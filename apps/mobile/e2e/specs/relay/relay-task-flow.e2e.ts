@@ -51,6 +51,7 @@ interface RelayTaskFlowOptions {
   prepareTaskUnreadForMarkRead(): Promise<void>;
   restoreTallTerminalGeometry(): Promise<void>;
   resyncTerminalConnection(): Promise<void>;
+  setTaskBusyUnread(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: RelayTaskRowExpectation;
   taskOrdering: RelayTaskOrderingFixture;
@@ -1742,6 +1743,24 @@ async function waitForTaskActivity(
   }
 }
 
+async function waitForBusyUnreadTaskRow(
+  ui: Pick<RelayUi, "getTaskRowById" | "waitUntil">,
+  taskId: string,
+): Promise<void> {
+  let lastObserved: string | null = null;
+  await ui.waitUntil(async () => {
+    const task = await ui.getTaskRowById(taskId);
+    lastObserved = await task.getAttribute("value").catch(() => null);
+    return lastObserved === "working, unread";
+  }, {
+    interval: POLL_INTERVAL_MS,
+    timeout: SCREEN_TIMEOUT_MS,
+    timeoutMsg:
+      `Expected relay task ${taskId} to render running and unread on the list ` +
+      `without visiting detail; last value was ${String(lastObserved)}`
+  });
+}
+
 async function waitForSelectedTaskDetailActivity(
   ui: Pick<RelayUi, "getTaskDetailActivity" | "waitUntil">,
   expectedActivity: TaskActivity,
@@ -1918,6 +1937,8 @@ export async function runRelayTaskFlow(
     );
   }
   await assertRelayTaskRowPresentation(exactTaskRow, options.taskRow);
+  await options.setTaskBusyUnread();
+  await waitForBusyUnreadTaskRow(ui, options.fixture.taskId);
   await options.setTaskActivity("unread");
   await waitForTaskActivity(ui, options.fixture.taskId, "unread");
   if (!isTabletWorkspace) {

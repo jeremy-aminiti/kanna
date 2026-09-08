@@ -74,6 +74,9 @@ export const MOBILE_E2E_IDS = {
   taskPinError(taskId: string): string {
     return `mobile.task-pin-error.${taskId}`;
   },
+  taskRunningIndicator(taskId: string): string {
+    return `mobile.task-running.${taskId}`;
+  },
   taskBlockedPlaceholder: "mobile.task-blocked-placeholder",
   terminalInspection: "mobile.terminal-inspection",
   terminalScrollTop: "mobile.terminal-scroll-top",

@@ -6,6 +6,14 @@ live Firestore listener must update the existing rendered task card through
 `working`, `unread`, and `idle` before the flow opens the task and continues its
 terminal/input checks.
 
+Before any detail navigation, the lane also holds the owner task at the
+previously ambiguous combination `activity: unread`, `runtimeState: busy`, and
+`readState: unread`, waits for that exact combination in both the owner-server
+list response and its Firestore publication, and asserts the native task row's
+value is `working, unread`. This proves the list renders the live runtime and
+unread axes independently; opening detail cannot be the operation that repairs
+the row.
+
 The same lane then makes the owner-server task unread through its runtime-status
 route, PATCHes the cloud fixture to unread, and opens it on mobile. The harness
 waits for the owner server's activity to become idle through the real relay

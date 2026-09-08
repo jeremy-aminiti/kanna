@@ -384,6 +384,7 @@ async function main(): Promise<void> {
         prepareTaskUnreadForMarkRead: relayHarness.prepareTaskUnreadForMarkRead,
         restoreTallTerminalGeometry: relayHarness.restoreTallTerminalGeometry,
         resyncTerminalConnection: relayHarness.resyncTerminalConnection,
+        setTaskBusyUnread: relayHarness.setTaskBusyUnread,
         setTaskActivity: relayHarness.setTaskActivity,
         taskRow: relayHarness.taskRow,
         taskOrdering: relayHarness.taskOrdering,
