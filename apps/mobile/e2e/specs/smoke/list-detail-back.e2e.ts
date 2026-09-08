@@ -105,6 +105,7 @@ interface SmokeUi
 export interface PtyTerminalFixture {
   taskId: string;
   sentinel: string;
+  expectBottomAnchored?: boolean;
   expectedCols: number;
   expectedRows: number;
   minDecodedBytes: number;
@@ -140,6 +141,8 @@ type TerminalWebViewInspection =
       cursorRow?: number | null;
       documentInstanceId?: string;
       frameCount: number;
+      gridBottomGap?: number;
+      gridTopGap?: number;
       mentionedFiles?: {
         mentions: Array<{ line?: number; path: string; raw: string }>;
         overflow: boolean;
@@ -686,10 +689,11 @@ export async function inspectTerminalWebView(
   try {
     return await driver.execute(() => {
       const root = document.getElementById("terminal-root");
-      if (!root) {
+      const viewport = document.getElementById("viewport");
+      if (!root || !viewport) {
         return {
           kind: "unavailable" as const,
-          reason: "WebView document did not contain #terminal-root"
+          reason: "WebView document did not contain the terminal viewport"
         };
       }
 
@@ -708,6 +712,16 @@ export async function inspectTerminalWebView(
         byteCount: Number.isNaN(byteCount) ? 0 : byteCount,
         cols: Number.isNaN(cols) ? null : cols,
         frameCount: Number.isNaN(frameCount) ? 0 : frameCount,
+        gridBottomGap: Math.max(
+          0,
+          viewport.getBoundingClientRect().bottom -
+            Number.parseInt(root.dataset.kannaBottomInset ?? "0", 10) -
+            root.getBoundingClientRect().bottom
+        ),
+        gridTopGap: Math.max(
+          0,
+          root.getBoundingClientRect().top - viewport.getBoundingClientRect().top
+        ),
         rows: Number.isNaN(rows) ? null : rows,
         text: terminalRows || root.dataset.kannaTextSample || "",
         visibleRows

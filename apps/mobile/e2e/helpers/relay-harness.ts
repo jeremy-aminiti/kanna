@@ -146,6 +146,7 @@ interface RemoteHarness {
     desktopId: string;
     desktopSecret?: string | null;
   }): Promise<void>;
+  restartDaemon(): Promise<void>;
   startServer(): Promise<void>;
   stopRelay(): Promise<void>;
   stopServer(): Promise<void>;
@@ -267,6 +268,7 @@ export interface MobileRelayHarness {
   emitFilePreviewLinks(): Promise<void>;
   expirePairingSession(): Promise<void>;
   prepareTaskUnreadForMarkRead(): Promise<void>;
+  restoreTallTerminalGeometry(): Promise<void>;
   resyncTerminalConnection(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: {
@@ -429,7 +431,9 @@ export async function startMobileRelayHarness(
             // below registers this size first and remains the elected remote
             // controller while mobile follows the authoritative grid.
             terminalCols: 132,
-            terminalRows: 43,
+            // Shorter than the phone viewport so the rendered-grid E2E also
+            // proves the authoritative live row is bottom-anchored.
+            terminalRows: 20,
             waitingPromptSnippet: RELAY_WAITING_PROMPT,
           }
         : {}),
@@ -467,7 +471,7 @@ export async function startMobileRelayHarness(
       ? await remote.terminal.collectLocalTerminalEvents(harness, localTask.taskId)
       : remote.terminal.collectTerminalEvents(harness, localTask.taskId);
     if (mode === "relay") {
-      terminalEvents.resize(132, 43);
+      terminalEvents.resize(132, 20);
     }
     await remote.terminal.waitForTerminalOutput(
       terminalEvents,
@@ -493,7 +497,7 @@ export async function startMobileRelayHarness(
       historySnapshot = {
         cols: 132,
         dataB64: "",
-        rows: 43,
+        rows: 20,
         scrollbackLines: 0,
       };
     }
@@ -506,6 +510,7 @@ export async function startMobileRelayHarness(
           : "RELAY_GRID_CELL",
       expectedCols: historySnapshot?.cols ?? DEFAULT_MOBILE_TERMINAL_GEOMETRY.cols,
       expectedRows: historySnapshot?.rows ?? DEFAULT_MOBILE_TERMINAL_GEOMETRY.rows,
+      expectBottomAnchored: historySnapshot !== null,
       ...(historySnapshot === null
         ? {
             expectedCell: {
@@ -646,6 +651,12 @@ export async function startMobileRelayHarness(
         // the task collection that owns the still-mounted detail screen.
         await harness.restartDaemon();
       },
+      async restoreTallTerminalGeometry() {
+        terminalEvents?.resize(132, 43);
+        terminalEvents?.takeControl();
+        terminalFixture.expectedRows = 43;
+        terminalFixture.expectBottomAnchored = false;
+      },
       setTaskActivity(activity) {
         return setPublishedTaskActivity({
           activity,
@@ -703,7 +714,7 @@ export async function startMobileRelayHarness(
         // into the later WebView assertion instead of assuming phone geometry.
         const deadline = Date.now() + timeoutMs;
         let lastDimensions = "unobserved";
-        terminalEvents?.resize(132, 43);
+        terminalEvents?.resize(132, 20);
         terminalEvents?.takeControl();
         while (Date.now() < deadline) {
           const observer = remote.terminal.collectTerminalEvents(
