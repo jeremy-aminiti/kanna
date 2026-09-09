@@ -2387,7 +2387,17 @@ identity; the mailbox contains the actual events. Delivery is a separate adapter
 
 Server startup resumes active rows. A row left `sending` by a crash becomes
 `uncertain`; its page remains readable and the layer does not blindly submit
-another turn. Adapter errors remain on the mailbox. Watch errors, including
+another turn. The layer retries only what provably never reached the
+daemon and is expected to clear on its own — `daemon_unavailable`,
+`daemon_state_unknown`, and the task-mutation lease conflict — by leaving
+the batch `pending` with the failure text in `error` and re-attempting on
+the next notification, so an app upgrade's daemon handoff delays a wake
+instead of dropping it. Everything else parks on the mailbox as
+`wakeState: error`: an uncertain or draft-held submission whose bytes may
+already have reached the PTY, a stale subscription, a genuinely dead
+session, an unsupported adapter, and the Codex thread-identity refusals.
+Retrying is never the mailbox's own recovery from a delivery that might
+have landed. Watch errors, including
 partial machine coverage, become pending attention batches and receive a wake;
 acknowledging that error pauses observation so a persistent fault cannot create
 a wake loop. Registering again with the same settings resumes that paused

@@ -32,7 +32,7 @@ impl Delivery {
 pub(super) async fn deliver(
     state: Arc<AppState>,
     row: &EventSubscription,
-) -> Result<&'static str, String> {
+) -> Result<&'static str, task_input::EngineWakeFailure> {
     let message = format!(
         "[Kanna supervisor] Event subscription {} has pending events (batch {}). Read them with kanna_read_event_subscription, then acknowledge that batch after reconciling it. This is an engine wakeup, not an owner directive or a task-completion verdict.",
         row.id, row.batch_id,
@@ -42,8 +42,22 @@ pub(super) async fn deliver(
         "input" => task_input::send_engine_wake(state, row, message)
             .await
             .map(|queued| if queued { "queued" } else { "notified" }),
-        "codex_app_server" => native_codex(state, row).await.map(|_| "notified"),
-        other => Err(format!("unsupported harness delivery adapter: {other}")),
+        // A native turn may have been started before the failure was observed,
+        // and an unknown adapter cannot start working by itself: both park.
+        "codex_app_server" => native_codex(state, row)
+            .await
+            .map(|_| "notified")
+            .map_err(park),
+        other => Err(park(format!(
+            "unsupported harness delivery adapter: {other}"
+        ))),
+    }
+}
+
+fn park(message: String) -> task_input::EngineWakeFailure {
+    task_input::EngineWakeFailure {
+        retry: task_input::DeliveryRetry::Park,
+        message,
     }
 }
 

@@ -1,7 +1,7 @@
 //! Subscription/mailbox semantics are independent of how a harness wakes.
 //! One pending page provides backpressure; only a matching acknowledgement
 //! advances the durable observation cursor. Wakes never carry directives.
-use super::{harness_wake, lan_trust::DesktopLocalAccess, task_events, AppState};
+use super::{harness_wake, lan_trust::DesktopLocalAccess, task_events, task_input, AppState};
 use crate::db::{Db, EventSubscription};
 use axum::{
     extract::{Path, State},
@@ -306,75 +306,115 @@ pub(super) async fn unsubscribe(
     Ok(Json(json!(row)))
 }
 
+/// What one worker iteration decided about the subscription's lifetime.
+enum Step {
+    /// This worker owns nothing more: the row is gone, inactive, or unbound.
+    Stop,
+    /// Observation continues; run another iteration.
+    Iterate,
+}
+
 async fn work(state: Arc<AppState>, id: String) -> Result<(), String> {
     let mut changes = state.subscribe_state_changes();
     loop {
         let mut changed = Box::pin(state.event_subscriptions_changed.notified());
         changed.as_mut().enable();
-        let Some(mut row) = database(&state)?
-            .event_subscription(&id)
-            .map_err(|e| e.to_string())?
-        else {
-            return Ok(());
-        };
-        if !row.active {
-            return Ok(());
-        }
-        if !still_bound(&state, &row)? {
-            row.active = false;
-            row.error = Some("subscriber stage/session was replaced or closed".into());
-            save(&state, &mut row)?;
-            return Ok(());
-        }
-        if row.pending.is_some() {
-            if row.wake_state == "pending" && row.delivery == "poll" {
-                row.wake_state = "ready".into();
-                if !save(&state, &mut row)? {
-                    continue;
-                }
-            } else if row.wake_state == "pending" {
-                row.wake_state = "sending".into();
-                if !save(&state, &mut row)? {
-                    continue;
-                }
-                let result = harness_wake::deliver(state.clone(), &row).await;
-                match result {
-                    Ok(outcome) => {
-                        row.wake_state = outcome.into();
-                        row.error = None;
-                    }
-                    Err(error) => {
-                        row.wake_state = "error".into();
-                        row.error = Some(error);
-                    }
-                }
-                save(&state, &mut row)?;
-            } else if row.wake_state == "sending" {
-                // A server died after reserving delivery. Preserve the page;
-                // sending another wake could submit a second turn.
-                row.wake_state = "uncertain".into();
-                row.error =
-                    Some("server restarted during wake delivery; mailbox remains readable".into());
-                save(&state, &mut row)?;
-            }
-            tokio::select! { _ = changed => {}, _ = changes.recv() => {} }
-            continue;
-        }
-        let batch = tokio::select! {
-            _ = changed => continue,
-            _ = changes.recv() => continue,
-            batch = collect(state.clone(), &row, 240) => batch,
-        };
-        match batch {
-            Ok(batch) => accept_page(&mut row, batch, false),
+        let step = step(&state, &id, changed.as_mut(), &mut changes).await;
+        match step {
+            Ok(Step::Stop) => return Ok(()),
+            Ok(Step::Iterate) => {}
+            // Storage faults are this machine being busy — a loaded disk, a
+            // writer holding SQLite past the busy timeout — not a decision to
+            // stop watching. Keep the row active and retry on the next
+            // notification rather than deactivating an observer nobody would
+            // be woken to replace.
             Err(error) => {
-                let batch = json!({"events": [], "cursor": row.cursor,
-                    "watchError": format!("event watch stopped: {error}; reconcile current state before establishing a new subscription")});
-                accept_page(&mut row, batch, false);
+                log::warn!("event subscription {id} deferred after a storage fault: {error}");
+                tokio::select! { _ = changed.as_mut() => {}, _ = changes.recv() => {} }
             }
         }
-        save(&state, &mut row)?;
     }
+}
+
+async fn step(
+    state: &Arc<AppState>,
+    id: &str,
+    mut changed: std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>,
+    changes: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
+) -> Result<Step, String> {
+    let Some(mut row) = database(state)?
+        .event_subscription(id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(Step::Stop);
+    };
+    if !row.active {
+        return Ok(Step::Stop);
+    }
+    if !still_bound(state, &row)? {
+        row.active = false;
+        row.error = Some("subscriber stage/session was replaced or closed".into());
+        save(state, &mut row)?;
+        return Ok(Step::Stop);
+    }
+    if row.pending.is_some() {
+        if row.wake_state == "pending" && row.delivery == "poll" {
+            row.wake_state = "ready".into();
+            if !save(state, &mut row)? {
+                return Ok(Step::Iterate);
+            }
+        } else if row.wake_state == "pending" {
+            row.wake_state = "sending".into();
+            if !save(state, &mut row)? {
+                return Ok(Step::Iterate);
+            }
+            let result = harness_wake::deliver(state.clone(), &row).await;
+            match result {
+                Ok(outcome) => {
+                    row.wake_state = outcome.into();
+                    row.error = None;
+                }
+                // Nothing reached the daemon and the cause clears itself — a
+                // daemon handoff, an unreadable daemon, a held mutation lease.
+                // Stay `pending` so the next notification re-attempts it; the
+                // retained text says why the last try failed without ever
+                // claiming the batch was delivered.
+                Err(failure) if failure.retry == task_input::DeliveryRetry::Transient => {
+                    row.wake_state = "pending".into();
+                    row.error = Some(failure.message);
+                }
+                Err(failure) => {
+                    row.wake_state = "error".into();
+                    row.error = Some(failure.message);
+                }
+            }
+            save(state, &mut row)?;
+        } else if row.wake_state == "sending" {
+            // A server died after reserving delivery. Preserve the page;
+            // sending another wake could submit a second turn.
+            row.wake_state = "uncertain".into();
+            row.error =
+                Some("server restarted during wake delivery; mailbox remains readable".into());
+            save(state, &mut row)?;
+        }
+        tokio::select! { _ = changed.as_mut() => {}, _ = changes.recv() => {} }
+        return Ok(Step::Iterate);
+    }
+    let batch = tokio::select! {
+        _ = changed.as_mut() => return Ok(Step::Iterate),
+        _ = changes.recv() => return Ok(Step::Iterate),
+        batch = collect(state.clone(), &row, 240) => batch,
+    };
+    match batch {
+        Ok(batch) => accept_page(&mut row, batch, false),
+        Err(error) => {
+            let batch = json!({"events": [], "cursor": row.cursor,
+                "watchError": format!("event watch stopped: {error}; reconcile current state before establishing a new subscription")});
+            accept_page(&mut row, batch, false);
+        }
+    }
+    save(state, &mut row)?;
+    Ok(Step::Iterate)
 }
 
 /// Lifecycle-owned workers; dropping the service aborts its own workers.
