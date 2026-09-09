@@ -351,7 +351,8 @@ mod tests {
     #[test]
     fn server_lock_prevents_duplicate_owner_for_same_database_config() {
         let root = std::env::temp_dir().join(format!(
-            "kanna-mobile-lock-{}",
+            "kanna-mobile-lock-{}-{}",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -872,7 +873,8 @@ mod tests {
             unset_env_var("KANNA_RELAY_URL");
         }
         let path = std::env::temp_dir().join(format!(
-            "kanna-server-config-runtime-{}.toml",
+            "kanna-server-config-runtime-{}-{}.toml",
+            std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("time should be monotonic")
@@ -969,7 +971,8 @@ mod tests {
             set_env_var("KANNA_DB_NAME", "kanna-wt-task-1234.db");
         }
         let root = std::env::temp_dir().join(format!(
-            "kanna-server-config-db-runtime-{}",
+            "kanna-server-config-db-runtime-{}-{}",
+            std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("time should be monotonic")

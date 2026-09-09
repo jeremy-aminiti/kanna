@@ -9,11 +9,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 impl Db {
+    /// A database path this run alone owns.
+    ///
+    /// `suffix` is a label, not an identity: several tasks' gates run
+    /// concurrently on one machine, so the same label is asked for by several
+    /// live processes at once. [`crate::test_paths`] adds what makes the path
+    /// theirs alone, so two callers never name one file — and `open_for_tests`
+    /// below never deletes a database another run is using.
     pub fn test_db_path(suffix: &str) -> String {
-        std::env::temp_dir()
-            .join(format!("kanna-server-db-{suffix}.sqlite"))
-            .to_string_lossy()
-            .to_string()
+        crate::test_paths::unique_test_file(&format!("kanna-server-db-{suffix}"), "sqlite")
     }
 
     #[cfg(test)]

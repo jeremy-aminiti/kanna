@@ -1180,7 +1180,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: "/tmp/kanna-transfer-sidecar-test.db".to_string(),
             kanna_cli_path: None,
             desktop_id: "desktop-test".to_string(),
@@ -1214,7 +1214,7 @@ mod tests {
     #[test]
     fn sidecar_env_takes_the_listen_port_from_the_server_config() {
         let _guard = crate::test_sidecar_guard_blocking();
-        let root = std::env::temp_dir().join("kanna-transfer-env-test");
+        let root = crate::test_paths::unique_test_path("kanna-transfer-env-test");
         clear_identity_env();
         std::env::set_var("KANNA_TRANSFER_ROOT", &root);
         std::env::set_var("KANNA_TRANSFER_PEER_ID", "peer-test");

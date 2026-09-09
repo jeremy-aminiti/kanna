@@ -30,6 +30,8 @@ mod task_transfer_tunnel;
 mod terminal_attachments;
 mod terminal_watcher;
 mod terminal_window;
+#[cfg(test)]
+mod test_paths;
 mod transfer_artifact;
 mod transfer_control;
 mod transfer_engine;
@@ -48,15 +50,73 @@ use std::sync::Arc;
 #[cfg(test)]
 static TEST_SIDECAR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Held for as long as a test owns the staged sidecars.
+///
+/// The directory the fixtures are staged in is the test executable's own, and
+/// nothing stops a second `cargo test` for this worktree from running that same
+/// executable at the same time — a gate beside a manual run, say. The mutex
+/// cannot see that process, so it used to watch one run delete the `codex` it
+/// had just written while another was resolving it, and the resolver then
+/// silently fell through to a real `codex` on `PATH`. The lock file makes the
+/// guard's reach match the directory's: `flock` is released when the file
+/// closes, including when a process dies holding it, so a panicking test leaves
+/// nothing wedged behind it.
 #[cfg(test)]
-pub(crate) async fn test_sidecar_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    TEST_SIDECAR_LOCK.lock().await
+pub(crate) struct TestSidecarGuard {
+    // Dropped in declaration order, so the narrower lock is released first and
+    // no other process is admitted while a thread here still holds the mutex.
+    _in_process: tokio::sync::MutexGuard<'static, ()>,
+    _across_processes: std::fs::File,
+}
+
+#[cfg(test)]
+fn lock_test_sidecar_directory() -> std::fs::File {
+    use std::os::unix::io::AsRawFd;
+
+    let path = std::env::current_exe()
+        .expect("test executable path")
+        .parent()
+        .expect("test executable directory")
+        .join(".kanna-test-sidecars.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|error| panic!("open sidecar lock {}: {error}", path.display()));
+    // SAFETY: `file` owns the descriptor and outlives the call.
+    while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        let error = std::io::Error::last_os_error();
+        assert!(
+            error.kind() == std::io::ErrorKind::Interrupted,
+            "lock sidecar directory {}: {error}",
+            path.display()
+        );
+    }
+    file
+}
+
+#[cfg(test)]
+pub(crate) async fn test_sidecar_guard() -> TestSidecarGuard {
+    // Taken blocking rather than through `block_in_place`, which panics on the
+    // current-thread runtime `#[tokio::test]` builds by default. The in-process
+    // mutex above is already held, so the only wait left is on another process,
+    // and this test cannot proceed until that one is done regardless.
+    let in_process = TEST_SIDECAR_LOCK.lock().await;
+    TestSidecarGuard {
+        _in_process: in_process,
+        _across_processes: lock_test_sidecar_directory(),
+    }
 }
 
 /// Synchronous fixtures share the same lock, outside any Tokio runtime.
 #[cfg(test)]
-pub(crate) fn test_sidecar_guard_blocking() -> tokio::sync::MutexGuard<'static, ()> {
-    TEST_SIDECAR_LOCK.blocking_lock()
+pub(crate) fn test_sidecar_guard_blocking() -> TestSidecarGuard {
+    let in_process = TEST_SIDECAR_LOCK.blocking_lock();
+    TestSidecarGuard {
+        _in_process: in_process,
+        _across_processes: lock_test_sidecar_directory(),
+    }
 }
 
 #[tokio::main]

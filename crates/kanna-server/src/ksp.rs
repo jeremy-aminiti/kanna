@@ -5843,7 +5843,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: Some("http://127.0.0.1:9099".to_string()),
             firebase_firestore_emulator_host: Some("127.0.0.1:8080".to_string()),
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: crate::db::Db::test_db_path(desktop_id),
             kanna_cli_path: None,
             desktop_id: desktop_id.to_string(),
@@ -5855,7 +5855,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}.json"),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         }
     }
 
@@ -10057,7 +10057,7 @@ mod tests {
         let mut config = test_config(&unique, "KSP Geometry Barrier Reconnect");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let state = Arc::new(AppState::new(config.clone()));
@@ -10236,7 +10236,7 @@ mod tests {
         let mut config = test_config("ksp-terminal-control", "KSP Terminal Control");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 4).await;
@@ -10332,7 +10332,7 @@ mod tests {
         let mut config = test_config(&unique, "KSP Legacy Terminal Boundary");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 1).await;
@@ -10389,7 +10389,7 @@ mod tests {
         let mut config = test_config("ksp-terminal-at-most-once", "KSP At Most Once");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let (daemon, mut commands) =
@@ -10437,7 +10437,7 @@ mod tests {
         let mut config = test_config("ksp-terminal-no-ack", "KSP No ACK");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let (daemon, mut commands) =
@@ -10509,7 +10509,7 @@ mod tests {
         let mut config = test_config("ksp-terminal-request-hol", "KSP Request HOL");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 2).await;
@@ -10680,7 +10680,7 @@ mod tests {
         let mut config = test_config("ksp-request-saturation", "KSP Request Saturation");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let (daemon, mut commands) =
@@ -10757,7 +10757,7 @@ mod tests {
         let mut config = test_config("ksp-terminal-agent-hol", "KSP Agent HOL");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let db = Db::open_for_tests(&config.db_path).expect("open test db");
         db.insert_test_repo("repo-1", "Repo One")
             .expect("insert repo");
@@ -10889,7 +10889,7 @@ mod tests {
         );
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let (daemon, mut commands) =
@@ -10960,7 +10960,7 @@ mod tests {
         );
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 2).await;
@@ -11045,7 +11045,7 @@ mod tests {
         );
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let (daemon, mut commands) = spawn_fake_control_daemon(config.daemon_dir.clone(), 1).await;
@@ -11165,7 +11165,7 @@ mod tests {
         let mut config = test_config("ksp-terminal-cancel-backoff", "KSP Cancel Backoff");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
         let _db = Db::open_for_tests(&config.db_path).expect("open test db");
 
         let state = Arc::new(AppState::new(config.clone()));
@@ -11762,7 +11762,7 @@ mod tests {
         let mut config = test_config("ksp-terminal-bytes", "KSP Terminal Bytes");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
 
         let db = Db::open_for_tests(&config.db_path).expect("open test db");
         db.insert_test_repo("repo-1", "Repo One")
@@ -11981,7 +11981,7 @@ mod tests {
         let mut config = test_config("ksp-terminal-reattach", "KSP Terminal Reattach");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
 
         let router = crate::http_api::router(Arc::new(AppState::new(config)));
         let url = serve_router(router).await;
@@ -12174,7 +12174,7 @@ mod tests {
         let mut config = test_config("ksp-agent-reattach", "KSP Agent Reattach");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
 
         let db = Db::open_for_tests(&config.db_path).expect("open test db");
         db.insert_test_repo("repo-1", "Repo One")
@@ -12900,7 +12900,7 @@ mod tests {
         let mut config = test_config("ksp-shell-attach", "KSP Shell Attach");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
 
         let daemon = spawn_fake_daemon_once_with_response(
             config.daemon_dir.clone(),
@@ -12994,7 +12994,7 @@ mod tests {
         let mut config = test_config("ksp-set-model", "KSP Set Model");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         config.db_path = Db::test_db_path(&unique);
-        config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
 
         let db = Db::open_for_tests(&config.db_path).expect("open test db");
         db.insert_test_repo("repo-1", "Repo One")
@@ -13412,13 +13412,7 @@ mod tests {
 
     #[tokio::test]
     async fn loopback_ksp_task_summary_attachment_streams_live_snippet() {
-        let unique = format!(
-            "ksp-task-summary-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        let unique = crate::test_paths::unique_test_name("ksp-task-summary");
         let config = test_config(&unique, "KSP Task Summary");
         let db = Db::open_for_tests(&config.db_path).unwrap();
         db.insert_test_repo("repo-summary-ksp", "Summary KSP")
@@ -13474,15 +13468,8 @@ mod tests {
 
     #[tokio::test]
     async fn loopback_ksp_delivers_ordinary_input_to_merge_singleton() {
-        let unique = format!(
-            "ksp-merge-input-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
-        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let unique = crate::test_paths::unique_test_name("ksp-merge-input");
+        let daemon_dir = crate::test_paths::unique_test_dir(&format!("{unique}-daemon"));
         let mut config = test_config(&unique, "KSP Merge Input");
         config.daemon_dir = daemon_dir.to_string_lossy().to_string();
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -13924,7 +13911,8 @@ mod tests {
             let mut config = test_config(&unique, "KSP Windowed Terminal");
             config.daemon_dir = daemon_dir.to_string_lossy().to_string();
             config.db_path = Db::test_db_path(&unique);
-            config.pairing_store_path = format!("/tmp/kanna-pairings-{unique}.json");
+            config.pairing_store_path =
+                crate::test_paths::unique_test_file("kanna-pairings", "json");
 
             let db = Db::open_for_tests(&config.db_path).expect("open test db");
             db.insert_test_repo("repo-1", "Repo One")

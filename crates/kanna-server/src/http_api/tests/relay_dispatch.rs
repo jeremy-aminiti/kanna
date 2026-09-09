@@ -13,14 +13,7 @@ use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 /// load that stays blocked while a later invoke completes.
 #[tokio::test(flavor = "current_thread")]
 async fn relay_http_invoke_dispatch_is_concurrent_and_off_the_runtime() {
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-relay-dispatch-{unique}"));
     super::init_test_git_repo(&repo_root);
 

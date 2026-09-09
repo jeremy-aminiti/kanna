@@ -509,12 +509,9 @@ mod tests {
     use tokio::net::UnixListener;
 
     fn temp_daemon_dir(label: &str) -> String {
-        let dir = std::env::temp_dir().join(format!(
-            "kanna-daemon-client-test-{label}-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.to_string_lossy().to_string()
+        crate::test_paths::unique_test_dir(&format!("kanna-daemon-client-test-{label}"))
+            .to_string_lossy()
+            .to_string()
     }
 
     #[tokio::test]
