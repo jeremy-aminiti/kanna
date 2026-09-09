@@ -47,7 +47,8 @@ does not prove who spoke or who called. No TUI speech is fabricated into
 
 ## Execution status and remaining gaps
 
-Focused checks on 2026-09-09 passed: desktop MainPanel 26 tests, mobile
+Before main reconciliation, focused checks on 2026-09-09 at checkpoint
+`a8a39ee4da3bd52c6bf6505e5195c9faf10eb435` passed: desktop MainPanel 26 tests, mobile
 screen/menu/controller/transports 437, agent asset contracts 61, and scripted
 fixture helpers 12. Desktop, mobile and remote-harness TypeScript checks passed.
 
@@ -75,10 +76,79 @@ library/binary targets of `kanna-server`, `kanna-tool-catalog`, `kanna-cli`, and
 `kanna-mcp`, plus the catalog and stdio HTTP test targets separately. Formatting
 and diff checks passed. This is focused evidence, not a full Rust lane.
 
-`./kd test all`, workspace-wide builds/full Rust lanes, and live multi-instance
-remote E2E remain **held and unrun** until `RESUME HEAVY VERIFICATION PR1401`.
-The revised live remote scenario is written but has not passed a run. PR #1401
-also remains held until the final verified head receives independent review.
+The manager released heavy verification on 2026-09-09. Main
+`f0b4e1ca8d` was merged without conflicts, preserving the checkpoint, at
+`29288aef34a6784c22ae7d0a011b0740c214a124`. The only overlapping file was
+`http_api/tests/actions.rs`: main changed fixture cleanup; this PR adds review
+context/non-authorization tests. No queue implementation changed. Full checks
+after reconciliation use `CARGO_BUILD_JOBS=2`, sequentially. Results below
+must not be conflated with the earlier focused evidence. PR #1401 remains
+held until the final verified head receives independent review.
+
+Post-reconciliation command history (each command uses `CARGO_BUILD_JOBS=2`):
+
+| Head | Command | Exit / outcome |
+| --- | --- | --- |
+| `29288aef3` | `./kd test all` | 1: workspace, Bazel, full Clippy passed; MCP exact tool-list test omitted the new tool. Fixed in `2095c9a00`. |
+| `2095c9a00` | `./kd test all` | 1: workspace, Bazel, full Clippy and MCP passed; server 1431 passed / 1 failed because the queue route was absent from the exhaustive LAN audit table. Fixed in `97ece7570`. All eight human-review integration cases and the stdio HTTP queue case passed. |
+| `97ece7570` | `./kd test all` | 1: workspace, Bazel, full Clippy, MCP, server (1432 tests) and catalog passed. Worker unit tests failed two default-database assertions; daemon and desktop mock lanes were not reached. |
+| `97ece7570` | `cargo test -p kanna-daemon -- --test-threads=1` | 0: 839 passed, 4 ignored. Separate continuation, not a full-gate pass. |
+| `97ece7570` | `./kd test desktop-mock-e2e` | 1: 47 of 48 files passed. Terminal-output performance failed with `terminal buffer not registered for session` in its blocked-WebView event-loop case. Harness cleanup completed. |
+| `97ece7570` | `./kd test remote-e2e` | 1: stopped in `terminal-flow.e2e.test.ts` with 12 failures, before task-actions, LAN and image-attachment files. |
+| `97ece7570` | task-actions command below, without `-t` | 1: 2 passed / 6 failed. New queue test omitted viewport registration; corrected only that test. Other failures remain open. |
+| `97ece7570` plus the queue viewport correction | task-actions command below | 0: queue case passed, 7 other cases filtered out. Real CLI → HTTP → durable decision → daemon → live singleton; stale head writes no decision, repeated call sends no second MERGE. |
+
+The first three full commands failed fast; none is a full-gate pass. The
+verification fixes add one tool-list expectation, one LAN route audit entry,
+and a measured viewport on each of the queue test's two terminal observers.
+Geometry-aware remote observers deliberately defer attachment until measurement;
+this is fixture setup, not a runtime policy or authorization change.
+
+The exact focused real-boundary command was:
+
+```sh
+CARGO_BUILD_JOBS=2 KANNA_REMOTE_E2E_ENV=dev pnpm --dir tests/remote-e2e exec vitest run --no-file-parallelism --maxWorkers=1 --maxConcurrency=1 --hookTimeout=240000 --testTimeout=120000 src/task-listing-actions.e2e.test.ts -t 'relays an explicit review instruction through the catalog tool exactly once'
+```
+
+The complete task-actions file used the same command without the `-t` selector.
+Formatting, diff checks, and remote-harness TypeScript checking passed after
+this correction. The final commit records this tested source and evidence;
+its exact identity and final focused rerun are reported in the task result.
+
+### Open verification failures (not waived)
+
+- Worker `config::tests::the_default_database_is_the_workers_own_under_its_data_dir`
+  and `unit::tests::the_unit_launches_against_the_resolved_database` expect
+  `/srv/worker/kanna-worker.db`, but `kd` injects this worktree's `KANNA_DB_PATH`.
+  The worker parser honors that inherited value. Worker code and `kd` context
+  are unchanged from main; no unrelated fixture or production fix was added.
+- Desktop `terminal-output-performance.test.ts` failed the blocked-WebView
+  event-loop case while waiting for its fixture terminal buffer. This file and
+  the terminal implementation were not changed for the queue revision. No
+  isolated retry is used to waive the full-file failure.
+- Full remote `terminal-flow` first missed the expected runtime edge, then
+  eleven cases timed out waiting for terminal markers: setup output, ordinary
+  input, long input, multiline input, partial raw draft, streaming input,
+  no-capability draft, bracketed continuation, menu input, child completion,
+  and reconnect. Several legacy observers omit the viewport now required for
+  remote attachment; only the newly added queue test was corrected in scope.
+- The separate complete task-actions file also failed its ordinary terminal
+  observer, old short-cursor regex, cross-desktop task lookup, and two remote
+  singleton credential/refusal cases. Its sixth failure was the queue observer,
+  subsequently fixed and verified in the focused run. The complete file has
+  not been claimed green.
+
+### Remaining unrun coverage
+
+The full gate still needs a clean pass after the worker fixture issue is
+resolved, including later Rust targets/doc-tests that fail-fast prevented.
+The desktop mock lane needs its failure resolved and a full pass. The complete
+remote lane needs its failures resolved and a full pass; `lan-layer` and
+`task-image-attachment` were not reached. Existing ignored Rust cases and
+workspace-skipped cloud/device cases remain unrun. No production credential
+suite, new mobile visual run, or two-machine reviewed-decision readback is
+claimed. Logs and exact exit files are retained under `.tmp/pr1401-*` in this
+worktree. These gaps keep PR #1401 held for independent review and verification.
 
 The prior desktop click-to-store and mobile action-menu/confirmation E2E gaps
 are retired with those controls, not claimed as tested. Read-only desktop

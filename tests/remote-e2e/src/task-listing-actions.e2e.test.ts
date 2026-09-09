@@ -782,6 +782,9 @@ describe("remote task listing, creation, and actions E2E", () => {
     const reviewEvents = collectTerminalEvents(harness, review.taskId);
     const mergeEvents = collectTerminalEvents(harness, mergeTaskId);
     try {
+      // Remote viewers attach only after reporting a measured viewport.
+      reviewEvents.resize(80, 24);
+      mergeEvents.resize(80, 24);
       await waitForTerminalOutput(reviewEvents, "SCRIPT_INPUT_READY");
       await waitForTerminalOutput(mergeEvents, "SCRIPT_INPUT_READY");
       const instruction = "Queue this PR, please.";
