@@ -1,4 +1,12 @@
 {
   "$schema": "./release-policy.schema.json",
-  "productionSoakHours": 24
+  "productionSoakHours": 24,
+  "linux": {
+    "requiredArchitectures": [
+      "x86_64",
+      "arm64"
+    ],
+    "optionalArchitectures": [],
+    "productionSoakHours": 24
+  }
 }

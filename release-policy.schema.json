@@ -14,6 +14,47 @@
       "minimum": 0,
       "default": 24,
       "description": "Hours a staging release candidate must have been published before `kd release promote` will ship it to production. Measured from the prerelease's GitHub publication time. 0 disables the gate. A promotion may exceed the gate only through the explicit `--override-soak <reason>` human override, which waives this window and nothing else."
+    },
+    "linux": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Linux's release requirements. Linux ships on its own channel pair (desktop-linux-staging / desktop-linux) with its own soak, so a Linux build failure never freezes a macOS ship.",
+      "properties": {
+        "requiredArchitectures": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "x86_64",
+              "arm64"
+            ]
+          },
+          "uniqueItems": true,
+          "minItems": 1,
+          "default": [
+            "x86_64",
+            "arm64"
+          ],
+          "description": "Architectures that must all build, pass their dependency audit and pass installed acceptance, at the same version and source revision, before a Linux publish or promotion. A missing required artifact fails the publish; it is never silently omitted, and never satisfied by an older build of the same architecture."
+        },
+        "optionalArchitectures": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "x86_64",
+              "arm64"
+            ]
+          },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Built and published when available, never a gate. Must be disjoint from requiredArchitectures: an architecture that was both would give the publish check and the status report two different answers about the same build."
+        },
+        "productionSoakHours": {
+          "type": "number",
+          "minimum": 0,
+          "default": 24,
+          "description": "Hours a Linux staging candidate must have been published before `kd release promote --platform linux` will ship it. Separate from the top-level value so a change to one platform's window cannot silently retime the other's."
+        }
+      }
     }
   }
 }
