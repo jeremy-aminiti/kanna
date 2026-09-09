@@ -283,6 +283,8 @@ export function TaskScreen({
     cols: number;
     rows: number;
   } | null>(null);
+  // Reset per task: the resting obstruction belongs to one screen's layout.
+  const restingTerminalInsetRef = useRef<number | null>(null);
   useEffect(() => {
     // Takeover belongs to one live terminal attachment, not to the task row
     // or screen component. A task switch, reconnect, background expiry, or
@@ -290,8 +292,9 @@ export function TaskScreen({
     // stale release action.
     setTerminalControlTaken(false);
     // The next task's page measures itself; the previous task's capacity is
-    // not a proposal for this one.
+    // not a proposal for this one, and neither is its resting obstruction.
     setMeasuredTerminalCapacity(null);
+    restingTerminalInsetRef.current = null;
   }, [task.id]);
   useEffect(() => {
     if (terminalStatus !== "live") {
@@ -455,13 +458,24 @@ export function TaskScreen({
     screenViewport?.height ?? 0,
     composerTop
   );
-  // The keyboard's share of that inset is presentation only. Measuring
-  // capacity against the resting composer keeps a controlled PTY from
-  // reflowing every time somebody taps Reply.
-  const terminalCapacityInset = Math.max(
-    0,
-    terminalBottomInset - keyboardHeight
-  );
+  // What the phone proposes must not move with the composer. The rendered
+  // inset grows both when the keyboard opens and when the composer grows a
+  // line, and deriving capacity from it would reflow the agent's terminal on
+  // every tap of Reply and again on every typed line while this phone holds
+  // control. Capacity is measured against the resting obstruction instead:
+  // the smallest inset seen with the keyboard down, which is the one-line
+  // composer. It only ever settles downward, so it cannot oscillate.
+  if (
+    keyboardHeight === 0 &&
+    terminalBottomInset > 0 &&
+    (restingTerminalInsetRef.current === null ||
+      terminalBottomInset < restingTerminalInsetRef.current)
+  ) {
+    restingTerminalInsetRef.current = terminalBottomInset;
+  }
+  const terminalCapacityInset =
+    restingTerminalInsetRef.current ??
+    Math.max(0, terminalBottomInset - keyboardHeight);
   const terminalSelectionToolbarTop =
     getTerminalSelectionToolbarTop(topChromeBottom);
   // A transient transport reconnect does not invalidate the authoritative
@@ -1477,6 +1491,14 @@ export function TaskScreen({
             placeholderTextColor="#6F89AE"
             style={[
               styles.inputField,
+              // Fabric retains a multiline TextInput's intrinsic native height
+              // after its controlled value becomes empty, so a sent draft left
+              // the composer standing at its last size — covering the terminal
+              // control button. A constant applied only while the value is
+              // empty is not a measured or controlled height: nothing reads
+              // layout, and while a draft exists the platform still owns the
+              // height between the style's one- and five-line bounds.
+              !draftInput ? { height: TASK_COMPOSER_MIN_HEIGHT } : null,
               isComposerDisabled ? styles.inputFieldDisabled : null
             ]}
             testID={MOBILE_E2E_IDS.taskInput}

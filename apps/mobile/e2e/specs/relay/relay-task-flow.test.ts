@@ -106,8 +106,13 @@ describe("relay task flow orchestration", () => {
         calls.push("file-preview");
       },
       async verifyComposerReset() {
-        expect(screen).toBe("detail");
-        calls.push("composer-reset");
+        // Runs after verifySendOutcomes, which returns to the list, so it
+        // opens the task itself.
+        expect(screen).toBe("list");
+        screen = "detail";
+        calls.push("open", "composer-reset");
+        screen = "list";
+        calls.push("close");
       },
       async verifyQuickReply() {
         expect(screen).toBe("detail");
@@ -125,6 +130,9 @@ describe("relay task flow orchestration", () => {
       "send-outcomes",
       "close",
       "open",
+      "composer-reset",
+      "close",
+      "open",
       "rendered",
       "close",
       "open",
@@ -135,7 +143,6 @@ describe("relay task flow orchestration", () => {
       "transport",
       "task-actions",
       "visual-companion",
-      "composer-reset",
     ]);
     expect(screen).toBe("detail");
   });

@@ -325,6 +325,11 @@ export async function runRelayTaskJourneys(
   // they are what this change owes, and the journeys after them are known to
   // move around between runs.
   await journeys.verifySendOutcomes();
+  // The composer's five-line cap and its one-line reset after Send are native
+  // layout facts no jsdom test can show, so they run here rather than last:
+  // across twelve lane runs on this branch the tail was never reached, and
+  // the checks silently never executed.
+  await journeys.verifyComposerReset();
   await journeys.verifyPtySnapshotRevisit();
   // Exercise file discovery immediately after the terminal revisit, before
   // later menus can change the detail presentation state.
@@ -333,7 +338,6 @@ export async function runRelayTaskJourneys(
   await journeys.verifyQuickReply();
   await journeys.verifyTaskActionMenu();
   await journeys.verifyVisualCompanion();
-  await journeys.verifyComposerReset();
 }
 
 async function verifyRelayTerminalKeys(
@@ -893,6 +897,12 @@ export async function verifyRelayComposerResetJourney(
         `${JSON.stringify(await status.getAttribute("label").catch(() => null))}`,
     );
   }
+
+  process.stdout.write(
+    `[mobile-e2e] composer reset passed: one line ${initialHeight}pt, grown to ` +
+      `${expandedHeight}pt within the ${TASK_COMPOSER_MAX_RENDERED_HEIGHT}pt cap, ` +
+      `back to ${lastResetHeight}pt after Send\n`,
+  );
 }
 
 /**
@@ -2324,7 +2334,14 @@ export async function runRelayTaskFlow(
       await options.emitFilePreviewLinks();
       await verifyMentionedFileMenuFlow(driver, ui, options.filePreview);
     },
-    verifyComposerReset: () => verifyRelayComposerResetJourney(ui),
+    // Owns its open/close like the other detail journeys: it now runs after
+    // verifySendOutcomes, which returns to the list.
+    verifyComposerReset: async () => {
+      await openRelayFixtureTask(ui, options.fixture.taskId);
+      await waitForTaskTerminalLive(ui);
+      await verifyRelayComposerResetJourney(ui);
+      await closeTaskForJourney();
+    },
     // On iPad this input follows the sidebar's alternate-task -> fixture-task
     // switch above, proving the existing single selected-task subscription is
     // the one that receives the composer message.

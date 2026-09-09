@@ -9,6 +9,7 @@ import {
   type TaskQuickReply
 } from "./taskQuickReplies";
 import { getTerminalSelectionToolbarTop } from "./terminalSafeArea";
+import { TASK_COMPOSER_MIN_HEIGHT } from "./taskComposerInput";
 
 vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
   callback(0);
@@ -1524,6 +1525,40 @@ describe("TaskScreen", () => {
     expect(raised?.capacityInset).toBe(132);
   });
 
+  it("does not let the composer's own growth change what the phone proposes", () => {
+    let tree = renderTaskScreen({ agentType: "pty" });
+    invokeLayout(findByTestId(tree, MOBILE_E2E_IDS.taskDetailScreen), {
+      height: 800,
+      width: 390,
+      x: 0,
+      y: 0
+    });
+    invokeLayout(findByTestId(tree, "mobile.task-composer-chrome"), {
+      height: 110,
+      width: 362,
+      x: 14,
+      y: 676
+    });
+    tree = renderTaskScreen({ agentType: "pty" });
+    expect(findByType(tree, "TerminalWebView")?.props?.capacityInset).toBe(132);
+
+    // A draft growing to five lines makes the composer chrome ~80pt taller,
+    // which raises its top edge and so the rendered inset. Proposing from
+    // that would resize the agent's PTY on every typed line while this phone
+    // holds control, so capacity stays measured against the resting composer.
+    invokeLayout(findByTestId(tree, "mobile.task-composer-chrome"), {
+      height: 190,
+      width: 362,
+      x: 14,
+      y: 596
+    });
+    tree = renderTaskScreen({ agentType: "pty" });
+
+    const grown = findByType(tree, "TerminalWebView")?.props;
+    expect(grown?.bottomInset).toBe(212);
+    expect(grown?.capacityInset).toBe(132);
+  });
+
   it("keeps the terminal selection toolbar clear of the measured top chrome", () => {
     let tree = renderTaskScreen({ agentType: "pty" });
 
@@ -1752,21 +1787,30 @@ describe("TaskScreen", () => {
     expect(componentMocks.draftSetter).toHaveBeenCalledWith("");
   });
 
-  it("clears the draft after Send without pinning a native height", () => {
+  it("pins the emptied composer to one line after Send", () => {
     let tree = renderTaskScreen({
       agentType: "agent",
       draftInput: "First line\nSecond line\nThird line"
     });
+    const inputWithDraft = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
+    // While a draft exists the platform owns the height between the style's
+    // one- and five-line bounds; nothing measures or controls it.
+    expect(
+      styleEntries(inputWithDraft).some((style) => "height" in style)
+    ).toBe(false);
+
     pressSend(tree);
     tree = renderTaskScreen({ agentType: "agent" });
     const inputAfterSend = findByTestId(tree, MOBILE_E2E_IDS.taskInput);
 
     expect(inputAfterSend?.props?.value).toBe("");
-    // Nothing assigns `height`: an empty controlled value collapses the input
-    // to its own one-line minimum, and the platform owns the measurement.
-    expect(styleEntries(inputAfterSend).some((style) => "height" in style)).toBe(
-      false
-    );
+    // Fabric retains the intrinsic native height after the controlled value
+    // becomes empty, so a sent three-line draft left the composer standing at
+    // three lines, covering the terminal control button. Pin it to one line
+    // while it is empty — a constant, not a measurement.
+    expect(styleEntries(inputAfterSend)).toContainEqual({
+      height: TASK_COMPOSER_MIN_HEIGHT
+    });
     expect(componentMocks.keyboardDismiss).toHaveBeenCalledOnce();
   });
 
