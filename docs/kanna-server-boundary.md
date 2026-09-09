@@ -1688,6 +1688,23 @@ cursor-based, not snapshot-diffed:
   shutting the task's agent down (`payload.phase`: `wrap-up-sent`, `idle`,
   `quit-sent`, `exited`, `already-exited`, `degraded`). See
   [Source finalization](#source-finalization).
+- `task.review_context_changed` announces that a review task's pull-request
+  identity was published or refreshed (`payload.version`, `prUrl`, `headSha`,
+  `baseRef`). It is candidate information an agent supplied about the forge,
+  never an approval, and a refresh deliberately strands any decision taken
+  against the older version. See
+  [Human-reviewed merge authorization](#human-reviewed-merge-authorization).
+- `task.human_review_decision` announces that a human authorized merging one
+  reviewed head (`payload.decisionId`, `prUrl`, `headSha`, `baseRef`, `origin`,
+  `reviewContextVersion`). It is created only by the operator's *Queue for
+  merge* control, and `payload.origin` is declared and unverified in the same
+  way `task.input_delivered`'s source is. Same section.
+- `task.human_review_decision_delivery` reports how far that decision's
+  delivery to the merge singleton got (`payload.decisionId`, `status`:
+  `pending` | `delivered` | `failed` | `uncertain`, plus `detail`, `prUrl`,
+  `headSha`, `mergeTaskId`, `ownerDesktopId`). `uncertain`, and a `pending`
+  that outlived its request, both mean the outcome is unknown and the merge
+  master may already hold the request. Same section.
 
 Every delivered event keeps event-time fields in the payload. In particular,
 `payload.stage` is the stage in effect when the event was appended (older rows

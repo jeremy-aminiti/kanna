@@ -101,9 +101,25 @@ exercises — but no Appium case presses `Queue for Merge` on a simulator, and
 the LAN and remote transports are covered at their own boundary rather than
 against a live server. The same fixture problem applies: the driven app needs a
 task with a published review context, which the mobile E2E lane does not seed
-today. The flow was instead verified by hand on the iOS Simulator; that run is
-recorded in the task result rather than here, because the worktree's
-screenshots do not outlive it.
+today.
+
+**What the simulator did and did not establish**, stated exactly, because this
+is the durable record: the build installed, launched, and ran this branch's JS
+(Metro logged its bundle for the device) and the app rendered its Tasks shell.
+It got no further. A Simulator cannot pair with a desktop on the same host —
+`machinePairing.ts` builds its claim URL from the Bonjour record, so it
+addresses the Mac by its `.local` name, which on a Simulator sharing the host's
+network stack resolves to loopback, where `lan_trust`'s DNS-rebinding guard
+correctly refuses it. Without a paired desktop there is no task to open, so
+**none of the five Queue for Merge interaction states were exercised**: the
+action-menu row, the confirmation alert naming PR/commit/base, "Request
+delivered" with the control withdrawn afterwards, "Not delivered" on a server
+refusal, and re-entering the task restoring the control. That guard is right
+and the limitation is simulator-only — a physical iPhone resolves the same name
+to the LAN IP and takes the paired-device branch — so nothing was changed for
+it. Those five states **remain a human gate on a physical iPhone after merge**;
+the manager waived them for this task under the owner's 2026-09-09 directive,
+so their absence is not a defect in this branch.
 
 **And not covered end to end:** a reviewer and a merge singleton on *different*
 machines. The remote E2E exercises the relay transport but resolves the

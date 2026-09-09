@@ -1269,6 +1269,9 @@ fn wait_events_documents_every_event_type_the_server_emits() {
         "task.transfer_finalizing",
         "task.provider_quota_rejected",
         "task.provider_quota_parked",
+        "task.review_context_changed",
+        "task.human_review_decision",
+        "task.human_review_decision_delivery",
     ] {
         assert!(
             description.contains(event_type),
