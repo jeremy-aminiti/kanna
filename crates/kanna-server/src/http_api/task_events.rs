@@ -150,6 +150,10 @@ pub(super) struct TaskEventsQuery {
     /// clients that omit this keep the deployed stateless wire format.
     #[serde(default)]
     short_cursor: bool,
+    /// Subscription notification selection. Optional on the wire so older
+    /// peers can ignore it; the collecting server also selects their rows.
+    #[serde(default)]
+    orchestration_notifications: bool,
 }
 
 fn include_current_state_by_default() -> bool {
@@ -197,6 +201,7 @@ struct AggregateWaitSession {
     last_touched: tokio::time::Instant,
     include_current_activity: bool,
     from_now: bool,
+    orchestration_notifications: bool,
 }
 
 struct ShortCursorEntry {
@@ -1177,6 +1182,7 @@ fn summary_snippet(summary: &str) -> String {
 fn enrich_event_batch(
     config: &crate::config::Config,
     batch: &mut EventBatch,
+    orchestration_notifications: bool,
 ) -> Result<(), String> {
     let event_db = Db::open(&config.db_path).map_err(|error| format!("db error: {error}"))?;
     let current_db = Db::open(&config.db_path).map_err(|error| format!("db error: {error}"))?;
@@ -1254,6 +1260,31 @@ fn enrich_event_batch(
             "machineId".to_string(),
             Value::String(config.desktop_id.clone()),
         );
+        if orchestration_notifications {
+            let run = payload
+                .get("runId")
+                .and_then(Value::as_str)
+                .map(|id| event_db.stage_run(id))
+                .transpose()
+                .map_err(|error| format!("db error: {error}"))?
+                .flatten();
+            let latest = event_db
+                .latest_stage_run(&task_id)
+                .map_err(|error| format!("db error: {error}"))?;
+            payload.insert("notificationContext".into(), json!({
+                "completionTransition": run.as_ref().and_then(|run| run.completion_transition.as_deref()),
+                "closed": task.closed_at.is_some(),
+                "runtimeState": task.runtime_state,
+                "providerParked": task.provider_rejection.as_ref()
+                    .is_some_and(|rejection| rejection.recovery.starts_with("parked-")),
+                "lifecyclePending": event_db.has_lifecycle_operation_for_task(&task_id)
+                    .map_err(|error| format!("db error: {error}"))?,
+                "latestRun": latest.as_ref().map(|run| json!({
+                    "id": run.id, "kind": run.kind, "status": run.status,
+                    "completionTransition": run.completion_transition,
+                })),
+            }));
+        }
         let latest_run = if include_latest_run {
             task.latest_run.map_or(Value::Null, |run| {
                 json!({
@@ -1430,8 +1461,12 @@ async fn wait_local_task_events(
             )
             .map_err(db_error)?;
         }
-        enrich_event_batch(state.config(), &mut batch)
-            .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
+        enrich_event_batch(
+            state.config(),
+            &mut batch,
+            query.orchestration_notifications,
+        )
+        .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
         let output_cursor = if query.include_current_activity {
             encode_current_activity_cursor(&CurrentActivityCursor {
                 durable_cursor: batch.cursor.clone(),
@@ -1441,7 +1476,17 @@ async fn wait_local_task_events(
         } else {
             batch.cursor.clone()
         };
-        collected_has_more |= batch.has_more;
+        if query.orchestration_notifications {
+            batch
+                .events
+                .retain(kanna_tool_catalog::is_relevant_subscription_event);
+            // Raw pagination is work for this wait, not a full actionable
+            // batch. Continue from its checkpoint even on a zero-time scan.
+            collected_has_more =
+                batch.has_more && collected.len() + batch.events.len() >= limit as usize;
+        } else {
+            collected_has_more |= batch.has_more;
+        }
         let read_events = !batch.events.is_empty();
         collected.append(&mut batch.events);
         if read_events && debounce_deadline.is_none() && !debounce.is_zero() {
@@ -1464,6 +1509,11 @@ async fn wait_local_task_events(
             })));
         }
 
+        if query.orchestration_notifications && batch.has_more && collected.len() < limit as usize {
+            cursor = parse_cursor(Some(&batch.cursor))?;
+            tokio::task::yield_now().await;
+            continue;
+        }
         if now >= deadline {
             // The window closed before the batch filled. Whatever accumulated
             // is still returned and still acknowledged by the cursor: holding
@@ -1793,6 +1843,9 @@ fn aggregate_query_path(query: &TaskEventsQuery) -> String {
     if let Some(event_types) = query.event_types.as_deref() {
         params.push(format!("eventTypes={}", encode_path_segment(event_types)));
     }
+    if query.orchestration_notifications {
+        params.push("orchestrationNotifications=true".to_string());
+    }
     if query.exclude_own {
         params.push("excludeOwn=true".to_string());
     }
@@ -1824,7 +1877,7 @@ fn spawn_aggregate_wait(
     timeout_secs: u64,
     limit: i64,
 ) -> Result<(), (axum::http::StatusCode, String)> {
-    let query = local_query_for_aggregate(
+    let mut query = local_query_for_aggregate(
         &session.cursor.scope,
         &session.filters,
         session
@@ -1838,6 +1891,7 @@ fn spawn_aggregate_wait(
         session.include_current_activity,
         session.from_now,
     );
+    query.orchestration_notifications = session.orchestration_notifications;
     let local_machine_id = session.cursor.local_machine_id.clone();
     let completed_machine_id = machine_id.clone();
     let waited_machine_id = machine_id.clone();
@@ -1942,7 +1996,27 @@ fn apply_aggregate_completion(
             )
         })?;
     let remaining = (limit as usize).saturating_sub(events.len());
-    if returned_events.len() > remaining || response_has_more {
+    // Consume excluded rows as well as selected ones, stopping immediately
+    // before the first relevant row that would overflow the aggregate. The
+    // checkpoint follows consumption, while thresholds count selection only.
+    let consumed_count = if session.orchestration_notifications {
+        let mut selected = 0;
+        returned_events
+            .iter()
+            .take_while(|event| {
+                if kanna_tool_catalog::is_relevant_subscription_event(event) {
+                    if selected == remaining {
+                        return false;
+                    }
+                    selected += 1;
+                }
+                true
+            })
+            .count()
+    } else {
+        returned_events.len().min(remaining)
+    };
+    if consumed_count < returned_events.len() || response_has_more {
         session
             .cursor
             .machines_with_more
@@ -1953,11 +2027,11 @@ fn apply_aggregate_completion(
             .machines_with_more
             .remove(&completion.machine_id);
     }
-    let emitted_count = returned_events.len().min(remaining);
-    let mut emitted_cursor = None;
-    let mut emitted_synthetic = false;
-    let mut emitted_task_id = None;
-    for event in returned_events.iter().take(emitted_count) {
+    let before_count = events.len();
+    let mut consumed_seq = None;
+    let mut consumed_synthetic = false;
+    let mut consumed_task_id = None;
+    for event in returned_events.iter().take(consumed_count) {
         let mut event = event.as_object().cloned().ok_or_else(|| {
             (
                 axum::http::StatusCode::BAD_GATEWAY,
@@ -1971,22 +2045,27 @@ fn apply_aggregate_completion(
             "machineId".to_string(),
             Value::String(completion.machine_id.clone()),
         );
-        emitted_cursor = event.get("seq").and_then(Value::as_i64);
-        emitted_synthetic = event
+        consumed_seq = event.get("seq").and_then(Value::as_i64);
+        consumed_synthetic = event
             .get("synthetic")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        emitted_task_id = event
+        consumed_task_id = event
             .get("taskId")
             .and_then(Value::as_str)
             .map(str::to_string);
-        events.push(Value::Object(event));
+        let event = Value::Object(event);
+        if !session.orchestration_notifications
+            || kanna_tool_catalog::is_relevant_subscription_event(&event)
+        {
+            events.push(event);
+        }
     }
-    let next_cursor = if emitted_count == returned_events.len() {
+    let next_cursor = if consumed_count == returned_events.len() {
         Some(cursor.to_string())
-    } else if emitted_count == 0 {
+    } else if consumed_count == 0 {
         None
-    } else if emitted_synthetic && emitted_cursor.is_none() {
+    } else if consumed_synthetic && consumed_seq.is_none() {
         let returned = decode_current_activity_cursor(cursor)?.ok_or_else(|| {
             (
                 axum::http::StatusCode::BAD_GATEWAY,
@@ -1998,11 +2077,11 @@ fn apply_aggregate_completion(
         })?;
         Some(encode_current_activity_cursor(&CurrentActivityCursor {
             durable_cursor: returned.durable_cursor,
-            settled_after_task_id: emitted_task_id,
+            settled_after_task_id: consumed_task_id,
             settled_complete: false,
         })?)
     } else {
-        let event_seq = emitted_cursor.ok_or_else(|| {
+        let event_seq = consumed_seq.ok_or_else(|| {
             (
                 axum::http::StatusCode::BAD_GATEWAY,
                 format!(
@@ -2055,8 +2134,16 @@ fn apply_aggregate_completion(
             encode_machine_cursor(&next_cursor)?,
         );
     }
-    *has_more |= !session.cursor.machines_with_more.is_empty();
-    Ok(!returned_events.is_empty())
+    if session.orchestration_notifications {
+        *has_more = events.len() >= limit as usize && !session.cursor.machines_with_more.is_empty();
+    } else {
+        *has_more |= !session.cursor.machines_with_more.is_empty();
+    }
+    Ok(if session.orchestration_notifications {
+        events.len() > before_count
+    } else {
+        !returned_events.is_empty()
+    })
 }
 
 async fn wait_aggregate_task_events(
@@ -2147,10 +2234,12 @@ async fn wait_aggregate_task_events(
                 last_touched: now,
                 include_current_activity: query.include_current_activity,
                 from_now,
+                orchestration_notifications: query.orchestration_notifications,
             })
     };
     if session.include_current_activity != query.include_current_activity
         || session.filters != filters
+        || session.orchestration_notifications != query.orchestration_notifications
     {
         // Inherited legs were started under the old filter. A fresh JoinSet
         // aborts them on drop; joining them here would surface their
@@ -2159,6 +2248,7 @@ async fn wait_aggregate_task_events(
         session.pending_machines.clear();
         session.include_current_activity = query.include_current_activity;
         session.filters = filters;
+        session.orchestration_notifications = query.orchestration_notifications;
     }
     let mut machine_errors = Vec::new();
     let mut active_machines = HashSet::from([local_machine_id.clone()]);
@@ -2207,7 +2297,8 @@ async fn wait_aggregate_task_events(
     let mut events = Vec::new();
     let mut completed_machines = HashSet::new();
     let mut failed_machines = HashSet::new();
-    let mut has_more = !session.cursor.machines_with_more.is_empty();
+    let mut has_more =
+        !query.orchestration_notifications && !session.cursor.machines_with_more.is_empty();
     // Batching is applied by the machine serving the wait, over the events of
     // every leg together — the same place the timeout is enforced. A leg that
     // has already answered is simply re-armed while the batch is still filling,
@@ -2297,8 +2388,12 @@ async fn wait_aggregate_task_events(
         // next events land in the same response instead of the next one.
         if !batch_complete
             && !failed_machines.contains(&completed_machine_id)
-            && timeout_secs > 0
-            && now < deadline
+            && ((timeout_secs > 0 && now < deadline)
+                || (query.orchestration_notifications
+                    && session
+                        .cursor
+                        .machines_with_more
+                        .contains(&completed_machine_id)))
         {
             completed_machines.remove(&completed_machine_id);
         }
@@ -2380,8 +2475,9 @@ pub(super) async fn wait_subscription_events(
     state: Arc<AppState>,
     query: Value,
 ) -> Result<Value, String> {
-    let query =
+    let mut query: TaskEventsQuery =
         serde_json::from_value(query).map_err(|error| format!("invalid event scope: {error}"))?;
+    query.orchestration_notifications = true;
     wait_events_in_process(state, query, true, false)
         .await
         .map(|Json(value)| value)
@@ -2516,6 +2612,7 @@ mod aggregate_wait_registry_tests {
             last_touched,
             include_current_activity: false,
             from_now: false,
+            orchestration_notifications: false,
         }
     }
 

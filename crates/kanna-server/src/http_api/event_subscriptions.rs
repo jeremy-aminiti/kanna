@@ -72,8 +72,8 @@ fn still_bound(state: &AppState, row: &EventSubscription) -> Result<bool, String
     }) && run.is_some_and(|run| run.id == row.run_id))
 }
 
-/// Consume only engine-noise pages internally, preserving the cursor even
-/// when the filter leaves no messages. The page itself is the mailbox record.
+/// Selection belongs to the wait, before batching. The returned page is the
+/// mailbox record, including its checkpoint through excluded events.
 async fn collect(
     state: Arc<AppState>,
     row: &EventSubscription,
@@ -84,11 +84,7 @@ async fn collect(
     if let Some(cursor) = &row.cursor {
         query["cursor"] = json!(cursor);
     }
-    let mut batch = task_events::wait_subscription_events(state, query).await?;
-    if let Some(events) = batch["events"].as_array_mut() {
-        events.retain(kanna_tool_catalog::is_actionable_task_event);
-    }
-    Ok(batch)
+    task_events::wait_subscription_events(state, query).await
 }
 
 fn accept_page(row: &mut EventSubscription, mut batch: Value, observed: bool) {

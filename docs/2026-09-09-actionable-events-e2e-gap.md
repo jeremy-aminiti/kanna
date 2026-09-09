@@ -1,0 +1,43 @@
+# Actionable subscription delivery verification
+
+The owner has held all Rust compilation/check/test/clippy, `./kd test all`,
+dev servers and heavy verification until `RESUME HEAVY VERIFICATION ACTIONABLE-EVENTS`.
+No release, restart, live subscription manipulation or load generation is authorized.
+The implementation is therefore a draft, not a verified delivery claim.
+
+The new `http_api/tests/task_events/subscription_relevance.rs` fixtures exercise
+durable producers → native waits → filtered batching/cursors and initial
+subscription mailbox/acknowledgement, including both adapter selections. A
+fixture peer ignores the optional selection parameter to exercise old-server
+responses through the aggregate relay request path. A detached transition test
+in `task_actions.rs` covers daemon connection failure → durable lifecycle failure
+→ actionable wait. Existing subscription tests retain fault, restart, uncertain
+wake and acknowledgement coverage. These Rust tests have not run under the hold.
+
+These fixtures do not prove a real installed Codex app-server turn or PTY input
+wake across independently running server/relay processes. After capacity release,
+run the focused Rust fixtures, existing task-event/subscription/adapter tests and
+catalog contract tests, then required clippy and repository lanes. Verify both
+adapters against isolated harnesses with a quiet automatic review → PR transition,
+a confirmed question, failure, manual gate and an observation fault. Confirm the
+mailbox carries only relevant rows and repeated reads do not submit duplicate
+wakes. Stop all owned processes. No shared production/staging probes are needed.
+
+The permit-lifetime fix in task `2c7a34b9` must land first. Its current draft pins
+`event_subscriptions.rs::step` collection across unrelated notifications and
+adds `tests/task_events/subscription_remote.rs`, registered in `tests/task_events.rs`.
+This task changes `collect` in the former and registers a separate relevance
+module in the latter. Preserve the pinned future, mailbox validation and bounded
+retirement; neither edit should absorb the other's lifecycle design. Reconcile
+against the committed permit fix before final verification/handoff.
+
+Other shared surfaces are limited to the subscription/wait catalog descriptions,
+subscription section of the server boundary document and manager event-loop
+instructions. Preserve independent brief-detail (`9fe6ba82`), machine-resource
+(`29696721`) and conversation-queue (`87fe345e`) changes. In particular, preserve
+`cc412ba26`'s provider/model/effort section and creation examples when it lands;
+this task does not import that independent instruction change.
+
+The separately observed false `awaiting_input` from a quoted fixture belongs to
+terminal prompt detection. This task deliberately retains confirmed question
+events and makes no speech/transcript classification changes.

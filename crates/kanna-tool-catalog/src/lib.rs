@@ -1572,6 +1572,128 @@ pub fn is_actionable_task_event(event: &Value) -> bool {
     }
 }
 
+/// Default subscription relevance, before either local or aggregate batching.
+/// Raw waits and the legacy CLI watch retain their general-purpose behavior.
+/// Unknown facts remain visible, including on independently upgraded peers.
+pub fn is_relevant_subscription_event(event: &Value) -> bool {
+    let payload = &event["payload"];
+    let current = &payload["currentTask"];
+    let context = &payload["notificationContext"];
+    let latest = context.get("latestRun").unwrap_or(&current["latestRun"]);
+    match event.get("type").and_then(Value::as_str) {
+        Some("run.finished") => {
+            // A later stage never erases a failure. Only successful completion
+            // is engine progress; missing verdict/policy stays observable.
+            if payload["status"] == "failed" {
+                return true;
+            }
+            if payload["status"] == "succeeded" {
+                if context["completionTransition"] == "auto"
+                    || payload["kind"] == "post"
+                    || (payload.get("stage").is_some()
+                        && current.get("stage").is_some()
+                        && (payload["stage"] != current["stage"]
+                            || (context["completionTransition"].is_null()
+                                && current["stageTransition"] == "auto")))
+                {
+                    return false;
+                }
+                let successor = payload
+                    .get("runId")
+                    .and_then(Value::as_str)
+                    .zip(current["latestRun"].get("id").and_then(Value::as_str))
+                    .is_some_and(|(finished, latest)| finished != latest);
+                return !successor && !run_finished_has_running_successor(event);
+            }
+            // Closing cancels its remaining runs; task.closed is the one
+            // coordination fact, not a second completion per cancelled run.
+            !(payload["status"] == "cancelled"
+                && (context["closed"] == true || run_finished_has_running_successor(event)))
+        }
+        Some("task.runtime_changed") => {
+            if payload["runtimeState"] == "busy" {
+                return false;
+            }
+            if context["closed"] == true {
+                return false;
+            }
+            if payload["currentState"] == true && context["providerParked"] == true {
+                return true;
+            }
+            // Runtime edges are not questions; preserve the daemon's explicit
+            // awaiting_input event. The initial settled scan must still find
+            // a question whose edge predates registration.
+            if payload["runtimeState"] == "waiting" {
+                return payload["currentState"] == true;
+            }
+            if context["lifecyclePending"] == true {
+                return false;
+            }
+            if context
+                .get("runtimeState")
+                .is_some_and(|state| state != &payload["runtimeState"])
+            {
+                return false;
+            }
+            if payload.get("stage").is_some()
+                && current.get("stage").is_some()
+                && payload["stage"] != current["stage"]
+            {
+                return false;
+            }
+            let transition = latest
+                .get("completionTransition")
+                .filter(|value| !value.is_null())
+                .unwrap_or(&current["stageTransition"]);
+            if payload["currentState"] == true
+                && (latest["status"] == "failed"
+                    || (latest["status"] == "succeeded"
+                        && transition != "auto"
+                        && latest["kind"] != "post"))
+            {
+                return true;
+            }
+            if payload["runtimeState"] == "idle" {
+                // A manual main agent may park without recording a verdict.
+                // An automatic main agent between turns is not manager work.
+                return (latest["status"] == "running" || latest["status"].is_null())
+                    && latest["kind"] != "post"
+                    && transition != "auto";
+            }
+            // Termination with no recorded verdict is incomplete lifecycle.
+            // A terminal run already supplied the durable completion signal.
+            payload["runtimeState"] == "exited" && latest["status"] == "running"
+        }
+        Some("task.revision_requested") => {
+            payload["exhausted"] != false || latest["status"] != "running"
+        }
+        Some("task.provider_quota_rejected") => {
+            !payload["recovery"].as_str().is_some_and(|recovery| {
+                recovery == "fallback-started" || recovery.starts_with("parked-")
+            })
+        }
+        Some("task.transfer_finalizing") => payload["phase"] == "degraded",
+        Some("task.raw_input_delivered") => false,
+        // Dependency edges are meaningful even when their cause was automatic
+        // PR/close progress. Closure and PR readiness also reconcile fan-out
+        // and merge ownership; do not globally exclude those event types.
+        Some(
+            "task.blocked"
+            | "task.unblocked"
+            | "task.closed"
+            | "task.pr_created"
+            | "task.merge_signaled"
+            | "task.merge_handoff_missing"
+            | "task.awaiting_input"
+            | "task.awaiting_advance"
+            | "task.provider_quota_parked"
+            | "task.teardown_failed"
+            | "task.lifecycle_operation_retired",
+        ) => true,
+        _ => is_actionable_task_event(event),
+    }
+}
+
 #[cfg(test)]
 mod completion_context_tests {
     use super::{
@@ -1633,5 +1755,151 @@ mod completion_context_tests {
         assert_eq!(context.run_id, "run-post");
         assert_eq!(context.run_for_attempt("attempt-main"), Some("run-main"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod subscription_relevance_tests {
+    use super::*;
+
+    #[test]
+    fn relevance_is_structured_and_failure_survives_a_successor() {
+        for kind in [
+            "run.started",
+            "stage.changed",
+            "task.created",
+            "task.activity_changed",
+            "task.runtime_settled",
+            "task.input_delivered",
+            "task.raw_input_delivered",
+        ] {
+            assert!(
+                !is_relevant_subscription_event(&serde_json::json!({"type":kind,"payload":{}})),
+                "{kind}"
+            );
+        }
+        for kind in [
+            "task.awaiting_input",
+            "task.awaiting_advance",
+            "task.blocked",
+            "task.unblocked",
+            "task.closed",
+            "task.pr_created",
+            "task.merge_signaled",
+            "task.merge_handoff_missing",
+            "task.provider_quota_parked",
+            "task.lifecycle_failed",
+            "task.lifecycle_operation_retired",
+            "task.teardown_failed",
+            "future.observation_fault",
+        ] {
+            assert!(
+                is_relevant_subscription_event(&serde_json::json!({"type":kind,"payload":{}})),
+                "{kind}"
+            );
+        }
+        let mut event = serde_json::json!({"type":"run.finished", "payload": {
+            "runId":"old", "stage":"review", "kind":"main", "status":"failed",
+            "currentTask":{"stage":"pr", "latestRun":{"id":"new", "status":"running"}},
+            "notificationContext":{"completionTransition":"auto"}
+        }});
+        assert!(
+            is_relevant_subscription_event(&event),
+            "failure is a historical fact even after advance"
+        );
+        event["payload"]["status"] = serde_json::json!("succeeded");
+        assert!(
+            !is_relevant_subscription_event(&event),
+            "automatic successful review is serviced by the engine"
+        );
+        event["payload"]["notificationContext"]["completionTransition"] =
+            serde_json::json!("manual");
+        event["payload"]["currentTask"] =
+            serde_json::json!({"stage":"review", "latestRun":{"id":"old", "status":"succeeded"}});
+        assert!(
+            is_relevant_subscription_event(&event),
+            "manual success needs advance"
+        );
+        event["payload"]["kind"] = serde_json::json!("post");
+        assert!(
+            !is_relevant_subscription_event(&event),
+            "successful post transitions automatically"
+        );
+    }
+
+    #[test]
+    fn settled_runtime_distinguishes_manual_attention_from_automatic_progress() {
+        let mut event = serde_json::json!({"type":"task.runtime_changed", "payload":{
+            "stage":"review", "runtimeState":"idle", "currentState":true,
+            "currentTask":{"stage":"review", "stageTransition":"auto"},
+            "notificationContext":{"runtimeState":"idle", "latestRun":{
+                "kind":"main", "status":"running", "completionTransition":"auto"
+            }}
+        }});
+        assert!(
+            !is_relevant_subscription_event(&event),
+            "automatic idle alone is not work"
+        );
+        event["payload"]["notificationContext"]["latestRun"]["completionTransition"] =
+            serde_json::json!("manual");
+        assert!(
+            is_relevant_subscription_event(&event),
+            "manual agent without a verdict stays observable"
+        );
+        event["payload"]["notificationContext"]["latestRun"]["status"] =
+            serde_json::json!("succeeded");
+        assert!(
+            is_relevant_subscription_event(&event),
+            "initial scan finds a completed manual gate"
+        );
+        event["payload"]["currentState"] = serde_json::json!(false);
+        assert!(
+            !is_relevant_subscription_event(&event),
+            "runtime echo adds nothing to recorded completion"
+        );
+        event["payload"]["currentState"] = serde_json::json!(true);
+        event["payload"]["notificationContext"]["latestRun"]["status"] =
+            serde_json::json!("running");
+        event["payload"]["notificationContext"]["latestRun"]["completionTransition"] =
+            serde_json::json!("auto");
+        event["payload"]["notificationContext"]["providerParked"] = serde_json::json!(true);
+        assert!(
+            is_relevant_subscription_event(&event),
+            "parked provider is attention even at an automatic stage"
+        );
+        event["payload"]["notificationContext"]["providerParked"] = serde_json::json!(false);
+        event["payload"]["runtimeState"] = serde_json::json!("waiting");
+        assert!(
+            is_relevant_subscription_event(&event),
+            "initial question scan survives"
+        );
+        event["payload"]["currentState"] = serde_json::json!(false);
+        assert!(
+            !is_relevant_subscription_event(&event),
+            "durable waiting duplicates awaiting_input"
+        );
+    }
+
+    #[test]
+    fn revisions_and_provider_recovery_select_attention_not_routine_recovery() {
+        let mut event = serde_json::json!({"type":"task.revision_requested", "payload":{
+            "exhausted":false, "notificationContext":{"latestRun":{"status":"running"}}
+        }});
+        assert!(!is_relevant_subscription_event(&event));
+        event["payload"]["exhausted"] = serde_json::json!(true);
+        assert!(is_relevant_subscription_event(&event));
+        event["payload"]["exhausted"] = serde_json::json!(false);
+        event["payload"]["notificationContext"]["latestRun"]["status"] =
+            serde_json::json!("failed");
+        assert!(
+            is_relevant_subscription_event(&event),
+            "unresolved revision needs coordination"
+        );
+        assert!(!is_relevant_subscription_event(
+            &serde_json::json!({"type":"task.provider_quota_rejected", "payload":{"recovery":"fallback-started"}})
+        ));
+        assert!(is_relevant_subscription_event(
+            &serde_json::json!({"type":"task.provider_quota_parked", "payload":{"reason":"parked-no-candidates"}})
+        ));
     }
 }

@@ -2559,6 +2559,41 @@ already-settled work, then the server owns observation independently of MCP
 request lifetime or provider background execution. Filters and cursors are the
 existing task-event implementation; no new completion detector is introduced.
 
+Subscription notification relevance is applied **before** batch size, minimum,
+and debounce decisions, in the native wait and in the collecting server. Both
+`input` and `codex_app_server` consume that same mailbox. The explicit default is:
+
+- Keep recorded failures even if the task has since changed stage, daemon-confirmed
+  `task.awaiting_input`, manual completion/awaiting-advance and settled manual
+  main agents without a verdict, unresolved or exhausted revisions, parked
+  providers, and lifecycle/teardown/merge-handoff faults.
+- Keep blocked/unblocked edges, closure, PR readiness and merge handoff: these
+  reconcile dependencies, fan-out ownership and ready work even when their cause
+  was automatic. Closing cancels remaining runs; those cancellations are redundant
+  with closure. Provider rejection with recovery is redundant with its fallback
+  or dedicated parked event. Successful runs with a successor are serviced.
+- Drop routine creation/start/stage progress, successful automatic main and post
+  completion, busy/read/activity edges, input-delivery echoes, ordinary transfer
+  progress, and automatic-stage idle. A runtime waiting edge duplicates the
+  explicit question event; an initial settled waiting snapshot still surfaces it.
+  Unknown event kinds or missing failure/policy information remain visible.
+
+`task.lifecycle_failed` is appended when preparation or detached execution of an
+accepted stage transition fails (`payload.operation: "stage_transition"`,
+`payload.error`). A successful main run is not rewritten into a failure just
+because its subsequent transition failed. No transcript or speech classifier
+participates in relevance.
+
+Raw durable history, general-purpose HTTP/MCP waits and the legacy CLI watch keep
+their behavior. The subscription wait sends the optional
+`orchestrationNotifications=true` parameter to peer legs; older servers may ignore
+it. The collector applies the same predicate before counting or truncating their
+raw rows, keeps the exact native checkpoint through excluded rows, and re-arms
+raw pages internally. `hasMore` from an unfiltered page cannot fill a relevant
+batch. Filtered initial snapshots still advance the existing settled-scan cursor;
+acknowledgement does not alter human read state. No cursor format, relay protocol,
+mailbox backpressure or delivery retry contract changes.
+
 The durable `event_subscription` row binds to the manager's current run,
 stage, and branch. Stage replacement or closure stops the worker. One pending
 page bounds the mailbox; later events stay in the feed until it is acknowledged.
