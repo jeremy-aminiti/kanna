@@ -115,6 +115,7 @@ import {
 } from "../runtime/headless-worker";
 import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
+import { configureExternalWorkspaceBuild, readExternalBuildRoot } from "../runtime/build-storage";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
 import { getDevStatus } from "../runtime/status";
 import { executeTestAll } from "../runtime/test-all";
@@ -2402,9 +2403,14 @@ export const taskDefinitions = [
       const context = await resolveDefaultContext(process.env);
       const cargoConfig = writeCargoConfig(context.repoRoot);
       const machineLocalConfig = syncMachineLocalConfig(context.repoRoot);
-      const legacyExternalBuild = migrateLegacyExternalWorkspaceBuild(context.repoRoot);
+      const externalBuildRoot = readExternalBuildRoot(context.homeDir, context.env);
+      const externalBuild = externalBuildRoot
+        ? configureExternalWorkspaceBuild(context.repoRoot, externalBuildRoot)
+        : undefined;
+      const legacyExternalBuild = externalBuild ? undefined : migrateLegacyExternalWorkspaceBuild(context.repoRoot);
       const lines = ["Synced Kanna dev environment files."];
-      if (legacyExternalBuild.status === "migrated") {
+      if (externalBuild) lines.push(`  using external Rust build root ${externalBuildRoot} (${externalBuild.target})`);
+      if (legacyExternalBuild?.status === "migrated") {
         lines.push(`  preserved legacy external build target ${legacyExternalBuild.target}`);
       }
       if (machineLocalConfig.status === "copied") {
@@ -2415,7 +2421,7 @@ export const taskDefinitions = [
       return {
         ok: true,
         message: lines.join("\n"),
-        data: { cargoConfig, machineLocalConfig, legacyExternalBuild }
+        data: { cargoConfig, machineLocalConfig, legacyExternalBuild, externalBuild }
       };
     }
   },
