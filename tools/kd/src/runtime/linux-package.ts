@@ -13,7 +13,7 @@
  * is returned as a command for the caller to run there.
  */
 
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export type LinuxChannel = "production" | "staging";
@@ -367,7 +367,37 @@ export function stageLinuxPackageTree(input: StageTreeInput): StagedTree {
     chmodSync(path, 0o755);
   }
 
+  // The root itself too: `dpkg-deb` records it as `./` in the archive, so a
+  // 0775 build directory would ship a group-writable filesystem root entry.
+  chmodSync(input.root, 0o755);
+  normalizePackageModes(input.root);
+
   return { root: input.root, controlPath, installedPaths: installed };
+}
+
+/**
+ * Give every packaged file a mode the *package* chose.
+ *
+ * `writeFileSync`, `mkdirSync` and `cpSync` all take their permissions from the
+ * builder's umask, so a build machine with a group-writable default produces a
+ * package that installs group-writable files onto every user's machine — the
+ * kind of defect that is invisible in the tree and only appears once somebody
+ * runs `dpkg-deb --contents`. It was: the first real package built from this
+ * code shipped `usr/share/applications/build.kanna.desktop` as 0664.
+ *
+ * Executables keep 0755 because they were chmodded deliberately above.
+ */
+function normalizePackageModes(root: string): void {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory()) {
+      chmodSync(path, 0o755);
+      normalizePackageModes(path);
+      continue;
+    }
+    chmodSync(path, statSync(path).mode & 0o111 ? 0o755 : 0o644);
+  }
 }
 
 function estimateInstalledSizeKb(paths: string[]): number {

@@ -137,6 +137,48 @@ gate.
 
 **This lane has not yet been run against real packages.** §7.
 
+## 4a. A real package was built (2026-09-09, ARM64 VM)
+
+The packaging code was run against real binaries rather than only against unit
+fixtures. On the Phase 0/1/2 VM (Ubuntu 26.04.1 aarch64), the seven Linux
+binaries Phase 2 left in `~/kanna-p2/.build` were staged through
+`stageLinuxPackageTree` and built with `dpkg-deb --root-owner-group --build`.
+
+Result: `kanna_0.0.68-1_arm64.deb`, 186 MB, accepted by `dpkg-deb --info` and
+`--contents`. The properties that only exist after a real build all held:
+
+- `./usr/bin/kanna -> ../lib/kanna/kanna-desktop` survived as a **symlink**, not
+  a copy — the property the whole sibling layout depends on.
+- `postinst` and `prerm` are recorded as maintainer scripts (`*` in
+  `dpkg-deb --info`) with their executable bits.
+- The built-in `.kanna/` definitions, the desktop entry and all three icon sizes
+  are present at their declared paths.
+- `Depends`, `Installed-Size` and the version parsed cleanly.
+
+**And it found a defect.** The desktop entry shipped as `0664` —
+group-writable. `writeFileSync`, `mkdirSync` and `cpSync` take their modes from
+the *builder's* umask, so a build machine with a group-writable default would
+have installed group-writable files onto every user's machine. Invisible in the
+staged tree; visible only in `dpkg-deb --contents`. `stageLinuxPackageTree` now
+normalizes every packaged path to 0755/0644 (including the tree root, which
+`dpkg-deb` records as `./`), a test asserts nothing is group- or
+world-writable whatever the umask, and the fix was re-verified on the VM:
+`find … -perm /022` returns nothing.
+
+Two caveats on this evidence, so it is not read as more than it is:
+
+- The binaries are **Phase 2 debug builds**, not release builds, and
+  `kanna-worker` was never built on that VM — a placeholder script stood in for
+  it, so the layout check was exercised but that binary was not.
+- `dpkg-deb`'s default xz compression took 3m28s wall / 26m CPU for these
+  (large, unstripped) debug binaries. Release artifacts will be far smaller;
+  if it stays slow, `-Zzstd` is supported on the 24.04 floor and is the
+  next thing to try.
+
+This closes "a package has never been built" as a *packaging* question. It does
+**not** make anything publishable: the binaries came from Cargo, not the Bazel
+release graph (§7.1).
+
 ## 5. The support matrix, and what each row is evidenced by
 
 | Dimension | Position | Evidence today |
@@ -228,8 +270,9 @@ Each item, with what it needs.
    may be published.** Needs the crate universes repinned for both Linux
    triples, Linux platforms/toolchains registered, Darwin SDK actions scoped to
    Darwin, and a `kanna-worker` Bazel target.
-2. **A real package has never been built.** Every packaging test is unit-level.
-   The lanes are written; nothing has run `dpkg-deb` on a Kanna tree.
+2. **No package has been built from the release graph.** One real `.deb` was
+   built and validated on the ARM64 VM (§4a) — from Cargo debug binaries, with
+   a placeholder `kanna-worker`. A publishable artifact needs (1).
 3. **The installed and upgrade lanes have never been run.** They need a host
    where the test user can become root; the ARM64 VM has no passwordless sudo
    and no container runtime, and the CI lane has not been executed.

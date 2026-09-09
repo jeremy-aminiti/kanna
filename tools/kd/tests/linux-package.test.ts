@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -134,6 +134,42 @@ describe("stageLinuxPackageTree", () => {
       rmSync(join(input.binariesDir, "..", remove), { recursive: true, force: true });
       expect(() => stageLinuxPackageTree(input)).toThrow(message);
     }
+  });
+
+  /**
+   * Found by building the first real package: `writeFileSync` and `mkdirSync`
+   * take their modes from the builder's umask, and the desktop entry shipped
+   * 0664. A build machine with a group-writable default would install
+   * group-writable files onto every user's machine, invisibly — the tree looks
+   * fine, and only `dpkg-deb --contents` shows it.
+   */
+  it("gives every packaged file a mode the package chose, not the builder's umask", () => {
+    const { root, input } = fixture();
+    stageLinuxPackageTree(input);
+    const modes = new Map<string, number>();
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory()) {
+          modes.set(path, statSync(path).mode & 0o777);
+          walk(path);
+        } else {
+          modes.set(path, statSync(path).mode & 0o777);
+        }
+      }
+    };
+    walk(root);
+    // `dpkg-deb` records the tree root as `./`, so it ships too.
+    modes.set(root, statSync(root).mode & 0o777);
+    for (const [path, mode] of modes) {
+      expect([0o755, 0o644], `${path} has mode ${mode.toString(8)}`).toContain(mode);
+      // Nothing group- or world-writable, whatever the builder's umask was.
+      expect(mode & 0o022, `${path} is writable beyond its owner`).toBe(0);
+    }
+    expect(modes.get(join(root, "usr", "share", "applications", "build.kanna.desktop"))).toBe(0o644);
+    expect(modes.get(join(root, "usr", "lib", "kanna", "kanna-daemon"))).toBe(0o755);
+    expect(modes.get(join(root, "DEBIAN", "postinst"))).toBe(0o755);
   });
 
   it("writes executable maintainer scripts", () => {
