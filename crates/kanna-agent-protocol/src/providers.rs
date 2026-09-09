@@ -166,8 +166,8 @@ impl FromStr for AgentProvider {
 /// A compact provider selector: `provider[-model[-effort]]`.
 ///
 /// Workflow definitions name provider candidates with an optional model and
-/// reasoning effort folded into one token — `claude`, `codex-sol`,
-/// `claude-fable-hi`, `codex-astra-lo` — so each candidate in an ordered
+/// reasoning effort folded into one token — `claude`, `codex-gpt-5.6-sol`,
+/// `claude-fable-hi`, `codex-gpt-6-astra-lo` — so each candidate in an ordered
 /// fallback list carries its own coherent pair instead of the list's leading
 /// candidate owning the only model. Anything not specified is left to the
 /// provider CLI's own defaults.
@@ -206,7 +206,7 @@ fn effort_alias(segment: &str) -> Option<&'static str> {
 /// is a recognized effort token (`lo`/`low`, `med`/`medium`, `hi`/`high`,
 /// `xhi`/`xhigh`, `max` — normalized to the canonical spelling), it is the
 /// effort; everything between provider and effort is the model, passed to the
-/// CLI verbatim (so multi-segment model ids like `gpt-5-codex` survive — a
+/// CLI verbatim (so multi-segment model ids like `gpt-5.6-sol` survive — a
 /// trailing segment that is not an effort token stays part of the model).
 /// A plain provider id parses with no model and no effort.
 ///
@@ -218,7 +218,7 @@ pub fn parse_provider_selector(value: &str) -> Result<ProviderSelector, String> 
     let syntax_error = |detail: &str| {
         format!(
             "invalid agent provider selector '{value}': {detail} \
-             (expected provider[-model[-effort]], e.g. codex, claude-fable, codex-astra-lo)"
+             (expected provider[-model[-effort]], e.g. codex, claude-fable, codex-gpt-6-astra-lo)"
         )
     };
     if value.is_empty() {
@@ -358,10 +358,10 @@ mod selector_tests {
             }
         );
         assert_eq!(
-            selector("codex-astra-lo"),
+            selector("codex-gpt-6-astra-lo"),
             ProviderSelector {
                 provider: AgentProvider::Codex,
-                model: Some("astra".to_string()),
+                model: Some("gpt-6-astra".to_string()),
                 effort: Some("low".to_string()),
             }
         );
@@ -370,10 +370,10 @@ mod selector_tests {
     #[test]
     fn a_trailing_segment_that_is_not_an_effort_token_stays_in_the_model() {
         assert_eq!(
-            selector("codex-gpt-5-codex"),
+            selector("codex-gpt-5.6-sol"),
             ProviderSelector {
                 provider: AgentProvider::Codex,
-                model: Some("gpt-5-codex".to_string()),
+                model: Some("gpt-5.6-sol".to_string()),
                 effort: None,
             }
         );

@@ -1,7 +1,7 @@
 //! What the server does when a provider positively refuses a task's turn.
 //!
 //! The incident this exists for: `plan-build-review` declares
-//! `"agent_provider": ["claude-fable", "codex-astra"]`, documented as an
+//! `"agent_provider": ["claude-fable", "codex-gpt-6-astra"]`, documented as an
 //! outage-fallback chain. The account's Fable allowance ran out, a task
 //! advanced to `review`, the stage spawned on the leading candidate, and the
 //! session died on `You've reached your Fable limit`. Nothing classified it,

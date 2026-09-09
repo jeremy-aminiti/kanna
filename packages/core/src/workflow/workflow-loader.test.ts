@@ -158,7 +158,7 @@ describe("parseWorkflowJson", () => {
         {
           name: "Stage 1",
           transition: "auto",
-          agent_provider: ["claude-fable-hi", "codex-astra-lo"],
+          agent_provider: ["claude-fable-hi", "codex-gpt-6-astra-lo"],
           post: { name: "commit", agent_provider: "claude-haiku" },
         },
       ],
@@ -168,7 +168,7 @@ describe("parseWorkflowJson", () => {
     // model/effort at spawn time.
     expect(result.stages[0].agent_provider).toEqual([
       "claude-fable-hi",
-      "codex-astra-lo",
+      "codex-gpt-6-astra-lo",
     ]);
     expect(result.stages[0].post?.agent_provider).toBe("claude-haiku");
   });

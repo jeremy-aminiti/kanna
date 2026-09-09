@@ -244,10 +244,10 @@ acknowledging transferred descriptors.
   resolved provider's own stamped or default model.
   Workflow stage/post `agent_provider` entries are the one shape that pins a
   pair per candidate: each entry is a compact selector,
-  `provider[-model[-effort]]` (`claude`, `codex-sol`, `claude-fable-hi`,
-  `codex-astra-lo` — effort tokens `lo`/`low`, `med`/`medium`, `hi`/`high`,
+  `provider[-model[-effort]]` (`claude`, `codex-gpt-5.6-sol`, `claude-fable-hi`,
+  `codex-gpt-6-astra-lo` — effort tokens `lo`/`low`, `med`/`medium`, `hi`/`high`,
   `xhi`/`xhigh`, `max`). A selector names exactly one provider, so an ordered
-  list like `["claude-fable-hi", "codex-astra-lo"]` gives every fallback
+  list like `["claude-fable-hi", "codex-gpt-6-astra-lo"]` gives every fallback
   candidate its own coherent model/effort; anything under-specified inherits
   the provider CLI's own defaults, and the model text is passed to the CLI
   verbatim.

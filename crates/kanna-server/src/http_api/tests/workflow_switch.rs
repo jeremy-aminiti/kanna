@@ -467,7 +467,7 @@ async fn replace_workflow(
 fn replacement_fixture(label: &str) -> (tempfile::TempDir, Arc<AppState>, Value) {
     let (temp, repo_path) = workflow_test_repo(label);
     let before = serde_json::json!({"name": "pinned", "stages": [
-        {"name": "review", "agent": "review", "agent_provider": ["claude-fable", "codex-astra"], "policy": {"transition": "manual"}},
+        {"name": "review", "agent": "review", "agent_provider": ["claude-fable", "codex-gpt-6-astra"], "policy": {"transition": "manual"}},
         {"name": "pr", "agent": "pr", "policy": {"transition": "manual"}}
     ]});
     let saved = before.clone();
@@ -507,7 +507,7 @@ async fn replacement_supersedes_only_changed_execution_and_is_durable_and_fenced
     let (_temp, state, before) = replacement_fixture("workflow-replace-incident");
     let app = router(Arc::clone(&state));
     let mut after = before.clone();
-    after["stages"][0]["agent_provider"] = serde_json::json!(["codex-astra"]);
+    after["stages"][0]["agent_provider"] = serde_json::json!(["codex-gpt-6-astra"]);
     let (status, body) = replace_workflow(&app, &before, &after).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["supersededRunIds"], serde_json::json!(["run-old"]));
@@ -606,7 +606,7 @@ async fn future_stage_and_description_edits_keep_current_provider_stamp() {
     let app = router(Arc::clone(&state));
     let mut after = before.clone();
     after["stages"][0]["description"] = serde_json::json!("updated description");
-    after["stages"][1]["agent_provider"] = serde_json::json!("codex-astra");
+    after["stages"][1]["agent_provider"] = serde_json::json!("codex-gpt-6-astra");
     let (status, body) = replace_workflow(&app, &before, &after).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["supersededRunIds"], serde_json::json!([]));

@@ -853,7 +853,7 @@ async fn a_workflow_selector_fallback_spawns_with_its_own_model_and_effort() {
             "stages": [{
                 "name": "in progress",
                 "agent": "review",
-                "agent_provider": ["codex-astra-lo", "claude-fable-hi"],
+                "agent_provider": ["codex-gpt-6-astra-lo", "claude-fable-hi"],
                 "transition": "manual"
             }]
         })

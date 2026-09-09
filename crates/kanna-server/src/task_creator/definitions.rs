@@ -1697,7 +1697,7 @@ where
         ));
     }
     // Workflow stage/post entries are compact provider selectors
-    // (`provider[-model[-effort]]`, e.g. `claude`, `codex-sol`,
+    // (`provider[-model[-effort]]`, e.g. `claude`, `codex-gpt-5.6-sol`,
     // `claude-fable-hi`), validated here so a bad selector fails definition
     // resolution naming the field instead of failing at spawn.
     for provider in &providers {
