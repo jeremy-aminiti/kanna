@@ -62,13 +62,13 @@ async fn assert_created_task_overrides_reach_daemon_spawn(
     use tokio::net::UnixListener;
 
     let unique = unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-http-create-overrides-{}-{unique}",
+    let repo_root = crate::test_paths::unique_test_path(&format!(
+        "kanna-http-create-overrides-{}",
         provider.as_str()
     ));
     init_test_git_repo(&repo_root);
-    let daemon_dir = std::env::temp_dir().join(format!(
-        "kanna-http-create-overrides-daemon-{}-{unique}",
+    let daemon_dir = crate::test_paths::unique_test_path(&format!(
+        "kanna-http-create-overrides-daemon-{}",
         provider.as_str()
     ));
     std::fs::create_dir_all(&daemon_dir).unwrap();
@@ -235,9 +235,7 @@ async fn create_task_effort_reaches_every_provider_daemon_spawn_argv() {
 
 #[tokio::test]
 async fn create_task_route_rejects_unsupported_provider_effort_without_persisting_task() {
-    let unique = unique_test_suffix();
-    let repo_root =
-        std::env::temp_dir().join(format!("kanna-http-reject-antigravity-effort-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-reject-antigravity-effort");
     init_test_git_repo(&repo_root);
     let state =
         super::test_state_with_seed("desktop-reject-antigravity-effort", "Studio Mac", |db| {
@@ -548,10 +546,10 @@ async fn create_task_route_round_trips_and_replays_eight_hex_requested_id() {
 
     let unique = super::unique_test_suffix();
     let task_id = "a1b2c3d4";
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-replay-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-replay");
     init_test_git_repo(&repo_root);
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-create-replay-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-create-replay-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -713,9 +711,9 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
 
     let unique = super::unique_test_suffix();
     let task_id = "d1e2f3a4b5c60718";
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-repair-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-repair");
     init_test_git_repo(&repo_root);
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-create-repair-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-create-repair-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -1130,13 +1128,11 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let repo_root =
-        std::env::temp_dir().join(format!("kanna-http-create-default-provider-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-default-provider");
     init_test_git_repo(&repo_root);
 
-    let daemon_dir = std::env::temp_dir().join(format!(
-        "kanna-http-create-default-provider-daemon-{unique}"
-    ));
+    let daemon_dir =
+        crate::test_paths::unique_test_path("kanna-http-create-default-provider-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -1246,11 +1242,10 @@ async fn create_task_route_runs_a_non_review_builtin_agent_in_the_first_stage() 
     use tokio::net::UnixListener;
 
     let unique = unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-commit-agent-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-commit-agent");
     init_test_git_repo(&repo_root);
 
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-create-commit-agent-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-create-commit-agent-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -1367,10 +1362,10 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-title-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-title");
     init_test_git_repo(&repo_root);
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-create-title-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-create-title-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -1516,7 +1511,7 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-stage-override-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-stage-override");
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
@@ -1553,8 +1548,7 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
         .unwrap()
         .success());
 
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-create-stage-override-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-create-stage-override-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -1662,7 +1656,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
     let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-env-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-env");
     init_test_git_repo(&repo_root);
 
     let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
@@ -1674,7 +1668,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
         .to_string_lossy()
         .to_string();
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-create-env-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-create-env-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let workflow_socket_path = workflow_socket_path_for_daemon_dir(&daemon_dir.to_string_lossy());
@@ -1818,12 +1812,11 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
 #[tokio::test]
 async fn create_task_route_rejects_invalid_blocker_before_creating_task_or_spawning() {
     let unique = super::unique_test_suffix();
-    let repo_root =
-        std::env::temp_dir().join(format!("kanna-http-create-invalid-blocker-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-invalid-blocker");
     init_test_git_repo(&repo_root);
 
     let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-create-invalid-blocker-daemon-{unique}"));
+        crate::test_paths::unique_test_path("kanna-http-create-invalid-blocker-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -1906,7 +1899,7 @@ async fn create_task_route_rejects_invalid_blocker_before_creating_task_or_spawn
 #[tokio::test]
 async fn create_task_route_preserves_failed_prepare_diagnostics() {
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-bad-base-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-bad-base");
     init_test_git_repo(&repo_root);
 
     let config = Config {
@@ -1915,8 +1908,7 @@ async fn create_task_route_preserves_failed_prepare_diagnostics() {
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: std::env::temp_dir()
-            .join(format!("kanna-http-create-bad-base-daemon-{unique}"))
+        daemon_dir: crate::test_paths::unique_test_path("kanna-http-create-bad-base-daemon")
             .to_string_lossy()
             .to_string(),
         db_path: Db::test_db_path(&format!("http-api-create-bad-base-{unique}")),
@@ -2004,9 +1996,7 @@ async fn create_task_route_preserves_failed_prepare_diagnostics() {
 
 #[tokio::test]
 async fn create_task_route_refuses_an_unresolvable_recorded_default_branch() {
-    let unique = unique_test_suffix();
-    let repo_root =
-        std::env::temp_dir().join(format!("kanna-http-create-unresolvable-default-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-unresolvable-default");
     init_test_git_repo(&repo_root);
     let state =
         super::test_state_with_seed("desktop-create-unresolvable-default", "Studio Mac", |db| {
@@ -2063,11 +2053,10 @@ async fn create_task_route_refuses_an_unresolvable_recorded_default_branch() {
 #[tokio::test]
 async fn create_task_route_with_blocker_creates_dormant_task_without_spawning() {
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-dormant-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-dormant");
     init_test_git_repo(&repo_root);
 
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-create-dormant-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-create-dormant-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -2191,11 +2180,10 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-closed-blocker-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-closed-blocker");
     init_test_git_repo(&repo_root);
 
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-create-closed-blocker-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-create-closed-blocker-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -2323,11 +2311,10 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-spawn-fail-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-spawn-fail");
     init_test_git_repo(&repo_root);
 
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-create-spawn-fail-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-create-spawn-fail-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -2494,11 +2481,10 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
 #[tokio::test]
 async fn create_task_route_persists_blocker_without_daemon_spawn() {
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-create-blocker-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-create-blocker");
     init_test_git_repo(&repo_root);
 
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-create-blocker-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-create-blocker-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);

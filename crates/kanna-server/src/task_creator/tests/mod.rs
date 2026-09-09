@@ -267,7 +267,7 @@ fn init_git_repo_with_provider_fixtures(
     label: &str,
     with_provider_fixtures: bool,
 ) -> std::path::PathBuf {
-    let repo_root = std::env::temp_dir().join(format!("kanna-task-{label}-{}", std::process::id()));
+    let repo_root = crate::test_paths::unique_test_path(&format!("kanna-task-{label}"));
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(&repo_root).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();

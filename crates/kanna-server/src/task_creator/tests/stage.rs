@@ -223,8 +223,7 @@ fn one_stage_operation_keeps_prompt_spawn_and_teardown_on_pinned_revision() {
 
 #[test]
 fn prepare_merge_agent_creates_in_progress_task() {
-    let repo_root =
-        std::env::temp_dir().join(format!("kanna-merge-agent-task-{}", std::process::id()));
+    let repo_root = crate::test_paths::unique_test_path("kanna-merge-agent-task");
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(&repo_root).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
@@ -843,8 +842,7 @@ fn rerun_of_a_stamped_provider_drops_a_model_written_for_another_provider() {
 
 #[test]
 fn prepare_advance_stage_uses_stored_workflow_snapshot_for_existing_task() {
-    let repo_root =
-        std::env::temp_dir().join(format!("kanna-stage-snapshot-{}", std::process::id()));
+    let repo_root = crate::test_paths::unique_test_path("kanna-stage-snapshot");
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
@@ -986,7 +984,7 @@ fn prepare_advance_stage_uses_stored_workflow_snapshot_for_existing_task() {
 
 #[test]
 fn prepare_advance_stage_applies_repo_agent_extension() {
-    let repo_root = std::env::temp_dir().join(format!("kanna-stage-extend-{}", std::process::id()));
+    let repo_root = crate::test_paths::unique_test_path("kanna-stage-extend");
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
@@ -1105,10 +1103,7 @@ fn prepare_advance_stage_applies_repo_agent_extension() {
 
 #[test]
 fn prepare_advance_stage_substitutes_previous_stage_run_result_before_legacy_stage_result() {
-    let repo_root = std::env::temp_dir().join(format!(
-        "kanna-stage-run-prev-result-{}",
-        std::process::id()
-    ));
+    let repo_root = crate::test_paths::unique_test_path("kanna-stage-run-prev-result");
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();

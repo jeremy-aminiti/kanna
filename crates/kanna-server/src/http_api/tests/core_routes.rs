@@ -772,9 +772,7 @@ async fn list_repos_omits_credential_bearing_remote_url() {
 #[tokio::test(flavor = "current_thread")]
 async fn repo_agent_provider_route_stays_responsive_and_uses_workspace_local_executables() {
     use std::os::unix::fs::PermissionsExt;
-
-    let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-provider-availability-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-provider-availability");
     init_test_git_repo(&repo_root);
     let provider_dir = repo_root.join(".kanna/provider-bin");
     std::fs::create_dir_all(&provider_dir).unwrap();
@@ -903,10 +901,7 @@ async fn repo_agent_provider_route_stays_responsive_and_uses_workspace_local_exe
 
 #[tokio::test]
 async fn snapshot_route_returns_ui_hydration_payload() {
-    let visible_worktree = std::env::temp_dir().join(format!(
-        "kanna-snapshot-visible-worktree-{}",
-        std::process::id()
-    ));
+    let visible_worktree = crate::test_paths::unique_test_path("kanna-snapshot-visible-worktree");
     let _ = std::fs::remove_dir_all(&visible_worktree);
     std::fs::create_dir_all(&visible_worktree).unwrap();
     let visible_worktree = visible_worktree.to_string_lossy().to_string();
@@ -1098,8 +1093,7 @@ async fn backup_route_creates_valid_snapshot_while_writes_continue() {
 
 #[tokio::test]
 async fn snapshot_route_records_initialized_tasks_whose_worktree_is_missing() {
-    let missing_worktree =
-        std::env::temp_dir().join(format!("kanna-missing-worktree-{}", std::process::id()));
+    let missing_worktree = crate::test_paths::unique_test_path("kanna-missing-worktree");
     let missing_worktree = missing_worktree.to_string_lossy().to_string();
     let state = super::test_state_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
@@ -2930,15 +2924,7 @@ async fn closed_task_identities_route_returns_closed_tasks() {
 
 #[tokio::test]
 async fn add_repo_route_registers_existing_git_repo() {
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    );
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-add-repo-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-add-repo");
     init_test_git_repo(&repo_root);
     let app = super::test_router("desktop-1", "Studio Mac");
 
@@ -3106,15 +3092,7 @@ async fn reconcile_repo_metadata_reports_and_repairs_default_branch_drift_in_pla
 
 #[tokio::test]
 async fn add_repo_route_honors_requested_default_branch() {
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    );
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-add-repo-branch-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-add-repo-branch");
     init_test_git_repo(&repo_root);
     let app = super::test_router("desktop-1", "Studio Mac");
 
@@ -3147,15 +3125,7 @@ async fn add_repo_route_honors_requested_default_branch() {
 
 #[tokio::test]
 async fn add_repo_route_registers_zero_commit_repo_with_its_unborn_branch() {
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    );
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-add-empty-repo-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-add-empty-repo");
     std::fs::create_dir_all(&repo_root).unwrap();
     assert!(Command::new("git")
         .args(["init", "--initial-branch=trunk"])
@@ -3200,15 +3170,7 @@ async fn add_repo_route_registers_zero_commit_repo_with_its_unborn_branch() {
 
 #[tokio::test]
 async fn add_repo_route_rejects_duplicate_path() {
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    );
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-add-repo-dupe-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-add-repo-dupe");
     init_test_git_repo(&repo_root);
     let app = super::test_router("desktop-1", "Studio Mac");
     let body = Body::from(
@@ -3252,15 +3214,7 @@ async fn add_repo_route_rejects_duplicate_path() {
 async fn repo_checkout_clones_registers_and_reports_done() {
     use sha2::{Digest, Sha256};
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    );
-    let fixture_root = std::env::temp_dir().join(format!("kanna-checkout-happy-{unique}"));
+    let fixture_root = crate::test_paths::unique_test_path("kanna-checkout-happy");
     let remote = fixture_root.join("remote");
     let checkouts = fixture_root.join("checkouts");
     init_test_git_repo(&remote);
@@ -3322,15 +3276,7 @@ async fn repo_checkout_clones_registers_and_reports_done() {
 async fn repo_checkout_failure_cleans_destination_and_registry() {
     use sha2::{Digest, Sha256};
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    );
-    let fixture_root = std::env::temp_dir().join(format!("kanna-checkout-fail-{unique}"));
+    let fixture_root = crate::test_paths::unique_test_path("kanna-checkout-fail");
     let checkouts = fixture_root.join("checkouts");
     let remote_url = format!("file://{}/missing-private-repo", fixture_root.display());
     let remote_url_hash = format!("{:x}", Sha256::digest(remote_url.as_bytes()));
@@ -3388,15 +3334,7 @@ async fn repo_checkout_failure_cleans_destination_and_registry() {
 async fn repo_checkout_rejects_credential_bearing_sources_without_side_effects_or_echo() {
     use sha2::{Digest, Sha256};
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    );
-    let fixture_root = std::env::temp_dir().join(format!("kanna-checkout-secret-{unique}"));
+    let fixture_root = crate::test_paths::unique_test_path("kanna-checkout-secret");
     let checkouts = fixture_root.join("checkouts");
     let app =
         super::test_router_with_repo_checkout_root("desktop-1", "Studio Mac", checkouts.clone());
@@ -4227,16 +4165,8 @@ async fn update_task_route_returns_not_found_for_unknown_task() {
 
 #[tokio::test]
 async fn get_task_route_returns_worktree_git_state() {
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    );
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-detail-repo-{unique}"));
-    let worktree = std::env::temp_dir().join(format!("kanna-http-detail-worktree-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-detail-repo");
+    let worktree = crate::test_paths::unique_test_path("kanna-http-detail-worktree");
     init_test_git_repo(&repo_root);
     assert!(Command::new("git")
         .args([
@@ -4339,16 +4269,9 @@ fn run_task_stats_git(repo: &Path, args: &[&str]) {
 }
 
 fn task_stats_fixture(label: &str) -> (PathBuf, PathBuf) {
-    let unique = format!(
-        "{}-{}-{label}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos()
-    );
-    let repo_root = std::env::temp_dir().join(format!("kanna-task-stats-repo-{unique}"));
-    let worktree = std::env::temp_dir().join(format!("kanna-task-stats-worktree-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path(&format!("kanna-task-stats-repo-{label}"));
+    let worktree =
+        crate::test_paths::unique_test_path(&format!("kanna-task-stats-worktree-{label}"));
     init_test_git_repo(&repo_root);
     run_task_stats_git(
         &repo_root,
@@ -6231,8 +6154,7 @@ async fn pairing_claim_racing_legacy_reissue_preserves_secret_and_both_markers()
 
 #[tokio::test]
 async fn create_pairing_session_route_uses_local_identity_without_desktop_secret() {
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-local-pairing-{}", std::process::id()));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-local-pairing");
     let _ = std::fs::remove_dir_all(&daemon_dir);
 
     let config = Config {

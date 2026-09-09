@@ -727,6 +727,17 @@ mod tests {
         _accept: tokio::task::JoinHandle<()>,
     }
 
+    /// The directory sits under this process's test root, so an aborted run is
+    /// still reclaimed; the socket lives in the shared socket directory and
+    /// only this removal takes it back.
+    impl Drop for FakeDaemon {
+        fn drop(&mut self) {
+            let dir = std::path::Path::new(&self.dir);
+            let _ = std::fs::remove_file(kanna_runtime_defaults::socket_path(dir));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     impl FakeDaemon {
         fn start(label: &str, listed: Option<SessionStatus>) -> Self {
             Self::start_refusing(label, listed, None)
@@ -739,8 +750,9 @@ mod tests {
             listed: Option<SessionStatus>,
             submit_refusal: Option<DaemonErrorCode>,
         ) -> Self {
-            let dir = format!("/tmp/kanna-finalize-{label}-{}", std::process::id());
-            std::fs::create_dir_all(&dir).expect("daemon dir");
+            let dir = crate::test_paths::unique_test_dir(&format!("kanna-finalize-{label}"))
+                .to_string_lossy()
+                .to_string();
             let socket = kanna_runtime_defaults::socket_path(std::path::Path::new(&dir));
             let _ = std::fs::remove_file(&socket);
             let listener = UnixListener::bind(&socket).expect("bind fake daemon");

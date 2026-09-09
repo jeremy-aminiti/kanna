@@ -151,9 +151,9 @@ async fn close_task_route_reports_success_when_post_commit_worktree_cleanup_fail
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-close-broken-repo-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-close-broken-repo");
     std::fs::create_dir_all(&repo_root).unwrap();
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-close-cleanup-d-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-close-cleanup-d");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let listener = UnixListener::bind(&socket_path).unwrap();
@@ -315,7 +315,7 @@ async fn close_task_route_releases_claimed_ports() {
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-close-ports-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-close-ports-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -416,7 +416,7 @@ async fn close_task_route_releases_claimed_ports() {
 #[tokio::test]
 async fn reopen_task_route_reopens_and_reclaims_ports_from_remote_default_config() {
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-reopen-ports-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-reopen-ports");
     init_test_git_repo(&repo_root);
     std::fs::write(
         repo_root.join(".kanna/config.json"),
@@ -535,7 +535,7 @@ async fn reopen_task_route_reopens_and_reclaims_ports_from_remote_default_config
 #[tokio::test]
 async fn reopen_task_route_rejects_cloud_identity_conflict_without_claiming_ports() {
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-reopen-identity-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-reopen-identity");
     init_test_git_repo(&repo_root);
     std::fs::write(
         repo_root.join(".kanna/config.json"),
@@ -840,9 +840,9 @@ async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_ru
     // Real git repo: the blocker's worktree branch gets renamed the way the
     // PR-stage agent renames it, so the instruction must carry the renamed
     // branch, not the stored fork name.
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-close-pr-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-close-pr");
     init_test_git_repo(&repo_root);
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-close-pr-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-close-pr-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -1278,7 +1278,7 @@ async fn close_task_route_resolves_branch_style_task_id() {
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-close-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-close-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -1381,7 +1381,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-close-env-teardown-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-close-env-teardown");
     let _ = std::fs::remove_dir_all(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(repo_root.join("README.md"), "test repo").unwrap();
@@ -1460,7 +1460,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
         .unwrap()
         .success());
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-close-env-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-close-env-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -1842,11 +1842,11 @@ async fn pr_completion_starts_dormant_dependent_from_current_branch_optimistical
     let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-pr-optimistic-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-pr-optimistic");
     init_test_git_repo(&repo_root);
 
     let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-pr-optimistic-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-pr-optimistic-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -2169,11 +2169,10 @@ async fn pr_completion_starts_dormant_dependent_from_current_branch_optimistical
 #[tokio::test]
 async fn complete_pr_stage_without_pr_url_leaves_dormant_dependent_unstarted() {
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-pr-stays-blocked-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-pr-stays-blocked");
     init_test_git_repo(&repo_root);
 
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-pr-stays-blocked-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-pr-stays-blocked-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -2289,12 +2288,11 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
     let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-close-unblocks-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-close-unblocks");
     init_test_git_repo(&repo_root);
 
     let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-close-unblocks-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-close-unblocks-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -2638,10 +2636,9 @@ async fn expect_one_spawn(
 #[tokio::test]
 async fn close_with_a_legacy_notify_target_still_starts_dependents() {
     let unique = unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-close-notify-dead-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-close-notify-dead");
     init_test_git_repo(&repo_root);
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-close-notify-dead-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-close-notify-dead-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -2749,10 +2746,9 @@ async fn close_with_a_legacy_notify_target_still_starts_dependents() {
 #[tokio::test]
 async fn unblock_starts_a_dependent_whose_blocker_never_created_its_branch() {
     let unique = unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-unblock-no-branch-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-unblock-no-branch");
     init_test_git_repo(&repo_root);
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-unblock-no-branch-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-unblock-no-branch-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -2897,7 +2893,7 @@ fn git_branch_exists(repo_root: &Path, branch: &str) -> bool {
 #[tokio::test]
 async fn request_revision_finalization_error_rolls_back_db_and_prepared_worktree() {
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-rollback-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-revision-rollback");
     init_test_git_repo(&repo_root);
     std::fs::write(
         repo_root.join(".kanna/workflows/reviewable.json"),
@@ -2936,7 +2932,7 @@ async fn request_revision_finalization_error_rolls_back_db_and_prepared_worktree
         "reviewed work",
     );
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-revision-rollback-d-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-revision-rollback-d");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
@@ -3098,7 +3094,7 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
     let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-conflict-integrates-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-conflict-integrates");
     init_test_git_repo(&repo_root);
     std::fs::write(repo_root.join("shared.txt"), "base\n").unwrap();
     assert!(Command::new("git")
@@ -3117,8 +3113,7 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
     commit_branch_change(&repo_root, "blocker-b-branch", "shared.txt", "from b\n");
 
     let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-conflict-integrates-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-conflict-integrates-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -3340,7 +3335,7 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
     let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-integration-closes-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-integration-closes");
     init_test_git_repo(&repo_root);
     std::fs::write(repo_root.join("shared.txt"), "base\n").unwrap();
     assert!(Command::new("git")
@@ -3359,8 +3354,7 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
     commit_branch_change(&repo_root, "blocker-b-branch", "shared.txt", "from b\n");
 
     let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-integration-closes-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-integration-closes-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -3615,7 +3609,7 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
     let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-clean-multi-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-clean-multi");
     init_test_git_repo(&repo_root);
     let blocker_a_worktree =
         commit_branch_change(&repo_root, "blocker-a-workspace", "a.txt", "from a\n");
@@ -3634,7 +3628,7 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
     }
 
     let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-clean-multi-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-clean-multi-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -3852,11 +3846,10 @@ async fn close_non_final_blocker_leaves_dormant_dependent_unstarted() {
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-close-non-final-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-close-non-final");
     init_test_git_repo(&repo_root);
 
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-close-non-final-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-close-non-final-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -4395,9 +4388,7 @@ async fn dependent_start_waits_for_mutation_lease_and_rechecks_blockers() {
             db.close_pipeline_item("blocker-closed").unwrap();
         },
     );
-    let unique = super::unique_test_suffix();
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-dependent-start-linearization-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-dependent-start-linearization");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -4502,7 +4493,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
             .unwrap()
             .as_nanos()
     );
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-stage-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-advance-stage");
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
@@ -4557,7 +4548,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         .unwrap()
         .success());
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-advance-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-advance-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -4769,7 +4760,7 @@ async fn advance_stage_route_notifies_after_detached_setup_failure_is_persisted(
             .unwrap()
             .as_nanos()
     );
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-failure-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-advance-failure");
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
@@ -4816,7 +4807,7 @@ async fn advance_stage_route_notifies_after_detached_setup_failure_is_persisted(
         .unwrap()
         .success());
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-failure-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-failure-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let kanna_cli_path = daemon_dir.join("kanna-cli");
     std::fs::write(&kanna_cli_path, "#!/bin/sh\nexit 0\n").unwrap();
@@ -4952,7 +4943,7 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
             .unwrap()
             .as_nanos()
     );
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-close-race-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-advance-close-race");
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
@@ -4985,8 +4976,7 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
         .unwrap()
         .success());
 
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-advance-close-race-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-advance-close-race-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -5239,7 +5229,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
             .unwrap()
             .as_nanos()
     );
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-final-close-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-final-close");
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::write(
@@ -5297,7 +5287,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
         .unwrap()
         .success());
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-final-close-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-final-close-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -6233,7 +6223,7 @@ async fn complete_post_and_transition(refinish: bool) {
             .unwrap()
             .as_nanos()
     );
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-post-refinish-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-post-refinish");
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
@@ -6272,7 +6262,7 @@ async fn complete_post_and_transition(refinish: bool) {
         .unwrap()
         .success());
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-post-refinish-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-post-refinish-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -6604,7 +6594,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
             .unwrap()
             .as_nanos()
     );
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-advance-block-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-advance-block");
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
@@ -6645,7 +6635,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
 
     super::add_slow_fetch_origin(&repo_root, 2);
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-advance-block-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-advance-block-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -6802,12 +6792,11 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
     let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-close-unblock-block-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-close-unblock-block");
     init_test_git_repo(&repo_root);
 
     let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-close-unblock-block-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-close-unblock-block-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -7019,12 +7008,11 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
     let _sidecar_guard = crate::test_sidecar_guard().await;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-pr-optimistic-block-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-pr-optimistic-block");
     init_test_git_repo(&repo_root);
 
     let (kanna_cli_path, created_test_sidecar) = ensure_test_kanna_cli_sidecar();
-    let daemon_dir =
-        std::env::temp_dir().join(format!("kanna-http-pr-optimistic-block-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-pr-optimistic-block-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
