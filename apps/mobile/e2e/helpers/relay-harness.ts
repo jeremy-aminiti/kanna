@@ -689,7 +689,14 @@ export async function startMobileRelayHarness(
       async restoreDesktopTerminalControl() {
         // Put the desktop-shaped viewer back in charge, the way releasing on
         // the phone hands the terminal back to the machine it lives on.
-        terminalEvents?.resize(132, 43);
+        // Restore whatever grid the fixture currently expects rather than a
+        // hardcoded pair: the lane's authoritative size is a fixture fact and
+        // has already changed once, and handing back the wrong one fails the
+        // rendering assertions that follow.
+        terminalEvents?.resize(
+          terminalFixture.expectedCols,
+          terminalFixture.expectedRows
+        );
         terminalEvents?.takeControl();
       },
       async resyncTerminalConnection() {
