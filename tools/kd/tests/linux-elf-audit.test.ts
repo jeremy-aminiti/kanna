@@ -81,12 +81,13 @@ describe("auditArtifacts", () => {
   });
 
   /**
-   * The one that catches a silently broken static link. `libc++` is supposed to
-   * come from the pinned Zig toolchain statically; a base Ubuntu image has no
-   * package for it, so a dynamic reference is a package that cannot start.
+   * The one that catches a silently broken bundling decision. The server owns
+   * SQLite's schema and its migrations, so a distribution-supplied engine would
+   * put the database's behaviour outside Kanna's control — a dynamic reference
+   * means the bundling stopped happening.
    */
   it("rejects a library that was supposed to be vendored", () => {
-    const audit = auditArtifacts(policy, "arm64", [facts({ needed: ["libc++.so.1"] })]);
+    const audit = auditArtifacts(policy, "arm64", [facts({ needed: ["libsqlite3.so.0"] })]);
     expect(audit.findings[0]).toMatchObject({ kind: "vendored-library-linked-dynamically" });
   });
 
@@ -148,10 +149,21 @@ describe("the runtime policy file", () => {
     expect(policy.architectures.arm64.debianArchitecture).toBe("arm64");
   });
 
-  it("keeps SQLite and the Zig C++ runtime on the vendored side", () => {
-    const vendored = policy.vendoredNotDeclared.flatMap((entry) => entry.sonames);
-    expect(vendored).toContain("libsqlite3.so.0");
-    expect(vendored).toContain("libc++.so.1");
+  it("keeps SQLite on the vendored side", () => {
+    expect(policy.vendoredNotDeclared.flatMap((entry) => entry.sonames)).toContain("libsqlite3.so.0");
+  });
+
+  /**
+   * Both exceptions are temporary by construction, so both must carry the
+   * evidence and the follow-up that would retire them. An entry that only said
+   * "allowed" would become permanent by forgetting.
+   */
+  it("makes every conditional exception explain itself", () => {
+    const conditional = policy.allowedRuntimeLibraries.filter((entry) => entry.conditional === true);
+    expect(conditional.length).toBeGreaterThan(0);
+    for (const entry of conditional) {
+      expect(entry.reason).toMatch(/vendor|static|follow-up/i);
+    }
   });
 
   it("gives every allowed library a supplying package and a reason", () => {
@@ -160,5 +172,72 @@ describe("the runtime policy file", () => {
       expect(entry.reason.length).toBeGreaterThan(20);
       expect(entry.sonames.length).toBeGreaterThan(0);
     }
+  });
+});
+
+/**
+ * The real closure, measured on a Linux build rather than imagined.
+ *
+ * Taken from the Phase 2 aarch64 binaries on 2026-09-09 with
+ * `readelf --wide -d`. Pinning it here is what stops the policy from drifting
+ * into a description of what somebody assumed: a new dependency appearing in a
+ * Kanna binary fails this test on any developer's machine, months before it
+ * would fail a user's launch.
+ */
+describe("the measured artifact closure", () => {
+  const MEASURED: Record<string, string[]> = {
+    "kanna-cli": ["libssl.so.3", "libcrypto.so.3", "libgcc_s.so.1", "libc.so.6"],
+    "kanna-daemon": ["libc++.so.1", "libc++abi.so.1", "libgcc_s.so.1", "libm.so.6", "libc.so.6"],
+    "kanna-mcp": ["libssl.so.3", "libcrypto.so.3", "libgcc_s.so.1", "libc.so.6"],
+    "kanna-server": [
+      "libc++.so.1", "libc++abi.so.1", "libssl.so.3", "libcrypto.so.3",
+      "libgcc_s.so.1", "libm.so.6", "libc.so.6",
+    ],
+    "kanna-task-transfer": ["libc++.so.1", "libc++abi.so.1", "libgcc_s.so.1", "libm.so.6", "libc.so.6"],
+    "kanna-terminal-recovery": ["libc++.so.1", "libc++abi.so.1", "libgcc_s.so.1", "libc.so.6"],
+    "kanna-desktop": [
+      "libgio-2.0.so.0", "libgobject-2.0.so.0", "libglib-2.0.so.0", "libz.so.1",
+      "libgdk-3.so.0", "libpango-1.0.so.0", "libgdk_pixbuf-2.0.so.0",
+      "libcairo-gobject.so.2", "libcairo.so.2", "libwebkit2gtk-4.1.so.0",
+      "libgtk-3.so.0", "libsoup-3.0.so.0", "libjavascriptcoregtk-4.1.so.0",
+      "libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-aarch64.so.1",
+    ],
+  };
+
+  it("is entirely covered by the policy", () => {
+    const artifacts: ElfFacts[] = Object.entries(MEASURED).map(([name, needed]) => ({
+      path: `/usr/lib/kanna/${name}`,
+      machine: "AArch64",
+      interpreter: "/lib/ld-linux-aarch64.so.1",
+      needed,
+      versionRequirements: { GLIBC: ["2.17", "2.39"] },
+      runpaths: [],
+    }));
+    const audit = auditArtifacts(policy, "arm64", artifacts);
+    expect(audit.findings).toEqual([]);
+  });
+
+  /**
+   * Both exceptions are load-bearing today and both are meant to go away, so
+   * the audit names every artifact still using them. This assertion is the
+   * record of how many that currently is — it should shrink, and a change
+   * either way should be deliberate.
+   */
+  it("reports exactly the artifacts still using a conditional exception", () => {
+    const artifacts: ElfFacts[] = Object.entries(MEASURED).map(([name, needed]) => ({
+      path: name,
+      machine: "AArch64",
+      interpreter: null,
+      needed,
+      versionRequirements: {},
+      runpaths: [],
+    }));
+    const audit = auditArtifacts(policy, "arm64", artifacts);
+    const openssl = audit.conditionalUses.filter((use) => use.soname === "libssl.so.3").map((use) => use.path);
+    const libcxx = audit.conditionalUses.filter((use) => use.soname === "libc++.so.1").map((use) => use.path);
+    expect(openssl.sort()).toEqual(["kanna-cli", "kanna-mcp", "kanna-server"]);
+    expect(libcxx.sort()).toEqual([
+      "kanna-daemon", "kanna-server", "kanna-task-transfer", "kanna-terminal-recovery",
+    ]);
   });
 });
