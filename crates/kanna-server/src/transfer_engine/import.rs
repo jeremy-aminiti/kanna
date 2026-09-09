@@ -349,7 +349,6 @@ async fn run_import(
             format!("failed to create the transferred task ({status}): {message}")
         })?;
         local_task_id = Some(created.task_id);
-
         let expected_head =
             payload.task.head_oid.as_deref().ok_or_else(|| {
                 ImportFailure::Terminal("task bundle has no expected head".into())
@@ -408,6 +407,20 @@ async fn run_import(
     // exact committed head/base, pinned workflow, and complete input history
     // before any acknowledgment can close the source.
     verify_persisted_task_bundle(state, &payload, &local_task_id, transfer_id).await?;
+    if let Some((_, _, _, bound_task, state_name)) = db
+        .transferred_task_manifest(transfer_id)
+        .map_err(|error| format!("db error: {error}"))?
+    {
+        if bound_task.as_deref() != Some(local_task_id.as_str()) {
+            return Err(format!("transfer manifest task binding mismatch: {transfer_id}").into());
+        }
+        if state_name == "importing" {
+            db.mark_transferred_task_manifest_prepared(transfer_id)
+                .map_err(|error| format!("db error: {error}"))?;
+        }
+    } else {
+        return Err(format!("transfer manifest missing: {transfer_id}").into());
+    }
 
     db.set_cloud_task_identity(&local_task_id, &payload.task.cloud_task_id)
         .map_err(|error| format!("db error: {error}"))?;
