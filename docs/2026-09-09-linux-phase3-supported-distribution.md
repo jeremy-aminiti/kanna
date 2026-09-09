@@ -186,7 +186,7 @@ release graph (§7.1).
 | Distribution floor | Ubuntu 24.04 LTS, glibc 2.39, kernel 6.8 | **Not verified.** All measurement to date is on 26.04.1 aarch64. |
 | x86-64 build | Required | CI lane written; **never run.** |
 | arm64 build | Required | Phase 2 built all seven binaries natively (debug). Release build not run. |
-| x86-64 installed acceptance | `ubuntu-24.04` hosted runner (substitute) | Lane and workflow written; **never run.** |
+| x86-64 installed acceptance | `ubuntu-24.04` hosted runner (substitute) | Lane written; **not wired into CI and never run** — see §7.3. |
 | arm64 installed acceptance | Native guest on an Apple Silicon Mac | **Not provisioned.** The existing VM is 26.04, not the 24.04 floor, and has no passwordless sudo. |
 | Display | GNOME Wayland primary; X11/XWayland runs, not performance-certified | Phase 2 evidence only, under headless GNOME. |
 | Rendering | Software rendering must be usable; GPU optional | Phase 2 measured software only. The DMA-BUF decision now lives in the binary (§6). |
@@ -195,10 +195,22 @@ release graph (§7.1).
 
 ### The x86-64 substitute, and its limits
 
-Per the 2026-09-09 directive, the `ubuntu-24.04` hosted runner is the x86-64
-installed-acceptance host. What it genuinely supplies: the supported floor's
+Per the 2026-09-09 directive, the `ubuntu-24.04` hosted runner is the intended
+x86-64 installed-acceptance host. What it can supply: the supported floor's
 userspace, a real `systemd --user` manager (with `loginctl enable-linger`), real
 `apt`, and a real two-version upgrade.
+
+**It does not run the lane yet.** The first version of
+`linux-release-check.yml` had an `installed-acceptance` job, and review found it
+could never have worked: it was gated on a `workflow_dispatch`/`workflow_call`
+input that is simply absent on `pull_request` and `push`, so it silently skipped
+on both, and on the one trigger where it did run it failed its own two-package
+check — the job built one package and the upgrade needs two, from two source
+revisions. That job is removed rather than half-fixed with an untested
+merge-base build: the workflow now builds and audits both architectures, which
+it really does, and running the lane in CI is §7.3. Until then the lane is run
+by hand:
+`./kd test linux-installed --old-artifact <deb> --new-artifact <deb>`.
 
 What it does **not** supply, recorded rather than glossed:
 
@@ -273,9 +285,13 @@ Each item, with what it needs.
 2. **No package has been built from the release graph.** One real `.deb` was
    built and validated on the ARM64 VM (§4a) — from Cargo debug binaries, with
    a placeholder `kanna-worker`. A publishable artifact needs (1).
-3. **The installed and upgrade lanes have never been run.** They need a host
-   where the test user can become root; the ARM64 VM has no passwordless sudo
-   and no container runtime, and the CI lane has not been executed.
+3. **The installed and upgrade lanes have never been run, and CI does not run
+   them.** They need a host where the test user can become root; the ARM64 VM
+   has no passwordless sudo and no container runtime. Wiring them into
+   `linux-release-check.yml` needs a second package built from another source
+   revision (the merge base) with a distinct version so the two `.deb` names do
+   not collide, uploaded alongside the candidate. The first attempt at this job
+   was removed for promising acceptance it could not perform; see §5.
 4. **Phase 2's E2E gaps (M4) are untouched.** Two simultaneous isolated
    instances, the Linux mock and real desktop lanes, real WebKitGTK credential
    tests, clipboard/drag/scaling, and paired-mobile LAN acceptance all remain
@@ -294,6 +310,56 @@ Each item, with what it needs.
    restart sequence, service semantics, uninstall, recovery, logs, graphics
    troubleshooting — is not written. It should not be written before there is a
    package a person can install.
+
+## 7a. Visual verification (2026-09-09, ARM64 VM)
+
+AGENTS.md requires changed UI to be rendered in the real app. The update prompt
+gained two Linux states, and both were rendered under real WebKitGTK on the
+Phase 0/1/2 VM (Ubuntu 26.04.1 aarch64, GNOME/Wayland console session), driven
+over the app's own W3C WebDriver endpoint and captured from the webview:
+
+| Capture | State |
+| --- | --- |
+| `package-update-light.png` / `package-update-dark.png` | `packageManagerUpdate` |
+| `package-unknown-light.png` / `package-unknown-dark.png` | `packageManagerUnknown` |
+
+Saved under the gitignored `docs/task-screenshots/13573eac-screenshots/`; this
+paragraph and the task result are the durable record, since the worktree goes
+away.
+
+What the captures show. The update state renders the headline "Update available
+from your package manager", the ownership sentence, `Installed: 0.0.68-1` and
+`Available: 0.0.71-1` from the injected status, and the `apt` command in
+monospace — and **its only action is Dismiss**. No Install, no Restart, no
+Retry. That negative is the whole design: the app cannot perform this upgrade,
+and a button that looked like it could is how a person ends up believing they
+started one. The unknown state renders "Package information unavailable" plus
+the reason and the `sudo apt update` remedy, again with only Dismiss.
+
+**A finding from doing this.** The review expected the unknown state to render
+on a Linux dev binary without an installed package. It does not, and no package
+state can: `useAppUpdate`'s `ensureEnabled()` returns false for
+`import.meta.env.MODE === "development"` — and again for a `KANNA_WORKTREE=1`
+instance — *before* any package check runs. A dev build therefore shows nothing
+whatever `dpkg` and `apt` report. Rendering these states in the real app needs
+either a production build installed from a package, or a fixture; the review
+sanctioned the latter, so `__e2eInjectPackageStatus` was added beside the
+existing `__e2eInjectUpdate`, under the same `import.meta.env.DEV &&
+window.__KANNA_E2E__` guard. It feeds the real `applyPackageStatus` — extracted
+from the check rather than copied — so what the captures show is the mapping the
+product uses, not a hand-set status.
+
+Two limits, stated rather than implied. The versions in the update capture are
+injected, not read from a real `apt` index, so these prove the rendering and the
+absent actions, not the `dpkg-query`/`apt-cache` parsing (that is covered by the
+Rust unit tests in `commands/linux_package.rs`). And the captures are of the
+webview, not the window: GNOME's Screenshot D-Bus API is access-denied to
+ordinary callers on this session and no capture tool is installed, which needs
+root. Window chrome is not what changed.
+
+One cosmetic observation, left alone deliberately because it is outside this
+revision's scope: in the unknown state the fixed hint and the backend `detail`
+say nearly the same thing twice. It reads as redundant rather than wrong.
 
 ## 8. E2E coverage note
 
