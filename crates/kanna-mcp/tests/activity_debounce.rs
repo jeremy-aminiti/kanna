@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 const TASK_ID: &str = "task-debounce";
 
 #[tokio::test]
-async fn a_spurious_idle_frame_between_busy_frames_is_not_reported_as_a_stopped_agent() {
+async fn a_spurious_idle_frame_between_busy_frames_preserves_unread_output() {
     let (server, daemon, mut mcp) = start_chain("spurious-idle", TASK_ID).await;
 
     // The dropped busy marker: one frame classified idle while the agent is
@@ -37,14 +37,54 @@ async fn a_spurious_idle_frame_between_busy_frames_is_not_reported_as_a_stopped_
 
     assert_eq!(
         task["activity"],
-        json!("working"),
-        "a single mid-redraw frame must not surface as a stopped agent"
+        json!("unread"),
+        "a fresh busy frame must not mark unread output read"
     );
     // A first read that had seen `working` would have returned immediately, so
-    // this also proves the confirmation is what produced the answer.
+    // this also proves that the stopped-looking value was confirmed rather
+    // than returned from the first sample.
     assert!(
         elapsed >= ACTIVITY_CONFIRM_DELAY,
         "the answer must have come from a confirmation read, not from a lucky first read (took {elapsed:?})"
+    );
+}
+
+#[tokio::test]
+async fn a_spurious_idle_frame_between_busy_frames_returns_working_after_output_is_read() {
+    let (server, daemon, mut mcp) = start_chain("spurious-idle-read", TASK_ID).await;
+
+    daemon.classify(TASK_ID, "idle");
+    await_stored_activity(&server, TASK_ID, "unread").await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/v1/tasks/{TASK_ID}/actions/mark-read",
+            server.base_url
+        ))
+        .send()
+        .await
+        .expect("mark output read");
+    assert!(
+        response.status().is_success(),
+        "mark-read failed: {response:?}"
+    );
+    await_stored_activity(&server, TASK_ID, "idle").await;
+
+    let started = Instant::now();
+    mcp.call_get_task(2, TASK_ID);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    daemon.classify(TASK_ID, "busy");
+    let task = mcp.recv_task();
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        task["activity"],
+        json!("working"),
+        "a busy task whose output was read must return to the working display state"
+    );
+    assert!(
+        elapsed >= ACTIVITY_CONFIRM_DELAY,
+        "the answer must have come from a confirmation read, not a lucky first read (took {elapsed:?})"
     );
 }
 
