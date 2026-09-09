@@ -5,7 +5,7 @@ import { access, copyFile, mkdir, readdir, readFile, rm, symlink, writeFile } fr
 import { createConnection, createServer } from "node:net";
 import { createServer as createHttpServer } from "node:http";
 import { homedir } from "node:os";
-import { dirname, basename, join, posix, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { processInventoryPath, recordInventoryResource, removeInventoryResource } from "../../../../tools/kd/src/runtime/process-inventory";
 import { fileURLToPath } from "node:url";
@@ -31,6 +31,7 @@ import {
 } from "./runPlan";
 import { assertPlaywrightChromiumAvailable } from "./playwrightPreflight";
 import { createPortAllocator } from "./runPorts";
+import { createE2eRunIdentity } from "./runIdentity";
 import {
   advanceAppStartupDeadline,
   APP_READY_TIMEOUT_MS,
@@ -414,9 +415,14 @@ async function main(): Promise<void> {
   const realE2eAgentEnv = buildRealE2eAgentEnv(testTargets, process.env);
 
   const enableSecondary = needsSecondaryInstance(testTargets);
-  const worktreeName = sanitizeSuffix(basename(repoRoot));
-  const runSuffix = sanitizeSuffix(`${process.pid}-${Date.now()}`);
-  const sessionName = `kanna-e2e-${worktreeName}-${runSuffix}`;
+  const {
+    worktreeName,
+    runSuffix,
+    primarySessionName: sessionName,
+    secondarySessionName,
+  } = createE2eRunIdentity({ repoRoot, pid: process.pid, now: Date.now() });
+  // The runner intentionally supplies this identity instead of inheriting a
+  // caller's KANNA_TMUX_SESSION: every invocation owns isolated app lifecycles.
   const transferRegistryDir = join(repoRoot, ".kanna-transfer-registry-e2e", runSuffix);
   const primaryCloudTransferRegistryDir = join(transferRegistryDir, "primary");
   const secondaryCloudTransferRegistryDir = join(transferRegistryDir, "secondary");
@@ -520,7 +526,7 @@ async function main(): Promise<void> {
           KANNA_TRANSFER_REGISTRY_DIR: transferRegistryDir,
         },
         mobileServerPortEnvValue: secondaryMobileServerPort,
-        sessionName: `${sessionName}-secondary`,
+        sessionName: secondarySessionName,
         transferPortEnvValue: secondaryTransferPort,
         webDriverPortEnvValue: secondaryWebDriverPort,
       })
