@@ -87,3 +87,19 @@ retry; no fake endpoint or authentication workaround is involved.
 Complete nested output is retained at
 `.tmp/desktop-active-view-restoration-isolated.log`. The runner cleaned its
 owned desktop, relay, and emulator processes after its exit.
+
+### Native-window identity audit
+
+The failed desktop capture above predates the exact native-title guard. It is
+already rejected as blank, and it also cannot establish that its WebDriver
+session was bound to this task's dev window rather than a staging or production
+window. It is not desktop visual proof for either reason. The phone relay
+screenshots in `docs/task-screenshots/5c82e022-screenshots/` remain mobile
+render records only; they make no native desktop-window identity claim.
+
+Before any future two-instance desktop interaction, the dedicated target now
+checks each already-bound WebDriver endpoint independently: compiled task id
+and worktree, then the native Tauri title read through that same endpoint. The
+title must exactly equal `formatAppWindowTitle(buildInfo)` and therefore name
+this task worktree; an absent or mismatched identity stops the test before
+reset, sign-in, focus, or capture.
