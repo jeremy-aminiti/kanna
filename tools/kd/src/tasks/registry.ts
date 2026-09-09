@@ -132,6 +132,8 @@ import {
 import {
   buildHeadlessWorkerBinariesCommand,
   buildHeadlessWorkerGateCommand,
+  buildLinuxInstalledGateCommand,
+  linuxInstalledLaneEnv,
 } from "../runtime/headless-worker";
 import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
@@ -238,6 +240,12 @@ const devRestartInputSchema = devUpInputSchema.extend({
   staging: z.boolean().default(false),
   production: z.boolean().default(false),
   withCredentials: z.boolean().default(false)
+});
+
+const linuxInstalledInputSchema = z.object({
+  oldArtifact: z.string(),
+  newArtifact: z.string(),
+  channel: z.enum(["production", "staging"]).default("production")
 });
 
 const linuxPackageInputSchema = z.object({
@@ -3263,6 +3271,33 @@ export const taskDefinitions = [
       if (!built.ok) return built;
       const [command, args] = buildHeadlessWorkerGateCommand();
       return runBuiltCommand(command, args, context.repoRoot, context.env);
+    },
+  },
+  {
+    id: "test.linux-installed",
+    description:
+      "Install a built .deb, run the worker under systemd --user, then upgrade to a second package with a live agent session and prove the session survived. Needs a Linux host where the test user can become root.",
+    inputSchema: linuxInstalledInputSchema,
+    execute: async (_context, input) => {
+      const parsed = linuxInstalledInputSchema.parse(input);
+      if (process.platform !== "linux") {
+        return {
+          ok: false,
+          message:
+            "test linux-installed drives apt and a systemd user manager. Run it on the Linux acceptance host."
+        };
+      }
+      const context = await resolveDefaultContext(process.env);
+      const [command, args] = buildLinuxInstalledGateCommand();
+      return runBuiltCommand(
+        command,
+        args,
+        context.repoRoot,
+        linuxInstalledLaneEnv(
+          { oldDeb: parsed.oldArtifact, newDeb: parsed.newArtifact, channel: parsed.channel },
+          context.env
+        )
+      );
     },
   },
   {
