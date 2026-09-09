@@ -92,6 +92,15 @@ export function resolveKdContext(input: ResolveKdContextInput): KdContext {
   // travels to SQLite openers, including launchers that forget the DB override.
   const env: NodeJS.ProcessEnv = { ...input.env, KANNA_DB_ISOLATED: "1" };
 
+  // A target directory is Cargo's mutable fingerprint and final-artifact
+  // boundary, not a compiler cache.  Letting a shell's CARGO_TARGET_DIR leak
+  // into a worktree would silently turn all worktrees into one target tree;
+  // that is incorrect even when Cargo's directory lock serializes builds.
+  // The checked-in Cargo config is the one authority for its private .build
+  // target, while kache provides the safe cross-worktree compiler cache.
+  delete env.CARGO_TARGET_DIR;
+  delete env.CARGO_BUILD_TARGET_DIR;
+
   if (isWorktree) {
     env.KANNA_WORKTREE = "1";
     env.KANNA_BUILD_WORKTREE = worktreeName;

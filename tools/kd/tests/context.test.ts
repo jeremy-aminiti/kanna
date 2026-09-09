@@ -27,6 +27,25 @@ describe("resolveKdContext", () => {
     expect(context.tmux.session).toBe("kanna-task-abc123");
   });
 
+  it("does not inherit a shared Cargo target directory into a worktree", () => {
+    const context = resolveKdContext({
+      repoRoot: "/repo/.kanna-worktrees/task-abc123",
+      homeDir: "/Users/tester",
+      env: {
+        CARGO_TARGET_DIR: "/Users/tester/Library/Caches/kanna/rust-target",
+        CARGO_BUILD_TARGET_DIR: "/Users/tester/Library/Caches/kanna/rust-target"
+      },
+      branch: "task-abc123",
+      commit: "cafebabe",
+      bundleIdentifier: "build.kanna",
+      configPorts: {}
+    });
+
+    expect(context.env.CARGO_TARGET_DIR).toBeUndefined();
+    expect(context.env.CARGO_BUILD_TARGET_DIR).toBeUndefined();
+    expect(context.env.CARGO_BUILD_BUILD_DIR).toBe("/repo/.kanna-worktrees/task-abc123/.build/cargo-build");
+  });
+
   it("derives the durable task id from numbered worktree names", () => {
     const context = resolveKdContext({
       repoRoot: "/repo/.kanna-worktrees/task-37ec6039-5",

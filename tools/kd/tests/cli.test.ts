@@ -23,6 +23,7 @@ import {
 import { parseCliArgs, runCli } from "../src/cli";
 import { nodeCommandRunner } from "../src/runtime/process";
 import { getTaskDefinition } from "../src/tasks/registry";
+import { kdTestScratchPrefix } from "./test-paths";
 
 interface SpawnResult {
   status: number | null;
@@ -333,7 +334,7 @@ describe("kd CLI", () => {
   it("serializes concurrent cold launchers and serves MCP from the shared install", async () => {
     const packageRoot = resolve(import.meta.dirname, "..");
     const repoRoot = resolve(packageRoot, "..", "..");
-    const tempRoot = mkdtempSync(join(tmpdir(), "kd launcher contract "));
+    const tempRoot = mkdtempSync(kdTestScratchPrefix("launcher-contract-"));
     const fixtureRepoRoots = Array.from({ length: 8 }, (_, index) =>
       join(tempRoot, `repo ${index + 1}`)
     );
@@ -497,7 +498,7 @@ describe("kd CLI", () => {
   it("bootstraps dependencies and installs kd from a clean clone", async () => {
     const packageRoot = resolve(import.meta.dirname, "..");
     const repoRoot = resolve(packageRoot, "..", "..");
-    const tempRoot = mkdtempSync(join(tmpdir(), "kd clean clone "));
+    const tempRoot = mkdtempSync(kdTestScratchPrefix("clean-clone-"));
     const fixtureRepoRoot = join(tempRoot, "repo");
     const home = join(tempRoot, "home");
     mkdirSync(home, { recursive: true });
