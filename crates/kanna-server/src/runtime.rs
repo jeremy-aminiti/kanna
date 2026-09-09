@@ -261,8 +261,10 @@ pub(crate) async fn run_server_services(
     // pings — and `RELAY_PONG_TIMEOUT` is 75s, so a long enough clone would tear
     // the relay down and take mobile offline.
     tokio::spawn(crate::transfer_engine::run(Arc::clone(&http_state)));
+    let subscription_service = http_api::event_subscriptions::run(Arc::clone(&http_state));
     if config.relay_url.trim().is_empty() {
         tokio::select! {
+            _ = subscription_service => {},
             result = http_api::serve(Arc::clone(&http_state)) => match result {
                 Ok(()) => log::warn!("LAN API exited unexpectedly"),
                 Err(err) => log::error!("LAN API failed: {}", err),
@@ -275,6 +277,7 @@ pub(crate) async fn run_server_services(
 
     let human_control_state = Arc::clone(&http_state);
     tokio::select! {
+        _ = subscription_service => {},
         result = http_api::serve(Arc::clone(&http_state)) => match result {
             Ok(()) => log::warn!("LAN API exited unexpectedly"),
             Err(err) => log::error!("LAN API failed: {}", err),

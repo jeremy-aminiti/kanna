@@ -1404,7 +1404,8 @@ cursor-based, not snapshot-diffed:
   deployed watchers keyed on it keep working. New callers watch
   `task.runtime_changed`; `kanna-cli task watch` suppresses the alias as
   redundant with an event already in the batch.
-- With `includeCurrentActivity=true`, the wait is also level-triggered:
+- Fresh waits default to `includeCurrentActivity=true` and are level-triggered
+  even with `from=now`; explicit `false` preserves edge-only reads:
   every scoped task whose current non-busy state has already survived that
   debounce is returned immediately as a synthetic `task.runtime_changed`
   response row without consuming or inventing a sequence number. It uses daemon
@@ -1418,6 +1419,13 @@ cursor-based, not snapshot-diffed:
   still owe a native page, so it cannot report `hasMore: false` before every
   peer continuation has been consumed. Durable events appended during that
   drain remain ordered by, and advance, their own sequence checkpoint.
+  Snapshot payloads name `reconciliationReason` (`idle_without_verdict`,
+  `awaiting_input`, `session_exited`, or `settled`) and include the current
+  stage, latest run, and `latestRunFinishedWithoutCompletion`. These are
+  observations for reconciliation, not new completion outcomes. A continuation
+  cursor acknowledges the initial scan; subsequent waits return edges rather
+  than the same settled tasks forever. Closed tasks and tasks without an
+  observed settled runtime are excluded. Human read state is never an ack.
 - `task.awaiting_advance` is appended atomically when an un-killed daemon Exit
   ends a manual-transition main run without a stage verdict. It is useful
   terminal context, but managers use the level-triggered runtime-settled wait
@@ -1798,13 +1806,13 @@ Which dimension each consumer reads:
   resolve that case, at the cost of also resolving on every busy task nobody had
   read.
 
-  This is deliberate: a parked agent has not finished, and a wait that says it
-  has is the defect this predicate was changed to remove. But a caller that
-  waits on an agent which may park without a verdict — the specialty-review join
-  in [qa-dispatch-review.md](specs/qa-dispatch-review.md) is the one in-tree
-  case — must carry its own bounded terminating condition rather than looping on
-  `waitOutcome: "timeout"` forever. The signature to bound on is a
-  non-`busy` `runtimeState` alongside a `running` `latestRun`.
+  The default `until: "reconcile"` returns this already-settled task instead.
+  Task detail's `runtimeSettled` uses the same observed non-busy baseline and
+  completed debounce as the synthetic feed scan, never human read state or
+  absence of output. It also resolves for recorded termination. Explicit
+  `until: "finished"` retains the contract above; `until: "closed"` requires
+  closure. A resolved reconciliation wait asks the caller to inspect work;
+  it does not create a verdict, advance a stage, or claim a turn is complete.
 - **Supervisors and orchestrators** read `runtimeState` to decide whether a task
   is alive. A quiet-task alarm keyed on `activity` fires on tasks whose agents
   are demonstrably running.
@@ -2333,3 +2341,65 @@ never exposes secret hashes or push credentials. `kd mobile ota` reads this
 endpoint; it does not read the pairing file or SQLite. Mobile reporting is best
 effort during trusted LAN connection setup and does not block using an older
 server. Remote-only operation does not refresh this observation.
+
+
+## Event subscriptions and harness delivery
+
+`POST /v1/event-subscriptions` (`kanna_subscribe_events`) registers a manager
+by `taskId` and one task/parent/repository scope (its own repository by default).
+It is a direct-desktop control, not a relay or paired-device endpoint. The
+manager itself is always excluded. Registration immediately returns any
+already-settled work, then the server owns observation independently of MCP
+request lifetime or provider background execution. Filters and cursors are the
+existing task-event implementation; no new completion detector is introduced.
+
+The durable `event_subscription` row binds to the manager's current run,
+stage, and branch. Stage replacement or closure stops the worker. One pending
+page bounds the mailbox; later events stay in the feed until it is acknowledged.
+`POST /v1/event-subscriptions/{id}/read` (`kanna_read_event_subscription`) is a
+non-destructive read unless `acknowledgeBatchId` matches the pending batch.
+Only that acknowledgement advances the stored cursor. A stale batch is refused;
+CAS revisions prevent a late wait or delivery response overwriting an ack.
+Registration retries reuse the active mailbox and reject conflicting settings.
+`POST /v1/event-subscriptions/{id}/unsubscribe` stops observation and preserves
+the pending page. Corresponding typed CLI commands are `task subscribe-events`,
+`task read-event-subscription`, and `task unsubscribe-events`.
+
+The first returned page is already observed by the registering caller. A later
+page receives one coalesced wake. Wakes contain only the subscription and batch
+identity; the mailbox contains the actual events. Delivery is a separate adapter:
+
+- `input` (default): a labelled Kanna supervisory message through the existing
+  logical-input queue, task mutation guard, and daemon PID fence. Delivered
+  messages carry the reserved `engine` input source, unavailable to public
+  caller declarations. A daemon-held input reports `wakeState: queued`;
+  `notified` means submission was accepted, not that the model read or acted
+  on it. No composer or draft handling is duplicated.
+- `codex_app_server` (explicit opt-in): connect through `codex app-server proxy`,
+  initialize, verify the recorded native thread's worktree (or discover the unique loaded
+  root thread for that worktree on a fresh run), then call
+  `turn/start` with empty `input` and a standalone `toolOutput`. This requires
+  a Codex harness sharing the app server and exposing a unique loaded root thread for the stage worktree;
+  generic MCP notifications do not establish that capability. A failed native
+  delivery does not silently fall back and risk a duplicate turn.
+- `poll`: retain the mailbox without waking; `wakeState: ready` explicitly
+  reports this. It is for a harness that supplies its own scheduling.
+
+Server startup resumes active rows. A row left `sending` by a crash becomes
+`uncertain`; its page remains readable and the layer does not blindly submit
+another turn. Adapter errors remain on the mailbox. Watch errors, including
+partial machine coverage, become pending attention batches and receive a wake;
+acknowledging that error pauses observation so a persistent fault cannot create
+a wake loop. Registering again with the same settings resumes that paused
+position. Only an explicit unsubscribe discards it for a fresh registration;
+reconcile gaps and current state first if the cursor itself cannot be resumed.
+Persistence of a mailbox is not an exactly-once delivery or cursor-retention
+promise: relay resilience and durable cursor recovery remain task f63b3698's
+work. Deploy that recovery before relying on unattended cross-machine
+continuity. A fresh level-triggered scan is useful independently, including
+when an idle task produced no new event after observation began.
+
+MCP dispatch is concurrent and bounded to 64 in-flight requests: a long wait
+cannot serialize mailbox reads behind itself. Subscriptions need no long MCP
+call at all. No debounce values change. The human sidebar receives KSP
+`ServerFrame::StateChanged` directly, independently of the debounced event feed.

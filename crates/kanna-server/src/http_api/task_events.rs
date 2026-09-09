@@ -118,13 +118,17 @@ pub(super) struct TaskEventsQuery {
     local_only: bool,
     /// Level-triggered manager wait: include synthetic current-state rows for
     /// tasks already stopped, so a restart cannot miss an earlier edge.
-    #[serde(default)]
+    #[serde(default = "include_current_state_by_default")]
     include_current_activity: bool,
     /// Agent-facing callers ask the server to replace the full native or
     /// aggregate checkpoint with a short, process-local handle. Direct HTTP
     /// clients that omit this keep the deployed stateless wire format.
     #[serde(default)]
     short_cursor: bool,
+}
+
+fn include_current_state_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1169,12 +1173,44 @@ fn enrich_event_batch(
         let event_seq = event_object.get("seq").and_then(Value::as_i64);
         let include_latest_run = matches!(
             event_object.get("type").and_then(Value::as_str),
-            Some("run.finished" | "task.awaiting_input" | "task.awaiting_advance")
+            Some(
+                "run.finished"
+                    | "task.awaiting_input"
+                    | "task.awaiting_advance"
+                    | "task.runtime_changed"
+            )
         );
         let payload = event_object.entry("payload").or_insert_with(|| json!({}));
         let Some(payload) = payload.as_object_mut() else {
             continue;
         };
+        if payload.get("currentState").and_then(Value::as_bool) == Some(true) {
+            payload.insert("stage".into(), json!(task.stage));
+            payload.insert(
+                "latestRunFinishedWithoutCompletion".into(),
+                json!(
+                    matches!(task.runtime_state.as_deref(), Some("idle" | "exited"))
+                        && task
+                            .latest_run
+                            .as_ref()
+                            .is_some_and(|run| run.status == "running")
+                ),
+            );
+            payload.insert(
+                "reconciliationReason".into(),
+                json!(match task.runtime_state.as_deref() {
+                    Some("idle")
+                        if task
+                            .latest_run
+                            .as_ref()
+                            .is_some_and(|run| run.status == "running") =>
+                        "idle_without_verdict",
+                    Some("waiting") => "awaiting_input",
+                    Some("exited") => "session_exited",
+                    _ => "settled",
+                }),
+            );
+        }
         if !payload.contains_key("stage") {
             let event_stage = event_seq
                 .map(|seq| event_db.task_event_stage_at(&task_id, seq))
@@ -1194,6 +1230,8 @@ fn enrich_event_batch(
                 json!({
                     "id": run.id,
                     "status": run.status,
+                    "kind": run.kind,
+                    "stage": run.stage,
                     "summarySnippet": run.summary.as_deref().map(summary_snippet),
                 })
             })
@@ -1604,9 +1642,10 @@ fn aggregate_query_path(query: &TaskEventsQuery) -> String {
         format!("limit={}", query.limit.unwrap_or(DEFAULT_EVENT_LIMIT)),
         "localOnly=true".to_string(),
     ];
-    if query.include_current_activity {
-        params.push("includeCurrentActivity=true".to_string());
-    }
+    params.push(format!(
+        "includeCurrentActivity={}",
+        query.include_current_activity
+    ));
     if let Some(from) = query.from.as_deref() {
         params.push(format!("from={}", encode_path_segment(from)));
     }
@@ -2159,9 +2198,36 @@ async fn wait_aggregate_task_events(
 
 pub(super) async fn wait_task_events(
     State(state): State<Arc<AppState>>,
-    Query(mut query): Query<TaskEventsQuery>,
+    Query(query): Query<TaskEventsQuery>,
     account_wide_access: AccountWideTaskEventAccess,
     tunneled: Option<Extension<TunneledHttpInvoke>>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    wait_events_in_process(
+        state,
+        query,
+        account_wide_access.is_authorized(),
+        tunneled.is_some(),
+    )
+    .await
+}
+
+pub(super) async fn wait_subscription_events(
+    state: Arc<AppState>,
+    query: Value,
+) -> Result<Value, String> {
+    let query =
+        serde_json::from_value(query).map_err(|error| format!("invalid event scope: {error}"))?;
+    wait_events_in_process(state, query, true, false)
+        .await
+        .map(|Json(value)| value)
+        .map_err(|(_, error)| error)
+}
+
+async fn wait_events_in_process(
+    state: Arc<AppState>,
+    mut query: TaskEventsQuery,
+    account_wide: bool,
+    tunneled: bool,
 ) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
     let mut input_short_cursor = query
         .cursor
@@ -2188,9 +2254,9 @@ pub(super) async fn wait_task_events(
         }
     };
 
-    let result = if tunneled.is_some() || query.local_only {
-        wait_local_task_events(Arc::clone(&state), query, tunneled.is_some()).await
-    } else if !account_wide_access.is_authorized() {
+    let result = if tunneled || query.local_only {
+        wait_local_task_events(Arc::clone(&state), query, tunneled).await
+    } else if !account_wide {
         if query
             .cursor
             .as_deref()

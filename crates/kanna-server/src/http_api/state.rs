@@ -41,6 +41,7 @@ pub(super) struct AuthenticatedHttpInvoke;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub(super) event_subscriptions_changed: Arc<Notify>,
     pub(super) config: Config,
     pub(crate) local_task_events_token: Option<String>,
     pub(super) pairing_session: Arc<Mutex<Option<ActivePairingSession>>>,
@@ -392,6 +393,7 @@ impl AppState {
             .join("repos");
         let (terminal_geometry_changed, _) = watch::channel(());
         Self {
+            event_subscriptions_changed: Arc::new(Notify::new()),
             config,
             local_task_events_token,
             transfer_sidecar,

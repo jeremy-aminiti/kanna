@@ -140,6 +140,7 @@ pub(crate) struct TaskDetail {
     /// such a server then falls back to the terminal-`stage_run` fact alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) runtime_state: Option<String>,
+    pub(crate) runtime_settled: bool,
     /// Read dimension — `read` | `unread`. Optional for the same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) read_state: Option<String>,
@@ -190,6 +191,8 @@ struct TaskDetailDef {
     activity: Option<String>,
     #[serde(default)]
     runtime_state: Option<String>,
+    #[serde(default)]
+    runtime_settled: bool,
     #[serde(default)]
     read_state: Option<String>,
     #[serde(default)]
@@ -565,6 +568,7 @@ pub(crate) struct TaskCreateOptions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WaitUntil {
+    Reconcile,
     Finished,
     Closed,
 }

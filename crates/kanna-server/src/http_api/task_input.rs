@@ -315,6 +315,38 @@ async fn send_task_input_impl(
         })?,
         None => TaskInputSource::Unspecified,
     };
+    deliver_task_input(state, task_id, payload, source, None).await
+}
+
+pub(super) async fn send_engine_wake(
+    state: Arc<AppState>,
+    subscription: &crate::db::EventSubscription,
+    input: String,
+) -> Result<bool, String> {
+    let payload = TaskInputRequest {
+        input,
+        source: None,
+        attachment: None,
+    };
+    deliver_task_input(
+        state,
+        subscription.task_id.clone(),
+        payload,
+        TaskInputSource::Engine,
+        Some(subscription.run_id.clone()),
+    )
+    .await
+    .map(|response| response.status() == axum::http::StatusCode::ACCEPTED)
+    .map_err(|(_, Json(failure))| format!("{}: {}", failure.reason, failure.message))
+}
+
+async fn deliver_task_input(
+    state: Arc<AppState>,
+    task_id: String,
+    payload: TaskInputRequest,
+    source: TaskInputSource,
+    expected_run: Option<String>,
+) -> Result<Response, TaskInputHttpError> {
     let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id)
         .await
         .map_err(map_task_input_error)?;
@@ -328,6 +360,35 @@ async fn send_task_input_impl(
             None,
         ));
     };
+    if let Some(expected) = expected_run {
+        let db = Db::open(&state.config.db_path).map_err(|error| {
+            task_input_http_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                error.to_string(),
+                None,
+            )
+        })?;
+        if db
+            .latest_stage_run(&task_id)
+            .map_err(|error| {
+                task_input_http_error(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    error.to_string(),
+                    None,
+                )
+            })?
+            .is_none_or(|run| run.id != expected)
+        {
+            return Err(task_input_http_error(
+                axum::http::StatusCode::CONFLICT,
+                "stale_subscription",
+                "subscription belongs to an earlier run".into(),
+                None,
+            ));
+        }
+    }
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|error| {

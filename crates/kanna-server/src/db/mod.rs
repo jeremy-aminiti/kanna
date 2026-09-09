@@ -20,6 +20,7 @@ use std::time::Duration;
 mod analytics;
 mod blockers;
 mod create_intents;
+mod event_subscriptions;
 mod lifecycle_operations;
 mod operator_events;
 mod pipeline_items;
@@ -69,6 +70,8 @@ pub use transfers::{
     is_active_outgoing_transfer_conflict, NewTaskTransfer, NewTaskTransferProvenance,
     PendingIncomingTransfer, TaskTransfer,
 };
+
+pub(crate) use event_subscriptions::EventSubscription;
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 10_000;
 const SQLITE_WAL_AUTOCHECKPOINT_PAGES: i64 = 100;
@@ -146,6 +149,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "068_task_transfer_dismissed_at",
     "069_retire_pre_existing_transfer_alerts",
     "070_provider_quota_rejection_log",
+    "071_event_subscriptions",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2120,7 +2124,25 @@ pub(crate) fn retire_pre_existing_transfer_alerts(
            AND dismissed_at IS NULL",
         [],
     )?;
+
+    run_migration(
+        conn,
+        "071_event_subscriptions",
+        create_event_subscription_schema,
+    )?;
+
     Ok(())
+}
+
+fn create_event_subscription_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE event_subscription (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        record TEXT NOT NULL
+    ); CREATE INDEX idx_event_subscription_task ON event_subscription(task_id);",
+    )
 }
 
 fn create_contextless_completion_attempt_schema(conn: &Connection) -> Result<(), rusqlite::Error> {

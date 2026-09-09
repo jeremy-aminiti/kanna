@@ -279,8 +279,8 @@ pub(crate) enum TaskCommands {
         #[arg(long, default_value_t = kanna_tool_catalog::DEFAULT_WAIT_POLL_SECS)]
         poll_secs: u64,
 
-        /// Condition to wait for: finished or closed
-        #[arg(long, default_value = "finished")]
+        /// Condition to wait for: reconcile (settled runtime), finished, or closed
+        #[arg(long, default_value = "reconcile")]
         until: String,
 
         /// Override the local Kanna server base URL
@@ -769,6 +769,41 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Subscribe once; Kanna owns the continuing watch and mailbox
+    SubscribeEvents {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        repo_id: Option<String>,
+        #[arg(long)]
+        parent_task_id: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        task_ids: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        exclude_task_ids: Vec<String>,
+        #[arg(long)]
+        local_only: bool,
+        #[arg(long, default_value = "input", value_parser = ["input", "codex_app_server", "poll"])]
+        delivery: String,
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Read the pending mailbox batch; acknowledge only after reconciling it
+    ReadEventSubscription {
+        #[arg(long)]
+        subscription_id: String,
+        #[arg(long)]
+        acknowledge_batch_id: Option<i64>,
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Stop a subscription without discarding its pending mailbox
+    UnsubscribeEvents {
+        #[arg(long)]
+        subscription_id: String,
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Watch several tasks at once and return their events since a cursor
     WaitEvents {
         /// Task IDs (or branch names) to watch; repeat or comma-separate
@@ -812,8 +847,8 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         local_only: bool,
 
-        /// Also return level-triggered settled runtime state
-        #[arg(long)]
+        /// Return existing settled tasks once per cursor (false opts out)
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
         include_current_activity: bool,
 
         /// Return a short process-local cursor handle for agent use

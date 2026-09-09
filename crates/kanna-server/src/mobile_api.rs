@@ -184,6 +184,9 @@ pub struct TaskDetail {
     /// working?"; `activity` cannot, because a busy agent whose last output
     /// nobody read and a finished one look alike through it.
     pub runtime_state: Option<String>,
+    /// Observed non-busy runtime has passed the event debounce.
+    #[serde(default)]
+    pub runtime_settled: bool,
     /// Read dimension — `read` | `unread`. Whether a human has seen the
     /// latest output; says nothing about whether the agent is running.
     /// Optional only so a payload from a peer that predates the split still
@@ -894,7 +897,11 @@ impl MobileApi {
                 (port != 0).then_some(TaskPort { name, port })
             })
             .collect::<Vec<_>>();
-        Ok(Some(map_task_detail(
+        let runtime_settled = self
+            ._db
+            .task_runtime_is_settled(&task_id)
+            .map_err(|e| format!("db error: {e}"))?;
+        let mut detail = map_task_detail(
             item,
             repo.as_ref(),
             TaskDetailRelations {
@@ -908,7 +915,9 @@ impl MobileApi {
                 ports,
                 provider_rejection,
             },
-        )))
+        );
+        detail.runtime_settled = runtime_settled;
+        Ok(Some(detail))
     }
 
     /// The latest provider refusal at the stage the task currently occupies.
@@ -1293,6 +1302,7 @@ fn map_task_detail(
         legacy_pipeline_name: workflow_name,
         stage_transition,
         runtime_state: item.runtime_status,
+        runtime_settled: false,
         read_state: Some(read_state_for_activity(item.activity.as_deref()).to_string()),
         activity: item.activity,
         snippet: None,

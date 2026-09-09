@@ -34,7 +34,9 @@ const TASK_INPUT_EVENT_PREVIEW_CHARS: usize = 200;
 
 /// Who delivered a task input.
 ///
-/// These labels are **declared by the caller** and are not verified:
+/// Operator/manager labels are **declared by the caller** and not verified.
+/// `Engine` is reserved for Kanna subscription delivery; callers cannot claim it.
+/// For the public labels:
 /// `POST /v1/tasks/{task_id}/input` cannot tell a human typing on
 /// mobile from an orchestrating agent's MCP call, and inventing a distinction
 /// it cannot observe would be worse than admitting `Unspecified`. What every
@@ -42,6 +44,8 @@ const TASK_INPUT_EVENT_PREVIEW_CHARS: usize = 200;
 /// outside it, at a recorded time, with the recorded content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskInputSource {
+    /// Kanna supervising an event subscriber; never accepted from a caller label.
+    Engine,
     /// A human — the task's owner or another operator — declared themselves
     /// the author, including when relaying their words through a client.
     Operator,
@@ -56,6 +60,7 @@ pub enum TaskInputSource {
 impl TaskInputSource {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Engine => "engine",
             Self::Operator => "operator",
             Self::Manager => "manager",
             Self::Unspecified => "unspecified",

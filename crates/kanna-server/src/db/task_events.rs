@@ -455,6 +455,17 @@ impl Db {
         Ok(())
     }
 
+    pub fn task_runtime_is_settled(&self, task_id: &str) -> rusqlite::Result<bool> {
+        Ok(!self
+            .list_non_busy_task_runtime_states(
+                &TaskEventScope::Tasks(vec![task_id.to_owned()]),
+                &TaskEventFilters::default(),
+                None,
+                1,
+            )?
+            .is_empty())
+    }
+
     pub fn list_non_busy_task_runtime_states(
         &self,
         scope: &TaskEventScope,
@@ -467,6 +478,7 @@ impl Db {
              WHERE closed_at IS NULL
                AND runtime_status IN ('idle', 'waiting', 'exited')
                AND runtime_event_pending_at IS NULL
+               AND runtime_event_baseline = runtime_status
                AND (? IS NULL OR id > ?)
                AND {}{}
              ORDER BY id ASC

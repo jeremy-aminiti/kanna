@@ -24,6 +24,9 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_info",
             "kanna_list_machines",
             "kanna_guide",
+            "kanna_subscribe_events",
+            "kanna_read_event_subscription",
+            "kanna_unsubscribe_events",
             "kanna_machine_stats",
             "kanna_list_transfer_peers",
             "kanna_list_repos",
@@ -224,7 +227,7 @@ fn generated_schema_preserves_required_order_types_and_enums() {
         .expect("wait task tool");
     let until = &wait["inputSchema"]["properties"]["until"];
     assert_eq!(until["type"], json!("string"));
-    assert_eq!(until["enum"], json!(["finished", "closed"]));
+    assert_eq!(until["enum"], json!(["reconcile", "finished", "closed"]));
 
     let complete_stage = tools
         .as_array()
@@ -372,7 +375,7 @@ fn generated_schema_surfaces_descriptions_defaults_and_integer_bounds() {
     assert_eq!(poll["minimum"], json!(1));
     assert_eq!(
         wait["inputSchema"]["properties"]["until"]["default"],
-        json!("finished")
+        json!("reconcile")
     );
 }
 
@@ -999,7 +1002,7 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
     assert_eq!(request.kind, ResponseKind::Json);
     assert_eq!(
         request.path,
-        format!("/v1/task-events?taskIds=task-a%2Ctask-b&shortCursor=true&cursor=42&timeoutSecs={DEFAULT_WAIT_TIMEOUT_SECS}")
+        format!("/v1/task-events?taskIds=task-a%2Ctask-b&includeCurrentActivity=true&shortCursor=true&cursor=42&timeoutSecs={DEFAULT_WAIT_TIMEOUT_SECS}")
     );
     let tools = catalog.tools_list_value();
     let schema = tools
@@ -1024,7 +1027,7 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
     .path;
     assert_eq!(
         repo_scoped,
-        format!("/v1/task-events?repoId=repo%201&shortCursor=true&timeoutSecs={MAX_WAIT_TIMEOUT_SECS}&limit=5"),
+        format!("/v1/task-events?repoId=repo%201&includeCurrentActivity=true&shortCursor=true&timeoutSecs={MAX_WAIT_TIMEOUT_SECS}&limit=5"),
         "an over-long window must be clamped before the client can kill the call"
     );
 
@@ -1039,7 +1042,7 @@ fn wait_events_is_scoped_cursored_and_bounded_by_the_client_budget() {
     .path;
     assert_eq!(
         parent_scoped,
-        format!("/v1/task-events?parentTaskId=parent%201&shortCursor=true&timeoutSecs={DEFAULT_WAIT_TIMEOUT_SECS}")
+        format!("/v1/task-events?parentTaskId=parent%201&includeCurrentActivity=true&shortCursor=true&timeoutSecs={DEFAULT_WAIT_TIMEOUT_SECS}")
     );
     let description = &catalog
         .tools
@@ -1082,7 +1085,7 @@ fn task_session_repo_defaulting_is_shared_by_every_catalog_client() {
         (
             "kanna_wait_events",
             json!({ "from": "now", "timeout_secs": 0 }),
-            "/v1/task-events?repoId=repo-current&shortCursor=true&from=now&timeoutSecs=0",
+            "/v1/task-events?repoId=repo-current&includeCurrentActivity=true&shortCursor=true&from=now&timeoutSecs=0",
         ),
     ] {
         assert_eq!(
@@ -1289,7 +1292,7 @@ fn wait_defaults_to_the_bounded_window_without_arguments() {
 
     assert_eq!(wait.timeout_secs, DEFAULT_WAIT_TIMEOUT_SECS);
     assert!(wait.timeout_secs < CLIENT_TOOL_CALL_BUDGET_SECS);
-    assert_eq!(wait.until, WaitUntil::Finished);
+    assert_eq!(wait.until, WaitUntil::Reconcile);
 }
 
 /// The cap lives in code, not only in `catalog.json`: `.kanna/mcp-tools.json`
@@ -1452,7 +1455,7 @@ fn preserves_validation_error_strings() {
             "kanna_wait_task",
             &json!({ "task_id": "task-1", "until": "later" })
         ),
-        Err("until must be finished or closed, got later".to_string())
+        Err("until must be reconcile, finished or closed, got later".to_string())
     );
     let unknown_tool = resolve_request(&catalog, "kanna_unknown", &json!({}))
         .expect_err("unknown tool should fail");
@@ -1460,7 +1463,7 @@ fn preserves_validation_error_strings() {
     assert!(
         unknown_tool.contains(
             "available tools: kanna_info, kanna_list_machines, kanna_guide, \
-             kanna_machine_stats, kanna_list_transfer_peers, kanna_list_repos,"
+             kanna_subscribe_events, kanna_read_event_subscription, kanna_unsubscribe_events, kanna_machine_stats, kanna_list_transfer_peers, kanna_list_repos,"
         ),
         "unknown tool error should list available tools: {unknown_tool}"
     );
@@ -2081,7 +2084,7 @@ fn wait_events_self_exclusion_is_shared_catalog_policy() {
     .expect("resolve defaulted wait");
     assert_eq!(
         resolved.path,
-        "/v1/task-events?repoId=repo-current&excludeTaskIds=manager-1&shortCursor=true&from=now&timeoutSecs=240"
+        "/v1/task-events?repoId=repo-current&excludeTaskIds=manager-1&includeCurrentActivity=true&shortCursor=true&from=now&timeoutSecs=240"
     );
 
     let explicit_repo = args_with_self_exclusion(
@@ -2198,7 +2201,7 @@ fn include_self_is_a_client_only_parameter() {
     .expect("resolve");
     assert_eq!(
         resolved.path,
-        "/v1/task-events?repoId=repo-1&excludeTaskIds=a%2Cb&shortCursor=true&timeoutSecs=0"
+        "/v1/task-events?repoId=repo-1&excludeTaskIds=a%2Cb&includeCurrentActivity=true&shortCursor=true&timeoutSecs=0"
     );
 
     let schema = bundled_catalog().tools_list_value();

@@ -253,14 +253,28 @@ fn run_kanna_mcp_with_env(
         .spawn()
         .expect("spawn kanna-mcp");
 
-    {
-        let stdin = child.stdin.as_mut().expect("stdin");
-        for message in messages {
-            writeln!(stdin, "{}", message).expect("write message");
+    // These fixtures describe sequential, sometimes dependent operations.
+    // JSON-RPC permits concurrent responses in any order; wait for each id
+    // before issuing the next dependency. Concurrent dispatch has its own test.
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let mut responses = Vec::new();
+    for message in messages {
+        send_mcp_message(&mut stdin, message.clone());
+        let Some(id) = message.get("id") else {
+            continue;
+        };
+        loop {
+            let mut line = String::new();
+            assert!(stdout.read_line(&mut line).expect("read response") > 0);
+            let response: Value = serde_json::from_str(&line).expect("json-rpc response");
+            if response.get("id") == Some(id) {
+                responses.push(response);
+                break;
+            }
         }
     }
-    drop(child.stdin.take());
-
+    drop(stdin);
     let output = child.wait_with_output().expect("wait for kanna-mcp");
     assert!(
         output.status.success(),
@@ -268,12 +282,7 @@ fn run_kanna_mcp_with_env(
         output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
-
-    String::from_utf8(output.stdout)
-        .expect("utf8 stdout")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("json-rpc line"))
-        .collect()
+    responses
 }
 
 fn run_kanna_mcp_with_response_cursor(
@@ -1064,7 +1073,7 @@ fn serve_defaults_listing_search_and_tail_watch_to_current_task_repo() {
         },
         ExpectedRequest {
             method: "GET",
-            path: "/v1/task-events?repoId=repo-current&excludeTaskIds=task-current&shortCursor=true&from=now&timeoutSecs=0",
+            path: "/v1/task-events?repoId=repo-current&excludeTaskIds=task-current&includeCurrentActivity=true&shortCursor=true&from=now&timeoutSecs=0",
             body: None,
             response_status: "200 OK",
             response_body: json!({
@@ -1085,7 +1094,7 @@ fn serve_defaults_listing_search_and_tail_watch_to_current_task_repo() {
         // no longer excluded and nothing named includeSelf reaches the wire.
         ExpectedRequest {
             method: "GET",
-            path: "/v1/task-events?repoId=repo-current&shortCursor=true&from=now&timeoutSecs=0",
+            path: "/v1/task-events?repoId=repo-current&includeCurrentActivity=true&shortCursor=true&from=now&timeoutSecs=0",
             body: None,
             response_status: "200 OK",
             response_body: json!({
@@ -1495,7 +1504,7 @@ fn wait_events_discovers_task_owners_and_waits_across_machines() {
 fn repo_wait_reads_the_local_credential_file_and_sends_bearer_authorization() {
     let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
         method: "GET",
-        path: "/v1/task-events?repoId=repo-1&shortCursor=true&timeoutSecs=0",
+        path: "/v1/task-events?repoId=repo-1&includeCurrentActivity=true&shortCursor=true&timeoutSecs=0",
         body: None,
         response_status: "200 OK",
         response_body: json!({
@@ -1556,7 +1565,7 @@ fn all_local_event_wait_does_not_require_relay_discovery() {
         ExpectedRequest {
             method: "GET",
             path:
-                "/v1/task-events?taskIds=task-local&localOnly=true&shortCursor=true&timeoutSecs=5",
+                "/v1/task-events?taskIds=task-local&localOnly=true&includeCurrentActivity=true&shortCursor=true&timeoutSecs=5",
             body: None,
             response_status: "200 OK",
             response_body: json!({
@@ -1610,7 +1619,7 @@ fn short_aggregate_cursor_preserves_continuity_across_calls() {
         },
         ExpectedRequest {
             method: "GET",
-            path: "/v1/task-events?taskIds=task-local&localOnly=true&shortCursor=true&timeoutSecs=0",
+            path: "/v1/task-events?taskIds=task-local&localOnly=true&includeCurrentActivity=true&shortCursor=true&timeoutSecs=0",
             body: None,
             response_status: "200 OK",
             response_body: json!({
@@ -1629,7 +1638,7 @@ fn short_aggregate_cursor_preserves_continuity_across_calls() {
         },
         ExpectedRequest {
             method: "GET",
-            path: "/v1/task-events?taskIds=task-local&localOnly=true&shortCursor=true&cursor=12&timeoutSecs=0",
+            path: "/v1/task-events?taskIds=task-local&localOnly=true&includeCurrentActivity=true&shortCursor=true&cursor=12&timeoutSecs=0",
             body: None,
             response_status: "200 OK",
             response_body: json!({
@@ -1682,7 +1691,7 @@ fn routed_cursor_rejection_invalidates_the_fan_in_checkpoint() {
         "km1.{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cursor_body)
     );
-    let machine_path = "/v1/task-events?taskIds=task-remote&localOnly=true&shortCursor=true&cursor=ksh1.deadbeef&timeoutSecs=0";
+    let machine_path = "/v1/task-events?taskIds=task-remote&localOnly=true&includeCurrentActivity=true&shortCursor=true&cursor=ksh1.deadbeef&timeoutSecs=0";
     let (base_url, server) = start_http_fixture(vec![
         ExpectedRequest {
             method: "GET",
@@ -2467,4 +2476,54 @@ fn raw_key_input_is_listed_as_a_mutating_tool() {
         tool["inputSchema"]["properties"]["keys"]["items"]["enum"][0],
         "escape"
     );
+}
+
+#[test]
+fn subscription_tools_register_acknowledge_and_stop_the_server_owned_mailbox() {
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/event-subscriptions",
+            body: Some(
+                json!({"taskId":"manager", "taskIds":["child"], "localOnly":true, "delivery":"input"}),
+            ),
+            response_status: "200 OK",
+            response_body: json!({"id":"watch-1", "batchId":7, "pending":{"events":[{"taskId":"child"}]}}),
+        },
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/event-subscriptions/watch-1/read",
+            body: Some(json!({"acknowledgeBatchId":7})),
+            response_status: "200 OK",
+            response_body: json!({"id":"watch-1", "pending":null, "active":true}),
+        },
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/event-subscriptions/watch-1/unsubscribe",
+            body: Some(json!({})),
+            response_status: "200 OK",
+            response_body: json!({"id":"watch-1", "active":false}),
+        },
+    ]);
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[
+            json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params": {
+                "name":"kanna_subscribe_events", "arguments":{"task_id":"manager", "task_ids":["child"], "local_only":true}
+            }}),
+            json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params": {
+                "name":"kanna_read_event_subscription", "arguments":{"subscription_id":"watch-1", "acknowledge_batch_id":7}
+            }}),
+            json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params": {
+                "name":"kanna_unsubscribe_events", "arguments":{"subscription_id":"watch-1"}
+            }}),
+        ],
+    );
+    assert_eq!(server.join().unwrap().len(), 3);
+    assert_eq!(
+        tool_text(&responses[0])["pending"]["events"][0]["taskId"],
+        "child"
+    );
+    assert!(tool_text(&responses[1])["pending"].is_null());
+    assert_eq!(tool_text(&responses[2])["active"], false);
 }

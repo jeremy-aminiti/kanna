@@ -278,6 +278,13 @@ impl Db {
                 PRIMARY KEY (pipeline_item_id, activity)
             );
 
+            CREATE TABLE event_subscription (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                revision INTEGER NOT NULL,
+                record TEXT NOT NULL
+            );
+            CREATE INDEX idx_event_subscription_task ON event_subscription(task_id);
             CREATE TABLE task_event (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,

@@ -389,6 +389,7 @@ pub enum ParamLoc {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitUntil {
+    Reconcile,
     Finished,
     Closed,
 }
@@ -426,6 +427,7 @@ pub fn run_status_is_terminal(status: &str) -> bool {
 pub struct WaitTaskState<'a> {
     pub closed: bool,
     pub runtime_state: Option<&'a str>,
+    pub runtime_settled: bool,
     pub latest_run_status: Option<&'a str>,
 }
 
@@ -446,16 +448,17 @@ pub struct WaitTaskState<'a> {
 /// parked at its composer between turns and for one that never started, and
 /// neither has finished anything. Termination, not quiet, is the signal.
 ///
-/// The case that leaves behind: a PTY agent that finishes its turn and parks
-/// without recording a verdict keeps its daemon session — sessions die at a
-/// stage transition, a rerun, or a close — so nothing records a termination
-/// and this never resolves for it, where `unread` used to. That is the correct
-/// answer to "has it finished?", but it means a caller waiting on an agent
-/// which may park must bound its own retry loop rather than re-calling on
-/// `timeout` forever; a non-`busy` `runtime_state` with a `running` latest run
-/// is the signature to bound on. See `docs/kanna-server-boundary.md`.
+/// The default `Reconcile` also accepts `runtimeSettled`: the server's
+/// observation of non-busy runtime after the existing debounce. It surfaces
+/// parked work without turning that observation into a completion verdict.
+/// An older server without that field retains termination-only behavior.
 pub fn task_state_matches_wait_until(state: WaitTaskState<'_>, until: WaitUntil) -> bool {
     match until {
+        WaitUntil::Reconcile => {
+            (state.runtime_settled
+                && matches!(state.runtime_state, Some("idle" | "waiting" | "exited")))
+                || task_state_matches_wait_until(state, WaitUntil::Finished)
+        }
         WaitUntil::Closed => state.closed,
         WaitUntil::Finished => {
             state.closed
@@ -470,6 +473,10 @@ pub fn wait_task_state(task: &Value) -> WaitTaskState<'_> {
     WaitTaskState {
         closed: task.get("closedAt").is_some_and(|value| !value.is_null()),
         runtime_state: task.get("runtimeState").and_then(Value::as_str),
+        runtime_settled: task
+            .get("runtimeSettled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         latest_run_status: task
             .get("latestRun")
             .and_then(|run| run.get("status"))
@@ -1258,7 +1265,9 @@ fn value_for_param(
                 return Err("status must be success or failure".to_string());
             }
             if tool.response_kind == ResponseKind::Wait && param.name == "until" {
-                return Err(format!("until must be finished or closed, got {rendered}"));
+                return Err(format!(
+                    "until must be reconcile, finished or closed, got {rendered}"
+                ));
             }
             return Err(format!(
                 "{} must be one of {}",
@@ -1372,7 +1381,7 @@ fn wait_spec(tool: &ToolDef, args: &Value) -> Result<WaitSpec, String> {
     let mut task_id = None;
     let mut timeout_secs = DEFAULT_WAIT_TIMEOUT_SECS;
     let mut poll_secs = DEFAULT_WAIT_POLL_SECS;
-    let mut until = WaitUntil::Finished;
+    let mut until = WaitUntil::Reconcile;
 
     for param in &tool.params {
         let Some(value) = value_for_param(tool, param, args)? else {
@@ -1384,9 +1393,14 @@ fn wait_spec(tool: &ToolDef, args: &Value) -> Result<WaitSpec, String> {
             "poll_secs" => poll_secs = integer_value(&value, &param.name, None, None)?,
             "until" => {
                 until = match string_value(&value, &param.name)?.as_str() {
+                    "reconcile" => WaitUntil::Reconcile,
                     "finished" => WaitUntil::Finished,
                     "closed" => WaitUntil::Closed,
-                    other => return Err(format!("until must be finished or closed, got {other}")),
+                    other => {
+                        return Err(format!(
+                            "until must be reconcile, finished or closed, got {other}"
+                        ))
+                    }
                 };
             }
             _ => {}
@@ -1458,6 +1472,40 @@ pub fn encode_path_segment(value: &str) -> String {
             _ => format!("%{byte:02X}").chars().collect(),
         })
         .collect()
+}
+
+fn run_finished_has_running_successor(event: &Value) -> bool {
+    let payload = &event["payload"];
+    let finished_run_id = payload.get("runId").and_then(Value::as_str);
+    let latest_run = &payload["currentTask"]["latestRun"];
+    latest_run.get("status").and_then(Value::as_str) == Some("running")
+        && match (
+            finished_run_id,
+            latest_run.get("id").and_then(Value::as_str),
+        ) {
+            (Some(finished), Some(latest)) => finished != latest,
+            // A running latest run is necessarily a successor even when an
+            // older server omitted one of the ids from its enrichment.
+            _ => true,
+        }
+}
+
+pub fn is_actionable_task_event(event: &Value) -> bool {
+    match event.get("type").and_then(Value::as_str) {
+        Some("run.started" | "stage.changed" | "task.created" | "task.input_delivered") => false,
+        // The read/unread display dimension. A person opening a task in the
+        // desktop moves it, which is information for that person and never a
+        // reason to wake the watcher; `task.runtime_changed` carries the
+        // runtime edge underneath it.
+        Some("task.activity_changed") => false,
+        // Deprecated alias of the busy-to-non-busy subset of
+        // `task.runtime_changed`, appended in the same transaction — so it is
+        // always redundant with an event already in this batch.
+        Some("task.runtime_settled") => false,
+        Some("task.runtime_changed") => event["payload"]["runtimeState"] != "busy",
+        Some("run.finished") => !run_finished_has_running_successor(event),
+        _ => true,
+    }
 }
 
 #[cfg(test)]
