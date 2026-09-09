@@ -616,3 +616,255 @@ describe("Bazel workspace path dependencies", () => {
     expect(problems.sort()).toEqual([]);
   });
 });
+
+// --- Cargo feature set vs. Bazel crate-universe pin parity --------------------
+//
+// A `Cargo.lock` records versions, never features, and the `crate` module
+// extension in MODULE.bazel watches only each universe's synthetic root
+// manifest (`Cargo.<name>.toml`) and its `Cargo.lock`. So a member crate that
+// turns on one more feature of a registry dependency — `io-std` on tokio, say —
+// changes nothing Bazel watches: Cargo resolves the manifest fresh on every
+// build and stays green, while the notarized release build compiles the
+// feature set pinned in MODULE.bazel.lock and fails with `cannot find function
+// ... the item is gated behind the ... feature` (the 0.3.0-staging.14 break,
+// PR #1394). The fix is a repin, which rewrites the pinned universe:
+//
+//     CARGO_BAZEL_REPIN=1 bazel query '@<universe>//...'
+//
+// followed by a plain evaluation, then committing MODULE.bazel.lock. This case
+// reads the pinned `crate_features` out of MODULE.bazel.lock and asserts every
+// feature a member manifest names on a registry dependency is in the pin.
+
+interface CrateUniverse {
+  /** Extension repository name, e.g. `kanna_mcp_crates`. */
+  repository: string;
+  /** Repository-relative path of the universe's Cargo.lock. */
+  cargoLockfile: string;
+  /** Repository-relative synthetic workspace manifest(s) the universe is built from. */
+  manifests: string[];
+}
+
+interface RequestedFeatures {
+  /** Registry package name (after any `package = "..."` rename). */
+  packageName: string;
+  features: string[];
+  /** Manifest table that named the dependency. */
+  table: string;
+  /** Declared in a `[target.<cfg>.dependencies]` table, so it may be absent from a macOS-only pin. */
+  platformSpecific: boolean;
+}
+
+function labelToPath(label: string): string {
+  const match = label.match(/^\/\/([^:]*):(.+)$/);
+  if (!match) {
+    throw new Error(`${label} is not a repository-local Bazel label`);
+  }
+  return match[1] ? `${match[1]}/${match[2]}` : match[2];
+}
+
+/** Every `crate.from_cargo(...)` universe declared by this repository's MODULE.bazel. */
+function repositoryCrateUniverses(): CrateUniverse[] {
+  const source = readFileSync(resolve(repoRoot, "MODULE.bazel"), "utf8");
+  const universes: CrateUniverse[] = [];
+  const pattern = /^crate\.from_cargo\(/gm;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(source)) !== null) {
+    const openingParen = match.index + match[0].length - 1;
+    const block = extractCallBlock(source, openingParen, "MODULE.bazel crate.from_cargo");
+    const repository = readStringAttribute(block, "name");
+    const cargoLockfile = readStringAttribute(block, "cargo_lockfile");
+    const manifests = Array.from((readRuleAttribute(block, "manifests") ?? "").matchAll(/"([^"]+)"/g)).map(
+      (label) => label[1]
+    );
+    if (!repository || !cargoLockfile || manifests.length === 0) {
+      throw new Error("MODULE.bazel has a crate.from_cargo call without name, cargo_lockfile and manifests");
+    }
+    universes.push({
+      repository,
+      cargoLockfile: labelToPath(cargoLockfile),
+      manifests: manifests.map(labelToPath)
+    });
+    pattern.lastIndex = openingParen + block.length;
+  }
+  if (universes.length === 0) {
+    throw new Error("MODULE.bazel declares no crate.from_cargo universes");
+  }
+  return universes;
+}
+
+/** Member crate directories of a synthetic `[workspace]` manifest. */
+function workspaceMembers(manifestPath: string): string[] {
+  const manifest = parseTomlFile(manifestPath);
+  const workspace = expectRecord(manifest.workspace, `${manifestPath} [workspace]`);
+  if (!Array.isArray(workspace.members) || workspace.members.some((member) => typeof member !== "string")) {
+    throw new Error(`${manifestPath} [workspace] has no string member list`);
+  }
+  return workspace.members as string[];
+}
+
+/**
+ * Features a member manifest explicitly asks of each registry dependency.
+ * Optional dependencies are skipped (nothing guarantees a member's own feature
+ * turning them on is enabled in the universe), as are path dependencies and
+ * `default`, which Cargo only enables when the package defines it.
+ */
+function requestedRegistryFeatures(crateDir: string): RequestedFeatures[] {
+  const manifest = parseTomlFile(`${crateDir}/Cargo.toml`);
+  const tables: [string, unknown, boolean][] = [
+    ["[dependencies]", manifest.dependencies, false],
+    // crate_universe resolves dev-dependencies into the same pinned graph, so a
+    // feature asked for by a test also has to be in the pin.
+    ["[dev-dependencies]", manifest["dev-dependencies"], false]
+  ];
+  const targetTables = manifest.target;
+  if (targetTables && typeof targetTables === "object" && !Array.isArray(targetTables)) {
+    for (const [predicate, table] of Object.entries(targetTables as Record<string, unknown>)) {
+      const specific = expectRecord(table, `${crateDir} [target.${predicate}]`);
+      tables.push([`[target.${predicate}.dependencies]`, specific.dependencies, true]);
+      tables.push([`[target.${predicate}.dev-dependencies]`, specific["dev-dependencies"], true]);
+    }
+  }
+
+  const requested: RequestedFeatures[] = [];
+  for (const [table, value, platformSpecific] of tables) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    for (const [name, specification] of Object.entries(value as Record<string, unknown>)) {
+      if (!specification || typeof specification !== "object" || Array.isArray(specification)) continue;
+      const spec = specification as Record<string, unknown>;
+      if (typeof spec.path === "string" || spec.optional === true) continue;
+      const features = Array.isArray(spec.features)
+        ? spec.features.filter((feature): feature is string => typeof feature === "string")
+        : [];
+      if (features.length === 0) continue;
+      requested.push({
+        packageName: typeof spec.package === "string" ? spec.package : name,
+        features: features.sort(),
+        table,
+        platformSpecific
+      });
+    }
+  }
+  return requested;
+}
+
+/** `name -> version` for every registry package a universe's Cargo.lock resolves exactly once. */
+function lockedRegistryVersions(lockPath: string): Map<string, string[]> {
+  const lock = parseTomlFile(lockPath);
+  if (!Array.isArray(lock.package)) {
+    throw new Error(`${lockPath} has no [[package]] entries`);
+  }
+  const versions = new Map<string, string[]>();
+  for (const entry of lock.package as Record<string, unknown>[]) {
+    if (typeof entry.name !== "string" || typeof entry.version !== "string") continue;
+    if (typeof entry.source !== "string" || !entry.source.startsWith("registry+")) continue;
+    versions.set(entry.name, [...(versions.get(entry.name) ?? []), entry.version]);
+  }
+  return versions;
+}
+
+/**
+ * The `crate_features` a universe pins for one registry crate, read from the
+ * generated BUILD file stored in MODULE.bazel.lock. Platform `select()`
+ * branches are unioned: a feature only some triple enables still counts as
+ * pinned, which is the lenient direction for a macOS-only universe.
+ */
+let cachedRepoSpecs: Record<string, unknown> | null = null;
+
+/** The crate universe's generated repository specs, parsed once per run (MODULE.bazel.lock is ~17 MB). */
+function crateUniverseRepoSpecs(): Record<string, unknown> {
+  if (cachedRepoSpecs) {
+    return cachedRepoSpecs;
+  }
+  const moduleLock = expectRecord(
+    JSON.parse(readFileSync(resolve(repoRoot, "MODULE.bazel.lock"), "utf8")) as unknown,
+    "MODULE.bazel.lock"
+  );
+  const extensions = expectRecord(moduleLock.moduleExtensions, "MODULE.bazel.lock moduleExtensions");
+  const extension = expectRecord(extensions[crateUniverseExtension], crateUniverseExtension);
+  const general = expectRecord(extension.general, `${crateUniverseExtension} general`);
+  cachedRepoSpecs = expectRecord(general.generatedRepoSpecs, "crate universe generatedRepoSpecs");
+  return cachedRepoSpecs;
+}
+
+function pinnedCrateFeatures(repository: string, packageName: string, version: string): string[] | null {
+  const spec = crateUniverseRepoSpecs()[`${repository}__${packageName}-${version}`];
+  if (spec === undefined) {
+    return null;
+  }
+  const attributes = expectRecord(expectRecord(spec, `${repository} ${packageName}`).attributes, `${repository} ${packageName} attributes`);
+  const buildFile = attributes.build_file_content;
+  if (typeof buildFile !== "string") {
+    throw new Error(`${repository}__${packageName}-${version} has no generated build_file_content`);
+  }
+  // The library, proc-macro and build-script rules of one crate all carry the
+  // same resolved feature set; union them so a crate with only a build script
+  // rule is still readable. Quoted platform labels inside a `select()` are
+  // dropped by the character filter.
+  const features = new Set<string>();
+  const rulePattern = /^(rust_library|rust_proc_macro|rust_binary|cargo_build_script)\(/gm;
+  let match: RegExpExecArray | null;
+  while ((match = rulePattern.exec(buildFile)) !== null) {
+    const openingParen = match.index + match[1].length;
+    const block = extractCallBlock(buildFile, openingParen, `${repository} ${packageName} ${match[1]}`);
+    const value = readRuleAttribute(block, "crate_features");
+    for (const feature of value?.matchAll(/"([^"@:/]+)"/g) ?? []) {
+      features.add(feature[1]);
+    }
+    rulePattern.lastIndex = openingParen + block.length;
+  }
+  return Array.from(features).sort();
+}
+
+describe("Bazel crate universe feature pins", () => {
+  it("pins every feature a member manifest asks of a registry dependency", () => {
+    const problems: string[] = [];
+
+    for (const universe of repositoryCrateUniverses()) {
+      const versions = lockedRegistryVersions(universe.cargoLockfile);
+      const members = universe.manifests.flatMap((manifest) => workspaceMembers(manifest));
+
+      for (const crateDir of members) {
+        for (const request of requestedRegistryFeatures(crateDir)) {
+          const candidates = versions.get(request.packageName) ?? [];
+          if (candidates.length === 0) {
+            problems.push(
+              `${universe.cargoLockfile} does not lock ${request.packageName}, which ` +
+                `${crateDir}/Cargo.toml ${request.table} depends on`
+            );
+            continue;
+          }
+          // A name locked at several versions is pinned once per version; the
+          // member's edge is satisfied if any of them carries the features.
+          const pins = candidates.map((version) => ({
+            version,
+            features: pinnedCrateFeatures(universe.repository, request.packageName, version)
+          }));
+          const present = pins.filter((pin) => pin.features !== null);
+          if (present.length === 0) {
+            if (request.platformSpecific) continue;
+            problems.push(
+              `${universe.repository} pins no ${request.packageName} crate ` +
+                `(locked at ${candidates.join(", ")}) although ${crateDir}/Cargo.toml ${request.table} depends on it`
+            );
+            continue;
+          }
+          const satisfied = present.some((pin) =>
+            request.features.every((feature) => (pin.features ?? []).includes(feature))
+          );
+          if (satisfied) continue;
+          const missing = present.map(
+            (pin) =>
+              `${request.packageName} ${pin.version} pins [${(pin.features ?? []).join(", ")}], missing ` +
+              `[${request.features.filter((feature) => !(pin.features ?? []).includes(feature)).join(", ")}]`
+          );
+          problems.push(
+            `${universe.repository} (MODULE.bazel.lock) is stale for ${crateDir}/Cargo.toml ${request.table}: ` +
+              `${missing.join("; ")} — repin with CARGO_BAZEL_REPIN=1 bazel query '@${universe.repository}//...'`
+          );
+        }
+      }
+    }
+
+    expect(problems.sort()).toEqual([]);
+  });
+});
