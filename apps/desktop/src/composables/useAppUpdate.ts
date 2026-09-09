@@ -7,7 +7,38 @@ import { isTauri } from "../tauri-mock";
 const STARTUP_DELAY_MS = 15_000;
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-type UpdateStatus = "idle" | "checking" | "available" | "downloading" | "readyToRestart" | "error";
+type UpdateStatus =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "readyToRestart"
+  | "error"
+  /**
+   * Linux: a newer version exists in the package manager's index. Deliberately
+   * a status of its own rather than `available`, because `available` is a
+   * promise the app can keep by clicking Install and this one is not — the
+   * upgrade belongs to apt.
+   */
+  | "packageManagerUpdate"
+  /** Linux: the package index cannot answer, so neither can the app. Saying
+   *  "up to date" here would be a guess dressed as a fact. */
+  | "packageManagerUnknown";
+
+/** What `linux_package_status` reports. Read-only by construction: nothing in
+ *  this path installs, downloads or asks for root. */
+export interface LinuxPackageStatus {
+  /** Does a package manager own this installation's updates? Comes from the
+   *  binary, not from the webview's platform string, which describes the
+   *  renderer rather than how this installation was delivered. */
+  packageManaged: boolean;
+  packageName: string;
+  installedVersion: string | null;
+  candidateVersion: string | null;
+  updateAvailable: boolean;
+  metadataUnavailable: boolean;
+  detail: string | null;
+}
 
 interface UpdateHandle {
   currentVersion: string;
@@ -35,7 +66,14 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function useAppUpdate() {
+/** Read the package-manager view of this installation. Injected in tests so
+ *  both platforms' behaviour is exercisable without a host. */
+export type ReadPackageStatus = () => Promise<LinuxPackageStatus>;
+
+const readPackageStatusFromHost: ReadPackageStatus = () =>
+  invoke<LinuxPackageStatus>("linux_package_status");
+
+export function useAppUpdate(readPackageStatus: ReadPackageStatus = readPackageStatusFromHost) {
   const status = ref<UpdateStatus>("idle");
   const windowFocused = ref(!isTauri);
   const updateRef = shallowRef<UpdateHandle | null>(null);
@@ -46,13 +84,16 @@ export function useAppUpdate() {
   const downloadedBytes = ref(0);
   const contentLength = ref<number | null>(null);
   const errorMessage = ref<string | null>(null);
+  const packageStatus = ref<LinuxPackageStatus | null>(null);
   const visible = computed(
     () =>
       windowFocused.value &&
       (status.value === "available" ||
         status.value === "downloading" ||
         status.value === "readyToRestart" ||
-        status.value === "error"),
+        status.value === "error" ||
+        status.value === "packageManagerUpdate" ||
+        status.value === "packageManagerUnknown"),
   );
 
   let started = false;
@@ -62,6 +103,8 @@ export function useAppUpdate() {
   let intervalTimer: ReturnType<typeof setInterval> | null = null;
   let enabledPromise: Promise<boolean> | null = null;
   let updaterEnabled: boolean | null = null;
+  let packageManagedPromise: Promise<boolean> | null = null;
+  let packageManaged: boolean | null = null;
   let unlistenWindowFocus: (() => void) | null = null;
 
   async function startWindowFocusTracking(): Promise<void> {
@@ -119,6 +162,67 @@ export function useAppUpdate() {
     return enabledPromise;
   }
 
+  /**
+   * Which update path this installation is on, asked once.
+   *
+   * A failure here resolves to the self-updater path, which is the safe
+   * default: on macOS it is correct, and on Linux the updater plugin is not
+   * registered at all, so the worst case is a check that finds nothing rather
+   * than an install over a dpkg-managed tree.
+   */
+  async function ensurePackageManaged(): Promise<boolean> {
+    if (packageManaged !== null) return packageManaged;
+    packageManagedPromise ??= readPackageStatus()
+      .then((result) => {
+        packageStatus.value = result;
+        return result.packageManaged;
+      })
+      .catch((error) => {
+        console.error("[app-update] could not read package status", error);
+        return false;
+      })
+      .then((value) => {
+        packageManaged = value;
+        return value;
+      });
+    return packageManagedPromise;
+  }
+
+  /**
+   * The Linux check: ask the package manager what it already knows and report
+   * it. No `apt update`, no download, no install action — the app is a reader
+   * here, and the honest failure ("the index cannot answer") is a state of its
+   * own rather than something rounded down to "up to date".
+   */
+  async function runPackageManagerCheck(): Promise<void> {
+    let result: LinuxPackageStatus;
+    try {
+      result = await readPackageStatus();
+    } catch (error) {
+      console.error("[app-update] package status check failed", error);
+      packageStatus.value = null;
+      status.value = "idle";
+      return;
+    }
+
+    packageStatus.value = result;
+    updateVersion.value = result.candidateVersion;
+    if (result.updateAvailable && dismissedVersion.value === result.candidateVersion) {
+      status.value = "idle";
+      return;
+    }
+    if (result.updateAvailable) {
+      status.value = "packageManagerUpdate";
+      return;
+    }
+    // An unreadable index is only worth interrupting a person for when it is
+    // also plausible that they are behind; on an installed, current machine it
+    // is noise. Reported as a state, shown only when nothing else is known.
+    status.value = result.metadataUnavailable && result.installedVersion !== null
+      ? "packageManagerUnknown"
+      : "idle";
+  }
+
   async function closeUpdateHandle(update: UpdateHandle | null): Promise<void> {
     if (!update) return;
     try {
@@ -145,6 +249,11 @@ export function useAppUpdate() {
       if (!(await ensureEnabled())) return;
       if (status.value !== "downloading" && status.value !== "readyToRestart") {
         status.value = "checking";
+      }
+
+      if (await ensurePackageManaged()) {
+        await runPackageManagerCheck();
+        return;
       }
 
       let update: UpdateHandle | null;
@@ -220,6 +329,10 @@ export function useAppUpdate() {
   }
 
   async function install() {
+    // Structurally unreachable on Linux — the updater plugin is not even
+    // registered there — but stated here too, because a UI change that
+    // reintroduced the button must not find a working install path behind it.
+    if (packageManaged === true) return;
     if (!updateRef.value) return;
 
     status.value = "downloading";
@@ -313,6 +426,7 @@ export function useAppUpdate() {
 
   return {
     status,
+    packageStatus,
     updateVersion,
     releaseNotes,
     publishedAt,

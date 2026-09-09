@@ -412,7 +412,14 @@
       "install": "インストール",
       "retry": "再試行",
       "restartNow": "今すぐ再起動",
-      "later": "あとで"
+      "later": "あとで",
+      "packageManagerUpdate": "パッケージマネージャーに更新があります",
+      "packageManagerHint": "Linux版 Kanna はパッケージマネージャーで管理されているため、システムと一緒に更新されます。",
+      "packageManagerCommand": "更新コマンド: sudo apt update && sudo apt install --only-upgrade {package}",
+      "packageManagerInstalled": "インストール済み: {version}",
+      "packageManagerCandidate": "利用可能: {version}",
+      "packageManagerUnknown": "パッケージ情報を取得できません",
+      "packageManagerUnknownHint": "パッケージインデックスに Kanna の項目がないため、更新の有無を判断できません。"
     }
   },
   "taskTransfer": {
