@@ -35,6 +35,16 @@ describe("build storage", () => {
     expect(() => readRustGateConcurrency(home, {}, "darwin")).toThrow(/positive integer/);
   });
 
+  it("allows a Rust-gate-only settings file without an external build root", () => {
+    const home = fixture();
+    const path = buildStorageSettingsPath(home, {}, "darwin");
+    mkdirSync(join(home, "Library", "Caches", "kanna"), { recursive: true });
+    writeFileSync(path, JSON.stringify({ rustGateConcurrency: 1 }));
+
+    expect(readExternalBuildRoot(home, {}, "darwin")).toBeUndefined();
+    expect(readRustGateConcurrency(home, {}, "darwin")).toBe(1);
+  });
+
   it("configures a new workspace target and durable record", () => {
     const root = fixture();
     const workspace = join(root, "task-123");

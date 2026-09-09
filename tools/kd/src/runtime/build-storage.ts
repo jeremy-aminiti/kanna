@@ -20,7 +20,12 @@ export function readExternalBuildRoot(homeDir: string, env: NodeJS.ProcessEnv, p
   let parsed: unknown;
   try { parsed = JSON.parse(readFileSync(path, "utf8")); } catch { throw new Error(`[kd] Invalid JSON in ${path}`); }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`[kd] Invalid build-storage settings in ${path}`);
-  const root = (parsed as BuildStorageSettings).rustBuildRoot;
+  const settings = parsed as BuildStorageSettings;
+  // The external root is an optional placement override.  The same
+  // machine-local file also owns the Rust-gate cap, so a cap-only file must
+  // not turn env sync into an external-build configuration error.
+  if (!("rustBuildRoot" in settings)) return undefined;
+  const root = settings.rustBuildRoot;
   if (typeof root !== "string" || !root.trim() || !root.startsWith("/")) {
     throw new Error(`[kd] ${path} must contain an absolute \"rustBuildRoot\" string`);
   }
