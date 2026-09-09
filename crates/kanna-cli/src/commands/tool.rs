@@ -73,7 +73,9 @@ pub(crate) async fn execute_catalog_request(
             .local_response
             .ok_or_else(|| "guide request missing local response".to_string()),
         (CatalogMethod::Get, ResponseKind::Json) => {
-            get_routed_json(base_url, &request.path, machine_id).await
+            let value = get_routed_json(base_url, &request.path, machine_id).await?;
+            kanna_tool_catalog::validate_task_detail_view(&request.path, &value)?;
+            Ok(value)
         }
         (CatalogMethod::Get, ResponseKind::Text) => match machine_id {
             Some(machine_id) => {

@@ -1701,6 +1701,27 @@ pub fn is_relevant_subscription_event(event: &Value) -> bool {
     }
 }
 
+/// A peer predating brief mode may silently ignore unknown query parameters.
+/// Validate the response before either adapter emits it, including routed reads.
+/// Never fabricate missing runtime, provider, or directive facts from old JSON.
+pub fn validate_task_detail_view(path: &str, value: &Value) -> Result<(), String> {
+    let Some((route, query)) = path.split_once('?') else {
+        return Ok(());
+    };
+    let is_task_detail = route
+        .strip_prefix("/v1/tasks/")
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'));
+    let brief = url::form_urlencoded::parse(query.as_bytes())
+        .any(|(key, value)| key == "brief" && value == "true");
+    if is_task_detail
+        && brief
+        && (value.get("view").and_then(Value::as_str) != Some("brief")
+            || value.get("briefVersion").and_then(Value::as_u64) != Some(1))
+    {
+        return Err("brief_task_detail_unsupported: the destination server did not confirm briefVersion 1. Upgrade that server, or explicitly request full detail with brief:false (CLI: omit --brief). No task state was returned; missing facts must not be treated as absent.".into());
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod completion_context_tests {
     use super::{

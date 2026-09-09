@@ -1451,6 +1451,50 @@ machine, the default is that machine's first available provider rather than a
 constant, and a selection made for one machine is re-resolved when the machine
 changes or a refresh brings a newer inventory.
 
+
+## Explicit brief task detail
+
+`GET /v1/tasks/{task_id}?brief=true` is the compact reconciliation view.
+The shared `kanna_get_task` catalog advertises `brief: true`; CLI callers use
+`kanna-cli task get --task-id ID --brief` or
+`kanna-cli tool call kanna_get_task --arg task_id=ID --arg brief=true`.
+The catalog form also accepts `--arg machine_id=MACHINE` for remote lookup.
+Omitting `brief` or passing `brief=false` preserves the existing full response.
+Desktop and mobile continue using their ordinary task APIs unchanged.
+The typed CLI's existing full serializer is retained; use the catalog CLI
+without `brief` to read the complete HTTP detail, including original task terms.
+
+Projection happens in the destination HTTP handler, after `agentView` composer
+sanitization, before serialization. Brief omits `prompt`, `workflowDefinition`,
+`ports`, and the duplicate deprecated `pipelineName`; keeps the remaining
+operational detail; and adds `machineId`, `view: "brief"`, and `briefVersion: 1`.
+`title` is capped at 200 Unicode characters (it can otherwise be the whole
+prompt), and `latestRun.summary` at 1000, with `titleTruncated` and
+`latestRun.summaryTruncated` flags. Null summaries remain null. Waiting text,
+provider rejection evidence/recovery, provider overrides, runtime/read state,
+blockers, revision budgets, branch/PR/git facts, parent/child ids (including
+closed children), and `deliveredInputCount` are retained. Unknown facts are
+not filled with guessed defaults. This is a compact view, not a fixed byte
+ceiling: actionable diagnostics and relationship ids are not silently cut.
+
+An omitted prompt is not absent task terms. Before substantive decisions,
+request full `kanna_get_task` detail and read `kanna_task_inputs` for durable
+delivered directives. A truncated summary likewise requires a full read before
+relying on its omitted text.
+
+Machine routing forwards the complete query. Updated MCP and CLI adapters
+require the destination's brief version marker, including after MCP's existing
+confirming re-read. A successful response from an old peer that ignored the
+query becomes `brief_task_detail_unsupported`, with instructions to upgrade
+that destination or explicitly request full detail. It is never locally
+projected into misleading partial success, and the full body is not dumped
+into another content block. HTTP/routing errors and cross-machine lookup hints
+remain errors. An old catalog that does not advertise `brief` rejects the
+unknown argument; upgrade the adapter/catalog before using brief mode.
+
+Coverage, focused verification results, and measured response sizes are recorded in
+[`2026-09-09-brief-task-verification.md`](2026-09-09-brief-task-verification.md).
+
 ## Task Event Feed
 
 `GET /v1/task-events` is the surface an orchestrating agent watches instead of

@@ -235,6 +235,11 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         task_id: String,
 
+        /// Return compact state; omit for the existing full view. For original
+        /// task terms and ports use `tool call kanna_get_task` without brief.
+        #[arg(long)]
+        brief: bool,
+
         /// Omit unattested provider composer suggestions from task detail
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         agent_view: bool,

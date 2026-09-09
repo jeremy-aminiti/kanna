@@ -307,6 +307,7 @@ async fn await_measuring_runtime_drift<T>(
 }
 
 mod actions;
+mod brief_task;
 mod core_routes;
 mod create_task;
 mod e2e_sql_routes;
