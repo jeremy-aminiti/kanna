@@ -1282,6 +1282,7 @@ async fn handle_request(
             Ok(()) => ControlResponse::PrepareTransferCommit {
                 request_id,
                 transfer_id,
+                admitted: true,
             },
             Err(error) => control_error(request_id, error),
         },

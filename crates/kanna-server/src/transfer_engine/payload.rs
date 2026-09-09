@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 pub const TASK_INPUT_LEDGER_FILENAME: &str = "task-inputs.json";
 const TASK_INPUT_LEDGER_VERSION: u8 = 1;
@@ -202,6 +203,10 @@ pub struct TransferBundlePayload {
     pub artifact_id: String,
     pub filename: String,
     pub ref_name: Option<String>,
+    /// Full source-side ref that names the immutable review base included in
+    /// the bundle. TaskBundle requires this alongside `task.base_oid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -220,6 +225,19 @@ pub struct TransferTaskPayload {
     /// it may acknowledge the transfer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_oid: Option<String>,
+    /// Exact source commit used as the transferred task's diff base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_oid: Option<String>,
+    /// Immutable source workflow/context carried into the first destination
+    /// preparation. These are snapshots, never local stage-run rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_definition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_stage_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_main_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_feedback: Option<String>,
     /// The task's workflow name. Emitted under both `workflow` (canonical)
     /// and `pipeline` (legacy) so a peer running either naming can import it;
     /// parsing accepts either key.
@@ -434,6 +452,7 @@ pub fn decode_task_input_ledger(
     if ledger.inputs.len() as u64 != metadata.count {
         return Err("transferred task input ledger count does not match its payload".into());
     }
+    let mut seen_origins = HashSet::with_capacity(ledger.inputs.len());
     ledger
         .inputs
         .into_iter()
@@ -457,6 +476,16 @@ pub fn decode_task_input_ledger(
                 || input.delivered_at.is_empty()
             {
                 return Err("transferred task input has incomplete origin provenance".into());
+            }
+            let origin_key = (
+                input.origin_peer_id.clone(),
+                input.origin_task_id.clone(),
+                input.origin_input_id,
+            );
+            if !seen_origins.insert(origin_key) {
+                return Err(
+                    "transferred task input ledger contains duplicate origin identity".into(),
+                );
             }
             Ok(crate::db::ImportedTaskInput {
                 stage: input.stage,
@@ -926,6 +955,16 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
                     .ok_or_else(|| "repo bundle ref_name is not a safe git ref".to_string())
             })
             .transpose()?;
+            let base_ref_name = nullable_string(
+                bundle,
+                &["base_ref_name", "baseRefName"],
+                "repo bundle base_ref_name must be a string or null",
+            )?
+            .map(|reference| {
+                super::git::normalize_ref(Some(&reference))
+                    .ok_or_else(|| "repo bundle base_ref_name is not a safe git ref".to_string())
+            })
+            .transpose()?;
             Some(TransferBundlePayload {
                 artifact_id: validate_component(
                     &required_string(
@@ -940,6 +979,7 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
                     "transfer bundle filename",
                 )?,
                 ref_name,
+                base_ref_name,
             })
         }
     };
@@ -998,6 +1038,14 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
     {
         return Err("task-bundle payload is missing its source ref".into());
     }
+    if mode == RepoAcquisitionMode::TaskBundle
+        && bundle
+            .as_ref()
+            .and_then(|bundle| bundle.base_ref_name.as_ref())
+            .is_none()
+    {
+        return Err("task-bundle payload is missing its immutable base ref".into());
+    }
 
     let artifacts = parse_artifacts(
         record.get("artifacts"),
@@ -1013,6 +1061,24 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
     .transpose()?;
     if mode == RepoAcquisitionMode::TaskBundle && head_oid.is_none() {
         return Err("task-bundle payload is missing the exact task head".into());
+    }
+    let base_oid = nullable_string(
+        task,
+        &["base_oid", "baseOid"],
+        "task base_oid must be a string or null",
+    )?
+    .map(|oid| validate_hex(&oid, &[40, 64], "task base_oid"))
+    .transpose()?;
+    if mode == RepoAcquisitionMode::TaskBundle && base_oid.is_none() {
+        return Err("task-bundle payload is missing the exact review base".into());
+    }
+    let workflow_definition = nullable_string(
+        task,
+        &["workflow_definition", "workflowDefinition"],
+        "task workflow_definition must be a string or null",
+    )?;
+    if mode == RepoAcquisitionMode::TaskBundle && workflow_definition.is_none() {
+        return Err("task-bundle payload is missing its pinned workflow definition".into());
     }
 
     Ok(OutgoingTransferPayload {
@@ -1038,6 +1104,23 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
             stage: required_string(task, &["stage"], "task missing stage")?,
             branch: nullable_string(task, &["branch"], "task branch must be a string or null")?,
             head_oid,
+            base_oid,
+            workflow_definition,
+            previous_stage_result: nullable_string(
+                task,
+                &["previous_stage_result", "previousStageResult"],
+                "task previous_stage_result must be a string or null",
+            )?,
+            previous_main_result: nullable_string(
+                task,
+                &["previous_main_result", "previousMainResult"],
+                "task previous_main_result must be a string or null",
+            )?,
+            revision_feedback: nullable_string(
+                task,
+                &["revision_feedback", "revisionFeedback"],
+                "task revision_feedback must be a string or null",
+            )?,
             workflow: workflow_name.clone(),
             legacy_pipeline: workflow_name,
             display_name: nullable_string(
@@ -1103,7 +1186,7 @@ mod tests {
     fn payload_with(artifacts: Value) -> Value {
         json!({
             "target_peer_id": "peer-destination",
-            "task": {
+        "task": {
                 "source_peer_id": "peer-source",
                 "source_task_id": "task-source",
                 "resume_session_id": SESSION_ID,
@@ -1111,6 +1194,7 @@ mod tests {
                 "pipeline": "single-reviewer",
                 "agent_type": "pty",
                 "agent_provider": "claude",
+                "workflow_definition": "{\"stages\":[{\"name\":\"in progress\"}]}",
             },
             "repo": { "mode": "reuse-local", "path": "/repo" },
             "artifacts": artifacts,
@@ -1270,6 +1354,7 @@ mod tests {
                 "artifact_id": "transfer-repo-bundle",
                 "filename": "transfer.bundle",
                 "ref_name": "refs/heads/task-source",
+                "base_ref_name": "refs/heads/main",
             },
         });
         assert!(parse_outgoing_transfer_payload(&value)
@@ -1282,6 +1367,7 @@ mod tests {
             "sha256": "a".repeat(64),
             "count": 0,
         });
+        value["task"]["base_oid"] = json!("a".repeat(40));
         assert!(parse_outgoing_transfer_payload(&value)
             .unwrap_err()
             .contains("exact task head"));
@@ -1353,6 +1439,42 @@ mod tests {
         assert_eq!(decoded[1].origin.task_id, "task-original");
         assert_eq!(decoded[1].origin.input_id, 3);
         assert_eq!(decoded[1].origin.run_id.as_deref(), Some("run-original"));
+    }
+
+    #[test]
+    fn task_input_ledger_rejects_conflicting_duplicate_origins() {
+        let entry = TransferInputLedgerEntry {
+            sequence: 0,
+            source: "manager".into(),
+            stage: Some("review".into()),
+            message: "directive".into(),
+            delivered_at: "2026-09-09 01:00:00".into(),
+            origin_peer_id: "peer-studio".into(),
+            origin_task_id: "task-source".into(),
+            origin_input_id: 7,
+            origin_run_id: Some("run-1".into()),
+        };
+        let duplicate = TransferInputLedgerEntry {
+            sequence: 1,
+            message: "different directive".into(),
+            ..entry.clone()
+        };
+        let bytes = serde_json::to_vec(&TransferInputLedger {
+            version: TASK_INPUT_LEDGER_VERSION,
+            source_peer_id: "peer-studio".into(),
+            source_task_id: "task-source".into(),
+            inputs: vec![entry, duplicate],
+        })
+        .expect("ledger json");
+        let metadata = TransferInputLedgerPayload {
+            artifact_id: "ledger".into(),
+            filename: TASK_INPUT_LEDGER_FILENAME.into(),
+            sha256: sha256_hex(&bytes),
+            count: 2,
+        };
+        let error = decode_task_input_ledger(&bytes, &metadata, "peer-studio", "task-source")
+            .expect_err("duplicate origin must be refused");
+        assert!(error.contains("duplicate origin"), "{error}");
     }
 
     #[test]

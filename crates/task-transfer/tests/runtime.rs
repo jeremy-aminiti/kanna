@@ -2011,6 +2011,7 @@ async fn outgoing_reservation_pins_cloud_route_across_external_peer_updates() {
             &PeerResponse::SubmitTransferPayload {
                 request_id,
                 transfer_id,
+                admitted: true,
             },
         )
         .await;

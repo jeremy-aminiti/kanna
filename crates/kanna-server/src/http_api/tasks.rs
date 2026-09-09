@@ -940,6 +940,10 @@ async fn create_task_with_requested_id_and_inputs(
         },
     }
     let imported_inputs = Arc::new(imported_inputs);
+    let transfer_head_oid = payload
+        .transfer_import
+        .as_ref()
+        .and_then(|import| import.head_oid.clone());
     let outcome = {
         let state = Arc::clone(&state);
         let imported_inputs = Arc::clone(&imported_inputs);
@@ -1101,6 +1105,7 @@ async fn create_task_with_requested_id_and_inputs(
                 }
             }
 
+            let transfer_context = payload.transfer_import.clone();
             let prepared = {
                 let db = Db::open(&state.config.db_path).map_err(|e| {
                     (
@@ -1126,6 +1131,38 @@ async fn create_task_with_requested_id_and_inputs(
                     }
                 }
             };
+            if let Some(context) = transfer_context.as_ref() {
+                if let (Some(transfer_id), Some(workflow_definition)) = (
+                    context.transfer_id.as_deref(),
+                    context.workflow_definition.as_deref(),
+                ) {
+                    let db = Db::open(&state.config.db_path).map_err(|e| {
+                        (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("db error: {e}"),
+                        )
+                    })?;
+                    if let Err(error) = db.upsert_transferred_task_context(
+                        crate::task_creator::prepared_task_id(&prepared),
+                        transfer_id,
+                        workflow_definition,
+                        context.previous_stage_result.as_deref(),
+                        context.previous_main_result.as_deref(),
+                        context.revision_feedback.as_deref(),
+                    ) {
+                        let reason = format!("could not persist transferred task context: {error}");
+                        let rollback =
+                            crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                        return Err((
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            match rollback {
+                                Ok(()) => reason,
+                                Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                            },
+                        ));
+                    }
+                }
+            }
             if !imported_inputs.is_empty() {
                 let db = Db::open(&state.config.db_path).map_err(|e| {
                     (
@@ -1286,7 +1323,27 @@ async fn create_task_with_requested_id_and_inputs(
         PreparedCreateOutcome::Spawn {
             prepared,
             resolved_blocker_ids,
-        } => (prepared, resolved_blocker_ids),
+        } => {
+            // Transfer bundles are admitted only after the prepared worktree
+            // proves the pinned committed head.  This runs before the daemon
+            // is contacted, so no agent can execute an unverified import.
+            if let Some(expected_head) = transfer_head_oid.as_deref() {
+                let (worktree, branch) = crate::task_creator::prepared_task_worktree(&prepared);
+                let actual =
+                    crate::transfer_engine::git::commit_oid(std::path::Path::new(worktree), branch)
+                        .map_err(|error| {
+                            (
+                                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                                format!("transferred task head verification failed: {error}"),
+                            )
+                        })?;
+                if actual != expected_head {
+                    return Err((axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("transferred task head mismatch: expected {expected_head}, got {actual}")));
+                }
+            }
+            (prepared, resolved_blocker_ids)
+        }
     };
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await

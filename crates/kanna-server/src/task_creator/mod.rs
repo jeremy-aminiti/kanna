@@ -13,6 +13,7 @@ mod stages;
 mod terminal_marker;
 mod types;
 mod work_tip;
+pub(crate) use work_tip::task_work_tip_for_transfer;
 mod workflow_edit;
 mod worktree;
 pub(crate) use workflow_edit::validate_task_workflow_replacement;
@@ -64,7 +65,7 @@ pub(crate) use definitions::DEFAULT_REVISION_LIMIT;
 pub(crate) use environment::{resolve_agent_executable, warm_login_shell_path};
 pub(crate) use lifecycle::{
     daemon_session_presence, dispatch_prepared_post_for_api, kill_session_replacing,
-    prepared_task_id, prune_completion_contexts_on_startup,
+    prepared_task_id, prepared_task_worktree, prune_completion_contexts_on_startup,
     reconcile_lifecycle_operations_on_startup, remove_completion_contexts,
     rerun_prepared_stage_for_api, resolve_legacy_completion_retry_run,
     rollback_prepared_stage_run_for_api, rollback_prepared_task_for_api,
@@ -2003,7 +2004,10 @@ pub(crate) fn prepare_task_for_api_with_error(
             task_prompt: request.prompt.clone(),
             display_name: request.display_name,
             workflow_name: request.workflow_name,
-            workflow_def: None,
+            workflow_def: request
+                .transfer_import
+                .as_ref()
+                .and_then(|import| import.workflow_definition.clone()),
             base_ref: request.base_ref,
             // The fork point and the diff base are the same ref for every
             // ordinary task; they differ when a task is forked from the tip
@@ -3209,7 +3213,37 @@ fn resolve_task_spawn(
     };
 
     let final_prompt = if request.stage_override.is_some() {
-        original_prompt.clone()
+        if let Some(import) = request.transfer_import.as_ref().filter(|import| {
+            import.previous_stage_result.is_some()
+                || import.previous_main_result.is_some()
+                || import.revision_feedback.is_some()
+        }) {
+            build_stage_prompt(
+                agent
+                    .as_ref()
+                    .map(|agent| agent.prompt.as_str())
+                    .unwrap_or(""),
+                stage.prompt.as_deref(),
+                &PromptContext {
+                    task_prompt: Some(&request.task_prompt),
+                    prev_result: import
+                        .revision_feedback
+                        .as_deref()
+                        .or(import.previous_stage_result.as_deref()),
+                    prev_main_result: import.previous_main_result.as_deref(),
+                    branch: request.base_ref.as_deref(),
+                    base_ref: request
+                        .stored_base_ref
+                        .as_deref()
+                        .or(request.base_ref.as_deref()),
+                    source_worktree: None,
+                    stage_trigger: "transfer",
+                    vars: repo_config.vars.as_ref(),
+                },
+            )
+        } else {
+            original_prompt.clone()
+        }
     } else {
         build_stage_prompt(
             agent

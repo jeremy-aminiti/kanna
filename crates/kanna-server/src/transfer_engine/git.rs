@@ -111,6 +111,54 @@ pub fn commit_oid(repo_path: &Path, reference: &str) -> Result<String, String> {
     }
 }
 
+/// Resolve a source-side ref to its full immutable name and commit id.
+/// Unlike `normalize_ref`, this accepts remote-tracking shorthand such as
+/// `origin/main`; the source repository, not the peer, resolves that shorthand
+/// before either value is placed on the wire.
+pub fn resolve_commit_ref(repo_path: &Path, reference: &str) -> Result<(String, String), String> {
+    let reference = reference.trim();
+    let safe = !reference.is_empty()
+        && reference.len() <= 512
+        && !reference.starts_with('-')
+        && !reference.contains("..")
+        && !reference.contains("//")
+        && reference.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b'+')
+        });
+    if !safe {
+        return Err(format!("invalid git ref for transferred task: {reference}"));
+    }
+    let full = git(
+        repo_path,
+        &[
+            "rev-parse",
+            "--symbolic-full-name",
+            "--verify",
+            "--end-of-options",
+            reference,
+        ],
+    )?;
+    let full = normalize_ref(Some(&full))
+        .ok_or_else(|| format!("git resolved an invalid full ref name for {reference}"))?;
+    let oid = git(
+        repo_path,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{full}^{{commit}}"),
+        ],
+    )?;
+    if !matches!(oid.len(), 40 | 64)
+        || !oid
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!("git returned an invalid object id for {full}"));
+    }
+    Ok((full, oid))
+}
+
 /// Fetches the source task ref into a transfer-private namespace and proves it
 /// resolves to the exact commit named by the finalized payload. Existing
 /// branches are never overwritten.
@@ -142,6 +190,50 @@ pub fn import_task_bundle_ref(
         ));
     }
     Ok(transfer_ref)
+}
+
+/// Import and prove both immutable refs a transferred review needs. The
+/// source names are read only from the bundle; destination branches live in a
+/// transfer-private namespace and are never rewritten.
+pub fn import_task_bundle_refs(
+    repo_path: &Path,
+    bundle_path: &Path,
+    source_head_ref: &str,
+    expected_head_oid: &str,
+    source_base_ref: &str,
+    expected_base_oid: &str,
+) -> Result<(String, String), String> {
+    let source_head_ref = normalize_ref(Some(source_head_ref))
+        .ok_or_else(|| format!("invalid source head ref in task bundle: {source_head_ref}"))?;
+    let source_base_ref = normalize_ref(Some(source_base_ref))
+        .ok_or_else(|| format!("invalid source base ref in task bundle: {source_base_ref}"))?;
+    let transfer_root = format!("refs/kanna/transfers/{expected_head_oid}");
+    let head_ref = format!("{transfer_root}/head");
+    let base_ref = format!("{transfer_root}/base");
+    let bundle_path = bundle_path
+        .to_str()
+        .ok_or_else(|| "bundle path is not valid unicode".to_string())?;
+    let head_refspec = format!("{source_head_ref}:{head_ref}");
+    let base_refspec = format!("{source_base_ref}:{base_ref}");
+    git(
+        repo_path,
+        &["fetch", bundle_path, &head_refspec, &base_refspec],
+    )?;
+    for (label, reference, expected) in [
+        ("head", head_ref.as_str(), expected_head_oid),
+        ("base", base_ref.as_str(), expected_base_oid),
+    ] {
+        let imported = git(
+            repo_path,
+            &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+        )?;
+        if imported != expected {
+            return Err(format!(
+                "transferred task {label} mismatch: expected {expected}, imported {imported}"
+            ));
+        }
+    }
+    Ok((head_ref, base_ref))
 }
 
 pub fn commit_is_ancestor(
@@ -259,9 +351,12 @@ pub fn create_bundle(
 /// Materializes a repository from a bundle the source staged.
 ///
 /// `git fetch <bundle> '+refs/*:refs/*'` then checkout, exactly as the renderer
-/// did — but the checkout ref comes from the validated payload rather than from
-/// string concatenation, and a checkout that fails leaves the caller with the
-/// git error instead of a shell exit code.
+/// did — but the repository starts with a bare `.git` directory. A normal
+/// `git init` checks out an unborn default branch first; fetching a bundle that
+/// contains that branch then fails with "refusing to fetch into branch ...
+/// checked out" before the requested task ref can be selected. Initializing
+/// the metadata bare and only enabling its worktree after the fetch leaves no
+/// checked-out ref for the fetch to overwrite.
 pub fn init_from_bundle(
     repo_path: &Path,
     bundle_path: &Path,
@@ -269,16 +364,32 @@ pub fn init_from_bundle(
 ) -> Result<(), String> {
     std::fs::create_dir_all(repo_path)
         .map_err(|error| format!("failed to create transferred repo directory: {error}"))?;
-    let repo_path_arg = repo_path
+    let git_dir = repo_path.join(".git");
+    let git_dir_arg = git_dir
         .to_str()
-        .ok_or_else(|| "repo path is not valid unicode".to_string())?;
-    git(Path::new("."), &["init", repo_path_arg])?;
+        .ok_or_else(|| "repo git directory is not valid unicode".to_string())?;
+    git(Path::new("."), &["init", "--bare", git_dir_arg])?;
     let bundle_path = bundle_path
         .to_str()
         .ok_or_else(|| "bundle path is not valid unicode".to_string())?;
     git(repo_path, &["fetch", bundle_path, "+refs/*:refs/*"])?;
+    git(repo_path, &["config", "core.bare", "false"])?;
     let checkout_ref = normalize_ref(checkout_ref).unwrap_or_else(|| "HEAD".to_string());
     git(repo_path, &["checkout", &checkout_ref])?;
+    Ok(())
+}
+
+/// Create a normal repository with no checked-out branch. Task-bundle imports
+/// populate only transfer-private refs before task creation forks its worktree.
+pub fn init_empty_repo(repo_path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(repo_path)
+        .map_err(|error| format!("failed to create transferred repo directory: {error}"))?;
+    let git_dir = repo_path.join(".git");
+    let git_dir_arg = git_dir
+        .to_str()
+        .ok_or_else(|| "repo git directory is not valid unicode".to_string())?;
+    git(Path::new("."), &["init", "--bare", git_dir_arg])?;
+    git(repo_path, &["config", "core.bare", "false"])?;
     Ok(())
 }
 

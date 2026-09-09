@@ -463,6 +463,10 @@ impl CreateTaskRecoverySnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferImportSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_id: Option<String>,
     #[serde(default)]
     pub source_machine: Option<String>,
     /// Raw acquisition mode from the transfer payload: `reuse-local`,
@@ -472,6 +476,17 @@ pub struct TransferImportSummary {
     pub repo_mode: Option<String>,
     #[serde(default)]
     pub session_restored: bool,
+    /// Source-pinned workflow/context snapshots. These are not local runs;
+    /// they seed the first destination prompt and remain attributable to the
+    /// source transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_definition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_stage_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_main_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_feedback: Option<String>,
 }
 
 impl TransferImportSummary {
@@ -479,8 +494,12 @@ impl TransferImportSummary {
 
     pub fn validate(&self) -> Result<(), String> {
         for (label, value) in [
+            ("transferId", self.transfer_id.as_deref()),
             ("sourceMachine", self.source_machine.as_deref()),
             ("repoMode", self.repo_mode.as_deref()),
+            ("previousStageResult", self.previous_stage_result.as_deref()),
+            ("previousMainResult", self.previous_main_result.as_deref()),
+            ("revisionFeedback", self.revision_feedback.as_deref()),
         ] {
             if value.is_some_and(|value| value.chars().count() > Self::MAX_FIELD_CHARS) {
                 return Err(format!(
@@ -493,6 +512,22 @@ impl TransferImportSummary {
                     "transferImport.{label} must not contain control characters"
                 ));
             }
+        }
+        if self
+            .workflow_definition
+            .as_deref()
+            .is_some_and(|value| value.len() > 4 * 1024 * 1024)
+        {
+            return Err("transferImport.workflowDefinition exceeds 4 MiB".into());
+        }
+        if self
+            .workflow_definition
+            .as_deref()
+            .is_some_and(|value| value.chars().any(char::is_control))
+        {
+            return Err(
+                "transferImport.workflowDefinition must not contain control characters".into(),
+            );
         }
         Ok(())
     }
@@ -1865,6 +1900,7 @@ mod tests {
             source_machine: Some("Primary Mac".to_string()),
             repo_mode: Some("bundle-repo".to_string()),
             session_restored: true,
+            ..Default::default()
         };
         assert_eq!(valid.validate(), Ok(()));
 

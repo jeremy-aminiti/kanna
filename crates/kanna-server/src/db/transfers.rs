@@ -1,4 +1,5 @@
 use super::Db;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 const TASK_TRANSFER_COLUMNS: &str = "SELECT id, direction, status, source_peer_id, target_peer_id,
@@ -110,6 +111,73 @@ pub struct NewTaskTransferProvenance {
 }
 
 impl Db {
+    /// Stores the source-pinned workflow/context before a transferred task's
+    /// first agent spawn. Replays must carry the same transfer identity.
+    pub fn upsert_transferred_task_context(
+        &self,
+        task_id: &str,
+        transfer_id: &str,
+        workflow_definition: &str,
+        previous_stage_result: Option<&str>,
+        previous_main_result: Option<&str>,
+        revision_feedback: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO transferred_task_context
+             (task_id, transfer_id, workflow_definition, previous_stage_result,
+              previous_main_result, revision_feedback)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(task_id) DO UPDATE SET
+               transfer_id = excluded.transfer_id,
+               workflow_definition = excluded.workflow_definition,
+               previous_stage_result = excluded.previous_stage_result,
+               previous_main_result = excluded.previous_main_result,
+               revision_feedback = excluded.revision_feedback
+             WHERE transferred_task_context.transfer_id = excluded.transfer_id",
+            (
+                task_id,
+                transfer_id,
+                workflow_definition,
+                previous_stage_result,
+                previous_main_result,
+                revision_feedback,
+            ),
+        )?;
+        Ok(())
+    }
+
+    pub fn transferred_task_context(
+        &self,
+        task_id: &str,
+    ) -> Result<
+        Option<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )>,
+        rusqlite::Error,
+    > {
+        self.conn
+            .query_row(
+                "SELECT transfer_id, workflow_definition, previous_stage_result,
+                        previous_main_result, revision_feedback
+                 FROM transferred_task_context WHERE task_id = ?",
+                [task_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+    }
+
     pub fn insert_task_transfer(&self, transfer: &NewTaskTransfer) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO task_transfer
