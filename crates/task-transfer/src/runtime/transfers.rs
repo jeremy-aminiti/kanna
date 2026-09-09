@@ -204,6 +204,7 @@ impl TransferRuntime {
             PeerResponse::SubmitTransferPayload {
                 request_id: response_request_id,
                 transfer_id: response_transfer_id,
+                admitted,
             } => {
                 if response_request_id != request_id {
                     return Err(RuntimeError::Protocol(format!(
@@ -217,6 +218,12 @@ impl TransferRuntime {
                         "mismatched transfer id in commit response: expected {}, got {}",
                         transfer_id, response_transfer_id
                     )));
+                }
+
+                if !admitted {
+                    return Err(RuntimeError::Protocol(
+                        "destination sidecar did not prove transfer admission".into(),
+                    ));
                 }
 
                 Ok(())

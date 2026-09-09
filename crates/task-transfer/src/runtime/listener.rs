@@ -708,9 +708,37 @@ async fn handle_connection(
                             .try_send(RuntimeEvent::IncomingTransferRequest(event))
                             .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
                     }
+                    // Do not acknowledge merely storing opaque bytes. The
+                    // destination server must durably admit the payload first;
+                    // otherwise an old/new mismatch can look successful while
+                    // the source remains the only copy.
+                    for _ in 0..100 {
+                        let admitted = context
+                            .incoming_reservations
+                            .lock()
+                            .await
+                            .get(&transfer_id)
+                            .is_some_and(|reservation| reservation.event_recorded);
+                        if admitted {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    let admitted = context
+                        .incoming_reservations
+                        .lock()
+                        .await
+                        .get(&transfer_id)
+                        .is_some_and(|reservation| reservation.event_recorded);
+                    if !admitted {
+                        return Err(RuntimeError::Protocol(
+                            "destination server did not durably admit transfer payload".into(),
+                        ));
+                    }
                     PeerResponse::SubmitTransferPayload {
                         request_id,
                         transfer_id,
+                        admitted: true,
                     }
                 }
                 Err(error) => PeerResponse::Error {

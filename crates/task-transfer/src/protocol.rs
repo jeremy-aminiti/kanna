@@ -361,6 +361,8 @@ pub enum ControlResponse {
     PrepareTransferCommit {
         request_id: String,
         transfer_id: String,
+        #[serde(default)]
+        admitted: bool,
     },
     AbandonOutgoingTransfer {
         request_id: String,
@@ -604,6 +606,8 @@ pub enum PeerResponse {
     SubmitTransferPayload {
         request_id: String,
         transfer_id: String,
+        #[serde(default)]
+        admitted: bool,
     },
     AbandonTransfer {
         request_id: String,

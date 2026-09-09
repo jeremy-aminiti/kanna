@@ -378,6 +378,26 @@ async fn run_push(state: &Arc<AppState>, work: &Value) -> Result<(), Result<Stri
     )
     .await;
     if result.is_err() {
+        if let Err(error) = &result {
+            if error.contains("legacy payload") || error.contains("task-bundle admission") {
+                match state.transfer_work().open_db() {
+                    Ok(db) => {
+                        if let Err(mark_error) =
+                            db.fail_outgoing_task_transfer(&preflight.transfer_id, error)
+                        {
+                            log::error!(
+                                "failed to persist terminal transfer refusal: {mark_error}"
+                            );
+                        }
+                    }
+                    Err(mark_error) => {
+                        log::error!(
+                            "failed to open transfer DB for terminal refusal: {mark_error}"
+                        );
+                    }
+                }
+            }
+        }
         release_reservation(state, &preflight.transfer_id).await;
     }
     result.map_err(retriable)
@@ -416,8 +436,15 @@ async fn stage_and_commit(
             .filter(|url| super::git::is_credential_free_clone_source(url)))
     })
     .await?;
-    let (bundle, head_oid) =
-        stage_repository_bundle(state, source, repo_path, transfer_id, "repo-bundle").await?;
+    let repository = stage_repository_bundle(
+        state,
+        source,
+        repo_path,
+        transfer_id,
+        "repo-bundle",
+        repo.default_branch.as_deref(),
+    )
+    .await?;
     let input_ledger = stage_task_input_ledger(
         state,
         source,
@@ -437,8 +464,7 @@ async fn stage_and_commit(
         source_desktop_id,
         target_desktop_id,
         remote_url.as_deref(),
-        Some(bundle),
-        Some(head_oid),
+        Some(repository),
         Some(input_ledger),
         staged,
         TransferFinalizationState::clean(),
@@ -486,45 +512,75 @@ async fn stage_repository_bundle(
     repo_path: &Path,
     transfer_id: &str,
     artifact_suffix: &str,
-) -> Result<(TransferBundlePayload, String), String> {
-    let source_ref = source
+    default_branch: Option<&str>,
+) -> Result<StagedRepositoryBundle, String> {
+    let db = state.transfer_work().open_db()?;
+    let tip = crate::task_creator::task_work_tip_for_transfer(
+        &db,
+        &repo_path.to_string_lossy(),
+        &source.item.id,
+        source.item.branch.as_deref(),
+    )?;
+    let base_label = source
         .item
-        .branch
+        .base_ref
         .as_deref()
-        .or(source.item.base_ref.as_deref())
-        .ok_or_else(|| "transferred task has no committed source ref to bundle".to_string())?;
+        .or(default_branch)
+        .ok_or_else(|| "transferred task has no committed review base to bundle".to_string())?;
+    let resolved_base = crate::git_refs::resolve_base_ref(repo_path, base_label)
+        .ok_or_else(|| format!("transferred task review base does not resolve: {base_label}"))?;
     let bundle_path = session::bundle_staging_path(&staging_dir(), transfer_id);
-    let (ref_name, head_oid) = {
-        let (repo_path, bundle_path, branch, base_ref, source_ref) = (
+    let (ref_name, head_oid, base_ref_name, base_oid) = {
+        let (repo_path, bundle_path, tip_branch, tip_commit, base_ref) = (
             repo_path.to_path_buf(),
             bundle_path.clone(),
-            source.item.branch.clone(),
-            source.item.base_ref.clone(),
-            source_ref.to_string(),
+            tip.branch.clone(),
+            tip.commit.clone(),
+            resolved_base.reference,
         );
         super::run_blocking("transfer bundle create", move || {
+            let (ref_name, resolved_head_oid) =
+                super::git::resolve_commit_ref(&repo_path, &tip_branch)?;
+            if resolved_head_oid != tip_commit {
+                return Err(format!(
+                    "task work tip moved while staging transfer: expected {tip_commit}, resolved {resolved_head_oid}"
+                ));
+            }
+            let (base_ref_name, base_oid) =
+                super::git::resolve_commit_ref(&repo_path, &base_ref)?;
             let ref_name = super::git::create_bundle(
                 &repo_path,
                 &bundle_path,
-                branch.as_deref(),
-                base_ref.as_deref(),
+                Some(&ref_name),
+                Some(&base_ref_name),
             )?
             .ok_or_else(|| "transferred task bundle did not name its source ref".to_string())?;
-            let head_oid = super::git::commit_oid(&repo_path, &source_ref)?;
-            Ok((ref_name, head_oid))
+            Ok((ref_name, resolved_head_oid, base_ref_name, base_oid))
         })
         .await?
     };
     let artifact_id = session::artifact_id(transfer_id, artifact_suffix);
     control::stage_artifact(state, transfer_id, &artifact_id, &bundle_path, true).await?;
-    Ok((
-        TransferBundlePayload {
+    Ok(StagedRepositoryBundle {
+        bundle: TransferBundlePayload {
             artifact_id,
             filename: format!("{transfer_id}.bundle"),
             ref_name: Some(ref_name),
+            base_ref_name: Some(base_ref_name),
         },
         head_oid,
-    ))
+        base_oid,
+        source_branch: tip.branch,
+        base_label: base_label.to_string(),
+    })
+}
+
+struct StagedRepositoryBundle {
+    bundle: TransferBundlePayload,
+    head_oid: String,
+    base_oid: String,
+    source_branch: String,
+    base_label: String,
 }
 
 async fn stage_task_input_ledger(
@@ -620,20 +676,35 @@ async fn build_payload(
     source_desktop_id: Option<&str>,
     target_desktop_id: Option<&str>,
     remote_url: Option<&str>,
-    bundle: Option<TransferBundlePayload>,
-    head_oid: Option<String>,
+    repository: Option<StagedRepositoryBundle>,
     input_ledger: Option<TransferInputLedgerPayload>,
     staged: StagedSessionArtifacts,
     finalization: TransferFinalizationState,
     recovery: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
 ) -> Result<OutgoingTransferPayload, String> {
     let mode = RepoAcquisitionMode::TaskBundle;
+    let context_db = state.transfer_work().open_db()?;
+    let previous_stage_result = context_db
+        .latest_finished_stage_run_result(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let previous_main_result = context_db
+        .latest_finished_main_stage_run_result(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let revision_feedback = context_db
+        .latest_stage_run(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?
+        .and_then(|run| run.feedback);
     // `pipeline` is the legacy storage column name for the task's workflow.
     let workflow_name = source
         .item
         .pipeline
         .clone()
         .unwrap_or_else(|| "no-review".into());
+    let workflow_definition = source.item.pipeline_def.clone().or_else(|| {
+        crate::task_creator::resolve_task_workflow_snapshot(repo, &workflow_name)
+            .ok()
+            .map(|snapshot| snapshot.definition_json)
+    });
     Ok(OutgoingTransferPayload {
         target_peer_id: peer_id.to_string(),
         target_desktop_id: target_desktop_id.map(str::to_string),
@@ -660,12 +731,27 @@ async fn build_payload(
                 .stage
                 .clone()
                 .unwrap_or_else(|| "in progress".into()),
-            branch: source.item.branch.clone(),
-            head_oid,
+            branch: repository
+                .as_ref()
+                .map(|repository| repository.source_branch.clone())
+                .or_else(|| source.item.branch.clone()),
+            head_oid: repository
+                .as_ref()
+                .map(|repository| repository.head_oid.clone()),
+            base_oid: repository
+                .as_ref()
+                .map(|repository| repository.base_oid.clone()),
+            workflow_definition,
+            previous_stage_result,
+            previous_main_result,
+            revision_feedback,
             workflow: workflow_name.clone(),
             legacy_pipeline: workflow_name,
             display_name: source.item.display_name.clone(),
-            base_ref: source.item.base_ref.clone(),
+            base_ref: repository
+                .as_ref()
+                .map(|repository| repository.base_label.clone())
+                .or_else(|| source.item.base_ref.clone()),
             agent_type: source.item.agent_type.clone(),
             // The provider the session shipped above belongs to, not the one
             // the task was created under: the destination spawns this CLI, and
@@ -683,7 +769,7 @@ async fn build_payload(
             path: Some(repo.path.clone()),
             name: Some(repo.name.clone()),
             default_branch: repo.default_branch.clone(),
-            bundle,
+            bundle: repository.map(|repository| repository.bundle),
         },
         input_ledger,
         // Finalization photographs the terminal before it types the quit
@@ -901,12 +987,13 @@ async fn run_finalization(
     // Their distinct ids leave the pre-finalization placeholders intact until
     // the sidecar cleans the whole transfer, while the finalized payload can
     // name only the post-finalization bytes.
-    let (bundle, head_oid) = stage_repository_bundle(
+    let repository = stage_repository_bundle(
         state,
         &refreshed,
         &repo_path,
         transfer_id,
         "repo-bundle-final",
+        repo.default_branch.as_deref(),
     )
     .await?;
     let input_ledger = stage_task_input_ledger(
@@ -949,8 +1036,7 @@ async fn run_finalization(
             .as_deref()
             .or(existing.target_desktop_id.as_deref()),
         remote_url.as_deref(),
-        Some(bundle),
-        Some(head_oid),
+        Some(repository),
         Some(input_ledger),
         staged,
         finalization,
@@ -982,7 +1068,7 @@ async fn run_finalization(
 /// second implementation of it.
 pub async fn outgoing_committed(
     state: &Arc<AppState>,
-    work: &TransferWorkItem,
+    _work: &TransferWorkItem,
     event: &Value,
 ) -> Result<(), String> {
     let transfer_id = string_field(event, "transfer_id")
@@ -1019,26 +1105,32 @@ pub async fn outgoing_committed(
     // skip the close and go on to mark the transfer completed — the task would
     // stay open on the source forever, which is the state this whole
     // acknowledgment exists to end.
-    if db
-        .claim_transfer_work_phase(&work.id, "source-task-close")
+    let already_closed = db
+        .get_pipeline_item(&source_task_id)
         .map_err(|error| format!("db error: {error}"))?
-    {
+        .is_some_and(|item| item.closed_at.is_some());
+    if !already_closed {
         if let Err((status, message)) =
             crate::http_api::close_task_in_process(Arc::clone(state), source_task_id.clone()).await
         {
-            let already_closed = db
+            let closed_after_error = db
                 .get_pipeline_item(&source_task_id)
                 .map_err(|error| format!("db error: {error}"))?
                 .is_some_and(|item| item.closed_at.is_some());
-            if !already_closed {
-                db.release_transfer_work_phase(&work.id, "source-task-close")
-                    .map_err(|release| {
-                        format!("db error releasing the source-task-close claim: {release}")
-                    })?;
+            if !closed_after_error {
                 return Err(format!(
                     "failed to close source task for outgoing transfer {transfer_id}: {status} {message}"
                 ));
             }
+        }
+        let closed = db
+            .get_pipeline_item(&source_task_id)
+            .map_err(|error| format!("db error: {error}"))?
+            .is_some_and(|item| item.closed_at.is_some());
+        if !closed {
+            return Err(format!(
+                "source task remained open after outgoing transfer close: {source_task_id}"
+            ));
         }
     }
 

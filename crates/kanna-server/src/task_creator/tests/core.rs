@@ -5535,6 +5535,7 @@ fn prepare_task_for_api_prints_transfer_import_summary_before_the_agent() {
                 source_machine: Some("Primary".to_string()),
                 repo_mode: Some("bundle-repo".to_string()),
                 session_restored: true,
+                ..Default::default()
             }),
             notify_task_id: None,
             review_context: None,

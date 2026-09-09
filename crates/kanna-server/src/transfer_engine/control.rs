@@ -93,13 +93,16 @@ pub async fn commit(
     transfer_id: &str,
     payload: &Value,
 ) -> Result<(), String> {
-    control(
+    let response = control(
         state,
         "prepare-outgoing-transfer",
         json!({ "payload": { "phase": "commit", "transferId": transfer_id, "payload": payload } }),
     )
-    .await
-    .map(|_| ())
+    .await?;
+    if response.get("admitted").and_then(Value::as_bool) != Some(true) {
+        return Err("destination sidecar did not prove transfer admission".into());
+    }
+    Ok(())
 }
 
 pub async fn abandon(state: &Arc<AppState>, transfer_id: &str) -> Result<(), String> {

@@ -158,7 +158,8 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "070_provider_quota_rejection_log",
     "071_event_subscriptions",
     "072_human_review_decision",
-    "073_transferred_task_input_provenance",
+    "074_transferred_task_input_provenance",
+    "075_transferred_task_context",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2190,7 +2191,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         create_human_review_schema,
     )?;
 
-    run_migration(conn, "073_transferred_task_input_provenance", |conn| {
+    run_migration(conn, "074_transferred_task_input_provenance", |conn| {
         add_column(conn, "task_input", "origin_peer_id", "TEXT")?;
         add_column(conn, "task_input", "origin_task_id", "TEXT")?;
         add_column(conn, "task_input", "origin_input_id", "INTEGER")?;
@@ -2198,6 +2199,20 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_input_transfer_origin
              ON task_input(task_id, origin_peer_id, origin_task_id, origin_input_id);",
+        )
+    })?;
+
+    run_migration(conn, "075_transferred_task_context", |conn| {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS transferred_task_context (
+                task_id TEXT PRIMARY KEY REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                transfer_id TEXT NOT NULL UNIQUE,
+                workflow_definition TEXT NOT NULL,
+                previous_stage_result TEXT,
+                previous_main_result TEXT,
+                revision_feedback TEXT,
+                recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
         )
     })?;
 

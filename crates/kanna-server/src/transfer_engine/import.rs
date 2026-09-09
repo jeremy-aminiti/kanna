@@ -68,6 +68,12 @@ pub async fn record_incoming(state: &Arc<AppState>, event: &Value) -> Result<(),
         ),
     })
     .map_err(|error| format!("db error: {error}"))?;
+    if parsed.repo.mode != RepoAcquisitionMode::TaskBundle {
+        let reason = "incoming transfer uses an unsupported legacy payload; task-bundle admission is required";
+        db.fail_incoming_task_transfer(&transfer_id, reason)
+            .map_err(|error| format!("db error: {error}"))?;
+        return Err(reason.to_string());
+    }
     control::mark_incoming_event_recorded(state, &transfer_id).await?;
     queue.enqueue(
         &format!("import:{transfer_id}"),
@@ -250,18 +256,26 @@ async fn run_import(
     )
     .map_err(ImportFailure::Terminal)?;
 
+    // Every recovery path must honor the same integrity contract as the first
+    // attempt. In particular, a pre-existing local_task_id is not evidence
+    // that the repository, head, or durable history was ever imported.
+    if stored.repo.mode != RepoAcquisitionMode::TaskBundle {
+        return Err(ImportFailure::Terminal(
+            "source server uses a legacy transfer payload that cannot prove the task head or durable input ledger; update it and retry the transfer".into(),
+        ));
+    }
+
     let payload = if local_task_id.is_some() {
         stored
     } else {
-        if stored.repo.mode != RepoAcquisitionMode::TaskBundle {
-            return Err(ImportFailure::Terminal(
-                "source server uses a legacy transfer payload that cannot prove the task head or durable input ledger; update it and retry the transfer"
-                    .into(),
-            ));
-        }
         let finalized = control::finalize_from_source(state, transfer_id).await?;
         let payload = payload::parse_outgoing_transfer_payload(&finalized.payload)
             .map_err(ImportFailure::Terminal)?;
+        if payload.repo.mode != RepoAcquisitionMode::TaskBundle {
+            return Err(ImportFailure::Terminal(
+                "finalized source payload lost the task-bundle integrity contract; source remains recoverable".into(),
+            ));
+        }
         assert_payload_matches_reservation(&transfer, &payload)?;
         if !finalized.finalized_cleanly {
             // The source could not shut its agent down cleanly. The
@@ -303,7 +317,7 @@ async fn run_import(
         )
         .map_err(|missing| ImportFailure::Terminal(missing.0))?;
 
-        let (repo_id, repo_path, imported_task_ref) =
+        let (repo_id, repo_path, imported_refs) =
             acquire_repo(state, transfer_id, &payload).await?;
         let imported_inputs = fetch_task_input_ledger(state, transfer_id, &payload).await?;
         // The destination task id — and therefore its worktree — is
@@ -320,9 +334,10 @@ async fn run_import(
             Arc::clone(state),
             build_create_request(
                 state,
+                transfer_id,
                 &repo_id,
                 &payload,
-                imported_task_ref,
+                imported_refs.clone(),
                 resume_session_id.clone(),
             )
             .await,
@@ -374,6 +389,11 @@ async fn run_import(
     let local_task_id = local_task_id
         .ok_or_else(|| format!("incoming transfer has no local task: {transfer_id}"))?;
 
+    // Recovery is not an integrity shortcut. Re-prove the persisted task,
+    // exact committed head/base, pinned workflow, and complete input history
+    // before any acknowledgment can close the source.
+    verify_persisted_task_bundle(state, &payload, &local_task_id, transfer_id).await?;
+
     db.set_cloud_task_identity(&local_task_id, &payload.task.cloud_task_id)
         .map_err(|error| format!("db error: {error}"))?;
     db.insert_task_transfer_provenance(&crate::db::NewTaskTransferProvenance {
@@ -398,32 +418,17 @@ async fn run_import(
     }
     state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
 
-    // Acknowledging is what closes the source task, so it happens at most once
-    // for this work item even across a restart that resumes it.
-    //
-    // A *failed* acknowledgment gives the claim back. Keeping it would make the
-    // retry skip the ack and fall straight through to marking this transfer
-    // completed — the destination would report success while the source was
-    // never told, leaving its task open and the same task live on two machines.
-    if db
-        .claim_transfer_work_phase(&work.id, "acknowledge-import")
-        .map_err(|error| format!("db error: {error}"))?
-    {
-        if let Err(error) = control::acknowledge_import_committed(
-            state,
-            transfer_id,
-            &payload.task.source_task_id,
-            &local_task_id,
-        )
-        .await
-        {
-            db.release_transfer_work_phase(&work.id, "acknowledge-import")
-                .map_err(|release| {
-                    format!("db error releasing the acknowledge-import claim: {release}")
-                })?;
-            return Err(error.into());
-        }
-    }
+    // The sidecar's matching receipt is idempotent. Always replay the network
+    // effect: a claim taken before it could turn a crash into local success
+    // while the source task remained open.
+    control::acknowledge_import_committed(
+        state,
+        transfer_id,
+        &payload.task.source_task_id,
+        &local_task_id,
+    )
+    .await
+    .map_err(ImportFailure::from)?;
     if !db
         .mark_task_transfer_completed(transfer_id, &local_task_id, Some(ENGINE_CLAIM_TOKEN))
         .map_err(|error| format!("db error: {error}"))?
@@ -433,6 +438,100 @@ async fn run_import(
         );
     }
     release_incoming_reservation(state, transfer_id).await?;
+    Ok(())
+}
+
+async fn verify_persisted_task_bundle(
+    state: &Arc<AppState>,
+    payload: &OutgoingTransferPayload,
+    local_task_id: &str,
+    transfer_id: &str,
+) -> Result<(), ImportFailure> {
+    let db = state.transfer_work().open_db()?;
+    let item = db
+        .get_pipeline_item(local_task_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| {
+            ImportFailure::Terminal(format!(
+                "transferred task {local_task_id} disappeared before integrity verification"
+            ))
+        })?;
+    if item.stage.as_deref() != Some(payload.task.stage.as_str()) {
+        return Err(ImportFailure::Terminal(format!(
+            "transferred task {local_task_id} stage does not match the source context"
+        )));
+    }
+    if item.pipeline_def.as_deref() != payload.task.workflow_definition.as_deref() {
+        return Err(ImportFailure::Terminal(format!(
+            "transferred task {local_task_id} workflow definition does not match the source snapshot"
+        )));
+    }
+    let repo = db
+        .get_repo(&item.repo_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| {
+            ImportFailure::Terminal(format!(
+                "transferred task {local_task_id} repository disappeared before verification"
+            ))
+        })?;
+    let expected_head = payload
+        .task
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| ImportFailure::Terminal("task bundle has no expected head".into()))?;
+    let expected_base =
+        payload.task.base_oid.as_deref().ok_or_else(|| {
+            ImportFailure::Terminal("task bundle has no expected review base".into())
+        })?;
+    let (repo_path, task_id, branch, base_ref, db_path) = (
+        repo.path.clone(),
+        local_task_id.to_string(),
+        item.branch.clone(),
+        item.base_ref.clone(),
+        state.config().db_path.clone(),
+    );
+    let (actual_head, actual_base) =
+        super::run_blocking("transferred task persisted ref verification", move || {
+            let verify_db =
+                crate::db::Db::open(&db_path).map_err(|error| format!("db error: {error}"))?;
+            let tip = crate::task_creator::task_work_tip_for_transfer(
+                &verify_db,
+                &repo_path,
+                &task_id,
+                branch.as_deref(),
+            )?;
+            let base = base_ref
+                .as_deref()
+                .ok_or_else(|| "transferred task has no persisted review base ref".to_string())?;
+            let base_oid = super::git::commit_oid(std::path::Path::new(&repo_path), base)?;
+            Ok::<_, String>((tip.commit, base_oid))
+        })
+        .await?;
+    if actual_head != expected_head || actual_base != expected_base {
+        return Err(ImportFailure::Terminal(format!(
+            "transferred task {local_task_id} persisted refs do not match the source manifest"
+        )));
+    }
+
+    drop(db);
+    let imported = fetch_task_input_ledger(state, transfer_id, payload).await?;
+    let verify_db = state.transfer_work().open_db()?;
+    let existing = verify_db
+        .list_all_task_inputs(local_task_id)
+        .map_err(|error| format!("db error: {error}"))?;
+    if existing.len() != imported.len()
+        || existing.iter().zip(imported.iter()).any(|(row, expected)| {
+            row.stage != expected.stage
+                || row.source != expected.source
+                || row.message != expected.message
+                || row.delivered_at != expected.delivered_at
+                || row.origin.as_ref() != Some(&expected.origin)
+        })
+    {
+        return Err(ImportFailure::Terminal(format!(
+            "transferred task {local_task_id} durable input history does not match the source ledger"
+        )));
+    }
     Ok(())
 }
 
@@ -461,7 +560,7 @@ async fn acquire_repo(
     state: &Arc<AppState>,
     transfer_id: &str,
     payload: &OutgoingTransferPayload,
-) -> Result<(String, PathBuf, Option<String>), ImportFailure> {
+) -> Result<(String, PathBuf, Option<(String, String)>), ImportFailure> {
     let repo_name = payload.repo.name.clone().unwrap_or_else(|| "repo".into());
     let default_branch = payload
         .repo
@@ -546,18 +645,10 @@ async fn acquire_repo(
             .await?
         }
         RepoAcquisitionMode::TaskBundle => {
-            let bundle = payload
-                .repo
-                .bundle
-                .as_ref()
-                .ok_or_else(|| "incoming task bundle is missing bundle metadata".to_string())
-                .map_err(ImportFailure::Terminal)?;
-            let fetched = control::fetch_artifact(state, transfer_id, &bundle.artifact_id).await?;
             let repo_name = repo_name.clone();
-            let checkout_ref = bundle.ref_name.clone();
             super::run_blocking("transfer repo restore", move || {
                 let repo_path = super::git::allocate_repo_path(&repos_home()?, &repo_name)?;
-                super::git::init_from_bundle(&repo_path, &fetched, checkout_ref.as_deref())?;
+                super::git::init_empty_repo(&repo_path)?;
                 Ok(repo_path)
             })
             .await?
@@ -591,7 +682,7 @@ async fn import_verified_task_bundle(
     transfer_id: &str,
     payload: &OutgoingTransferPayload,
     repo_path: &Path,
-) -> Result<String, ImportFailure> {
+) -> Result<(String, String), ImportFailure> {
     let bundle = payload
         .repo
         .bundle
@@ -606,14 +697,31 @@ async fn import_verified_task_bundle(
         .head_oid
         .as_deref()
         .ok_or_else(|| ImportFailure::Terminal("task bundle has no expected head".into()))?;
+    let source_base_ref = bundle
+        .base_ref_name
+        .as_deref()
+        .ok_or_else(|| ImportFailure::Terminal("task bundle has no immutable base ref".into()))?;
+    let expected_base =
+        payload.task.base_oid.as_deref().ok_or_else(|| {
+            ImportFailure::Terminal("task bundle has no expected review base".into())
+        })?;
     let fetched = control::fetch_artifact(state, transfer_id, &bundle.artifact_id).await?;
-    let (repo_path, source_ref, expected_head) = (
+    let (repo_path, source_ref, expected_head, source_base_ref, expected_base) = (
         repo_path.to_path_buf(),
         source_ref.to_string(),
         expected_head.to_string(),
+        source_base_ref.to_string(),
+        expected_base.to_string(),
     );
     super::run_blocking("transfer task bundle import", move || {
-        super::git::import_task_bundle_ref(&repo_path, &fetched, &source_ref, &expected_head)
+        super::git::import_task_bundle_refs(
+            &repo_path,
+            &fetched,
+            &source_ref,
+            &expected_head,
+            &source_base_ref,
+            &expected_base,
+        )
     })
     .await
     .map_err(ImportFailure::Terminal)
@@ -886,9 +994,10 @@ async fn materialize_resume_state(
 
 async fn build_create_request(
     state: &Arc<AppState>,
+    transfer_id: &str,
     repo_id: &str,
     payload: &OutgoingTransferPayload,
-    imported_task_ref: Option<String>,
+    imported_refs: Option<(String, String)>,
     resume_session_id: Option<String>,
 ) -> crate::mobile_api::CreateTaskRequest {
     crate::mobile_api::CreateTaskRequest {
@@ -899,10 +1008,15 @@ async fn build_create_request(
         stage: Some(payload.task.stage.clone()),
         // Integrity-aware transfers fork from the private ref whose object id
         // was just proved. Legacy payloads retain their historical resolver.
-        base_ref: imported_task_ref.or_else(|| payload::resolve_incoming_base_branch(payload)),
+        base_ref: imported_refs
+            .as_ref()
+            .map(|(head, _base)| head.clone())
+            .or_else(|| payload::resolve_incoming_base_branch(payload)),
         // The source task's diff base is distinct from its fork point once the
         // exact transferred head is available locally.
-        diff_base_ref: payload.task.base_ref.clone(),
+        diff_base_ref: imported_refs
+            .map(|(_head, base)| base)
+            .or_else(|| payload.task.base_ref.clone()),
         review_context: None,
         agent: None,
         agent_provider: Some(payload.task.agent_provider.clone()),
@@ -925,9 +1039,15 @@ async fn build_create_request(
         setup_cmds: None,
         task_template: None,
         transfer_import: Some(crate::mobile_api::TransferImportSummary {
+            head_oid: payload.task.head_oid.clone(),
+            transfer_id: Some(transfer_id.to_string()),
             source_machine: resolve_source_machine_name(state, &payload.task.source_peer_id).await,
             repo_mode: Some(payload.repo.mode.as_str().to_string()),
             session_restored: resume_session_id.is_some(),
+            workflow_definition: payload.task.workflow_definition.clone(),
+            previous_stage_result: payload.task.previous_stage_result.clone(),
+            previous_main_result: payload.task.previous_main_result.clone(),
+            revision_feedback: payload.task.revision_feedback.clone(),
         }),
         resume_session_id,
         recovery_snapshot: payload.recovery.clone(),

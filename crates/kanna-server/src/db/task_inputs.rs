@@ -359,7 +359,7 @@ impl Db {
     ) -> Result<(), rusqlite::Error> {
         self.with_immediate_transaction(|db| {
             for input in inputs {
-                db.conn.execute(
+                let inserted = db.conn.execute(
                     "INSERT INTO task_input
                      (task_id, run_id, stage, source, message, delivered_at,
                       origin_peer_id, origin_task_id, origin_input_id, origin_run_id)
@@ -378,6 +378,33 @@ impl Db {
                         input.origin.run_id.as_deref(),
                     ],
                 )?;
+                if inserted == 0 {
+                    let existing: (Option<String>, String, String, String, Option<String>) =
+                        db.conn.query_row(
+                            "SELECT stage, source, message, delivered_at, origin_run_id
+                             FROM task_input
+                             WHERE task_id = ? AND origin_peer_id = ? AND origin_task_id = ? AND origin_input_id = ?",
+                            params![
+                                task_id,
+                                &input.origin.peer_id,
+                                &input.origin.task_id,
+                                input.origin.input_id,
+                            ],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                        )?;
+                    let expected = (
+                        input.stage.clone(),
+                        input.source.clone(),
+                        input.message.clone(),
+                        input.delivered_at.clone(),
+                        input.origin.run_id.clone(),
+                    );
+                    if existing != expected {
+                        return Err(rusqlite::Error::InvalidParameterName(
+                            "conflicting transferred task input replay".into(),
+                        ));
+                    }
+                }
             }
             Ok(())
         })

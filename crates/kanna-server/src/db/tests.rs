@@ -229,7 +229,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "073_transferred_task_input_provenance");
+    assert_eq!(latest_migration, "075_transferred_task_context");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -4100,6 +4100,12 @@ fn transferred_task_inputs_keep_origin_and_are_idempotent() {
         .expect("first import");
     db.import_task_inputs("task-destination", &inputs)
         .expect("retry import");
+
+    let mut conflicting = inputs.clone();
+    conflicting[0].message = "different directive".into();
+    assert!(db
+        .import_task_inputs("task-destination", &conflicting)
+        .is_err());
 
     let imported = db
         .list_all_task_inputs("task-destination")

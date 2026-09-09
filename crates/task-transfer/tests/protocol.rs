@@ -404,6 +404,7 @@ fn control_and_peer_message_roundtrips_with_request_ids() {
     let peer_response = PeerResponse::SubmitTransferPayload {
         request_id: "req-4".into(),
         transfer_id: "transfer-4".into(),
+        admitted: true,
     };
 
     let peer_response_json = serde_json::to_string(&peer_response).unwrap();
@@ -824,6 +825,7 @@ fn wire_messages_use_expected_json_shapes() {
     let peer_response = PeerResponse::SubmitTransferPayload {
         request_id: "req-4".into(),
         transfer_id: "transfer-4".into(),
+        admitted: true,
     };
     assert_eq!(
         serde_json::to_value(&peer_response).unwrap(),
@@ -831,6 +833,7 @@ fn wire_messages_use_expected_json_shapes() {
             "type": "submit_transfer_payload",
             "request_id": "req-4",
             "transfer_id": "transfer-4",
+            "admitted": true,
         })
     );
 
@@ -957,6 +960,7 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
     let commit_response = ControlResponse::PrepareTransferCommit {
         request_id: "req-8".into(),
         transfer_id: "transfer-8".into(),
+        admitted: true,
     };
     assert_eq!(
         serde_json::to_value(&commit_response).unwrap(),
@@ -964,6 +968,7 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
             "type": "prepare_transfer_commit",
             "request_id": "req-8",
             "transfer_id": "transfer-8",
+            "admitted": true,
         })
     );
 

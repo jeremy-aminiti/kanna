@@ -160,6 +160,35 @@ pub(crate) fn resolve_task_work_tip(
     }
 }
 
+/// Resolve the one committed workspace tip a transfer is allowed to export.
+///
+/// Stage preparation deliberately leaves a diverged task in place so a human
+/// can repair it without the lifecycle guessing. A transfer has a stricter
+/// contract: choosing either side would close the source after dropping the
+/// other, so ambiguity is a terminal refusal before finalization begins.
+pub(crate) fn task_work_tip_for_transfer(
+    db: &Db,
+    repo_path: &str,
+    task_id: &str,
+    current_branch_name: Option<&str>,
+) -> Result<TaskWorkTip, String> {
+    let workspaces = task_workspaces(db, repo_path, task_id, current_branch_name)?;
+    match resolve_task_work_tip(repo_path, &workspaces) {
+        WorkTipResolution::Tip(tip) => Ok(tip),
+        WorkTipResolution::Diverged(tips) => Err(format!(
+            "task {task_id} has diverged committed workspace tips and cannot be transferred without dropping work: {}",
+            tips
+                .iter()
+                .map(|tip| format!("{}@{}", tip.branch, tip.commit))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        WorkTipResolution::Unknown => Err(format!(
+            "task {task_id} has no resolvable committed workspace tip to transfer"
+        )),
+    }
+}
+
 /// Move the task's workspace identity onto the branch holding its latest
 /// committed tip, so that everything downstream — the fork start point, the
 /// post's worktree, `$SOURCE_WORKTREE`, the resume preconditions, the departed
