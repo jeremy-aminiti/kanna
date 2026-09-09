@@ -133,7 +133,86 @@ async fn signal_merge_handoff_impl(
     payload: crate::mobile_api::MergeHandoffRequest,
 ) -> Result<SignalAgentResponse, (axum::http::StatusCode, String)> {
     let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id).await?;
-    deliver_merge_handoff(state, task_id, payload, MergeSignalSource::Agent).await
+    // Two callers, two contracts. An agent's request is an ordinary policy
+    // message that Kanna does not attest; a human-review request carries a
+    // durable decision this server records itself and the merge master reads
+    // back. They must not be able to impersonate one another, so the presence
+    // of the decision — a field no agent-facing surface can send — selects the
+    // path, and each validates only its own required shape.
+    if payload.human_review_decision.is_some() {
+        return deliver_human_review_merge_request(state, task_id, payload).await;
+    }
+    let branch = required_handoff_field("branch", payload.branch.as_deref())?;
+    let target = required_handoff_field("target", payload.target.as_deref())?;
+    let summary = required_handoff_field("summary", Some(payload.summary.as_str()))?;
+    deliver_merge_handoff(
+        state,
+        task_id,
+        MergeHandoffMessage {
+            branch,
+            target,
+            pr_url: trimmed_option(payload.pr_url.as_deref()),
+            summary,
+            extra_lines: Vec::new(),
+        },
+        MergeSignalSource::Agent,
+    )
+    .await
+}
+
+fn required_handoff_field(
+    name: &str,
+    value: Option<&str>,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    trimmed_option(value).ok_or_else(|| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("merge handoff {name} must be non-empty"),
+        )
+    })
+}
+
+fn trimmed_option(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// The request Kanna writes into the merge singleton's session.
+struct MergeHandoffMessage {
+    branch: String,
+    target: String,
+    pr_url: Option<String>,
+    summary: String,
+    /// Lines appended under the compact `MERGE` line. The human-review path
+    /// uses them to carry the decision reference, the reviewed SHAs, and the
+    /// ordering advice triage computed; the agent path sends none, so its wire
+    /// shape is byte-for-byte what it always was.
+    extra_lines: Vec<String>,
+}
+
+impl MergeHandoffMessage {
+    fn render(&self, task_id: &str) -> String {
+        let head = format!(
+            "MERGE {} -> {} [TASK {}]{}: {}",
+            self.branch,
+            self.target,
+            task_id,
+            self.pr_url
+                .as_deref()
+                .map(|url| format!(" [PR {url}]"))
+                .unwrap_or_default(),
+            self.summary,
+        );
+        if self.extra_lines.is_empty() {
+            return head;
+        }
+        std::iter::once(head)
+            .chain(self.extra_lines.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// Deliver a task's merge request to the repo's merge agent and record that
@@ -144,30 +223,12 @@ async fn signal_merge_handoff_impl(
 async fn deliver_merge_handoff(
     state: Arc<AppState>,
     task_id: String,
-    payload: crate::mobile_api::MergeHandoffRequest,
+    message: MergeHandoffMessage,
     source: MergeSignalSource,
 ) -> Result<SignalAgentResponse, (axum::http::StatusCode, String)> {
-    for (name, value) in [
-        ("branch", payload.branch.trim()),
-        ("target", payload.target.trim()),
-        ("summary", payload.summary.trim()),
-    ] {
-        if value.is_empty() {
-            return Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                format!("merge handoff {name} must be non-empty"),
-            ));
-        }
-    }
-
-    let branch = payload.branch.trim().to_string();
-    let target = payload.target.trim().to_string();
-    let pr_url = payload
-        .pr_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
+    let branch = message.branch.clone();
+    let target = message.target.clone();
+    let pr_url = message.pr_url.clone();
 
     let repo_id = {
         let state = Arc::clone(&state);
@@ -187,22 +248,11 @@ async fn deliver_merge_handoff(
         })
         .await?
     };
-    let message = format!(
-        "MERGE {} -> {} [TASK {}]{}: {}",
-        branch,
-        target,
-        task_id,
-        pr_url
-            .as_deref()
-            .map(|url| format!(" [PR {url}]"))
-            .unwrap_or_default(),
-        payload.summary.trim(),
-    );
     let response = signal_agent_request(
         state.clone(),
         repo_id,
         "merge".to_string(),
-        message,
+        message.render(&task_id),
         SingletonAgentOverrides::default(),
         true,
     )
@@ -227,6 +277,361 @@ async fn deliver_merge_handoff(
         state.publish_state_changed(StateChangeScope::Tasks);
     }
     Ok(response)
+}
+
+/// Deliver a **human's** merge authorization for a reviewed pull request.
+///
+/// This is the route the desktop and mobile "Queue for merge" control uses,
+/// and it is the only way a person's review decision reaches the merge
+/// singleton. It exists because the two agents on the human-assisted review
+/// path are deliberately denied merge authority — `pr-reviewer` may not
+/// approve or merge, `pr-triage` may not join or aggregate — and relaying an
+/// inferred verdict through either of them would quietly give it back.
+///
+/// Four things happen here that the ordinary agent path does not do:
+///
+/// 1. **The PR identity comes from the durable record, not the caller.** A
+///    review child forks from `pull/<n>/head` into a local `pr/<n>` ref, so
+///    its own branch names nothing mergeable; the head and base are read from
+///    the task's stored review context.
+/// 2. **The decision is pinned to what was read.** The context version and the
+///    head SHA the operator saw must still be current, and where the review
+///    worktree exists its checked-out commit must be that head. A PR that
+///    moved under the reviewer is refused, not merged from a stale decision.
+/// 3. **The decision is recorded before anything is delivered**, immutably and
+///    idempotently per reviewed head, so the record of what a human authorized
+///    survives a delivery that fails, and a second click cannot become a
+///    second authorization.
+/// 4. **`merge_signaled_at` is left alone.** That stamp answers "does this
+///    task still owe the approve post's one handoff?" — a different question,
+///    on a different workflow, that a per-head review decision must not
+///    silently answer.
+async fn deliver_human_review_merge_request(
+    state: Arc<AppState>,
+    task_id: String,
+    payload: crate::mobile_api::MergeHandoffRequest,
+) -> Result<SignalAgentResponse, (axum::http::StatusCode, String)> {
+    let decision_request = payload
+        .human_review_decision
+        .clone()
+        .expect("caller checked the decision is present");
+    let action_text = required_handoff_field(
+        "humanReviewDecision.actionText",
+        Some(&decision_request.action_text),
+    )?;
+    let claimed_head = required_handoff_field(
+        "humanReviewDecision.headSha",
+        Some(&decision_request.head_sha),
+    )?
+    .to_ascii_lowercase();
+    let summary = trimmed_option(Some(payload.summary.as_str()));
+
+    let prepared = {
+        let state = Arc::clone(&state);
+        let task_id = task_id.clone();
+        super::blocking::run_handler_blocking("human review decision prepare", move || {
+            let db = Db::open(&state.config.db_path)
+                .map_err(|error| db_write_error("db error", error))?;
+            let task = db
+                .get_pipeline_item(&task_id)
+                .map_err(|error| db_write_error("db error", error))?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::NOT_FOUND,
+                        format!("task not found: {task_id}"),
+                    )
+                })?;
+            let stored = db
+                .read_task_review_context(&task_id)
+                .map_err(|error| db_write_error("db error", error))?
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        format!(
+                            "task {task_id} has no published review context, so there is no pull request to \
+                             queue. Ask the review agent to publish one; never infer the PR from the \
+                             task's title or branch."
+                        ),
+                    )
+                })?;
+            if stored.version != decision_request.review_context_version {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        "the review context for {task_id} changed while you were deciding (you saw \
+                         version {}, it is now version {}). Re-read the pull request and decide \
+                         again.",
+                        decision_request.review_context_version, stored.version
+                    ),
+                ));
+            }
+            if stored.context.head_sha != claimed_head {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        "the reviewed head moved: you decided on {claimed_head}, the recorded head is \
+                         {}. Re-read the pull request and decide again.",
+                        stored.context.head_sha
+                    ),
+                ));
+            }
+            let worktree_path = db
+                .get_task_worktree_path(&task_id)
+                .map_err(|error| db_write_error("db error", error))?;
+            // The local worktree is corroboration, not the source of truth: a
+            // review whose worktree was already removed is still decidable
+            // from the durable context. What it must never do is contradict
+            // it — a checkout at a different commit means the human read
+            // something other than the head they are authorizing.
+            if let Some(path) = worktree_path
+                .as_deref()
+                .filter(|path| std::path::Path::new(path).exists())
+            {
+                if let Some(head) = worktree_head_commit(path) {
+                    if !head.eq_ignore_ascii_case(&stored.context.head_sha) {
+                        return Err((
+                            axum::http::StatusCode::CONFLICT,
+                            format!(
+                                "the review worktree for {task_id} is at {head}, not the reviewed head \
+                                 {}. Refresh the review context before queueing.",
+                                stored.context.head_sha
+                            ),
+                        ));
+                    }
+                }
+            }
+            let head = stored
+                .context
+                .qualified_head()
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        format!(
+                            "the review context for {task_id} records no pull-request head branch, so there \
+                             is nothing the merge agent could be asked to merge. Refresh it with the \
+                             PR's own head ref."
+                        ),
+                    )
+                })?;
+            let (decision, created) = db
+                .record_human_review_decision(crate::db::NewHumanReviewDecision {
+                    task_id: &task_id,
+                    review_context_version: stored.version,
+                    pr_url: &stored.context.pr_url,
+                    head: Some(&head),
+                    head_sha: &stored.context.head_sha,
+                    base_ref: &stored.context.base_ref,
+                    base_sha: stored.context.base_sha.as_deref(),
+                    action_text: &action_text,
+                    // Declared, never verified — the same model the input
+                    // ledger and revision origin use, and the same limit: it
+                    // records who the caller said was acting, beside what the
+                    // server can itself observe.
+                    origin: "operator",
+                    device_provenance: decision_request.device_provenance.as_ref(),
+                    source_machine_id: Some(&state.config.desktop_id),
+                })
+                .map_err(|error| db_write_error("db error", error))?;
+            Ok((task.repo_id, stored, decision, created))
+        })
+        .await?
+    };
+    let (repo_id, stored, decision, created) = prepared;
+
+    // A decision that already reached the merge master is not re-sent. The
+    // merge queue reads a second copy as a second authorization, and there is
+    // no request here that a retry could make more true.
+    match decision.delivery_status.as_str() {
+        "delivered" => {
+            log::info!(
+                "human review decision {} for {} was already delivered; not re-sending",
+                decision.id,
+                decision.pr_url
+            );
+            return Ok(SignalAgentResponse {
+                task_id: decision.merge_task_id.clone().unwrap_or_default(),
+                created: false,
+                owner_desktop_id: decision.owner_desktop_id.clone(),
+                owner_local_repo_id: None,
+            });
+        }
+        "uncertain" => {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                format!(
+                    "the merge request for decision {} stopped part-way and may already be in the \
+                     merge master's session. Read that session and reconcile it; do not send \
+                     this again.",
+                    decision.id
+                ),
+            ));
+        }
+        _ => {}
+    }
+    if !created {
+        log::info!(
+            "redelivering human review decision {} for {} (previous delivery: {})",
+            decision.id,
+            decision.pr_url,
+            decision.delivery_status
+        );
+    }
+
+    let message = MergeHandoffMessage {
+        branch: decision
+            .head
+            .clone()
+            .unwrap_or_else(|| stored.context.head_sha.clone()),
+        target: stored.context.base_ref.clone(),
+        pr_url: Some(stored.context.pr_url.clone()),
+        summary: summary.unwrap_or_else(|| format!("human-reviewed {}", stored.context.pr_url)),
+        extra_lines: human_review_request_lines(&decision, &stored, &task_id),
+    };
+
+    let delivered =
+        deliver_merge_handoff_message(Arc::clone(&state), repo_id, task_id.clone(), message).await;
+
+    let (status, detail, merge_task_id, owner_desktop_id) = match &delivered {
+        Ok(response) => (
+            crate::db::ReviewDecisionDelivery::Delivered,
+            None,
+            Some(response.task_id.clone()),
+            response.owner_desktop_id.clone(),
+        ),
+        Err((_, reason)) => (
+            classify_delivery_failure(reason),
+            Some(reason.clone()),
+            None,
+            None,
+        ),
+    };
+    {
+        let state = Arc::clone(&state);
+        let decision_id = decision.id.clone();
+        super::blocking::run_handler_blocking("human review decision delivery record", move || {
+            let db = Db::open(&state.config.db_path)
+                .map_err(|error| db_write_error("db error", error))?;
+            db.record_human_review_decision_delivery(
+                &decision_id,
+                status,
+                detail.as_deref(),
+                merge_task_id.as_deref(),
+                owner_desktop_id.as_deref(),
+            )
+            .map_err(|error| db_write_error("db error", error))
+        })
+        .await?;
+    }
+    state.publish_state_changed(StateChangeScope::Tasks);
+    delivered
+}
+
+/// A refused delivery is safe to send again; one that stopped part-way is not.
+///
+/// `input_held_by_draft` is in the second group deliberately: the daemon
+/// accepted the message into its queue and will write it when that terminal
+/// submits, so resending would put two authorizations in the merge master's
+/// session for one human decision.
+fn classify_delivery_failure(reason: &str) -> crate::db::ReviewDecisionDelivery {
+    if reason.contains("delivery_uncertain") || reason.contains("input_held_by_draft") {
+        crate::db::ReviewDecisionDelivery::Uncertain
+    } else {
+        crate::db::ReviewDecisionDelivery::Failed
+    }
+}
+
+/// The structured lines a human-review request carries under its `MERGE` line.
+///
+/// The merge master may be running on a different machine from the reviewer —
+/// the singleton is account-wide through the relay directory — and the triage
+/// task that ranked this PR may be closed. So everything it needs travels in
+/// the request: which decision authorizes it, what commit that decision was
+/// taken against, where to read the durable record back, and what else triage
+/// saw touching the same files.
+fn human_review_request_lines(
+    decision: &crate::db::HumanReviewDecision,
+    stored: &crate::db::TaskReviewContext,
+    task_id: &str,
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "HUMAN-REVIEW-DECISION {} reviewed-head={} base={}{} review-task={} machine={} decided-at={}",
+        decision.id,
+        decision.head_sha,
+        stored.context.base_ref,
+        stored
+            .context
+            .base_sha
+            .as_deref()
+            .map(|sha| format!("@{sha}"))
+            .unwrap_or_default(),
+        task_id,
+        decision.source_machine_id.as_deref().unwrap_or("unknown"),
+        decision.created_at,
+    )];
+    lines.push(format!("HUMAN-AUTHORIZATION {:?}", decision.action_text));
+    if let Some(producing) = stored.context.producing_task_id.as_deref() {
+        lines.push(format!(
+            "PRODUCING-TASK {producing}{}",
+            stored
+                .context
+                .producing_machine_id
+                .as_deref()
+                .map(|machine| format!(" machine={machine}"))
+                .unwrap_or_default()
+        ));
+    }
+    if let Some(rank) = stored.context.triage_rank {
+        lines.push(format!(
+            "TRIAGE-RANK {rank}{}",
+            stored
+                .context
+                .triage_parent_task_id
+                .as_deref()
+                .map(|parent| format!(" triage-task={parent}"))
+                .unwrap_or_default()
+        ));
+    }
+    for related in &stored.context.related_pr_urls {
+        lines.push(format!("RELATED-PR {related}"));
+    }
+    lines
+}
+
+/// The commit a review worktree is actually checked out at, or `None` when it
+/// cannot be read — an unreadable worktree corroborates nothing and must not
+/// be treated as a mismatch.
+fn worktree_head_commit(worktree_path: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let head = String::from_utf8(output.stdout).ok()?;
+    let head = head.trim();
+    (!head.is_empty()).then(|| head.to_ascii_lowercase())
+}
+
+/// Send a prepared request to a repo's merge singleton without touching the
+/// task's `merge_signaled_at` stamp. The human-review path owns its own
+/// durable record and must not answer the approve post's question.
+async fn deliver_merge_handoff_message(
+    state: Arc<AppState>,
+    repo_id: String,
+    task_id: String,
+    message: MergeHandoffMessage,
+) -> Result<SignalAgentResponse, (axum::http::StatusCode, String)> {
+    signal_agent_request(
+        state,
+        repo_id,
+        "merge".to_string(),
+        message.render(&task_id),
+        SingletonAgentOverrides::default(),
+    )
+    .await
 }
 
 /// Hand the task's PR to the repo's merge master before the workflow closes
@@ -288,11 +693,12 @@ pub(super) async fn ensure_merge_handoff_before_close(
     let delivered = deliver_merge_handoff(
         Arc::clone(state),
         task_id.to_string(),
-        crate::mobile_api::MergeHandoffRequest {
+        MergeHandoffMessage {
             branch: pending.branch,
             target: pending.target,
             pr_url: Some(pr_url),
             summary: pending.summary,
+            extra_lines: Vec::new(),
         },
         MergeSignalSource::Engine,
     )

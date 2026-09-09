@@ -423,6 +423,19 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         diff_base_ref: Option<String>,
 
+        /// For a pull-request review task, a JSON object naming the PR this
+        /// task reviews: prUrl, headSha and baseRef are required, with
+        /// optional headRepo, headRef, baseSha, producingTaskId,
+        /// producingMachineId, triageParentTaskId, triageRank and
+        /// relatedPrUrls
+        ///
+        /// This is candidate information about the forge and authorizes
+        /// nothing. It exists so the operator's own merge control has a
+        /// durable pull-request identity; a review child's branch and its
+        /// local `pr/<n>` fork point are not mergeable names.
+        #[arg(long)]
+        review_context: Option<String>,
+
         /// Agent definition name to run the task's first stage with,
         /// overriding the workflow stage's own agent binding
         #[arg(long)]

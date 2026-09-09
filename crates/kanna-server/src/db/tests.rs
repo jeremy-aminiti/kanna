@@ -229,7 +229,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "071_event_subscriptions");
+    assert_eq!(latest_migration, "072_human_review_decision");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -3593,6 +3593,9 @@ fn task_event_type_names_are_stable() {
             "task.unblocked",
             "task.provider_quota_rejected",
             "task.provider_quota_parked",
+            "task.review_context_changed",
+            "task.human_review_decision",
+            "task.human_review_decision_delivery",
         ]
     );
 }
@@ -4280,4 +4283,219 @@ fn production_access_is_refused_at_every_database_entry_point() {
         String::from_utf8_lossy(&output.stderr),
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
+
+fn seed_review_task(db: &Db, task_id: &str) {
+    db.insert_test_repo("repo-review", "Review Repo")
+        .expect("repo");
+    db.insert_test_pipeline_item(
+        task_id,
+        "repo-review",
+        "Review pull request #12",
+        Some("PR #12"),
+        "review",
+        "2026-09-08T00:00:00Z",
+    )
+    .expect("task");
+}
+
+fn sample_review_context() -> super::ReviewContextInput {
+    super::ReviewContextInput {
+        pr_url: "https://github.com/acme/repo/pull/12".to_string(),
+        head_repo: Some("contributor/repo".to_string()),
+        head_ref: Some("feature/x".to_string()),
+        head_sha: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+        base_ref: "main".to_string(),
+        base_sha: None,
+        producing_task_id: None,
+        producing_machine_id: None,
+        triage_parent_task_id: None,
+        triage_rank: None,
+        related_pr_urls: Vec::new(),
+    }
+}
+
+/// A refresh must be *visible*. The version is what lets a decision taken
+/// against an older read be refused rather than silently applied to a commit
+/// nobody looked at.
+#[test]
+fn refreshing_a_review_context_bumps_its_version() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    seed_review_task(&db, "task-review");
+
+    let first = db
+        .upsert_task_review_context("task-review", &sample_review_context())
+        .expect("store");
+    assert_eq!(first.version, 1);
+    // SHAs are normalized so a decision cannot miss a match on case alone.
+    assert_eq!(first.context.head_sha, "a".repeat(40));
+
+    let mut moved = sample_review_context();
+    moved.head_sha = "b".repeat(40);
+    let second = db
+        .upsert_task_review_context("task-review", &moved)
+        .expect("refresh");
+    assert_eq!(second.version, 2);
+    assert_eq!(second.context.head_sha, "b".repeat(40));
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+/// A context that cannot say which pull request, at which commit, is worse
+/// than none: the control would offer to queue a merge it cannot name.
+#[test]
+fn a_review_context_must_identify_the_pull_request_and_commit() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    seed_review_task(&db, "task-review");
+
+    for mutate in [
+        (|context: &mut super::ReviewContextInput| context.pr_url = String::new())
+            as fn(&mut super::ReviewContextInput),
+        |context| context.pr_url = "acme/repo#12".to_string(),
+        |context| context.head_sha = "not-a-sha".to_string(),
+        |context| context.head_sha = "abc".to_string(),
+        |context| context.base_ref = "  ".to_string(),
+    ] {
+        let mut context = sample_review_context();
+        mutate(&mut context);
+        assert!(
+            db.upsert_task_review_context("task-review", &context)
+                .is_err(),
+            "expected {context:?} to be refused"
+        );
+    }
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+/// One human decision per reviewed head. A double click, a retried request, or
+/// a client that lost the response must resolve to the decision that already
+/// exists — the merge queue reads a second copy as a second person authorizing
+/// the merge.
+#[test]
+fn a_repeated_authorization_resolves_to_the_same_decision() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    seed_review_task(&db, "task-review");
+    db.upsert_task_review_context("task-review", &sample_review_context())
+        .expect("store");
+
+    let new_decision = |head_sha: &'static str| super::NewHumanReviewDecision {
+        task_id: "task-review",
+        review_context_version: 1,
+        pr_url: "https://github.com/acme/repo/pull/12",
+        head: Some("contributor/repo:feature/x"),
+        head_sha,
+        base_ref: "main",
+        base_sha: None,
+        action_text: "I reviewed it and authorize the merge.",
+        origin: "operator",
+        device_provenance: None,
+        source_machine_id: Some("desktop-1"),
+    };
+
+    let head = "a".repeat(40);
+    let head: &'static str = Box::leak(head.into_boxed_str());
+    let (first, created) = db
+        .record_human_review_decision(new_decision(head))
+        .expect("record");
+    assert!(created);
+    let (again, created_again) = db
+        .record_human_review_decision(new_decision(head))
+        .expect("record again");
+    assert!(!created_again);
+    assert_eq!(first.id, again.id);
+    assert_eq!(
+        db.count_test_human_review_decisions("task-review")
+            .expect("count"),
+        1
+    );
+
+    // A head that moved is a different decision, not a rewrite of this one:
+    // the reviewer read a different commit.
+    let moved: &'static str = Box::leak("b".repeat(40).into_boxed_str());
+    let (moved_decision, created_moved) = db
+        .record_human_review_decision(new_decision(moved))
+        .expect("record moved");
+    assert!(created_moved);
+    assert_ne!(moved_decision.id, first.id);
+    assert_eq!(
+        db.count_test_human_review_decisions("task-review")
+            .expect("count"),
+        2
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+/// Delivery outcome is recorded beside the decision, never inside it, so a
+/// redelivery cannot rewrite what a person authorized.
+#[test]
+fn recording_delivery_leaves_the_decision_itself_untouched() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    seed_review_task(&db, "task-review");
+    db.upsert_task_review_context("task-review", &sample_review_context())
+        .expect("store");
+    let (decision, _) = db
+        .record_human_review_decision(super::NewHumanReviewDecision {
+            task_id: "task-review",
+            review_context_version: 1,
+            pr_url: "https://github.com/acme/repo/pull/12",
+            head: Some("contributor/repo:feature/x"),
+            head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            base_ref: "main",
+            base_sha: None,
+            action_text: "I reviewed it and authorize the merge.",
+            origin: "operator",
+            device_provenance: None,
+            source_machine_id: Some("desktop-1"),
+        })
+        .expect("record");
+    assert_eq!(decision.delivery_status, "pending");
+    assert!(decision.delivered_at.is_none());
+
+    db.record_human_review_decision_delivery(
+        &decision.id,
+        super::ReviewDecisionDelivery::Failed,
+        Some("input_blocked"),
+        None,
+        None,
+    )
+    .expect("record failure");
+    let failed = db
+        .read_human_review_decision(&decision.id)
+        .expect("read")
+        .expect("exists");
+    assert_eq!(failed.delivery_status, "failed");
+    assert!(failed.delivered_at.is_none());
+    assert_eq!(failed.action_text, decision.action_text);
+    assert_eq!(failed.created_at, decision.created_at);
+
+    db.record_human_review_decision_delivery(
+        &decision.id,
+        super::ReviewDecisionDelivery::Delivered,
+        None,
+        Some("task-merge"),
+        Some("desktop-2"),
+    )
+    .expect("record delivery");
+    let delivered = db
+        .read_human_review_decision(&decision.id)
+        .expect("read")
+        .expect("exists");
+    assert_eq!(delivered.delivery_status, "delivered");
+    assert!(delivered.delivered_at.is_some());
+    assert_eq!(delivered.merge_task_id.as_deref(), Some("task-merge"));
+    assert_eq!(delivered.owner_desktop_id.as_deref(), Some("desktop-2"));
+    assert_eq!(delivered.action_text, decision.action_text);
+    assert_eq!(delivered.head_sha, decision.head_sha);
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
 }

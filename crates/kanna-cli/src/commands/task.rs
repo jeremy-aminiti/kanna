@@ -247,6 +247,7 @@ pub(crate) fn build_create_task_request(options: TaskCreateOptions) -> CreateTas
         workflow_name: options.workflow_name,
         base_ref: options.base_ref,
         diff_base_ref: options.diff_base_ref,
+        review_context: options.review_context,
         agent: options.agent,
         agent_provider: options.agent_provider,
         agent_type: options.agent_type.or_else(|| Some("pty".to_string())),
@@ -710,6 +711,7 @@ pub(crate) async fn run(command: TaskCommands) {
             workflow_name,
             base_ref,
             diff_base_ref,
+            review_context,
             agent,
             agent_provider,
             agent_type,
@@ -721,6 +723,10 @@ pub(crate) async fn run(command: TaskCommands) {
             parent_task,
         } => {
             let base_url = resolve_server_base_url_from_env(server_url.as_deref());
+            let review_context_value = parse_metadata_json(&review_context).unwrap_or_else(|e| {
+                eprintln!("Invalid --review-context JSON: {e}");
+                process::exit(1);
+            });
             let request = build_create_task_request(TaskCreateOptions {
                 repo_id,
                 prompt,
@@ -728,6 +734,7 @@ pub(crate) async fn run(command: TaskCommands) {
                 workflow_name,
                 base_ref,
                 diff_base_ref,
+                review_context: review_context_value,
                 agent,
                 agent_provider,
                 agent_type,

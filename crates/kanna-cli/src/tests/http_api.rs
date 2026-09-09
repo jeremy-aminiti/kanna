@@ -1054,6 +1054,7 @@ async fn create_task_via_api_posts_default_agent_type_without_agent_provider_whe
         workflow_name: None,
         base_ref: None,
         diff_base_ref: None,
+        review_context: None,
         agent: None,
         agent_provider: None,
         agent_type: None,

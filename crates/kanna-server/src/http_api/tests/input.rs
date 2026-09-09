@@ -3581,3 +3581,403 @@ mod merge_handoff_on_close {
         harness.cleanup();
     }
 }
+
+/// The human-assisted PR review path: an operator's own merge authorization.
+///
+/// What these tests hold in place is a boundary, not a feature. `pr-reviewer`
+/// and `pr-triage` are deliberately denied merge authority, so the only route
+/// from a human's verdict to the merge queue is this one — and it must stay
+/// unable to be walked by anything that is not a person pressing a control on
+/// a pull request they read at a commit that has not moved since.
+mod human_review_merge_authorization {
+    use super::*;
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    const REVIEWED_HEAD: &str = "1111111111111111111111111111111111111111";
+    const PR_URL: &str = "https://github.com/acme/repo/pull/77";
+
+    fn review_context() -> crate::db::ReviewContextInput {
+        crate::db::ReviewContextInput {
+            pr_url: PR_URL.to_string(),
+            head_repo: Some("contributor/repo".to_string()),
+            head_ref: Some("feature/from-a-fork".to_string()),
+            head_sha: REVIEWED_HEAD.to_string(),
+            base_ref: "main".to_string(),
+            base_sha: Some("2222222222222222222222222222222222222222".to_string()),
+            producing_task_id: Some("task-producer".to_string()),
+            producing_machine_id: Some("desktop-other".to_string()),
+            triage_parent_task_id: Some("task-triage".to_string()),
+            triage_rank: Some(2),
+            related_pr_urls: vec!["https://github.com/acme/repo/pull/78".to_string()],
+        }
+    }
+
+    /// A review child, as `pr-triage` dispatches one: forked from the PR head
+    /// into a local `pr/<n>` ref, on a workflow with no `approve` post.
+    fn seed_review_child(db: &Db, task_id: &str) {
+        db.insert_test_pipeline_item(
+            task_id,
+            "repo-1",
+            "Review pull request #77 for a human reviewer.",
+            Some("PR #77 · a change"),
+            "review",
+            "2026-09-08T00:00:00Z",
+        )
+        .unwrap();
+        db.upsert_task_review_context(task_id, &review_context())
+            .unwrap();
+    }
+
+    fn seed_merge_singleton(db: &Db) {
+        db.insert_test_pipeline_item(
+            "task-merge",
+            "repo-1",
+            "Merge master",
+            Some("Merge Master"),
+            "in progress",
+            "2026-09-08T00:00:01Z",
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-merge",
+            task_id: "task-merge",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("merge"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("merge-session"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    }
+
+    fn queue_body(version: i64, head_sha: &str) -> String {
+        serde_json::json!({
+            "summary": "Human-reviewed pull request 77",
+            "humanReviewDecision": {
+                "reviewContextVersion": version,
+                "headSha": head_sha,
+                "actionText": "I reviewed it and authorize the merge.",
+            }
+        })
+        .to_string()
+    }
+
+    /// Drive one request against a live fake daemon, returning the HTTP
+    /// response and every line the merge singleton's session was sent.
+    async fn post_queue_request(
+        unique: &str,
+        seed: impl FnOnce(&Db),
+        body: String,
+        expect_delivery: bool,
+    ) -> (axum::http::StatusCode, String, Vec<String>, Config) {
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let daemon_server = tokio::spawn(async move {
+            let mut inputs: Vec<String> = Vec::new();
+            let Ok(Ok((stream, _))) =
+                tokio::time::timeout(std::time::Duration::from_millis(1500), listener.accept())
+                    .await
+            else {
+                return inputs;
+            };
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            // Exactly one request: the caller says up front whether it expects
+            // a delivery, and a second read on a closed connection would panic
+            // rather than report what was sent.
+            if let DaemonCommand::SubmitInput { data, .. } =
+                read_test_daemon_command(&mut reader, &mut write_half).await
+            {
+                inputs.push(String::from_utf8_lossy(&data).to_string());
+            }
+            let _ = write_half
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
+                )
+                .await;
+            inputs
+        });
+
+        let config = merge_test_config(unique, &daemon_dir);
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        seed(&db);
+        drop(db);
+
+        let response = super::super::router(Arc::new(super::super::AppState::new(config.clone())))
+            .oneshot(
+                Request::post("/v1/tasks/task-review/actions/signal-merge-handoff")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+
+        let inputs = if expect_delivery {
+            daemon_server.await.unwrap()
+        } else {
+            daemon_server.abort();
+            Vec::new()
+        };
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        (status, body, inputs, config)
+    }
+
+    /// The request the merge master actually receives names the *pull
+    /// request's* head — never the review task's `task-*` branch and never the
+    /// local `pr/<n>` ref it forked from, neither of which the forge can
+    /// merge — and carries the decision reference, so a merge master on
+    /// another machine can read the durable record without a living review or
+    /// triage session.
+    #[tokio::test]
+    async fn delivers_the_prs_own_head_and_the_recorded_decision() {
+        let unique = format!("human-review-merge-{}", unique_test_suffix());
+        let (status, _body, inputs, config) = post_queue_request(
+            &unique,
+            |db| {
+                seed_review_child(db, "task-review");
+                seed_merge_singleton(db);
+            },
+            queue_body(1, REVIEWED_HEAD),
+            true,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let message = inputs.first().expect("a merge request was delivered");
+        let mut lines = message.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            format!(
+                "MERGE contributor/repo:feature/from-a-fork -> main [TASK task-review] \
+                 [PR {PR_URL}]: Human-reviewed pull request 77"
+            )
+        );
+        let decision_line = lines.next().unwrap();
+        assert!(
+            decision_line.starts_with("HUMAN-REVIEW-DECISION hrd-"),
+            "expected a decision reference, got {decision_line}"
+        );
+        assert!(decision_line.contains(&format!("reviewed-head={REVIEWED_HEAD}")));
+        assert!(decision_line.contains("base=main@2222222222222222222222222222222222222222"));
+        assert!(decision_line.contains("review-task=task-review"));
+        assert!(message.contains("HUMAN-AUTHORIZATION \"I reviewed it and authorize the merge.\""));
+        assert!(message.contains("PRODUCING-TASK task-producer machine=desktop-other"));
+        assert!(message.contains("TRIAGE-RANK 2 triage-task=task-triage"));
+        assert!(message.contains("RELATED-PR https://github.com/acme/repo/pull/78"));
+
+        let db = Db::open(&config.db_path).unwrap();
+        let decision = db
+            .latest_human_review_decision("task-review")
+            .unwrap()
+            .expect("the decision is durable");
+        assert_eq!(decision.head_sha, REVIEWED_HEAD);
+        assert_eq!(decision.origin, "operator");
+        assert_eq!(decision.delivery_status, "delivered");
+        assert_eq!(decision.merge_task_id.as_deref(), Some("task-merge"));
+        // The approve post's one-handoff stamp answers a different question on
+        // a different workflow. A per-head review decision must not answer it.
+        assert!(db.task_merge_signaled_at("task-review").unwrap().is_none());
+        drop(db);
+        let _ = std::fs::remove_file(config.db_path);
+    }
+
+    /// A pull request that moved under its reviewer needs a fresh read. The
+    /// operator's decision was taken on a commit that is no longer the head,
+    /// and inheriting it onto the new one would merge code nobody read.
+    #[tokio::test]
+    async fn refuses_a_decision_taken_on_a_head_that_moved() {
+        let unique = format!("human-review-stale-head-{}", unique_test_suffix());
+        let (status, body, _inputs, config) = post_queue_request(
+            &unique,
+            |db| {
+                seed_review_child(db, "task-review");
+                seed_merge_singleton(db);
+            },
+            queue_body(1, "3333333333333333333333333333333333333333"),
+            false,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("the reviewed head moved"), "{body}");
+        let db = Db::open(&config.db_path).unwrap();
+        assert!(db
+            .latest_human_review_decision("task-review")
+            .unwrap()
+            .is_none());
+        drop(db);
+        let _ = std::fs::remove_file(config.db_path);
+    }
+
+    /// A review context refreshed while the operator was deciding invalidates
+    /// that decision. The version is what makes the change visible instead of
+    /// silently adopted.
+    #[tokio::test]
+    async fn refuses_a_decision_taken_against_a_superseded_context() {
+        let unique = format!("human-review-stale-version-{}", unique_test_suffix());
+        let (status, body, _inputs, config) = post_queue_request(
+            &unique,
+            |db| {
+                seed_review_child(db, "task-review");
+                db.upsert_task_review_context("task-review", &review_context())
+                    .unwrap();
+                seed_merge_singleton(db);
+            },
+            queue_body(1, REVIEWED_HEAD),
+            false,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("changed while you were deciding"), "{body}");
+        let _ = std::fs::remove_file(config.db_path);
+    }
+
+    /// Without a published review context there is no pull request to name and
+    /// nothing a decision could be checked against. Guessing one from the
+    /// task's title or branch is exactly the inference this path refuses.
+    #[tokio::test]
+    async fn refuses_a_review_task_with_no_published_pull_request() {
+        let unique = format!("human-review-no-context-{}", unique_test_suffix());
+        let (status, body, _inputs, config) = post_queue_request(
+            &unique,
+            |db| {
+                db.insert_test_pipeline_item(
+                    "task-review",
+                    "repo-1",
+                    "Review something",
+                    Some("PR #77"),
+                    "review",
+                    "2026-09-08T00:00:00Z",
+                )
+                .unwrap();
+                seed_merge_singleton(db);
+            },
+            queue_body(1, REVIEWED_HEAD),
+            false,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("no published review context"), "{body}");
+        let _ = std::fs::remove_file(config.db_path);
+    }
+
+    /// A second click is the same decision, not a second authorization: the
+    /// merge master would read a duplicate as another human saying merge it.
+    #[tokio::test]
+    async fn does_not_resend_a_decision_the_merge_master_already_holds() {
+        let unique = format!("human-review-duplicate-{}", unique_test_suffix());
+        let (status, _body, _inputs, config) = post_queue_request(
+            &unique,
+            |db| {
+                seed_review_child(db, "task-review");
+                seed_merge_singleton(db);
+                let (decision, created) = db
+                    .record_human_review_decision(crate::db::NewHumanReviewDecision {
+                        task_id: "task-review",
+                        review_context_version: 1,
+                        pr_url: PR_URL,
+                        head: Some("contributor/repo:feature/from-a-fork"),
+                        head_sha: REVIEWED_HEAD,
+                        base_ref: "main",
+                        base_sha: None,
+                        action_text: "I reviewed it and authorize the merge.",
+                        origin: "operator",
+                        device_provenance: None,
+                        source_machine_id: Some("desktop-concurrency"),
+                    })
+                    .unwrap();
+                assert!(created);
+                db.record_human_review_decision_delivery(
+                    &decision.id,
+                    crate::db::ReviewDecisionDelivery::Delivered,
+                    None,
+                    Some("task-merge"),
+                    Some("desktop-concurrency"),
+                )
+                .unwrap();
+            },
+            queue_body(1, REVIEWED_HEAD),
+            false,
+        )
+        .await;
+
+        // Nothing was written to the merge session: the fake daemon is aborted
+        // without ever having been connected to.
+        assert_eq!(status, StatusCode::OK);
+        let db = Db::open(&config.db_path).unwrap();
+        let count = db.count_test_human_review_decisions("task-review").unwrap();
+        assert_eq!(count, 1, "a retry must not create a second authorization");
+        drop(db);
+        let _ = std::fs::remove_file(config.db_path);
+    }
+
+    /// A delivery that stopped part-way may already be in the merge master's
+    /// session. Resending it would put two authorizations there for one human
+    /// decision, so it is refused and handed to a person to reconcile.
+    #[tokio::test]
+    async fn refuses_to_resend_an_uncertain_delivery() {
+        let unique = format!("human-review-uncertain-{}", unique_test_suffix());
+        let (status, body, _inputs, config) = post_queue_request(
+            &unique,
+            |db| {
+                seed_review_child(db, "task-review");
+                seed_merge_singleton(db);
+                let (decision, _) = db
+                    .record_human_review_decision(crate::db::NewHumanReviewDecision {
+                        task_id: "task-review",
+                        review_context_version: 1,
+                        pr_url: PR_URL,
+                        head: Some("contributor/repo:feature/from-a-fork"),
+                        head_sha: REVIEWED_HEAD,
+                        base_ref: "main",
+                        base_sha: None,
+                        action_text: "I reviewed it and authorize the merge.",
+                        origin: "operator",
+                        device_provenance: None,
+                        source_machine_id: Some("desktop-concurrency"),
+                    })
+                    .unwrap();
+                db.record_human_review_decision_delivery(
+                    &decision.id,
+                    crate::db::ReviewDecisionDelivery::Uncertain,
+                    Some("delivery_uncertain"),
+                    None,
+                    None,
+                )
+                .unwrap();
+            },
+            queue_body(1, REVIEWED_HEAD),
+            false,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("stopped part-way"), "{body}");
+        let _ = std::fs::remove_file(config.db_path);
+    }
+}

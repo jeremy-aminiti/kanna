@@ -27,6 +27,7 @@ mod pipeline_items;
 mod ports;
 mod provider_rejections;
 mod repos;
+mod review_context;
 mod settings;
 mod snapshot;
 mod stage_runs;
@@ -54,6 +55,10 @@ pub use provider_rejections::{
     NewProviderRejection, ProviderRejection, QuotaRecovery, QuotaRejectionSource,
 };
 pub(crate) use repos::RepoOrderInput;
+pub use review_context::{
+    HumanReviewDecision, NewHumanReviewDecision, ReviewContextInput, ReviewDecisionDelivery,
+    TaskReviewContext,
+};
 #[allow(unused_imports)]
 pub use stage_runs::{
     FinishedStageRun, ProviderOverrideSource, StageProviderOverride, StageTrigger,
@@ -150,6 +155,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "069_retire_pre_existing_transfer_alerts",
     "070_provider_quota_rejection_log",
     "071_event_subscriptions",
+    "072_human_review_decision",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2175,6 +2181,12 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         create_event_subscription_schema,
     )?;
 
+    run_migration(
+        conn,
+        "072_human_review_decision",
+        create_human_review_schema,
+    )?;
+
     Ok(())
 }
 
@@ -2206,6 +2218,62 @@ fn create_event_subscription_schema(conn: &Connection) -> rusqlite::Result<()> {
         revision INTEGER NOT NULL,
         record TEXT NOT NULL
     ); CREATE INDEX idx_event_subscription_task ON event_subscription(task_id);",
+    )
+}
+
+/// The human-assisted PR review path's two records: what a review task is
+/// reviewing, and the human decisions that authorize merging it.
+///
+/// Separate tables because they are separate kinds of claim — see
+/// [`crate::db::review_context`]. The decision's uniqueness on
+/// `(task_id, head_sha)` is the idempotency that keeps a double click, a
+/// retried request, or a lost response from manufacturing a second
+/// authorization, while still allowing a PR whose head moved to be re-reviewed
+/// and decided again.
+fn create_human_review_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS task_review_context (
+          task_id TEXT PRIMARY KEY REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          version INTEGER NOT NULL,
+          pr_url TEXT NOT NULL,
+          head_repo TEXT,
+          head_ref TEXT,
+          head_sha TEXT NOT NULL,
+          base_ref TEXT NOT NULL,
+          base_sha TEXT,
+          producing_task_id TEXT,
+          producing_machine_id TEXT,
+          triage_parent_task_id TEXT,
+          triage_rank INTEGER,
+          related_pr_urls TEXT,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS human_review_decision (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+          review_context_version INTEGER NOT NULL,
+          pr_url TEXT NOT NULL,
+          head TEXT,
+          head_sha TEXT NOT NULL,
+          base_ref TEXT NOT NULL,
+          base_sha TEXT,
+          action_text TEXT NOT NULL,
+          origin TEXT NOT NULL,
+          device_provenance TEXT,
+          source_machine_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          delivery_status TEXT NOT NULL DEFAULT 'pending',
+          delivery_detail TEXT,
+          delivered_at TEXT,
+          merge_task_id TEXT,
+          owner_desktop_id TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_human_review_decision_head
+          ON human_review_decision(task_id, head_sha);
+        CREATE INDEX IF NOT EXISTS idx_human_review_decision_task
+          ON human_review_decision(task_id, created_at);
+        "#,
     )
 }
 

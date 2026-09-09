@@ -125,6 +125,12 @@ export async function createScriptedTask(
     traceTerminalKeys?: boolean;
     waitingPromptSnippet?: string;
     agentProvider?: "claude" | "codex";
+    /**
+     * A pull-request review identity for the created task, exactly as
+     * `pr-triage` dispatches one. Candidate information about the forge; it
+     * authorizes nothing on its own.
+     */
+    reviewContext?: Record<string, unknown>;
   }
 ): Promise<ScriptedTask> {
   const repoPath = join(
@@ -168,6 +174,9 @@ export async function createScriptedTask(
       displayName: options.displayName,
       agentProvider: options.agentProvider ?? "codex",
       agentType: "pty",
+      ...(options.reviewContext === undefined
+        ? {}
+        : { reviewContext: options.reviewContext }),
       ...(options.terminalCols === undefined
         ? {}
         : { terminalCols: options.terminalCols }),
