@@ -1021,7 +1021,6 @@ async fn run_finalization(
                 .source_peer_id
                 .clone()
                 .unwrap_or(existing.task.source_peer_id.clone()),
-            target_has_repo: existing.repo.mode == RepoAcquisitionMode::ReuseLocal,
         },
         transfer
             .target_peer_id
