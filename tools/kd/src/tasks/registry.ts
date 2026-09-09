@@ -116,6 +116,7 @@ import {
 import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
 import { configureExternalWorkspaceBuild, readExternalBuildRoot } from "../runtime/build-storage";
+import { withRustGate } from "../runtime/rust-gate";
 import { checkSetupPrerequisites, installSetupDependencies } from "../runtime/setup";
 import { getDevStatus } from "../runtime/status";
 import { executeTestAll } from "../runtime/test-all";
@@ -2467,7 +2468,11 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
-      const staged = await buildDesktopSidecars(nodeCommandRunner, context.repoRoot, context.env);
+      const staged = await withRustGate({
+        homeDir: context.homeDir,
+        env: context.env,
+        run: (env) => buildDesktopSidecars(nodeCommandRunner, context.repoRoot, env)
+      });
       return {
         ok: true,
         message: `Built and staged ${staged.length} sidecars.`,
@@ -2850,10 +2855,14 @@ export const taskDefinitions = [
     inputSchema: emptyInputSchema,
     execute: async () => {
       const context = await resolveDefaultContext(process.env);
-      return executeRustTests({
-        repoRoot: context.repoRoot,
+      return withRustGate({
+        homeDir: context.homeDir,
         env: context.env,
-        runner: nodeCommandRunner
+        run: (env) => executeRustTests({
+          repoRoot: context.repoRoot,
+          env,
+          runner: nodeCommandRunner
+        })
       });
     },
   },
