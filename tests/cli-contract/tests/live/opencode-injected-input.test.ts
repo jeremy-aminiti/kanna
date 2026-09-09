@@ -10,12 +10,12 @@ import { startPtySession, type PtySession } from "../../helpers/pty";
 // task send-input, and stage posts.
 //
 // Decision 3 of the transfer plan replaces finalization's SIGINT with injected
-// input: write a wrap-up message, wait for Idle, then inject the provider's quit
-// command. Two provider-owned behaviors have to hold for that to work — that a
-// message written to the PTY master and submitted with a discrete CR is accepted
-// exactly like typing, and that the quit command preempts an agent that is
-// mid-turn (which is *why* the design waits for Idle first: quitting early
-// truncates the wrap-up the transfer is trying to capture).
+// input: establish Idle, submit a wrap-up message, observe its Busy → Idle
+// lifecycle, then inject the provider's quit command. Two provider-owned
+// behaviors have to hold for that to work — that one logical buffer containing
+// a message plus CR is accepted exactly like typing, and that the quit command
+// preempts an agent that is mid-turn (which is why completion must be observed
+// before quitting).
 //
 // These need a real TUI, so they are pinned against OpenCode's free model — the
 // repo's standing choice for interactive live-agent tests. Codex's quit command
@@ -43,7 +43,7 @@ async function requireEnvironment(ctx: { skip: (reason?: string) => void }): Pro
 }
 
 describe("injected input against a live agent TUI (opencode)", () => {
-  it("accepts a message written to the PTY and submitted with a discrete CR", async (ctx) => {
+  it("completes submitted preparation before a separate quit command", async (ctx) => {
     if (!(await requireEnvironment(ctx))) return;
 
     const cwd = await makeRealTempDir("kanna-opencode-input-");
@@ -54,9 +54,12 @@ describe("injected input against a live agent TUI (opencode)", () => {
         return;
       }
 
-      // kanna-server's exact submission policy: text, 150 ms, then CR.
+      // The exact current daemon contract: message and terminating CR in one
+      // write. The requested response avoids spelling the marker itself, so an
+      // echoed prompt cannot look like provider completion.
       await session.submit(
-        "Create a file named parity.txt in the current directory containing exactly: PARITY_OK. Then stop.",
+        "Create a file named parity.txt in the current directory containing exactly: PARITY_OK. " +
+        "Then reply with the words PREPARATION and COMPLETE joined by one underscore.",
       );
 
       const parityFile = join(cwd, "parity.txt");
@@ -69,9 +72,13 @@ describe("injected input against a live agent TUI (opencode)", () => {
         session.output.slice(-1000),
       ).toBe(true);
       expect(readFileSync(parityFile, "utf8")).toContain("PARITY_OK");
+      expect(
+        await session.waitForOutput("PREPARATION_COMPLETE", 60_000),
+        `the provider had not completed the preparation turn before quit. TUI tail:\n` +
+        session.output.slice(-1000),
+      ).toBe(true);
 
-      // Slash commands go through the same path and are executed as commands,
-      // not delivered to the model as chat text.
+      // Quit is a second logical command only after the preparation response.
       await session.submit("/exit");
       expect(
         await session.waitForExit(30_000),

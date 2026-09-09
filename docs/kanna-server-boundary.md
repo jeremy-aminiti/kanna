@@ -1294,27 +1294,34 @@ A push cannot ship a conversation the source agent is still writing to, so the
 engine shuts that agent down first — by **typing at it**, not by signalling it
 (`transfer_engine/finalize.rs`):
 
-1. inject a wrap-up message through the same logical-input helper every other
+1. wait for an existing turn to reach an observed `Idle`;
+2. inject a wrap-up message through the same logical-input helper every other
    Kanna input path uses, fenced to the PTY process observed at attach; current
    daemons write the message and its trailing CR as one buffer and acknowledge
    only after all of it reaches the PTY;
-2. apply the existing settled-`Idle` sequencing policy on the daemon's status
-   stream — status carries no input identity and is not proof of submission or
-   provider completion; `Waiting` is a permission prompt;
-3. inject the provider's quit command (`AgentProvider::quit_command`);
-4. wait for the daemon `Exit`, and only then stage artifacts.
+3. require a post-submission `Busy` edge followed by settled `Idle` on the
+   daemon's status stream; idle silence alone is not completion;
+4. inject the provider's quit command (`AgentProvider::quit_command`);
+5. wait for the daemon `Exit`, and only then stage artifacts.
 
 The durable at-most-once phase claim is crash protection, not delivery proof.
 If recovery finds the wrap-up phase already claimed, or the daemon response was
 lost after a possible write, finalization does not resend or treat the phase as
-success: it records a degraded result. A fresh acknowledgement is still only
-the responding daemon's delivery contract; provider parsing and completion are
-not inferred from it.
+success: it records a degraded result. The pre-submission idle boundary plus
+the following observed `Busy` → `Idle` cycle is what orders provider work; a
+quiet composer never substitutes for that lifecycle.
 
-Nothing is typed while the session is `Waiting`. Step 3 gets that from step 2 —
-it is only reached on `Idle` — but step 1 has nothing in front of it, so the
-status the daemon reported at attach is checked before the wrap-up goes out. The
-helper's trailing CR is the keystroke that accepts a permission prompt's
+`v0.3.0-staging.10` through `.12` and current daemons all advertise protected
+input protocol v3, but those older daemons could retain a message or write its
+text and withhold Enter. Their legacy `logical_input_held_by_draft` and
+`logical_input_submission_unproven` errors remain decodable by current servers
+and are treated as uncertain delivery: no resend and no quit. Staging `.13` and
+`.14` contain the one-buffer submission behavior.
+
+Nothing is typed while the session is `Waiting`. Preparation is sent only from
+an idle session; quit additionally sits behind preparation's observed
+`Busy` → settled-`Idle` lifecycle. The status reported at attach is checked
+before waiting begins. The helper's trailing CR is the keystroke that accepts a permission prompt's
 highlighted option, so a wrap-up typed at a parked session approves whatever
 tool call it is holding, in the operator's name — and silently, because the
 agent then resumes, goes idle, quits on cue and ships `cleanlyFinalized: true`.
@@ -1352,8 +1359,8 @@ answer. The server's own budget must fit inside it — `WRAP_UP_TIMEOUT` plus
 artifacts, and a unit test in `finalize.rs` fails if that stops holding. The
 destination allows the same window plus one ordinary request window, so the
 source's answer — including its own timeout report — always arrives while the
-destination is still listening. Injection failure or a session
-that never goes idle degrades the finalization — artifacts are staged as they
+destination is still listening. Injection failure or a session that never
+produces the required preparation lifecycle degrades the finalization — artifacts are staged as they
 stand and the payload carries `cleanlyFinalized: false` with the reason —
 rather than failing the transfer. Destructive teardown stays last and stays
 *after* staging: it is the source task's own close, once the destination has

@@ -6,12 +6,10 @@ import { dirname, join } from "node:path";
  * Drive an agent CLI's interactive TUI on a real terminal.
  *
  * Kanna's daemon writes input bytes straight to a PTY master fd
- * (`Command::Input` — no per-source transformation), and `kanna-server`'s
- * submission policy is "write the message, wait 150 ms, then send CR as a
- * discrete keystroke" (`crates/kanna-server/src/http_api/task_input.rs`,
- * `LOGICAL_INPUT_SUBMIT_DELAY_MS`). {@link PtySession.submit} reproduces that exactly,
- * so a test that passes here is evidence about the real injection path rather
- * than about an approximation of it.
+ * (`Command::SubmitInput`), and frames one logical message plus its terminating
+ * CR as one buffer. {@link PtySession.submit} reproduces that exact current
+ * contract, so a test that passes here is evidence about the real injection
+ * path rather than about an approximation of it.
  *
  * Node has no built-in PTY and the live suite must stay free of native
  * dependencies, so the terminal comes from `helpers/pty-bridge.py` (system
@@ -20,9 +18,6 @@ import { dirname, join } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = join(HERE, "pty-bridge.py");
-
-/** Mirrors LOGICAL_INPUT_SUBMIT_DELAY_MS in crates/daemon/src/session.rs. */
-export const SUBMIT_ENTER_DELAY_MS = 150;
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -96,13 +91,9 @@ export class PtySession {
     this.child.stdin.write(bytes);
   }
 
-  /** Write text, pause, then send CR — `try_submit_task_input`'s exact policy. */
+  /** Write one logical message and its CR in one buffer, like `SubmitInput`. */
   async submit(text: string): Promise<void> {
-    if (text.length > 0) {
-      this.write(text.replace(/[\r\n]+$/, ""));
-      await sleep(SUBMIT_ENTER_DELAY_MS);
-    }
-    this.write("\r");
+    this.write(`${text.replace(/[\r\n]+$/, "")}\r`);
   }
 
   /** Write text one character at a time, the way a person types it. */

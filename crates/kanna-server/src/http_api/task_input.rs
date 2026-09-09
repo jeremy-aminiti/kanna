@@ -146,10 +146,11 @@ pub(crate) enum TaskInputError {
 
 /// Write one semantic logical message into a daemon session.
 ///
-/// The daemon types the text and its submission boundary as one write. It does
-/// not consult the composer, so there is no held, parked, or refused answer to
-/// map here: the message reaches the PTY, the session is gone, or the round
-/// trip was lost.
+/// A current daemon types the text and its submission boundary as one write. It
+/// does not consult the composer: the message reaches the PTY, the session is
+/// gone, or the round trip was lost. Legacy protected-input-v3 daemons can still
+/// return their retired held/unproven answers, which are decoded below as
+/// uncertain delivery for safe version skew.
 async fn send_logical_session_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
@@ -183,6 +184,18 @@ async fn send_logical_session_input(
         } => Err(TaskInputError::SessionNotFound),
         DaemonEvent::Error {
             code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
+            message,
+        } => Err(TaskInputError::Uncertain(message)),
+        // Daemons through v0.3.0-staging.12 shared protected-input protocol v3
+        // but could retain a logical message behind a draft or write its text
+        // and withhold Enter. Either result may still reach the provider later,
+        // so a current server must decode it and refuse a blind retry.
+        DaemonEvent::Error {
+            code:
+                Some(
+                    kanna_daemon::protocol::ErrorCode::LogicalInputHeldByDraft
+                    | kanna_daemon::protocol::ErrorCode::LogicalInputSubmissionUnproven,
+                ),
             message,
         } => Err(TaskInputError::Uncertain(message)),
         DaemonEvent::Error { message, .. }

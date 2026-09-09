@@ -15,11 +15,11 @@
 //! process observed at attach. So finalization *asks* the agent to stop instead
 //! of signalling it:
 //!
-//! 1. inject a wrap-up message and wait for the daemon's delivery acknowledgement;
-//! 2. use the existing settled-`Idle` policy on the daemon `StatusChanged`
-//!    stream before sending anything else;
-//! 3. inject the provider's quit command (`/exit`, `/quit` for Codex);
-//! 4. wait for the daemon `Exit`.
+//! 1. wait for the current turn to reach an observed `Idle`;
+//! 2. inject a wrap-up message and wait for the daemon's delivery acknowledgement;
+//! 3. require the wrap-up to produce an observed `Busy` → settled-`Idle` cycle;
+//! 4. inject the provider's quit command (`/exit`, `/quit` for Codex);
+//! 5. wait for the daemon `Exit`.
 //!
 //! On the clean path, only then are artifacts staged, which is also what fixes
 //! Codex: its rollout under `~/.codex/sessions` is nameable long before the
@@ -27,25 +27,24 @@
 //! staging shipped a truncated conversation (pinned by
 //! `tests/cli-contract/tests/live/codex-rollout-timing.test.ts`).
 //!
-//! Step 2 is a sequencing heuristic, not a provider acknowledgement: daemon
-//! status has no input identity and a fast turn may never publish `Busy`. It is
-//! retained because the quit command preempts a mid-turn agent (pinned against
-//! OpenCode in `opencode-injected-input.test.ts`). What finalization can prove
-//! locally is narrower: only a fresh daemon acknowledgement permits this attempt
-//! to continue; a pre-existing phase claim or uncertain reply does not.
+//! The pre-injection idle boundary makes the post-injection lifecycle causal.
+//! A quiet composer is not completion: if the daemon never observes the wrap-up
+//! start (`Busy`) and then finish (`Idle`), finalization degrades and leaves the
+//! session alive rather than appending a quit command to an unsubmitted prompt.
+//! A pre-existing phase claim or uncertain delivery likewise never releases the
+//! quit.
 //!
 //! **`Waiting` is not `Idle`, and nothing may be typed while it holds.** It
 //! means the agent is parked on a permission prompt, which consumes the next
 //! input as its *answer* — and the submission policy ends every message with a
-//! discrete CR, which is exactly the keystroke that accepts the prompt's
+//! CR, which is exactly the keystroke that accepts the prompt's
 //! highlighted option. Approving a pending tool call on the operator's behalf
 //! is not something a transfer may do, and it would be silent: the agent would
 //! resume, reach `Idle`, quit on cue, and ship `cleanlyFinalized: true` with
 //! nothing anywhere saying a tool call had been approved.
 //!
-//! The quit gets that guarantee from step 2, which only lets it through on
-//! `Idle`. The wrap-up has nothing in front of it, so it checks the status
-//! `attach` read off the daemon itself. A session already parked when
+//! Preparation and quit both get that guarantee from observed idle boundaries.
+//! A session already parked when
 //! finalization starts degrades on the spot rather than waiting: nobody is
 //! going to answer that prompt — the operator is in the
 //! middle of pushing the task away from this machine — so waiting out the
@@ -111,20 +110,12 @@ const WRAP_UP_MESSAGE: &str = "This task is being transferred to another machine
 /// held by [`the_shutdown_budget_fits_inside_the_peer_finalization_window`].
 const WRAP_UP_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// How long a session that is *already* `Idle` may stay silent before the
-/// existing completion policy lets finalization proceed.
-///
-/// The daemon only publishes status changes, so a turn shorter than its
-/// detector interval can produce no `Busy` edge. This is deliberately a
-/// heuristic, not proof that a particular input was parsed or completed.
-const IDLE_SETTLE: Duration = Duration::from_secs(20);
-
-/// How long an observed `Idle` edge must hold before finalization proceeds.
+/// How long the observed post-preparation `Idle` edge must hold before
+/// finalization proceeds.
 ///
 /// Short idle repaints can occur between stretches of one turn, so an edge uses
-/// a settle window rather than releasing the quit immediately. Like
-/// [`IDLE_SETTLE`], this is existing sequencing policy rather than causal input
-/// acknowledgement.
+/// a settle window rather than releasing the quit immediately. This window is
+/// considered only after this preparation's `Busy` edge has been observed.
 const IDLE_EDGE_SETTLE: Duration = Duration::from_secs(2);
 
 /// How long the agent gets to exit after the quit command.
@@ -276,7 +267,39 @@ async fn run_sequence(
         );
     };
 
-    // 1. Wrap-up.
+    // Put a causal boundary in front of preparation. If the transfer begins
+    // during an existing turn, an eventual Idle only proves that old turn
+    // finished; submitting preparation after it means the next Busy → Idle
+    // cycle belongs to work that began after this command.
+    let wrap_up_deadline = tokio::time::Instant::now() + WRAP_UP_TIMEOUT;
+    match observer.wait_until_idle(wrap_up_deadline).await {
+        IdleOutcome::Idle => {}
+        IdleOutcome::Exited { killed: false } => {
+            record_phase(state, task_id, "already-exited", None);
+            return SourceFinalization::default();
+        }
+        IdleOutcome::Exited { killed: true } => {
+            return degraded(
+                state,
+                task_id,
+                "the source agent was forcibly killed before it could be prepared for transfer"
+                    .to_string(),
+            )
+        }
+        IdleOutcome::TimedOut(status) => {
+            let detail = wait_failure_detail(status);
+            return degraded(
+                state,
+                task_id,
+                format!(
+                    "the source agent did not become ready for transfer preparation within {}s: {detail}",
+                    WRAP_UP_TIMEOUT.as_secs(),
+                ),
+            );
+        }
+    }
+
+    // 1. Submit preparation after the preceding turn is known to be over.
     match inject(
         state,
         work,
@@ -323,20 +346,35 @@ async fn run_sequence(
         }
     }
 
-    // 2. Existing settled-idle sequencing policy. Daemon status carries no
-    // input identity, so this is deliberately not called proof of preparation.
+    // 2. Completion requires an observed turn, not an idle composer or silence.
+    // The pre-submission idle boundary above is what associates this next
+    // Busy → Idle cycle with work started after preparation was submitted.
     match observer
-        .wait_for_idle(WRAP_UP_TIMEOUT, IDLE_SETTLE, IDLE_EDGE_SETTLE)
+        .wait_for_completed_turn(wrap_up_deadline, IDLE_EDGE_SETTLE)
         .await
     {
-        IdleOutcome::Idle => record_phase(state, task_id, "idle", None),
-        IdleOutcome::Exited { killed: false } => {
+        TurnOutcome::Complete => record_phase(state, task_id, "idle", None),
+        TurnOutcome::Exited {
+            killed: false,
+            started: true,
+        } => {
             // The agent ended its own session while wrapping up. That is the
             // destination state, reached without the quit command.
             record_phase(state, task_id, "exited", None);
             return SourceFinalization::default();
         }
-        IdleOutcome::Exited { killed: true } => {
+        TurnOutcome::Exited {
+            killed: false,
+            started: false,
+        } => {
+            return degraded(
+                state,
+                task_id,
+                "the source agent exited before transfer preparation was observed starting"
+                    .to_string(),
+            )
+        }
+        TurnOutcome::Exited { killed: true, .. } => {
             return degraded(
                 state,
                 task_id,
@@ -344,20 +382,29 @@ async fn run_sequence(
                     .to_string(),
             )
         }
-        IdleOutcome::TimedOut(status) => {
-            let detail = match status {
-                // Typing the quit command now would answer the prompt, not quit
-                // the agent. Refusing to is the whole point of keying on `Idle`.
-                SessionStatus::Waiting => {
-                    "it is parked on a permission prompt and was not answered on the operator's behalf"
-                }
-                _ => "it was still working",
-            };
+        TurnOutcome::TimedOut {
+            status,
+            started: false,
+        } => {
             return degraded(
                 state,
                 task_id,
                 format!(
-                    "the source agent did not finish its turn within {}s: {detail}",
+                    "transfer preparation was submitted, but the source agent did not produce an observed Busy-to-Idle preparation cycle within {}s (last status: {status:?}); no quit command was sent",
+                    WRAP_UP_TIMEOUT.as_secs(),
+                ),
+            );
+        }
+        TurnOutcome::TimedOut {
+            status,
+            started: true,
+        } => {
+            let detail = wait_failure_detail(status);
+            return degraded(
+                state,
+                task_id,
+                format!(
+                    "the source agent did not finish transfer preparation within {}s: {detail}",
                     WRAP_UP_TIMEOUT.as_secs(),
                 ),
             );
@@ -579,6 +626,27 @@ enum IdleOutcome {
     TimedOut(SessionStatus),
 }
 
+enum TurnOutcome {
+    Complete,
+    Exited {
+        killed: bool,
+        started: bool,
+    },
+    TimedOut {
+        status: SessionStatus,
+        started: bool,
+    },
+}
+
+fn wait_failure_detail(status: SessionStatus) -> &'static str {
+    match status {
+        SessionStatus::Waiting => {
+            "it is parked on a permission prompt and was not answered on the operator's behalf"
+        }
+        _ => "it was still working",
+    }
+}
+
 enum ExitOutcome {
     Exited { killed: bool },
     TimedOut,
@@ -693,56 +761,111 @@ impl SessionObserver {
         }
     }
 
-    /// Waits for the existing settled-idle completion policy.
-    async fn wait_for_idle(
-        &mut self,
-        budget: Duration,
-        settle: Duration,
-        edge_settle: Duration,
-    ) -> IdleOutcome {
-        let start = tokio::time::Instant::now();
-        let deadline = start + budget;
-        let mut silent_since = start;
-        let mut idle_edge_seen = false;
+    /// Wait for a trustworthy idle boundary before preparation is submitted.
+    async fn wait_until_idle(&mut self, deadline: tokio::time::Instant) -> IdleOutcome {
         loop {
             let now = tokio::time::Instant::now();
+            if self.status == SessionStatus::Idle {
+                return IdleOutcome::Idle;
+            }
             if now >= deadline {
                 return IdleOutcome::TimedOut(self.status);
             }
-            let settled_at = silent_since + if idle_edge_seen { edge_settle } else { settle };
-            if self.status == SessionStatus::Idle && now >= settled_at {
-                return IdleOutcome::Idle;
+            match tokio::time::timeout_at(deadline, self.reader.read_event()).await {
+                Ok(Ok(event)) => {
+                    self.absorb(&event);
+                    if let DaemonEvent::Exit {
+                        ref session_id,
+                        killed,
+                        ..
+                    } = event
+                    {
+                        if *session_id == self.session_id {
+                            return IdleOutcome::Exited { killed };
+                        }
+                    }
+                }
+                Ok(Err(_)) => return IdleOutcome::TimedOut(self.status),
+                Err(_) => return IdleOutcome::TimedOut(self.status),
             }
-            let wake = if self.status == SessionStatus::Idle {
-                settled_at.min(deadline)
-            } else {
-                deadline
-            };
+        }
+    }
+
+    /// Wait for preparation to start and then finish.
+    ///
+    /// Idle at entry, or silence while it remains idle, proves neither event.
+    /// Only a Busy edge after the pre-submission idle boundary arms the final
+    /// settled-Idle edge that may release the provider's quit command.
+    async fn wait_for_completed_turn(
+        &mut self,
+        deadline: tokio::time::Instant,
+        idle_settle: Duration,
+    ) -> TurnOutcome {
+        let mut started = false;
+        let mut idle_since: Option<tokio::time::Instant> = None;
+        loop {
+            let now = tokio::time::Instant::now();
+            if let Some(since) = idle_since {
+                if now >= since + idle_settle {
+                    return TurnOutcome::Complete;
+                }
+            }
+            if now >= deadline {
+                return TurnOutcome::TimedOut {
+                    status: self.status,
+                    started,
+                };
+            }
+            let wake = idle_since
+                .map(|since| (since + idle_settle).min(deadline))
+                .unwrap_or(deadline);
             match tokio::time::timeout_at(wake, self.reader.read_event()).await {
                 Ok(Ok(event)) => {
-                    if self.absorb(&event) {
-                        silent_since = tokio::time::Instant::now();
-                    }
+                    self.absorb(&event);
                     match event {
+                        DaemonEvent::StatusChanged {
+                            ref session_id,
+                            status: SessionStatus::Busy,
+                            ..
+                        } if *session_id == self.session_id => {
+                            started = true;
+                            idle_since = None;
+                        }
                         DaemonEvent::StatusChanged {
                             ref session_id,
                             status: SessionStatus::Idle,
                             ..
-                        } if *session_id == self.session_id => {
-                            idle_edge_seen = true;
+                        } if *session_id == self.session_id && started => {
+                            idle_since = Some(tokio::time::Instant::now());
+                        }
+                        DaemonEvent::StatusChanged { ref session_id, .. }
+                            if *session_id == self.session_id =>
+                        {
+                            idle_since = None;
                         }
                         DaemonEvent::Exit {
                             ref session_id,
                             killed,
                             ..
                         } if *session_id == self.session_id => {
-                            return IdleOutcome::Exited { killed };
+                            return TurnOutcome::Exited { killed, started };
                         }
                         _ => {}
                     }
                 }
-                Ok(Err(_)) => return IdleOutcome::TimedOut(self.status),
-                Err(_) => continue,
+                Ok(Err(_)) => {
+                    return TurnOutcome::TimedOut {
+                        status: self.status,
+                        started,
+                    }
+                }
+                Err(_) if idle_since.is_some() => continue,
+                Err(_) => {
+                    return TurnOutcome::TimedOut {
+                        status: self.status,
+                        started,
+                    }
+                }
             }
         }
     }
@@ -789,10 +912,12 @@ mod tests {
     /// assertions are on this transcript, not on the return value.
     #[derive(Debug, Default)]
     struct DaemonLog {
+        /// Every fenced logical submission command, including refusals.
+        attempts: Vec<String>,
         /// Every fenced logical message accepted for the session, in order.
         inputs: Vec<String>,
         /// How many inputs had arrived when `Idle` was published.
-        inputs_at_idle: Option<usize>,
+        inputs_at_idle: Vec<usize>,
     }
 
     /// A scripted daemon over a real Unix socket.
@@ -875,7 +1000,7 @@ mod tests {
                 if session_id == SESSION {
                     let mut log = self.log.lock().expect("log");
                     let seen = log.inputs.len();
-                    log.inputs_at_idle.get_or_insert(seen);
+                    log.inputs_at_idle.push(seen);
                 }
             }
             let _ = self.events.send(event);
@@ -908,8 +1033,12 @@ mod tests {
             self.log.lock().expect("log").inputs.clone()
         }
 
-        fn inputs_at_idle(&self) -> Option<usize> {
-            self.log.lock().expect("log").inputs_at_idle
+        fn attempts(&self) -> Vec<String> {
+            self.log.lock().expect("log").attempts.clone()
+        }
+
+        fn inputs_at_idle(&self) -> Vec<usize> {
+            self.log.lock().expect("log").inputs_at_idle.clone()
         }
 
         /// Blocks until `count` input writes have arrived, so a test never
@@ -990,19 +1119,20 @@ mod tests {
                     code: Some(DaemonErrorCode::SessionIncarnationMismatch),
                     message: "the fake session incarnation changed".to_string(),
                 },
-                DaemonCommand::SubmitInputIfSession { data, .. } => match submit_refusal {
-                    Some(code) => DaemonEvent::Error {
-                        code: Some(code),
-                        message: "the fake daemon refused this submission".to_string(),
-                    },
-                    None => {
-                        log.lock()
-                            .expect("log")
-                            .inputs
-                            .push(String::from_utf8_lossy(&data).into_owned());
-                        DaemonEvent::Ok
+                DaemonCommand::SubmitInputIfSession { data, .. } => {
+                    let input = String::from_utf8_lossy(&data).into_owned();
+                    log.lock().expect("log").attempts.push(input.clone());
+                    match submit_refusal {
+                        Some(code) => DaemonEvent::Error {
+                            code: Some(code),
+                            message: "the fake daemon refused this submission".to_string(),
+                        },
+                        None => {
+                            log.lock().expect("log").inputs.push(input);
+                            DaemonEvent::Ok
+                        }
                     }
-                },
+                }
                 DaemonCommand::NegotiateProtectedInput { version } => {
                     DaemonEvent::ProtectedInputReady { version }
                 }
@@ -1082,7 +1212,9 @@ mod tests {
         .collect()
     }
 
-    /// The existing settled-idle policy keeps `/exit` from preempting a turn.
+    /// A transfer that starts during an existing turn waits for it to finish,
+    /// submits preparation from idle, then waits for preparation's own observed
+    /// Busy → Idle cycle before sending a separate quit command.
     #[tokio::test]
     async fn the_quit_command_is_never_typed_while_the_agent_is_busy() {
         let daemon = FakeDaemon::start("busy-then-idle", Some(SessionStatus::Busy));
@@ -1096,8 +1228,18 @@ mod tests {
             }
         });
 
+        // The old turn must finish before preparation is even submitted; its
+        // Idle edge cannot be mistaken for preparation completing.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            daemon.inputs().is_empty(),
+            "preparation interrupted the old turn"
+        );
+        daemon.status(SessionStatus::Idle);
         daemon.wait_for_inputs(1).await;
-        // Still busy — a quit typed now would truncate the turn.
+
+        // Preparation has started, but a quit now would truncate it.
+        daemon.status(SessionStatus::Busy);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(
             daemon.inputs().len(),
@@ -1128,14 +1270,51 @@ mod tests {
         );
         assert_eq!(
             daemon.inputs_at_idle(),
-            Some(1),
-            "the quit was typed before the session was reported idle: {inputs:?}",
+            vec![0, 1],
+            "the two idle boundaries did not surround preparation: {inputs:?}",
         );
         assert_eq!(
             phases(&state),
             vec!["wrap-up-sent", "idle", "quit-sent", "exited"],
             "the transfer's finalization was not observable step by step",
         );
+    }
+
+    /// The second owner symptom: preparation text can be visible at a composer
+    /// while its Enter is missing. A quiet idle frame after that is not evidence
+    /// of completion and must never release the quit command into the same line.
+    #[tokio::test(start_paused = true)]
+    async fn quiet_idle_after_submission_never_appends_quit_to_preparation() {
+        let daemon = FakeDaemon::start("idle-without-turn", Some(SessionStatus::Idle));
+        let state = state_for(&daemon, "desktop-finalize-idle-without-turn");
+
+        let sequence = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("claude"))
+                    .await
+            }
+        });
+
+        daemon.wait_for_inputs(1).await;
+        tokio::time::advance(Duration::from_secs(21)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            daemon.inputs().len(),
+            1,
+            "idle silence released /exit without an observed preparation turn: {:?}",
+            daemon.inputs(),
+        );
+
+        daemon.status(SessionStatus::Busy);
+        daemon.status(SessionStatus::Idle);
+        tokio::time::advance(IDLE_EDGE_SETTLE).await;
+        daemon.wait_for_inputs(2).await;
+        daemon.exit();
+
+        let outcome = sequence.await.expect("sequence");
+        assert!(outcome.cleanly_finalized(), "{outcome:?}");
+        assert_eq!(daemon.inputs()[1], "/exit");
     }
 
     /// A wrap-up the daemon refused outright releases its phase claim: nothing
@@ -1248,6 +1427,35 @@ mod tests {
                 .claim_transfer_work_phase(&work_item().id, WRAP_UP_PHASE)
                 .expect("claim state"),
             "uncertain delivery was released for a blind resend"
+        );
+    }
+
+    /// Daemons shipped in v0.3.0-staging.10 through .12 used the same protocol
+    /// version but could write preparation text, withhold Enter, and answer with
+    /// this legacy error. The current server must decode that response, retain
+    /// its at-most-once claim, and never attempt the quit command.
+    #[tokio::test]
+    async fn a_legacy_missing_enter_response_never_allows_an_appended_quit() {
+        let daemon = FakeDaemon::start_refusing(
+            "legacy-missing-enter",
+            Some(SessionStatus::Idle),
+            Some(DaemonErrorCode::LogicalInputSubmissionUnproven),
+        );
+        let state = state_for(&daemon, "desktop-finalize-legacy-missing-enter");
+
+        let outcome = run_sequence(&state, &work_item(), SESSION, Some("claude")).await;
+
+        assert!(!outcome.cleanly_finalized());
+        let attempts = daemon.attempts();
+        assert_eq!(attempts.len(), 1, "a quit followed unsubmitted preparation");
+        assert!(attempts[0].contains("transferred to another machine"));
+        assert!(!attempts.iter().any(|input| input == "/exit"));
+        assert!(
+            !open_db(&state)
+                .expect("db")
+                .claim_transfer_work_phase(&work_item().id, WRAP_UP_PHASE)
+                .expect("claim state"),
+            "the possibly-written preparation was released for a blind resend"
         );
     }
 
@@ -1374,11 +1582,7 @@ mod tests {
         daemon.status(SessionStatus::Waiting);
 
         let outcome = observer
-            .wait_for_idle(
-                Duration::from_millis(400),
-                Duration::from_millis(20),
-                Duration::from_millis(20),
-            )
+            .wait_until_idle(tokio::time::Instant::now() + Duration::from_millis(400))
             .await;
 
         assert!(
@@ -1390,7 +1594,7 @@ mod tests {
     /// …and reading it correctly is not enough on its own: a session already
     /// parked when finalization starts must be left completely alone.
     ///
-    /// The submission policy ends every message with a discrete CR, which is
+    /// The submission policy ends every message with a CR, which is
     /// the keystroke that accepts a permission prompt's highlighted option — so
     /// typing the *wrap-up* at a parked session approves whatever tool call it
     /// is holding, in the operator's name. Worse, it does so invisibly: the

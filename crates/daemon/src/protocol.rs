@@ -46,6 +46,13 @@ pub enum ErrorCode {
     RetryOnSuccessor,
     InputUnauthorized,
     ProtectedInputProtocolRequired,
+    /// Wire compatibility with daemons from before logical input became an
+    /// unconditional one-buffer submission. Current daemons never emit these
+    /// values, but an independently deployed predecessor can still answer a
+    /// current server with one after handoff/version skew.
+    InheritedDraftStateUnknown,
+    LogicalInputHeldByDraft,
+    LogicalInputSubmissionUnproven,
 }
 
 /// Whether a session is a PTY terminal or a headless agent (NDJSON pipes).
@@ -397,7 +404,7 @@ pub enum Command {
     /// One logical message for a PTY session. Unlike raw terminal input, the
     /// daemon keeps the message and its synthesized Enter atomic, frames
     /// multiline text as one bracketed paste when the terminal requested that
-    /// mode, and defers the delivery while a raw composer draft is active.
+    /// mode, and submits it immediately regardless of composer state.
     SubmitInput {
         session_id: String,
         data: Vec<u8>,
@@ -422,7 +429,7 @@ pub enum Command {
         data: Vec<u8>,
     },
     /// Latency-sensitive producer-declared terminal control. It preserves the
-    /// current draft state and cannot release queued logical messages.
+    /// current draft-state attestation.
     InputControlNoReply {
         session_id: String,
         data: Vec<u8>,
@@ -1232,6 +1239,27 @@ mod tests {
                 assert_eq!(message, "something went wrong");
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn legacy_logical_input_errors_keep_their_deployed_wire_names() {
+        for (wire_name, expected) in [
+            (
+                "logical_input_held_by_draft",
+                ErrorCode::LogicalInputHeldByDraft,
+            ),
+            (
+                "logical_input_submission_unproven",
+                ErrorCode::LogicalInputSubmissionUnproven,
+            ),
+        ] {
+            let json =
+                format!(r#"{{"type":"Error","code":"{wire_name}","message":"legacy daemon"}}"#);
+            match serde_json::from_str::<Event>(&json).expect("decode deployed error") {
+                Event::Error { code, .. } => assert_eq!(code, Some(expected)),
+                other => panic!("expected Error, got {other:?}"),
+            }
         }
     }
 
