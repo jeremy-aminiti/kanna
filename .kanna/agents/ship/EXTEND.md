@@ -13,7 +13,7 @@ The task prompt selects the mode:
 - **Interactive palette mode** only when the prompt explicitly says it launched you interactively. Run `./kd release status`, present the operations below, and ask the human what to do. Walk through missing choices and prerequisites, but do not treat interactive mode or an answer about version/channel as publish authorization.
 - **Programmatic mode** otherwise. If the prompt does not explicitly authorize a publish or another state-changing operation below, do not ask questions: run `./kd release status` and `./kd release ship --staging --dry-run`, report what **WOULD** ship (version, channel, artifacts, and blockers), then stop without publishing. If an authorized request is incomplete or ambiguous, report the blocker and stop rather than guessing.
 
-A staging publish, staging rollback, release cut, or push of a backport branch must be explicitly requested in the task prompt or, in interactive mode, by the human in this session. A staging publish requires unmistakable intent such as “publish” or “ship for real”; quote the exact authorizing sentence in the final report.
+A staging publish, staging rollback, release cut (including `--recut`), or push of a backport branch must be explicitly requested in the task prompt or, in interactive mode, by the human in this session. A staging publish requires unmistakable intent such as “publish” or “ship for real”; quote the exact authorizing sentence in the final report.
 
 Production is never your decision. Refuse `--production`, `./kd release promote`, and production mobile OTA actions unless the request explicitly identifies a named human and says that person requested **production**. This applies in both modes. Even when authorized, restate the exact version, channel, and operation immediately before running it. Never infer production authorization from a version, an RC being mechanically promotable, a request to “ship,” or prior staging approval.
 
@@ -28,6 +28,7 @@ After `./kd release status`, select only the authorized operation:
 - **Staging RC:** `./kd release ship --staging --release [--major|--minor|--patch] [--branch main|release/X.Y]`.
 - **Direct production:** after fetching tags and selecting the bump, compute `X.Y.Z`, run `git branch -m release-vX.Y.Z` and `git push -u origin release-vX.Y.Z` from a Kanna worktree, then run `./kd release ship --production --release [--major|--minor|--patch]`.
 - **Cut a release series:** `./kd release cut [--major|--minor|--patch]` (default `--minor`), or `./kd release cut --version X.Y.0` when the intended series must be named because an earlier series is being abandoned.
+- **Recut an unreleased series:** `./kd release cut --version <X.Y.0> --recut --confirm-recut <active-staging-version|empty> --confirm-old-tip <old-branch-sha> --reason "<why>"`, then ship the RC with `./kd release ship --staging --release --branch release/<X.Y>`. This is the required route for a staging RC in a series whose `release/X.Y` freeze is refusing main publishes: with an unpromoted candidate soaking, a main publish is refused, and the recut moves the branch onto the current `origin/main` tip so the branch RC carries the newer work. Read both confirmations from `./kd release status` and `git ls-remote origin refs/heads/release/<X.Y>` immediately before the command and never guess them; rehearse with `--dry-run` first.
 - **Backport RC fixes:** land fixes on main first, then update `release/X.Y`, cherry-pick only the named merged fixes with `git cherry-pick -x`, run `pnpm test` and `./kd test rust`, push the branch, and ship a fresh branch RC from a checkout of the pushed tip. Ask which fixes only in interactive mode; otherwise stop on ambiguity.
 - **Promote a soaked RC:** `./kd release promote X.Y.Z-staging.N`; the RC fixes the production version, so do not ask for a bump.
 - **Roll back staging:** `./kd release ship --staging --rollback-to X.Y.Z-staging.N`; this repoints the channel without building.
@@ -38,6 +39,8 @@ After `./kd release status`, select only the authorized operation:
 For plain ships, choose `--major`, `--minor`, or `--patch` when an explicit override is required. A bare main staging ship continues an active unpromoted main RC; otherwise it starts the next minor series from the production floor. Release-branch RCs derive their version from `release/X.Y`, ignore bump flags, and require `--branch release/X.Y` from a Kanna `task-*` worktree whose `HEAD` is exactly the branch's remote tip. Production-series patch RCs belong on that release branch.
 
 ## Preflight
+
+Release credentials — the Developer ID certificate, the Tauri updater private key, and the notarization Keychain profile in `~/.kanna/.env.release.local` — exist only on the owner's MacBook Pro. Ship tasks must run there; on any other machine the preflight below fails at the first credential check and no amount of retrying fixes it. If you are not on that machine, report it as the blocker and stop rather than working around it.
 
 Before any ship, cut, promotion, rollback, or backport:
 
@@ -58,6 +61,17 @@ Each staging publish increments `N` from remote tags, creates an immutable `vX.Y
 `./kd release status` separates *mechanical* promotability (the RC still matches its promotion branch tip) from whether promotion is allowed. Never describe a candidate as promotable or ready on the mechanical field alone — report `promotion.allowed` and, when it is false, every entry in `promotion.blockers`, including lineage validity, the soak window (`promotion.soak`), an abandoned series, and any active freeze.
 
 Promotion is production: it must rebuild the exact soaked commit with production identity and refuses unless HEAD and the recorded promotion base still match, the candidate's lineage is valid, its series is not abandoned, the policy soak window has elapsed, the tree is clean, and `vX.Y.Z` does not exist. After branch promotion, report that the branch goes dormant for future patch backports; do not merge its version-bump commit into main. The verified post-promotion hand-back and production-version floor let forward main start the next minor RC while trunk's `VERSION` is stale. See `docs/specs/release-candidates.md`.
+
+### Recut
+
+A recut is the audited move of an unreleased `release/X.Y` branch onto the current `origin/main` tip. It is not an abandonment and not an implicit main ship — no ordinary ship ever recuts — but it does rewrite a release branch, so it needs the same explicit request as any other cut.
+
+Preconditions kd checks and refuses on, all against freshly fetched remote refs: `release/X.Y` exists on origin and has **zero commits of its own** that are not already on main by patch identity (branch-exclusive merge commits are rejected conservatively too, so backport them first); the branch is therefore an ancestor of main in content; no production `vX.Y.*` tag exists for the series; the `desktop-staging` channel is readable and its active candidate verifiable; and `--confirm-recut` / `--confirm-old-tip` match the observed staging version (or `empty`) and the observed branch SHA exactly. The series must also not have been abandoned — a recut does not revive one, and the ship that follows refuses an abandoned series. A same-tip request is a no-op. `--reason` is required and single-line; export `KANNA_RELEASE_REQUESTER` to name the requesting human, because the audit record otherwise falls back to `USER`.
+
+What it changes: the `release/X.Y` branch tip moves to the pinned `origin/main` tip under an exact old-SHA `--force-with-lease`; the old tip is preserved first as an annotated `recut/release/X.Y-N` archive tag; and a `Lineage-Recut:` block carrying the recut id, both tips, the archive tag, requester, and reason is prepended to the `desktop-staging` release body. Nothing is built and no channel pointer moves. That block authorizes exactly one publish: the next RC built from that branch tip, which starts a fresh soak and receives a durable `recut-applied/<id>` tag.
+
+Retry rule when the ship after a recut fails: the grant is consumed only by a publish that repoints the channel, so a failed build consumes nothing and retrying the same tip still carries it. But once the fix lands on `origin/main`, the branch is behind again — the next attempt needs a **new** recut onto the fixed main, with `--confirm-old-tip` naming the tip the previous recut left. Do not try to reach the fix by shipping from main; the freeze that made the recut necessary is still refusing that. See `docs/specs/release-candidates.md` for the full recut contract.
+
 
 ## Report And Complete
 
