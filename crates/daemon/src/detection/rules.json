@@ -94,6 +94,7 @@
     {
       "provider": "claude",
       "versionProbe": { "args": ["--version"] },
+      "noticeRows": 24,
 
       "vocabulary": {
         "composerPrompts": [
@@ -272,12 +273,28 @@
           "priority": 10,
           "when": { "text": { "startsWithGlyphWord": "titleBusyGlyphs" } }
         }
+      ],
+
+      "notices": [
+        {
+          "id": "claude/notice/quota-rejection",
+          "kind": "quota-rejection",
+          "versions": ">=2.1.265",
+          "priority": 10,
+          "when": {
+            "anyLineWrapped": {
+              "containsAll": ["reached your", "limit. Run /usage-credits"]
+            }
+          },
+          "scope": { "between": ["reached your ", " limit"] }
+        }
       ]
     },
 
     {
       "provider": "codex",
       "versionProbe": { "args": ["--version"] },
+      "noticeRows": 24,
 
       "vocabulary": {
         "composerPrompts": [
@@ -366,6 +383,23 @@
           "versions": "*",
           "priority": 60,
           "when": { "lastNonEmptyLine": { "startsWithGlyph": "idlePromptGlyphs" } }
+        }
+      ],
+
+      "notices": [
+        {
+          "id": "codex/notice/quota-rejection",
+          "kind": "quota-rejection",
+          "versions": ">=0.153",
+          "priority": 10,
+          "when": {
+            "anyLineWrapped": {
+              "containsAll": [
+                "hit your usage limit",
+                "chatgpt.com/codex/settings/usage"
+              ]
+            }
+          }
         }
       ]
     },

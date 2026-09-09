@@ -20,7 +20,7 @@ use libghostty_vt::{
 
 use crate::detection::progress::ProgressScanner;
 use crate::detection::schema::ProgressState;
-use crate::detection::{Classifier, Evidence, Verdict};
+use crate::detection::{Classifier, Evidence, Notice, Verdict};
 use crate::protocol::{AgentProvider, SessionStatus, TerminalSnapshot};
 
 #[allow(unused_imports)]
@@ -342,6 +342,29 @@ impl HeadlessTerminal {
         let title = self.title();
         let progress = self.progress_state();
         Ok(classifier.classify(&Evidence {
+            lines: &lines,
+            title: &title,
+            progress,
+        }))
+    }
+
+    /// The provider-stated notice this frame carries, if any.
+    ///
+    /// Read over its own window: a refusal is printed into the transcript and
+    /// the CLI keeps drawing chrome beneath it, so the sentence is further
+    /// from the bottom of the screen than any status row.
+    pub fn visible_notice(
+        &mut self,
+        classifier: &mut Classifier,
+    ) -> HeadlessTerminalResult<Option<Notice>> {
+        if classifier.provider().is_none() {
+            return Ok(None);
+        }
+        let rows = classifier.notice_rows();
+        let lines = self.visible_footer_lines(rows)?;
+        let title = self.title();
+        let progress = self.progress_state();
+        Ok(classifier.notice(&Evidence {
             lines: &lines,
             title: &title,
             progress,

@@ -4514,6 +4514,10 @@ fn halve_agent_event_strings(event: &mut AgentEvent) {
         }
         AgentEvent::TurnCompleted { .. } => {}
         AgentEvent::SessionEnded { message, .. } => halve_optional_string(message),
+        AgentEvent::QuotaRejected { scope, detail, .. } => {
+            halve_optional_string(scope);
+            halve_string(detail);
+        }
         AgentEvent::Diagnostic { message } => halve_string(message),
         AgentEvent::Raw { line, truncated } => {
             halve_string(line);

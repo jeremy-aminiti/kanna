@@ -140,6 +140,30 @@ pub enum TaskEventKind {
     /// The task's last unresolved blocker went away. Same derived predicate as
     /// [`Self::TaskBlocked`]; `payload.blockerTaskIds` is empty.
     TaskUnblocked,
+    /// A provider refused this task's turn because the allowance for the
+    /// scope it named is spent. A *positive* match on the provider's own
+    /// rejection output, never inferred from a session going quiet, and the
+    /// claim is exactly as wide as the provider made it: `payload.scope` is
+    /// the model or window the CLI named, and a null scope is "the CLI did
+    /// not say", never "this provider is unavailable".
+    ///
+    /// `payload.provider`, `model`, `effort` and `stageRunId` identify the
+    /// refused attempt; `payload.source` is `pty` or `sdk`; `payload.ruleId`
+    /// and `payload.matchedText` are the pattern and the sentence, so the
+    /// claim can be checked. `payload.recovery` says what was done about it,
+    /// and `payload.replacementRunId` names the fallback run when one
+    /// started. This event is a record, not a verdict: it never finishes a
+    /// run, never advances a stage, and never turns a failure into a success.
+    ProviderQuotaRejected,
+    /// Every recovery this task had is spent, so it is waiting for a person.
+    ///
+    /// The one actionable state, emitted once per rejection that parks —
+    /// never on a loop. `payload.reason` is the recovery verdict
+    /// (`parked-no-candidates`, `parked-work-observed`,
+    /// `parked-override-binding`, `parked-no-candidate-list`),
+    /// `payload.rejectedProviders` lists what has been refused at this stage,
+    /// and `payload.action` says in words what a human can do about it.
+    ProviderQuotaParked,
 }
 
 impl TaskEventKind {
@@ -167,6 +191,8 @@ impl TaskEventKind {
             Self::TransferFinalizing => "task.transfer_finalizing",
             Self::TaskBlocked => "task.blocked",
             Self::TaskUnblocked => "task.unblocked",
+            Self::ProviderQuotaRejected => "task.provider_quota_rejected",
+            Self::ProviderQuotaParked => "task.provider_quota_parked",
         }
     }
 
@@ -194,6 +220,8 @@ impl TaskEventKind {
         Self::TransferFinalizing,
         Self::TaskBlocked,
         Self::TaskUnblocked,
+        Self::ProviderQuotaRejected,
+        Self::ProviderQuotaParked,
     ];
 }
 

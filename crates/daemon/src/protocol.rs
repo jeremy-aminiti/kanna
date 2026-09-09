@@ -236,6 +236,37 @@ pub enum SessionStatus {
     Idle,
 }
 
+/// A positive, provider-*stated* observation about a session that is not a
+/// status.
+///
+/// `SessionStatus` answers "what is this session doing"; a notice carries
+/// something the CLI itself said about why. The two are deliberately separate
+/// channels. A CLI that refuses a turn for a spent allowance prints its
+/// refusal and then parks at its composer — a perfectly healthy idle session —
+/// so folding the fact into the status vocabulary would mean either inventing
+/// a runtime state for it or reporting a live agent as dead. Neither is true.
+///
+/// Like every other verdict here, a notice is a positive match on chrome the
+/// provider drew at a CLI version this repository has measured. Silence is
+/// never a notice.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProviderNoticeKind {
+    /// The provider refused the turn because the allowance for the scope it
+    /// named is spent. The claim is exactly what the CLI stated and no wider:
+    /// a rejection naming one model says nothing about the rest of that
+    /// provider's models.
+    QuotaRejection,
+}
+
+impl ProviderNoticeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::QuotaRejection => "quota-rejection",
+        }
+    }
+}
+
 /// What this daemon can prove about the text rendered on a session's composer
 /// line.
 ///
@@ -568,6 +599,40 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         composer_text: Option<String>,
         composer_attestation: ComposerAttestation,
+    },
+    /// The session's CLI stated something about itself that no status can
+    /// carry — today, that it refused the turn for a spent allowance.
+    ///
+    /// Broadcast on the edge, once per observation, from the session's own
+    /// classification path. It is not a status change and never replaces one:
+    /// the session that produced this is still whatever the grid says it is,
+    /// which for every rejection measured so far is a parked, idle agent.
+    ///
+    /// `scope` is what the provider itself named as rejected (Claude spells
+    /// the model, Codex names only the account), `text` is the matched chrome
+    /// so a reader can check the claim, and `cli_version` is the version the
+    /// rule was selected for — absent when the daemon never measured one, in
+    /// which case no version-bounded notice rule could have fired at all.
+    ProviderNotice {
+        session_id: String,
+        kind: ProviderNoticeKind,
+        /// Which surface stated it: a `Pty` notice was matched against the
+        /// rendered terminal by a version-measured rule, an `Agent` one came
+        /// from the headless SDK's own structured status. Carried explicitly
+        /// rather than inferred from the other fields — a PTY session whose
+        /// version probe failed still produced a terminal match.
+        #[serde(default)]
+        session_kind: SessionKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_provider: Option<AgentProvider>,
+        /// The rule that decided it, for the same reason a status verdict
+        /// names one: a wrong match must be traceable to the pattern.
+        rule_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cli_version: Option<String>,
     },
     SessionList {
         sessions: Vec<SessionInfo>,

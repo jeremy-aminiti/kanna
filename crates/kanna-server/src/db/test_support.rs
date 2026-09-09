@@ -217,6 +217,27 @@ impl Db {
             );
             CREATE INDEX idx_stage_run_task_started ON stage_run(task_id, started_at);
 
+            CREATE TABLE task_provider_rejection (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                stage_run_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT,
+                effort TEXT,
+                source TEXT NOT NULL CHECK (source IN ('pty', 'sdk')),
+                rule_id TEXT NOT NULL,
+                matched_text TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT '',
+                cli_version TEXT,
+                recovery TEXT NOT NULL,
+                replacement_run_id TEXT,
+                observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (stage_run_id, provider, scope)
+            );
+            CREATE INDEX idx_task_provider_rejection_task_stage
+            ON task_provider_rejection(task_id, stage);
+
             CREATE TABLE settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -562,6 +583,26 @@ impl Db {
     }
 
     #[cfg(test)]
+    /// Stamp a stage run with the explicit provider override an advance would
+    /// have carried, so a test can exercise the layer that outranks every
+    /// other resolution step.
+    pub fn set_test_stage_run_provider_override(
+        &self,
+        run_id: &str,
+        provider_override: &crate::db::StageProviderOverride,
+    ) -> Result<(), rusqlite::Error> {
+        let encoded = serde_json::to_string(provider_override).map_err(|error| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                error.to_string(),
+            )))
+        })?;
+        self.conn.execute(
+            "UPDATE stage_run SET provider_override = ?2 WHERE id = ?1",
+            rusqlite::params![run_id, encoded],
+        )?;
+        Ok(())
+    }
+
     pub fn update_test_pipeline_item_stage_context(
         &self,
         id: &str,

@@ -260,6 +260,54 @@ pub struct TaskDetail {
     /// no previewable port; absence identifies a server predating previews.
     #[serde(default)]
     pub ports: Option<Vec<TaskPort>>,
+    /// The most recent time a provider refused this task's turn at the stage
+    /// it currently occupies, when one did.
+    ///
+    /// Present whether the refusal was recovered from or not, because both
+    /// answers matter to a reader: `recovery: "fallback-started"` explains why
+    /// the task is running on a provider its leading candidate does not name,
+    /// and every other value is a task waiting for a person. This is the whole
+    /// reason the field exists — a quota-exhausted session parks at its
+    /// composer looking exactly like an idle, healthy one, so neither
+    /// `activity` nor `runtimeState` can say what happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_rejection: Option<TaskProviderRejection>,
+}
+
+/// A provider's own refusal of a turn, as task detail reports it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskProviderRejection {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// What the provider itself named as refused — Claude spells the model,
+    /// Codex names only the account. Absent means the CLI did not say, which
+    /// is never the same claim as "this provider is unavailable".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub stage: String,
+    pub stage_run_id: String,
+    /// `pty` (matched against the CLI's rendered refusal by a
+    /// version-measured rule) or `sdk` (the headless payload's own status).
+    pub source: String,
+    /// The rule that decided it and the sentence it matched, so the claim can
+    /// be checked rather than believed.
+    pub rule_id: String,
+    pub matched_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    /// What Kanna did: `fallback-started`, or one of the `parked-*` verdicts.
+    pub recovery: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_run_id: Option<String>,
+    /// Every provider that has refused a turn at this stage. A rerun
+    /// re-resolves the stage's candidate list around exactly this set.
+    #[serde(default)]
+    pub rejected_providers: Vec<String>,
+    pub observed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -835,6 +883,7 @@ impl MobileApi {
             ._db
             .count_task_inputs(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
+        let provider_rejection = self.task_provider_rejection(&item)?;
         let ports = self
             ._db
             .list_task_ports_for_item(&item.id)
@@ -857,8 +906,51 @@ impl MobileApi {
                 blocked_by_task_ids,
                 delivered_input_count,
                 ports,
+                provider_rejection,
             },
         )))
+    }
+
+    /// The latest provider refusal at the stage the task currently occupies.
+    ///
+    /// Scoped to the current stage on purpose: a refusal at a stage the task
+    /// has already left is history, and reporting it on detail would read as a
+    /// live condition. The full history stays readable through the durable
+    /// `task.provider_quota_rejected` events.
+    fn task_provider_rejection(
+        &self,
+        item: &crate::db::PipelineItem,
+    ) -> Result<Option<TaskProviderRejection>, String> {
+        let Some(stage) = item.stage.as_deref() else {
+            return Ok(None);
+        };
+        let Some(rejection) = self
+            ._db
+            .latest_provider_rejection_at_stage(&item.id, stage)
+            .map_err(|error| format!("db error: {error}"))?
+        else {
+            return Ok(None);
+        };
+        let rejected_providers = self
+            ._db
+            .providers_rejected_at_stage(&item.id, stage)
+            .map_err(|error| format!("db error: {error}"))?;
+        Ok(Some(TaskProviderRejection {
+            provider: rejection.provider,
+            model: rejection.model,
+            effort: rejection.effort,
+            scope: rejection.scope,
+            stage: rejection.stage,
+            stage_run_id: rejection.stage_run_id,
+            source: rejection.source,
+            rule_id: rejection.rule_id,
+            matched_text: rejection.matched_text,
+            cli_version: rejection.cli_version,
+            recovery: rejection.recovery,
+            replacement_run_id: rejection.replacement_run_id,
+            rejected_providers,
+            observed_at: rejection.observed_at,
+        }))
     }
 
     /// The task's delivered-input history, oldest first, with `total` naming
@@ -1091,6 +1183,7 @@ struct TaskDetailRelations {
     blocked_by_task_ids: Vec<String>,
     delivered_input_count: i64,
     ports: Vec<TaskPort>,
+    provider_rejection: Option<TaskProviderRejection>,
 }
 
 fn map_task_detail(
@@ -1107,6 +1200,7 @@ fn map_task_detail(
         blocked_by_task_ids,
         delivered_input_count,
         mut ports,
+        provider_rejection,
     } = relations;
     let prompt = item.prompt.clone();
     let title = item
@@ -1224,6 +1318,7 @@ fn map_task_detail(
         child_task_ids,
         blocked_by_task_ids,
         ports: (!ports.is_empty()).then_some(ports),
+        provider_rejection,
     }
 }
 

@@ -16,6 +16,7 @@ mod mobile_notifications;
 mod operator_events;
 mod pairing;
 mod preview;
+mod quota_recovery;
 mod repo_browser;
 mod repo_commands;
 mod repos;
@@ -98,6 +99,9 @@ pub async fn serve(state: std::sync::Arc<AppState>) -> Result<(), String> {
 /// creating the destination task, closing the source once its import is
 /// acknowledged — and must perform *those* actions rather than a second
 /// implementation of them.
+#[cfg(test)]
+pub(crate) use quota_recovery::parked_action_for_tests;
+pub(crate) use quota_recovery::{handle_quota_rejection, QuotaRejectionNotice};
 pub(crate) use task_actions::close_task_in_process;
 pub(crate) use tasks::create_task_in_process;
 

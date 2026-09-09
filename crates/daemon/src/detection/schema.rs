@@ -7,7 +7,7 @@
 
 use serde::Deserialize;
 
-use crate::protocol::{AgentProvider, SessionStatus};
+use crate::protocol::{AgentProvider, ProviderNoticeKind, SessionStatus};
 
 /// The one schema version this daemon understands. A file declaring a newer
 /// one is refused rather than half-read: an override a daemon only partially
@@ -38,6 +38,10 @@ pub struct CommonRules {
     /// Rules merged into every provider's list before priority ordering.
     #[serde(default)]
     pub rules: Vec<Rule>,
+    /// Notice rules merged into every provider's list. Empty today: every
+    /// rejection measured so far is spelled in the provider's own words.
+    #[serde(default)]
+    pub notices: Vec<NoticeRule>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,6 +56,10 @@ pub struct ProviderRuleSet {
     pub chrome: Vec<ChromeEntry>,
     #[serde(default)]
     pub rules: Vec<Rule>,
+    /// Positive observations this provider's CLI states in its own chrome,
+    /// carried beside the status verdict rather than folded into it.
+    #[serde(default)]
+    pub notices: Vec<NoticeRule>,
     /// How many rendered rows status classification reads from the bottom of
     /// the screen.
     #[serde(default)]
@@ -60,6 +68,13 @@ pub struct ProviderRuleSet {
     /// OpenCode's permission dialog is taller than the status window.
     #[serde(default)]
     pub waiting_prompt_rows: Option<usize>,
+    /// How many rendered rows the notice scan reads. Its own knob rather than
+    /// a share of the status window: a refusal is printed into the transcript
+    /// above the composer and the CLI keeps drawing its footer and hints under
+    /// it, so the sentence sits further from the bottom of the screen than any
+    /// status chrome does. Defaults to the status window.
+    #[serde(default)]
+    pub notice_rows: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -222,6 +237,45 @@ pub struct Rule {
     pub versions: Option<String>,
     pub priority: i32,
     pub when: Predicate,
+}
+
+/// One provider-stated observation this daemon knows how to recognise.
+///
+/// Deliberately a separate list from [`Rule`], not a fourth `status` value:
+/// the two answer different questions about the same frame, and a session that
+/// matches a notice keeps whatever status its grid proves. Notice rules read
+/// the grid only — a title or a progress report cannot carry a provider's
+/// sentence — and every one of them names the CLI versions its chrome was
+/// measured against, because a rejection drives automatic recovery and an
+/// unmeasured version must not inherit somebody else's pattern as authority.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NoticeRule {
+    pub id: String,
+    pub kind: ProviderNoticeKind,
+    #[serde(default)]
+    pub versions: Option<String>,
+    pub priority: i32,
+    pub when: Predicate,
+    /// How to read the scope the provider named out of the matched text.
+    /// Absent where the CLI states no scope, which is itself a fact worth
+    /// keeping: Codex's refusal names the account, not a model.
+    #[serde(default)]
+    pub scope: Option<ScopeExtractor>,
+}
+
+/// The stated scope, read as the text between two anchors of the matched line.
+///
+/// Declarative for the same reason the matchers are: "Fable" is Claude 2.1's
+/// wording of one model's allowance, and the next release may spell it
+/// differently. A hard-coded parser per provider is the thing this rule file
+/// exists to replace.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScopeExtractor {
+    /// `[after, before]`. The scope is what the matched text holds between the
+    /// first occurrence of `after` and the next occurrence of `before`.
+    pub between: [String; 2],
 }
 
 /// Which provider-emitted evidence a rule reads.

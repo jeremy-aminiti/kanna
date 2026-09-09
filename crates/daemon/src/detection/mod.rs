@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 #[allow(unused_imports)]
-pub use classify::{Classifier, ComposerState, Evidence, Verdict};
+pub use classify::{Classifier, ComposerState, Evidence, Notice, Verdict};
 #[allow(unused_imports)]
 pub use progress::ProgressScanner;
 pub use rules::CompiledRules;

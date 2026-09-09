@@ -24,6 +24,7 @@ mod lifecycle_operations;
 mod operator_events;
 mod pipeline_items;
 mod ports;
+mod provider_rejections;
 mod repos;
 mod settings;
 mod snapshot;
@@ -48,6 +49,9 @@ pub use pipeline_items::MergeSignalSource;
 #[allow(unused_imports)]
 pub use pipeline_items::WorkflowReplacement;
 #[allow(unused_imports)]
+pub use provider_rejections::{
+    NewProviderRejection, ProviderRejection, QuotaRecovery, QuotaRejectionSource,
+};
 pub(crate) use repos::RepoOrderInput;
 #[allow(unused_imports)]
 pub use stage_runs::{
@@ -141,6 +145,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "067_remove_input_hold_state",
     "068_task_transfer_dismissed_at",
     "069_retire_pre_existing_transfer_alerts",
+    "070_provider_quota_rejection_log",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2068,6 +2073,33 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         "069_retire_pre_existing_transfer_alerts",
         retire_pre_existing_transfer_alerts,
     )?;
+
+    run_migration(conn, "070_provider_quota_rejection_log", |conn| {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS task_provider_rejection (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                stage_run_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT,
+                effort TEXT,
+                source TEXT NOT NULL CHECK (source IN ('pty', 'sdk')),
+                rule_id TEXT NOT NULL,
+                matched_text TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT '',
+                cli_version TEXT,
+                recovery TEXT NOT NULL,
+                replacement_run_id TEXT,
+                observed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (stage_run_id, provider, scope)
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_provider_rejection_task_stage
+            ON task_provider_rejection(task_id, stage);
+            "#,
+        )
+    })?;
 
     Ok(())
 }

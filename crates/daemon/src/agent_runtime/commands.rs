@@ -136,6 +136,7 @@ pub async fn handle_spawn_agent(
                 provider_session_id: None,
                 status: SessionStatus::Busy,
                 last_assistant_prompt: None,
+                quota_rejection_announced: false,
                 session_allowed_tools: HashSet::new(),
                 pending_permissions: HashSet::new(),
                 exited: true,

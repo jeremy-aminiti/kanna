@@ -32,7 +32,7 @@ fn translates_captured_tool_run() {
                 }),
             },
             AgentEvent::Diagnostic {
-                message: "rate limit event".to_string(),
+                message: "rate limit allowed (five_hour, resets at 1781261400)".to_string(),
             },
             AgentEvent::ToolResult {
                 call_id: "toolu_01SDTmHWQGNoFkD5cYXqkbBb".to_string(),
@@ -325,4 +325,129 @@ fn parses_streaming_result_stats_from_live_cli() {
         completed.total_cost_usd.is_some(),
         "total_cost_usd should be set"
     );
+}
+
+/// The rate-limit event is a heartbeat, not a refusal.
+///
+/// The Claude CLI emits one whenever a usage window moves — the checked-in
+/// tool-run fixture carries `status: "allowed"` mid-conversation. The whole
+/// payload used to be discarded into a bare `"rate limit event"` diagnostic,
+/// which is why a day of exhausted quota was indistinguishable from a dead
+/// session. Only the status the CLI *states* separates the two, so each state
+/// is pinned here.
+mod rate_limit {
+    use super::*;
+
+    fn events(line: &str) -> Vec<AgentEvent> {
+        ClaudeAdapter::new().parse_line(line)
+    }
+
+    #[test]
+    fn an_allowed_window_is_a_diagnostic_not_a_rejection() {
+        let events = events(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1781261400,"rateLimitType":"five_hour","overageStatus":"rejected","isUsingOverage":false}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![AgentEvent::Diagnostic {
+                message: "rate limit allowed (five_hour, resets at 1781261400)".to_string(),
+            }],
+            "an allowed window must never be read as exhaustion"
+        );
+    }
+
+    /// A warning is the CLI saying the window is nearly spent. It has not
+    /// refused anything, so nothing may be recovered from it.
+    #[test]
+    fn a_warning_window_is_a_diagnostic_not_a_rejection() {
+        let events = events(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1781261400,"rateLimitType":"seven_day"}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![AgentEvent::Diagnostic {
+                message: "rate limit allowed_warning (seven_day, resets at 1781261400)".to_string(),
+            }],
+        );
+    }
+
+    #[test]
+    fn a_rejected_window_is_a_quota_rejection_carrying_the_scope_the_cli_named() {
+        let events = events(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1781261400,"rateLimitType":"five_hour","model":"fable"}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![AgentEvent::QuotaRejected {
+                scope: Some("fable".to_string()),
+                resets_at: Some(1781261400),
+                detail: "the provider reported rate_limit_info.status=rejected for fable"
+                    .to_string(),
+            }],
+        );
+    }
+
+    /// The CLI names a window but no model. The scope is then the window, and
+    /// the claim stays exactly that wide.
+    #[test]
+    fn a_rejection_without_a_model_falls_back_to_the_window_it_named() {
+        let events = events(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"seven_day"}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![AgentEvent::QuotaRejected {
+                scope: Some("seven_day".to_string()),
+                resets_at: None,
+                detail: "the provider reported rate_limit_info.status=rejected for seven_day"
+                    .to_string(),
+            }],
+        );
+    }
+
+    /// A refusal that names nothing at all still refuses. `scope: None` is
+    /// "the CLI did not say", which is never "every model is unavailable".
+    #[test]
+    fn a_sparse_rejection_claims_no_scope_it_was_not_given() {
+        let events =
+            events(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}"#);
+        assert_eq!(
+            events,
+            vec![AgentEvent::QuotaRejected {
+                scope: None,
+                resets_at: None,
+                detail: "the provider reported rate_limit_info.status=rejected for an unstated \
+                         scope"
+                    .to_string(),
+            }],
+        );
+    }
+
+    /// An older CLI sends the event with no structured payload. That is not
+    /// evidence of a refusal, and inferring one would be exactly the
+    /// silent-degradation failure this replaces.
+    #[test]
+    fn an_event_without_the_structured_payload_claims_nothing() {
+        let events = events(r#"{"type":"rate_limit_event","retry_after_seconds":30.5}"#);
+        assert_eq!(
+            events,
+            vec![AgentEvent::Diagnostic {
+                message: "rate limit event without rate_limit_info".to_string(),
+            }],
+        );
+    }
+
+    /// An unknown status is unknown, not a refusal.
+    #[test]
+    fn an_unrecognized_status_is_reported_verbatim_and_claims_nothing() {
+        let events = events(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"some_future_state"}}"#,
+        );
+        assert_eq!(
+            events,
+            vec![AgentEvent::Diagnostic {
+                message: "rate limit some_future_state (window unstated)".to_string(),
+            }],
+        );
+    }
 }

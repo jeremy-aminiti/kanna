@@ -11,4 +11,15 @@ import type { TurnStatus } from "./TurnStatus";
  * and the only shape any consumer — desktop, kanna-server, relay, mobile —
  * ever sees. Provider adapters translate provider-specific output into these.
  */
-export type AgentEvent = { "type": "turn_started", model?: string | null, } | { "type": "user_message", text: string, } | { "type": "assistant_text", text: string, truncated: boolean, } | { "type": "thinking", text: string, truncated: boolean, } | { "type": "tool_call", call_id: string, tool_name: string, input: unknown, } | { "type": "tool_result", call_id: string, output: string, truncated: boolean, is_error: boolean, } | { "type": "tool_progress", call_id?: string | null, message: string, } | { "type": "permission_request", request_id: string, tool_name: string, input: unknown, } | { "type": "permission_resolved", request_id: string, decision: PermissionDecision, } | { "type": "turn_completed", status: TurnStatus, stats: TurnStats, } | { "type": "session_ended", reason: SessionEndReason, exit_code?: number | null, message?: string | null, } | { "type": "diagnostic", message: string, } | { "type": "raw", line: string, truncated: boolean, };
+export type AgentEvent = { "type": "turn_started", model?: string | null, } | { "type": "user_message", text: string, } | { "type": "assistant_text", text: string, truncated: boolean, } | { "type": "thinking", text: string, truncated: boolean, } | { "type": "tool_call", call_id: string, tool_name: string, input: unknown, } | { "type": "tool_result", call_id: string, output: string, truncated: boolean, is_error: boolean, } | { "type": "tool_progress", call_id?: string | null, message: string, } | { "type": "permission_request", request_id: string, tool_name: string, input: unknown, } | { "type": "permission_resolved", request_id: string, decision: PermissionDecision, } | { "type": "turn_completed", status: TurnStatus, stats: TurnStats, } | { "type": "session_ended", reason: SessionEndReason, exit_code?: number | null, message?: string | null, } | { "type": "quota_rejected", scope?: string | null, 
+/**
+ * Unix seconds at which the provider said the window replenishes,
+ * when it said. A passed reset permits reconsidering; it does not
+ * prove replenishment.
+ */
+resets_at?: number | null, 
+/**
+ * The provider's own wording, kept so a durable record of this can
+ * be checked rather than believed.
+ */
+detail: string, } | { "type": "diagnostic", message: string, } | { "type": "raw", line: string, truncated: boolean, };

@@ -228,7 +228,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "069_retire_pre_existing_transfer_alerts");
+    assert_eq!(latest_migration, "070_provider_quota_rejection_log");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -3524,6 +3524,8 @@ fn task_event_type_names_are_stable() {
             "task.transfer_finalizing",
             "task.blocked",
             "task.unblocked",
+            "task.provider_quota_rejected",
+            "task.provider_quota_parked",
         ]
     );
 }

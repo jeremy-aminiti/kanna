@@ -1248,6 +1248,8 @@ fn wait_events_documents_every_event_type_the_server_emits() {
         "task.input_delivered",
         "task.raw_input_delivered",
         "task.transfer_finalizing",
+        "task.provider_quota_rejected",
+        "task.provider_quota_parked",
     ] {
         assert!(
             description.contains(event_type),

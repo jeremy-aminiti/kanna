@@ -195,6 +195,11 @@ pub async fn adopt_agent_session(
             SessionStatus::Idle
         },
         last_assistant_prompt,
+        // An adopted session's earlier announcement is not knowable here, and
+        // announcing one refusal twice across an adoption is strictly better
+        // than silently swallowing a live one: the server de-duplicates by
+        // stage run.
+        quota_rejection_announced: false,
         session_allowed_tools,
         pending_permissions,
         exited: !alive,

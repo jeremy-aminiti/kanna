@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kanna_daemon::{
-    protocol::{self, Event, SessionStatus},
+    protocol::{self, Event, SessionKind, SessionStatus},
     recovery::RecoveryManager,
     terminal_perf::{self, TerminalPerfContext, OUTPUT_GAP_THRESHOLD, STALL_THRESHOLD},
 };
@@ -18,8 +18,8 @@ use crate::fanout::{
     SessionFanouts,
 };
 use crate::session::{
-    MirrorResult, PendingInput, PendingInputKind, SessionHandle, SessionManager, StreamControl,
-    LOGICAL_INPUT_SUBMIT_DELAY_MS, STATUS_DETECTION_THROTTLE_MS,
+    MirrorResult, PendingInput, PendingInputKind, QuietRefresh, SessionHandle, SessionManager,
+    StreamControl, LOGICAL_INPUT_SUBMIT_DELAY_MS, STATUS_DETECTION_THROTTLE_MS,
 };
 
 const STATUS_IDLE_FLUSH_MS: u64 = STATUS_DETECTION_THROTTLE_MS;
@@ -461,24 +461,30 @@ pub(crate) async fn stream_output(
                     .refresh_quiet_status(std::time::Duration::from_millis(STATUS_IDLE_FLUSH_MS))
                     .await
                 {
-                    Ok(Some(status)) => {
+                    Ok(QuietRefresh { status, notice }) => {
                         if stream_control.stop_requested() || session.is_retired() {
                             log::info!("[stream] stopped retired reader session={}", session_id);
                             stream_control.mark_stopped();
                             return;
                         }
                         log_status_observation(&session, &session_id, "quiet_refresh").await;
-                        emit_status_changed(
-                            &session,
-                            &broadcast_tx,
-                            &fanouts,
-                            &session_id,
-                            status,
-                        )
-                        .await;
-                    }
-                    Ok(None) => {
-                        log_status_observation(&session, &session_id, "quiet_refresh").await;
+                        if let Some(status) = status {
+                            emit_status_changed(
+                                &session,
+                                &broadcast_tx,
+                                &fanouts,
+                                &session_id,
+                                status,
+                            )
+                            .await;
+                        }
+                        // Announced after the status so a subscriber that
+                        // reads both sees the parked session first and the
+                        // provider's reason for it second, never the reverse.
+                        if let Some(notice) = notice {
+                            emit_provider_notice(&session, &broadcast_tx, &session_id, notice)
+                                .await;
+                        }
                     }
                     Err(error) => {
                         log::warn!(
@@ -716,7 +722,11 @@ pub(crate) async fn handle_output_chunk(
     }
 
     match mirror_result {
-        Ok(MirrorResult { status, replies }) => {
+        Ok(MirrorResult {
+            status,
+            notice,
+            replies,
+        }) => {
             for reply in replies {
                 if session.enqueue_terminal_reply(reply).is_err() {
                     log::warn!(
@@ -732,14 +742,18 @@ pub(crate) async fn handle_output_chunk(
                 chunk,
                 data.len(),
             ));
+            log_status_observation(session, session_id, "mirror_output").await;
             if let Some(status) = status {
-                log_status_observation(session, session_id, "mirror_output").await;
                 if session.is_retired() {
                     return slow_stage;
                 }
                 emit_status_changed(session, broadcast_tx, fanouts, session_id, status).await;
-            } else {
-                log_status_observation(session, session_id, "mirror_output").await;
+            }
+            if let Some(notice) = notice {
+                if session.is_retired() {
+                    return slow_stage;
+                }
+                emit_provider_notice(session, broadcast_tx, session_id, notice).await;
             }
             status_operation.finish();
             note_slow_stage(status_started, STAGE_DETECT_STATUS, &mut slow_stage);
@@ -814,6 +828,47 @@ async fn resync_drained_subscribers(
     let recovered = fanout_state.resync_drained(&recovery_events);
     drop(fanout_state);
     terminal_perf::emit_events(recovered);
+}
+
+/// Broadcast one provider-stated notice.
+///
+/// Broadcast only, like `InputBlockedChanged`: this is kanna-server's signal,
+/// not a terminal client's. A terminal client is already looking at the
+/// sentence — it is painted on the screen it is rendering — while the server
+/// is the only consumer that has to act on it.
+async fn emit_provider_notice(
+    session: &Arc<SessionHandle>,
+    broadcast_tx: &broadcast::Sender<String>,
+    session_id: &str,
+    notice: crate::detection::Notice,
+) {
+    if session.is_retired() {
+        return;
+    }
+    let event = Event::ProviderNotice {
+        session_id: session_id.to_string(),
+        kind: notice.kind,
+        session_kind: SessionKind::Pty,
+        agent_provider: session.agent_provider().await,
+        rule_id: notice.rule_id.clone(),
+        scope: notice.scope.clone(),
+        text: notice.text.clone(),
+        cli_version: session
+            .cli_version()
+            .await
+            .map(|version| version.to_string()),
+    };
+    log::info!(
+        "[notice] session={} kind={} scope={:?} rule={} text={:?}",
+        session_id,
+        notice.kind.as_str(),
+        notice.scope,
+        notice.rule_id,
+        notice.text
+    );
+    if let Ok(json) = serde_json::to_string(&event) {
+        let _ = broadcast_tx.send(json);
+    }
 }
 
 async fn emit_status_changed(

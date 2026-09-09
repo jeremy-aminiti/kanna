@@ -308,6 +308,43 @@ impl ClaudeAdapter {
         }
     }
 
+    /// A rate-limit event is not a rejection.
+    ///
+    /// The CLI emits one whenever a window moves, and the checked-in fixture
+    /// carries `status: "allowed"`. Only the status the CLI *states* separates
+    /// a healthy heartbeat from a refused turn, and the whole payload used to
+    /// be discarded into a bare "rate limit event" diagnostic — which is why a
+    /// day of exhausted quota looked exactly like a dead session.
+    fn translate_rate_limit(event: &claude_agent_sdk::RateLimitMessage) -> Vec<AgentEvent> {
+        let Some(info) = event.rate_limit_info.as_ref() else {
+            // An older CLI says only that the event happened. That is not
+            // evidence of a rejection, so it stays a diagnostic.
+            return vec![AgentEvent::Diagnostic {
+                message: "rate limit event without rate_limit_info".to_string(),
+            }];
+        };
+        if !info.is_rejected() {
+            return vec![AgentEvent::Diagnostic {
+                message: format!(
+                    "rate limit {} ({}{})",
+                    info.status.as_deref().unwrap_or("status unstated"),
+                    info.rate_limit_type.as_deref().unwrap_or("window unstated"),
+                    info.resets_at
+                        .map(|resets_at| format!(", resets at {resets_at}"))
+                        .unwrap_or_default(),
+                ),
+            }];
+        }
+        vec![AgentEvent::QuotaRejected {
+            scope: info.scope().map(str::to_string),
+            resets_at: info.resets_at,
+            detail: format!(
+                "the provider reported rate_limit_info.status=rejected for {}",
+                info.scope().unwrap_or("an unstated scope"),
+            ),
+        }]
+    }
+
     fn translate_tool_progress(progress: &ToolProgressMessage) -> Vec<AgentEvent> {
         let message = progress.content.clone().unwrap_or_default();
         if message.is_empty() {
@@ -392,9 +429,7 @@ impl ProviderAdapter for ClaudeAdapter {
                 Ok(Message::AuthStatus(auth)) => vec![AgentEvent::Diagnostic {
                     message: format!("auth_status authenticated={}", auth.authenticated),
                 }],
-                Ok(Message::RateLimit(_)) => vec![AgentEvent::Diagnostic {
-                    message: "rate limit event".to_string(),
-                }],
+                Ok(Message::RateLimit(event)) => Self::translate_rate_limit(&event),
                 // User/System are handled above from the raw value.
                 Ok(Message::User(_)) | Ok(Message::System(_)) => Vec::new(),
                 Err(_) => vec![raw_event(line)],

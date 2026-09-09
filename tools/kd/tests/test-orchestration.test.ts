@@ -37,6 +37,7 @@ const expectedOfflineCliContractTests = [
   "claude-helper.test.ts",
   "claude-project-slug.test.ts",
   "codex-helper.test.ts",
+  "provider-quota-rejection-contract.test.ts",
   "task-effort-spawn-contract.test.ts",
   "task-model-spawn-contract.test.ts",
 ];

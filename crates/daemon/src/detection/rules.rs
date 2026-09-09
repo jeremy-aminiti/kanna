@@ -6,11 +6,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::protocol::{AgentProvider, SessionStatus};
+use crate::protocol::{AgentProvider, ProviderNoticeKind, SessionStatus};
 
 use super::schema::{
-    Channel, ChromeEntry, LineMatch, Predicate, ProgressState, Rule, RuleFile, Vocabulary,
-    VocabularySet, SCHEMA_VERSION,
+    Channel, ChromeEntry, LineMatch, NoticeRule, Predicate, ProgressState, Rule, RuleFile,
+    ScopeExtractor, Vocabulary, VocabularySet, SCHEMA_VERSION,
 };
 use super::version::{CliVersion, VersionRange};
 
@@ -83,6 +83,33 @@ pub struct CompiledChrome {
     pub namespace: Namespace,
     pub versions: VersionRange,
     pub matcher: Matcher,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledNotice {
+    pub id: String,
+    pub kind: ProviderNoticeKind,
+    pub namespace: Namespace,
+    pub versions: VersionRange,
+    pub priority: i32,
+    pub order: usize,
+    pub predicate: CompiledPredicate,
+    pub scope: Option<CompiledScope>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledScope {
+    pub after: String,
+    pub before: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedNotice {
+    pub id: String,
+    pub kind: ProviderNoticeKind,
+    pub namespace: Namespace,
+    pub predicate: CompiledPredicate,
+    pub scope: Option<CompiledScope>,
 }
 
 /// One vocabulary set, resolved for a specific CLI version.
@@ -202,8 +229,10 @@ struct CompiledProvider {
     vocabulary: CompiledVocabulary,
     chrome: Vec<CompiledChrome>,
     rules: Vec<CompiledRule>,
+    notices: Vec<CompiledNotice>,
     status_rows: Option<usize>,
     waiting_prompt_rows: Option<usize>,
+    notice_rows: Option<usize>,
 }
 
 /// How many rendered rows status classification reads when a provider does not
@@ -215,6 +244,7 @@ pub struct CompiledRules {
     common_vocabulary: CompiledVocabulary,
     common_chrome: Vec<CompiledChrome>,
     common_rules: Vec<CompiledRule>,
+    common_notices: Vec<CompiledNotice>,
     providers: HashMap<AgentProvider, CompiledProvider>,
 }
 
@@ -227,8 +257,13 @@ pub struct ResolvedRules {
     pub vocabulary: ResolvedVocabulary,
     pub chrome: Vec<(Namespace, Matcher)>,
     pub rules: Vec<ResolvedRule>,
+    /// Notice rules that survived version selection, in priority order. A
+    /// version-bounded notice is dropped outright when the session's CLI
+    /// version was never measured — see [`CompiledRules::resolve`].
+    pub notices: Vec<ResolvedNotice>,
     pub status_rows: usize,
     pub waiting_prompt_rows: usize,
+    pub notice_rows: usize,
     pub probe_args: Vec<String>,
 }
 
@@ -285,6 +320,14 @@ impl CompiledRules {
             &mut seen_ids,
             0,
         )?;
+        let common_notices = compile_notices(
+            &file.common.notices,
+            Namespace::Common,
+            origin,
+            "common",
+            &mut seen_ids,
+            0,
+        )?;
 
         let mut providers = HashMap::new();
         for (index, provider_set) in file.providers.iter().enumerate() {
@@ -309,6 +352,14 @@ impl CompiledRules {
                 &mut seen_ids,
                 (index + 1) * 10_000,
             )?;
+            let notices = compile_notices(
+                &provider_set.notices,
+                Namespace::Provider,
+                origin,
+                &label,
+                &mut seen_ids,
+                (index + 1) * 10_000,
+            )?;
             providers.insert(
                 provider_set.provider,
                 CompiledProvider {
@@ -320,8 +371,10 @@ impl CompiledRules {
                     vocabulary,
                     chrome,
                     rules,
+                    notices,
                     status_rows: provider_set.status_rows,
                     waiting_prompt_rows: provider_set.waiting_prompt_rows,
+                    notice_rows: provider_set.notice_rows,
                 },
             );
         }
@@ -330,6 +383,7 @@ impl CompiledRules {
             common_vocabulary,
             common_chrome,
             common_rules,
+            common_notices,
             providers,
         })
     }
@@ -345,6 +399,7 @@ impl CompiledRules {
         merge_vocabulary(&mut merged.common_vocabulary, &overlay.common_vocabulary);
         merge_chrome(&mut merged.common_chrome, &overlay.common_chrome);
         merge_rules(&mut merged.common_rules, &overlay.common_rules);
+        merge_notices(&mut merged.common_notices, &overlay.common_notices);
 
         for (provider, overlay_provider) in &overlay.providers {
             match merged.providers.get_mut(provider) {
@@ -355,11 +410,15 @@ impl CompiledRules {
                     merge_vocabulary(&mut base.vocabulary, &overlay_provider.vocabulary);
                     merge_chrome(&mut base.chrome, &overlay_provider.chrome);
                     merge_rules(&mut base.rules, &overlay_provider.rules);
+                    merge_notices(&mut base.notices, &overlay_provider.notices);
                     if overlay_provider.status_rows.is_some() {
                         base.status_rows = overlay_provider.status_rows;
                     }
                     if overlay_provider.waiting_prompt_rows.is_some() {
                         base.waiting_prompt_rows = overlay_provider.waiting_prompt_rows;
+                    }
+                    if overlay_provider.notice_rows.is_some() {
+                        base.notice_rows = overlay_provider.notice_rows;
                     }
                 }
                 None => {
@@ -419,6 +478,23 @@ impl CompiledRules {
         // pre-empt a frame that already proved something.
         selected.sort_by_key(|rule| (rule.channel, rule.priority, rule.order));
 
+        // A notice drives automatic recovery, so an unmeasured CLI version must
+        // not inherit a bounded pattern the way an unbounded status rule lets
+        // it. `VersionRange::admits(None)` is permissive by design — a status
+        // verdict is better than none — but "this provider refused the turn"
+        // is a claim, and a claim made from a version nobody measured is the
+        // silent-degradation failure this file exists to end.
+        let mut selected_notices = self
+            .common_notices
+            .iter()
+            .chain(compiled.iter().flat_map(|compiled| compiled.notices.iter()))
+            .filter(|notice| {
+                notice.versions.is_unbounded()
+                    || (version.is_some() && notice.versions.admits(version))
+            })
+            .collect::<Vec<_>>();
+        selected_notices.sort_by_key(|notice| (notice.priority, notice.order));
+
         ResolvedRules {
             provider,
             version: version.cloned(),
@@ -435,14 +511,40 @@ impl CompiledRules {
                     predicate: rule.predicate.clone(),
                 })
                 .collect(),
+            notices: selected_notices
+                .into_iter()
+                .map(|notice| ResolvedNotice {
+                    id: notice.id.clone(),
+                    kind: notice.kind,
+                    namespace: notice.namespace,
+                    predicate: notice.predicate.clone(),
+                    scope: notice.scope.clone(),
+                })
+                .collect(),
             status_rows,
             waiting_prompt_rows: compiled
                 .and_then(|compiled| compiled.waiting_prompt_rows)
+                .unwrap_or(status_rows),
+            notice_rows: compiled
+                .and_then(|compiled| compiled.notice_rows)
                 .unwrap_or(status_rows),
             probe_args: compiled
                 .map(|compiled| compiled.probe_args.clone())
                 .unwrap_or_default(),
         }
+    }
+
+    /// Every notice rule id this file declares, for tests and diagnostics.
+    pub fn notice_ids(&self) -> Vec<String> {
+        self.common_notices
+            .iter()
+            .map(|notice| notice.id.clone())
+            .chain(
+                self.providers
+                    .values()
+                    .flat_map(|provider| provider.notices.iter().map(|notice| notice.id.clone())),
+            )
+            .collect()
     }
 
     /// Every rule id this file declares, for tests and diagnostics.
@@ -492,6 +594,77 @@ fn merge_rules(base: &mut Vec<CompiledRule>, overlay: &[CompiledRule]) {
             None => base.push(rule.clone()),
         }
     }
+}
+
+fn merge_notices(base: &mut Vec<CompiledNotice>, overlay: &[CompiledNotice]) {
+    for notice in overlay {
+        match base.iter_mut().find(|existing| existing.id == notice.id) {
+            Some(existing) => {
+                let order = existing.order;
+                *existing = notice.clone();
+                existing.order = order;
+            }
+            None => base.push(notice.clone()),
+        }
+    }
+}
+
+fn compile_notices(
+    declared: &[NoticeRule],
+    namespace: Namespace,
+    origin: &str,
+    label: &str,
+    seen_ids: &mut HashSet<String>,
+    order_base: usize,
+) -> Result<Vec<CompiledNotice>, String> {
+    declared
+        .iter()
+        .enumerate()
+        .map(|(index, notice)| {
+            if !seen_ids.insert(notice.id.clone()) {
+                return Err(format!(
+                    "{origin}: {label} declares the id {} more than once",
+                    notice.id
+                ));
+            }
+            let predicate = compile_predicate(&notice.when, origin, &notice.id)?;
+            // A provider's sentence is drawn on the grid. Allowing a title or
+            // progress predicate here would compile a notice that could never
+            // report the text it claims to have matched.
+            check_channel(&predicate, Channel::Grid, origin, &notice.id)?;
+            Ok(CompiledNotice {
+                id: notice.id.clone(),
+                kind: notice.kind,
+                namespace,
+                versions: parse_range(notice.versions.as_deref(), origin, &notice.id)?,
+                priority: notice.priority,
+                order: order_base + index,
+                predicate,
+                scope: compile_scope(notice.scope.as_ref(), origin, &notice.id)?,
+            })
+        })
+        .collect()
+}
+
+fn compile_scope(
+    scope: Option<&ScopeExtractor>,
+    origin: &str,
+    id: &str,
+) -> Result<Option<CompiledScope>, String> {
+    let Some(scope) = scope else {
+        return Ok(None);
+    };
+    let [after, before] = &scope.between;
+    if after.is_empty() || before.is_empty() {
+        return Err(format!(
+            "{origin}: notice {id} declares an empty scope anchor; an empty anchor would match at \
+             position zero and report the whole line as the provider's stated scope"
+        ));
+    }
+    Ok(Some(CompiledScope {
+        after: after.clone(),
+        before: before.clone(),
+    }))
 }
 
 fn compile_vocabulary(
@@ -1206,6 +1379,248 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+}
+
+/// The measured rejection chrome and the rules that classify it.
+///
+/// The captures live in `tests/cli-contract/fixtures/provider-quota-rejection.json`
+/// — the repository's home for version-tagged provider CLI evidence — and are
+/// compiled in here so a pattern and the frame it was measured against cannot
+/// drift apart in separate commits. A quota rejection drives automatic
+/// provider recovery, so an unmeasured claim is worse than none.
+#[cfg(test)]
+mod quota_notice_tests {
+    use crate::detection::classify::{Classifier, Evidence};
+    use crate::detection::version::CliVersion;
+    use crate::protocol::{AgentProvider, ProviderNoticeKind};
+
+    const CAPTURES: &str =
+        include_str!("../../../../tests/cli-contract/fixtures/provider-quota-rejection.json");
+
+    struct Capture {
+        provider: AgentProvider,
+        cli_version: String,
+        rule_id: Option<String>,
+        scope: Option<String>,
+        frame: Vec<String>,
+        wrapped_frame: Vec<String>,
+        must_not_match: Vec<String>,
+    }
+
+    fn captures() -> Vec<Capture> {
+        let parsed: serde_json::Value =
+            serde_json::from_str(CAPTURES).expect("the capture fixture must be valid JSON");
+        parsed
+            .as_array()
+            .expect("the capture fixture is a list")
+            .iter()
+            .map(|entry| {
+                let strings = |key: &str| {
+                    entry
+                        .get(key)
+                        .and_then(|value| value.as_array())
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(|value| value.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                Capture {
+                    provider: entry["provider"]
+                        .as_str()
+                        .and_then(|provider| provider.parse().ok())
+                        .expect("a capture names a supported provider"),
+                    cli_version: entry["cliVersion"]
+                        .as_str()
+                        .expect("a capture names the CLI version it was measured at")
+                        .to_string(),
+                    rule_id: entry["ruleId"].as_str().map(str::to_string),
+                    scope: entry["scope"].as_str().map(str::to_string),
+                    frame: strings("frame"),
+                    wrapped_frame: strings("wrappedFrame"),
+                    must_not_match: strings("mustNotMatch"),
+                }
+            })
+            .collect()
+    }
+
+    fn classifier(capture: &Capture) -> Classifier {
+        Classifier::with_version(
+            Some(capture.provider),
+            Some(CliVersion::parse(&capture.cli_version).expect("a capture's version parses")),
+        )
+    }
+
+    fn notice(
+        classifier: &mut Classifier,
+        lines: &[String],
+    ) -> Option<crate::detection::classify::Notice> {
+        classifier.notice(&Evidence {
+            lines,
+            title: "",
+            progress: None,
+        })
+    }
+
+    #[test]
+    fn classifies_every_measured_refusal_and_reports_the_scope_the_cli_named() {
+        for capture in captures()
+            .iter()
+            .filter(|capture| !capture.frame.is_empty())
+        {
+            let mut classifier = classifier(capture);
+            let matched = notice(&mut classifier, &capture.frame).unwrap_or_else(|| {
+                panic!(
+                    "{:?} {} must classify its own measured refusal",
+                    capture.provider, capture.cli_version
+                )
+            });
+            assert_eq!(matched.kind, ProviderNoticeKind::QuotaRejection);
+            assert_eq!(Some(matched.rule_id.clone()), capture.rule_id);
+            // The scope is exactly what the provider stated and no wider: a
+            // Claude refusal names one model, a Codex refusal names none.
+            assert_eq!(matched.scope, capture.scope);
+            assert!(
+                !matched.text.trim().is_empty(),
+                "a notice reports the sentence it matched"
+            );
+        }
+    }
+
+    /// A narrow terminal is where a stranded task is hardest to notice, so the
+    /// wrapped form has to classify too.
+    #[test]
+    fn classifies_the_narrow_terminal_wrap_of_every_refusal() {
+        for capture in captures()
+            .iter()
+            .filter(|capture| !capture.wrapped_frame.is_empty())
+        {
+            let mut classifier = classifier(capture);
+            assert!(
+                notice(&mut classifier, &capture.wrapped_frame).is_some(),
+                "{:?} {} must classify its refusal wrapped across rows",
+                capture.provider,
+                capture.cli_version,
+            );
+        }
+    }
+
+    #[test]
+    fn never_classifies_prose_or_the_banner_that_means_the_opposite() {
+        let captures = captures();
+        let negatives = captures
+            .iter()
+            .flat_map(|capture| capture.must_not_match.iter())
+            .collect::<Vec<_>>();
+        assert!(!negatives.is_empty(), "the fixture keeps negatives");
+        for provider in [AgentProvider::Claude, AgentProvider::Codex] {
+            let mut classifier = Classifier::with_version(
+                Some(provider),
+                Some(CliVersion::parse("99.0.0").expect("version parses")),
+            );
+            for line in &negatives {
+                let lines = vec![(*line).clone()];
+                assert!(
+                    notice(&mut classifier, &lines).is_none(),
+                    "{provider:?} must not read {line:?} as a refusal",
+                );
+            }
+        }
+    }
+
+    /// `VersionRange::admits(None)` is permissive by design — a status verdict
+    /// from an unmeasured CLI beats no verdict at all. A rejection is not a
+    /// verdict about the screen, it is a claim that drives automatic recovery,
+    /// so an unmeasured version must not inherit somebody else's pattern.
+    #[test]
+    fn a_version_bounded_notice_needs_a_measured_cli_version() {
+        for capture in captures()
+            .iter()
+            .filter(|capture| !capture.frame.is_empty())
+        {
+            let mut unmeasured = Classifier::with_version(Some(capture.provider), None);
+            assert!(
+                notice(&mut unmeasured, &capture.frame).is_none(),
+                "{:?} must not classify a refusal from an unprobed CLI version",
+                capture.provider,
+            );
+        }
+    }
+
+    /// A CLI older than the release the chrome was measured on gets no rule
+    /// either: the wording it prints has not been checked.
+    #[test]
+    fn a_cli_older_than_the_measured_range_gets_no_notice() {
+        for (provider, older) in [
+            (AgentProvider::Claude, "2.1.100"),
+            (AgentProvider::Codex, "0.52.0"),
+        ] {
+            let capture = captures()
+                .into_iter()
+                .find(|capture| capture.provider == provider && !capture.frame.is_empty())
+                .expect("a measured capture for this provider");
+            let mut classifier = Classifier::with_version(
+                Some(provider),
+                Some(CliVersion::parse(older).expect("version parses")),
+            );
+            assert!(
+                notice(&mut classifier, &capture.frame).is_none(),
+                "{provider:?} {older} predates the measured chrome and must not classify it",
+            );
+        }
+    }
+
+    /// One provider's refusal wording is not another's evidence.
+    #[test]
+    fn a_providers_rule_does_not_classify_another_providers_refusal() {
+        let captures = captures();
+        for capture in captures.iter().filter(|capture| !capture.frame.is_empty()) {
+            for other in [AgentProvider::Claude, AgentProvider::Codex] {
+                if other == capture.provider {
+                    continue;
+                }
+                let mut classifier = Classifier::with_version(
+                    Some(other),
+                    Some(CliVersion::parse("99.0.0").expect("version parses")),
+                );
+                assert!(
+                    notice(&mut classifier, &capture.frame).is_none(),
+                    "{other:?} must not classify {:?}'s refusal",
+                    capture.provider,
+                );
+            }
+        }
+    }
+
+    /// A refusal changes nothing about what the session is doing.
+    ///
+    /// This is the whole reason a notice is a separate channel from a status.
+    /// Both measured frames end where the CLI actually left the screen — a
+    /// finished-turn footer, a parked composer — so both still classify as
+    /// `idle`. A live, healthy session that happens to have been refused must
+    /// never be reported as busy, and must never be reported as dead.
+    #[test]
+    fn a_refusal_does_not_change_the_sessions_status() {
+        for capture in captures()
+            .iter()
+            .filter(|capture| !capture.frame.is_empty())
+        {
+            let mut classifier = classifier(capture);
+            let verdict = classifier.classify(&Evidence {
+                lines: &capture.frame,
+                title: "",
+                progress: None,
+            });
+            assert_eq!(
+                verdict.as_ref().map(|verdict| verdict.status),
+                Some(crate::protocol::SessionStatus::Idle),
+                "{:?} parks idle after a refusal",
+                capture.provider,
+            );
         }
     }
 }

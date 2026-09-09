@@ -6,7 +6,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use crate::detection::{Classifier, CliVersion};
+use crate::detection::{Classifier, CliVersion, Notice};
 use crate::draft_bytes::draft_content_byte_count;
 #[cfg(test)]
 use crate::headless_terminal::ComposerState;
@@ -231,6 +231,15 @@ pub struct SessionRuntimeState {
     last_output_at: Option<Instant>,
     pub operator_input_only: bool,
     pub input_policy_classified: bool,
+    /// The provider-stated notice already broadcast for this incarnation.
+    ///
+    /// Edge-held rather than published per frame: a refusal stays painted on
+    /// the screen for as long as the session is parked in front of it, and
+    /// re-announcing the same sentence every tick would turn one observation
+    /// into a stream that a recovery path would have to de-duplicate anyway.
+    /// Cleared when the session goes busy again, so a *second* refusal on a
+    /// later turn is a second observation rather than a swallowed one.
+    published_notice: Option<Notice>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,7 +393,19 @@ impl InputCoordinationState {
 
 pub struct MirrorResult {
     pub status: Option<SessionStatus>,
+    /// A provider-stated notice this frame carries that has not been
+    /// announced yet. Scanned only on the boundary where the classifier read
+    /// the frame anyway, so it costs one extra pass per throttle window
+    /// rather than one per output chunk.
+    pub notice: Option<Notice>,
     pub replies: Vec<Vec<u8>>,
+}
+
+/// What the periodic settled-frame read found.
+#[derive(Debug)]
+pub struct QuietRefresh {
+    pub status: Option<SessionStatus>,
+    pub notice: Option<Notice>,
 }
 
 /// One live PTY master, attributed to the session that owns it, for the
@@ -491,6 +512,7 @@ impl SessionHandle {
                 last_output_at: None,
                 operator_input_only: record.operator_input_only,
                 input_policy_classified: record.input_policy_classified,
+                published_notice: None,
             }),
             input_tx,
             input_rx: Mutex::new(Some(input_rx)),
@@ -819,13 +841,18 @@ impl SessionHandle {
         };
         let allow_idle = allows_output_triggered_idle(state.agent_provider);
         let status = detect_runtime_status_if_due(&mut state, now, throttle, allow_idle)?;
-        Ok(MirrorResult { status, replies })
+        let notice = read_new_notice_if_frame_was_read(&mut state, now);
+        Ok(MirrorResult {
+            status,
+            notice,
+            replies,
+        })
     }
 
     pub async fn refresh_quiet_status(
         &self,
         quiet_for: Duration,
-    ) -> Result<Option<SessionStatus>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<QuietRefresh, Box<dyn std::error::Error + Send + Sync>> {
         self.refresh_quiet_status_at(quiet_for, Instant::now())
             .await
     }
@@ -834,13 +861,16 @@ impl SessionHandle {
         &self,
         quiet_for: Duration,
         now: Instant,
-    ) -> Result<Option<SessionStatus>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<QuietRefresh, Box<dyn std::error::Error + Send + Sync>> {
         let mut state = self.state.lock().await;
         if state
             .last_output_at
             .is_some_and(|last_output_at| now.saturating_duration_since(last_output_at) < quiet_for)
         {
-            return Ok(None);
+            return Ok(QuietRefresh {
+                status: None,
+                notice: None,
+            });
         }
 
         // This periodic settled-state read is the convergence boundary. TUI
@@ -848,7 +878,12 @@ impl SessionHandle {
         // must not be able to starve it by continually consuming the shared
         // throttle slot. Synchronized partial frames are still rejected by
         // the classifier itself.
-        detect_runtime_status_if_due(&mut state, now, Duration::ZERO, true)
+        let status = detect_runtime_status_if_due(&mut state, now, Duration::ZERO, true)?;
+        // The refusal frame is the one this path exists to catch: the CLI
+        // prints its sentence, parks, and then produces nothing further, so
+        // the output-triggered scan may never see the settled screen.
+        let notice = read_new_notice_if_frame_was_read(&mut state, now);
+        Ok(QuietRefresh { status, notice })
     }
 
     pub async fn debug_status_observation(
@@ -888,6 +923,12 @@ impl SessionHandle {
     pub async fn update_status(&self, status: SessionStatus) -> bool {
         let mut state = self.state.lock().await;
         if state.status != status {
+            // A turn starting is a clean boundary: whatever the provider
+            // refused before, it is trying again now, so the next refusal is
+            // news rather than the same screen still being painted.
+            if status == SessionStatus::Busy {
+                state.published_notice = None;
+            }
             state.status = status;
             true
         } else {
@@ -913,6 +954,11 @@ impl SessionHandle {
 
     pub async fn agent_provider(&self) -> Option<AgentProvider> {
         self.state.lock().await.agent_provider
+    }
+
+    /// The CLI version this session's classifier resolved its rules for.
+    pub async fn cli_version(&self) -> Option<CliVersion> {
+        self.state.lock().await.classifier.version().cloned()
     }
 
     /// Record what the CLI version probe answered.
@@ -1741,6 +1787,39 @@ pub fn replay_headless_terminal_for_benchmark(
             allow_idle: allows_output_triggered_idle(classifier.provider()),
         },
     )
+}
+
+/// The unannounced provider-stated notice on the frame the classifier just
+/// read, latched so it is announced exactly once.
+///
+/// Gated on `last_status_check_at == Some(now)`, which is precisely "the
+/// classifier read a settled frame on this pass". Scanning independently
+/// would either pay a render per output chunk or read a frame mid-repaint —
+/// and a refusal half-painted is not a refusal.
+fn read_new_notice_if_frame_was_read(
+    state: &mut SessionRuntimeState,
+    now: Instant,
+) -> Option<Notice> {
+    if state.last_status_check_at != Some(now) {
+        return None;
+    }
+    let SessionRuntimeState {
+        headless_terminal,
+        classifier,
+        ..
+    } = &mut *state;
+    let notice = match headless_terminal.visible_notice(classifier) {
+        Ok(notice) => notice?,
+        Err(error) => {
+            log::warn!("[notice] could not read this session's notice window: {error}");
+            return None;
+        }
+    };
+    if state.published_notice.as_ref() == Some(&notice) {
+        return None;
+    }
+    state.published_notice = Some(notice.clone());
+    Some(notice)
 }
 
 fn detect_runtime_status_if_due(
@@ -2671,7 +2750,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(status, None);
+        assert_eq!(status.status, None);
 
         handle.kill().await.unwrap();
     }
@@ -2689,7 +2768,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(status, Some(SessionStatus::Idle));
+        assert_eq!(status.status, Some(SessionStatus::Idle));
 
         handle.kill().await.unwrap();
     }
@@ -2788,7 +2867,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(early_refresh, None, "the repaint has not settled yet");
+        assert_eq!(
+            early_refresh.status, None,
+            "the repaint has not settled yet"
+        );
 
         let refreshed_status = handle
             .refresh_quiet_status_at(
@@ -2797,7 +2879,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(refreshed_status, Some(SessionStatus::Idle));
+        assert_eq!(refreshed_status.status, Some(SessionStatus::Idle));
 
         handle.kill().await.unwrap();
     }
@@ -2911,7 +2993,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(repainting, None);
+        assert_eq!(repainting.status, None);
         let settled = handle
             .refresh_quiet_status_at(
                 Duration::from_millis(500),
@@ -2919,7 +3001,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(settled, Some(SessionStatus::Idle));
+        assert_eq!(settled.status, Some(SessionStatus::Idle));
 
         handle.kill().await.unwrap();
     }
@@ -3062,7 +3144,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(still_repainting, None);
+        assert_eq!(still_repainting.status, None);
 
         let settled = handle
             .refresh_quiet_status_at(
@@ -3071,7 +3153,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(settled, Some(SessionStatus::Idle));
+        assert_eq!(settled.status, Some(SessionStatus::Idle));
 
         handle.kill().await.unwrap();
     }
