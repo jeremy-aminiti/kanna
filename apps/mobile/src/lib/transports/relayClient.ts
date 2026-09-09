@@ -1,4 +1,8 @@
-import { readServerRefusal, ServerRefusalError } from "./serverRefusal";
+import {
+  readServerFailureBody,
+  readServerRefusal,
+  ServerRefusalError
+} from "./serverRefusal";
 import type {
   TaskAgentSubscription,
   TaskCompanionSubscription,
@@ -298,12 +302,17 @@ export function createRelayDesktopClient({
       // the whole app into its connection-error state over one refused
       // request.
       if (typeof message.status === "number" && message.status >= 400) {
+        // `error` carries the desktop's response body verbatim, which for a
+        // structured refusal is JSON. Parse it here: a screen showing
+        // `error` raw rendered `{"message":...,"ok":false,"reason":...}` at a
+        // person. The prefixed `message` stays diagnostic, for logs.
+        const refusal = readServerFailureBody(message.error);
         pending.reject(
           new ServerRefusalError(
             `Remote desktop request failed with status ${message.status}. ${message.error}`,
-            null,
+            refusal.reason,
             message.status,
-            message.error
+            refusal.message
           )
         );
         return;

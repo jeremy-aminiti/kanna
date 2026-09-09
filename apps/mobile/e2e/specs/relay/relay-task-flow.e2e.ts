@@ -12,6 +12,7 @@ import {
   type PtyTerminalFixture
 } from "../smoke/list-detail-back.e2e";
 import type { TaskActivity } from "../../../src/lib/api/types";
+import { TASK_COMPOSER_MAX_HEIGHT } from "../../../src/screens/taskComposerInput";
 import type {
   MobileRelayCompanionFixture,
   RelayTaskOrderingFixture
@@ -19,10 +20,25 @@ import type {
 
 const SCREEN_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
+const GEOMETRY_POLL_INTERVAL_MS = 1_000;
 const IOS_APP_STATE_NOT_RUNNING = 1;
 const TASK_COMPOSER_PLACEHOLDER = "Reply…";
-const TASK_COMPOSER_MULTILINE_DRAFT =
-  "First relay line.\nSecond relay line.\nThird relay line.";
+// Deliberately longer than the five-line cap, so a composer that kept growing
+// with its content fails the height assertion instead of quietly filling the
+// screen.
+const TASK_COMPOSER_MULTILINE_DRAFT = [
+  "First relay line.",
+  "Second relay line.",
+  "Third relay line.",
+  "Fourth relay line.",
+  "Fifth relay line.",
+  "Sixth relay line.",
+  "Seventh relay line.",
+  "Eighth relay line."
+].join("\n");
+// Five line-heights plus the input's own vertical padding, with room for iOS
+// rounding and the container inset around it.
+const TASK_COMPOSER_MAX_RENDERED_HEIGHT = TASK_COMPOSER_MAX_HEIGHT + 24;
 const TASK_ACTION_MENU_TITLE = "Task Actions";
 const TASK_ACTION_LABELS = [
   "Mentioned Files (0)",
@@ -48,9 +64,11 @@ interface RelayTaskFlowOptions {
   draft: string;
   customizedReply: string;
   fixture: PtyTerminalFixture;
+  observeAuthoritativeTerminalGeometry(): Promise<{ cols: number; rows: number }>;
   prepareTaskUnreadForMarkRead(): Promise<void>;
   setTaskBusyRead(): Promise<void>;
   restoreTallTerminalGeometry(): Promise<void>;
+  restoreDesktopTerminalControl(): Promise<void>;
   resyncTerminalConnection(): Promise<void>;
   setTaskBusyUnread(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
@@ -280,6 +298,7 @@ interface RelayTaskJourneys {
   verifyComposerReset(): Promise<void>;
   verifyFilePreview(): Promise<void>;
   verifyMarkedRead(): Promise<void>;
+  verifyMobileTerminalControl(): Promise<void>;
   verifyPtySnapshotRevisit(): Promise<void>;
   verifyQuickReply(): Promise<void>;
   verifyTaskActionMenu(): Promise<void>;
@@ -293,6 +312,9 @@ export async function runRelayTaskJourneys(
   await journeys.verifyQuickReplyPersistence();
   await journeys.verifyMarkedRead();
   await journeys.verifyPtySnapshotRevisit();
+  // Ownership of the grid is exercised while the terminal is still the
+  // rendered subject, and hands it back before the later journeys.
+  await journeys.verifyMobileTerminalControl();
   // Exercise file discovery immediately after the terminal revisit, before
   // later menus can change the detail presentation state.
   await journeys.verifyFilePreview();
@@ -791,31 +813,19 @@ export async function verifyRelayComposerResetJourney(
     },
   );
 
+  // Five lines is the cap, and past it the input scrolls itself rather than
+  // eating the screen. The draft is far longer than five lines, so a composer
+  // that kept growing would fail here.
+  if (expandedHeight > TASK_COMPOSER_MAX_RENDERED_HEIGHT) {
+    throw new Error(
+      `Expected the composer to stop growing at five lines (<= ` +
+        `${TASK_COMPOSER_MAX_RENDERED_HEIGHT}pt); it rendered ${expandedHeight}pt`,
+    );
+  }
+
   const send = await ui.getTaskSendButton();
   await send.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await send.click();
-
-  const deliveryStatus = await ui.getTaskInputStatus();
-  await deliveryStatus.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  let lastDeliveryStatus: string | null = null;
-  try {
-    await ui.waitUntil(
-      async () => {
-        lastDeliveryStatus = await deliveryStatus.getAttribute("label");
-        return lastDeliveryStatus?.includes("accepted by the desktop") === true;
-      },
-      {
-        interval: POLL_INTERVAL_MS,
-        timeout: SCREEN_TIMEOUT_MS,
-        timeoutMsg: "Expected the desktop-accepted task input outcome",
-      },
-    );
-  } catch {
-    throw new Error(
-      "Expected the desktop-accepted task input outcome; " +
-        `last native accessibility label was ${JSON.stringify(lastDeliveryStatus)}`,
-    );
-  }
 
   let lastValue: string | null = null;
   let lastLabel: string | null = null;
@@ -857,6 +867,113 @@ export async function verifyRelayComposerResetJourney(
         `keyboardShown=${lastKeyboardShown}`,
     );
   }
+
+  // A send that landed says nothing. The notice this replaced appeared on
+  // every message, and two of them stacked pushed the composer down the
+  // screen. The cleared composer is the confirmation.
+  const status = await ui.getTaskInputStatus();
+  if (await status.isExisting()) {
+    throw new Error(
+      "Expected no delivery notice after a successful send; found one labelled " +
+        `${JSON.stringify(await status.getAttribute("label").catch(() => null))}`,
+    );
+  }
+}
+
+/**
+ * Taking control on the phone means "size this terminal for my phone". As a
+ * follower the mobile client correctly renders the daemon's authoritative
+ * grid — a desktop-shaped 132x43 here — but the owner reported that taking
+ * control changed nothing, because the phone registered a viewport it had
+ * never measured.
+ */
+export async function verifyRelayMobileTerminalControlJourney(
+  driver: Browser,
+  ui: Pick<RelayUi, "inspectTerminalWebView" | "waitUntil">,
+  fixture: PtyTerminalFixture,
+  actions: {
+    observeAuthoritativeTerminalGeometry(): Promise<{ cols: number; rows: number }>;
+    restoreDesktopTerminalControl(): Promise<void>;
+  },
+): Promise<void> {
+  const followed = await actions.observeAuthoritativeTerminalGeometry();
+  if (followed.cols !== fixture.expectedCols || followed.rows !== fixture.expectedRows) {
+    throw new Error(
+      `Expected the desktop-owned grid ${fixture.expectedCols}x${fixture.expectedRows} ` +
+        `before the phone takes control; observed ${followed.cols}x${followed.rows}`,
+    );
+  }
+
+  const control = await driver.$(selectors.taskTerminalControl);
+  await control.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await control.click();
+
+  let taken: { cols: number; rows: number } = followed;
+  await ui.waitUntil(
+    async () => {
+      taken = await actions.observeAuthoritativeTerminalGeometry();
+      return taken.cols !== followed.cols || taken.rows !== followed.rows;
+    },
+    {
+      // Each probe opens its own observer, so poll far less often than the UI.
+      interval: GEOMETRY_POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        "Expected taking terminal control on the phone to resize the daemon's PTY; " +
+        `it stayed at ${followed.cols}x${followed.rows}`,
+    },
+  );
+
+  if (taken.cols >= followed.cols) {
+    throw new Error(
+      `Expected the phone's measured grid to be narrower than the desktop's ` +
+        `${followed.cols} columns; it took control at ${taken.cols}x${taken.rows}`,
+    );
+  }
+  if (taken.cols < 20 || taken.rows < 8) {
+    throw new Error(
+      `Expected a readable measured grid, not a still-settling layout; ` +
+        `the phone took control at ${taken.cols}x${taken.rows}`,
+    );
+  }
+
+  // Every renderer still shows the daemon's grid, which is now the phone's.
+  let lastInspection: Awaited<ReturnType<RelayUi["inspectTerminalWebView"]>> | null = null;
+  await ui.waitUntil(
+    async () => {
+      lastInspection = await ui.inspectTerminalWebView();
+      return (
+        lastInspection.kind === "rendered" &&
+        lastInspection.cols === taken.cols &&
+        lastInspection.rows === taken.rows
+      );
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        `Expected the WebView to render the grid it now owns (${taken.cols}x${taken.rows}); ` +
+        `last inspection ${JSON.stringify(lastInspection)}`,
+    },
+  );
+
+  await control.click();
+  await actions.restoreDesktopTerminalControl();
+  await ui.waitUntil(
+    async () => {
+      const released = await actions.observeAuthoritativeTerminalGeometry();
+      return (
+        released.cols === fixture.expectedCols && released.rows === fixture.expectedRows
+      );
+    },
+    {
+      interval: GEOMETRY_POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg:
+        "Expected releasing control on the phone to hand the grid back to the desktop",
+    },
+  );
+  await verifyRelayPtyRenderedGridAndCursor(ui, fixture);
 }
 
 export async function verifyRelayQuickReplyJourney(
@@ -2075,6 +2192,14 @@ export async function runRelayTaskFlow(
     }),
     verifyTerminalKeys: () =>
       verifyRelayTerminalKeys(driver, options.terminalKeys),
+    // Runs on the detail screen the terminal revisit leaves rendered, and
+    // hands the grid back before returning it in the same state.
+    verifyMobileTerminalControl: () =>
+      verifyRelayMobileTerminalControlJourney(driver, ui, options.fixture, {
+        observeAuthoritativeTerminalGeometry:
+          options.observeAuthoritativeTerminalGeometry,
+        restoreDesktopTerminalControl: options.restoreDesktopTerminalControl,
+      }),
     verifyTaskActionMenu: () => verifyRelayTaskActionMenuJourney(
       ui,
       isTabletWorkspace

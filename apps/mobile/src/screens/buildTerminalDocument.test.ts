@@ -584,6 +584,13 @@ function createExecutedTerminalDocument({
   };
 }
 
+function capacityMessages(messages: string[]): Array<{ cols: number; rows: number }> {
+  return messages
+    .map((message) => JSON.parse(message) as { type?: string; cols?: number; rows?: number })
+    .filter((message) => message.type === "terminal-capacity")
+    .map((message) => ({ cols: message.cols as number, rows: message.rows as number }));
+}
+
 describe("buildTerminalDocument", () => {
   it("provides conservative source-file links with line suffixes", () => {
     const { messages, terminal } = createExecutedTerminalDocument();
@@ -1747,6 +1754,67 @@ describe("buildTerminalDocument", () => {
     expect(terminal.resets).toBe(1);
     expect(terminal.writes).toHaveLength(1);
     expect(terminal.scrollToLineCalls).toEqual([]);
+  });
+
+  it("reports the grid this phone can show, measured, not the grid it renders", () => {
+    const { messages, root, window } = createExecutedTerminalDocument();
+
+    // 390px of visible width at a 9px cell, and 844px less the 24px composer
+    // inset at an 18px cell.
+    expect(capacityMessages(messages)).toEqual([{ cols: 43, rows: 45 }]);
+
+    // The daemon's authoritative grid is far wider than the screen. Capacity
+    // is what the screen can hold, so pinning must not change it — deriving
+    // one from the other is what would close a resize/render loop.
+    window.__setTerminalDims({ cols: 132, rows: 43 });
+    window.dispatchEvent(new window.Event("resize"));
+
+    expect(root.dataset.kannaCols).toBe("132");
+    expect(capacityMessages(messages)).toEqual([{ cols: 43, rows: 45 }]);
+  });
+
+  it("re-reports capacity when the cell box or the composer inset changes", () => {
+    const { messages, terminal, window } = createExecutedTerminalDocument();
+    expect(capacityMessages(messages)).toEqual([{ cols: 43, rows: 45 }]);
+
+    // Zooming out shrinks the cell, so the same screen holds more of it.
+    terminal.dimensions.css.cell = { width: 6, height: 12 };
+    window.dispatchEvent(new window.Event("resize"));
+
+    expect(capacityMessages(messages)).toEqual([
+      { cols: 43, rows: 45 },
+      { cols: 65, rows: 68 }
+    ]);
+
+    // A taller resting composer takes rows away from the terminal.
+    window.__setTerminalBottomInset({ bottomInset: 400, capacityInset: 400 });
+
+    expect(capacityMessages(messages).at(-1)).toEqual({ cols: 65, rows: 37 });
+
+    // The software keyboard is presentation only: it pads the rendered view
+    // without changing what the phone would propose, so tapping the composer
+    // cannot reflow the PTY of a session this viewer controls.
+    window.__setTerminalBottomInset({ bottomInset: 700, capacityInset: 400 });
+
+    expect(capacityMessages(messages).at(-1)).toEqual({ cols: 65, rows: 37 });
+
+    // An unchanged measurement is not worth a control frame.
+    const before = capacityMessages(messages).length;
+    window.dispatchEvent(new window.Event("resize"));
+    expect(capacityMessages(messages)).toHaveLength(before);
+  });
+
+  it("proposes nothing from a viewport that has not laid out", () => {
+    const { messages, viewport, window } = createExecutedTerminalDocument();
+    const settled = capacityMessages(messages).length;
+
+    Object.defineProperty(viewport, "clientWidth", {
+      configurable: true,
+      value: 0
+    });
+    window.dispatchEvent(new window.Event("resize"));
+
+    expect(capacityMessages(messages)).toHaveLength(settled);
   });
 
   it("writes base64 terminal chunks as bytes in replace scripts", () => {

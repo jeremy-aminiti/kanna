@@ -849,7 +849,10 @@ describe("RootNavigator task collection integration", () => {
       await flushMicrotasks();
     });
 
-    expect(resize).toHaveBeenCalledWith("task-1", 80, 48);
+    // Nothing has laid the detail screen out yet, so this is the conventional
+    // fallback grid. The page's own measurement replaces it as soon as the
+    // terminal renders; the seed exists only so a fresh PTY is not stranded.
+    expect(resize).toHaveBeenCalledWith("task-1", 80, 24);
     expect(open).toHaveBeenCalledWith("task-1");
     expect(resize.mock.invocationCallOrder[0]).toBeLessThan(
       open.mock.invocationCallOrder[0]

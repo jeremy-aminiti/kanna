@@ -381,9 +381,12 @@ async function main(): Promise<void> {
         draft: relayHarness.quickReply.draft,
         customizedReply: relayHarness.quickReply.text,
         fixture: relayHarness.fixture,
+        observeAuthoritativeTerminalGeometry:
+          relayHarness.observeAuthoritativeTerminalGeometry,
         prepareTaskUnreadForMarkRead: relayHarness.prepareTaskUnreadForMarkRead,
         setTaskBusyRead: relayHarness.setTaskBusyRead,
         restoreTallTerminalGeometry: relayHarness.restoreTallTerminalGeometry,
+        restoreDesktopTerminalControl: relayHarness.restoreDesktopTerminalControl,
         resyncTerminalConnection: relayHarness.resyncTerminalConnection,
         setTaskBusyUnread: relayHarness.setTaskBusyUnread,
         setTaskActivity: relayHarness.setTaskActivity,

@@ -39,6 +39,7 @@ describe("relay task flow orchestration", () => {
           verifyComposerReset(): Promise<void>;
           verifyFilePreview(): Promise<void>;
           verifyMarkedRead(): Promise<void>;
+          verifyMobileTerminalControl(): Promise<void>;
           verifyPtySnapshotRevisit(): Promise<void>;
           verifyQuickReply(): Promise<void>;
           verifyQuickReplyPersistence(): Promise<void>;
@@ -69,6 +70,11 @@ describe("relay task flow orchestration", () => {
         calls.push("close");
         screen = "detail";
         calls.push("open", "rendered");
+      },
+      async verifyMobileTerminalControl() {
+        // Runs on the rendered detail screen and leaves it there.
+        expect(screen).toBe("detail");
+        calls.push("terminal-control");
       },
       async verifyTaskActionMenu() {
         expect(screen).toBe("detail");
@@ -104,6 +110,7 @@ describe("relay task flow orchestration", () => {
       "close",
       "open",
       "rendered",
+      "terminal-control",
       "file-preview",
       "terminal-keys",
       "quick-reply",
@@ -633,14 +640,26 @@ describe("relay task action menu journey", () => {
 });
 
 describe("relay composer reset journey", () => {
-  const multilineDraft =
-    "First relay line.\nSecond relay line.\nThird relay line.";
+  const multilineDraft = [
+    "First relay line.",
+    "Second relay line.",
+    "Third relay line.",
+    "Fourth relay line.",
+    "Fifth relay line.",
+    "Sixth relay line.",
+    "Seventh relay line.",
+    "Eighth relay line."
+  ].join("\n");
 
   function createComposerResetUi({
     dismissKeyboard = true,
+    expandedHeight = 82,
+    noticeAfterSend = false,
     resetHeight = true,
   }: {
     dismissKeyboard?: boolean;
+    expandedHeight?: number;
+    noticeAfterSend?: boolean;
     resetHeight?: boolean;
   } = {}) {
     let composerHeight = 40;
@@ -657,7 +676,7 @@ describe("relay composer reset journey", () => {
       getSize: vi.fn(async () => ({ height: composerHeight, width: 240 })),
       setValue: vi.fn(async (value: string) => {
         composerValue = value;
-        composerHeight = 82;
+        composerHeight = expandedHeight;
       }),
       waitForDisplayed: vi.fn(async () => undefined),
     };
@@ -671,10 +690,9 @@ describe("relay composer reset journey", () => {
     };
     const deliveryStatus = {
       getAttribute: vi.fn(async (name: string) =>
-        name === "label"
-          ? "Input accepted by the desktop; agent processing is not confirmed yet."
-          : null
+        name === "label" ? "Not sent: no live agent session. Your text is still here." : null
       ),
+      isExisting: vi.fn(async () => noticeAfterSend),
       waitForDisplayed: vi.fn(async () => undefined),
     };
     const ui = {
@@ -701,6 +719,22 @@ describe("relay composer reset journey", () => {
     expect(input.getSize).toHaveBeenCalled();
     expect(send.click).toHaveBeenCalledOnce();
     expect(ui.isKeyboardShown).toHaveBeenCalled();
+  });
+
+  it("fails when a successful send still raises a notice", async () => {
+    const { ui } = createComposerResetUi({ noticeAfterSend: true });
+
+    await expect(
+      verifyRelayComposerResetJourney(ui as never),
+    ).rejects.toThrow(/no delivery notice after a successful send/i);
+  });
+
+  it("fails when the composer grows past its five-line cap", async () => {
+    const { ui } = createComposerResetUi({ expandedHeight: 260 });
+
+    await expect(
+      verifyRelayComposerResetJourney(ui as never),
+    ).rejects.toThrow(/stop growing at five lines/i);
   });
 
   it("fails when Send leaves the cleared native input expanded", async () => {

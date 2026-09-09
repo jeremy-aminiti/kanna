@@ -52,6 +52,7 @@ export const MOBILE_E2E_IDS = {
   taskAttachmentPreview: "mobile.task-attachment-preview",
   taskAttachmentRemove: "mobile.task-attachment-remove",
   taskAttachmentError: "mobile.task-attachment-error",
+  taskTerminalControl: "mobile.task-terminal-control",
   taskInputStatus: "mobile.task-input-status",
   taskTerminalDirectInputToggle: "mobile.task-terminal-direct-input-toggle",
   taskTerminalDirectInputStatus: "mobile.task-terminal-direct-input-status",
@@ -60,6 +61,7 @@ export const MOBILE_E2E_IDS = {
   taskTerminalKey(key: string): string {
     return `mobile.task-terminal-key.${key}`;
   },
+  taskInputStatusDismiss: "mobile.task-input-status-dismiss",
   taskQuickReplyRail: "mobile.quick-reply.rail",
   taskQuickReplyPicker: "mobile.quick-reply.picker",
   taskQuickReplyPickerCancel: "mobile.quick-reply.picker.cancel",

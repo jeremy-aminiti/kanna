@@ -10,7 +10,6 @@ import {
   StyleSheet,
   Text,
   TextInput,
-  type TextInputContentSizeChangeEvent,
   useWindowDimensions,
   View
 } from "react-native";
@@ -78,7 +77,6 @@ import {
 } from "./VisualCompanionModal";
 import {
   appendComposerFileReference,
-  shouldTaskComposerScroll,
   TASK_COMPOSER_LINE_HEIGHT,
   TASK_COMPOSER_MAX_HEIGHT,
   TASK_COMPOSER_MIN_HEIGHT,
@@ -182,45 +180,24 @@ function preserveExpandedTextSelection(): void {
   // Pressability suppresses onPress after a long press when this handler exists.
 }
 
-type ComposerInputStatus = {
+/**
+ * A send that did not reach the desktop. Success is silent: the sent text
+ * leaving the composer and the agent answering in the terminal is the
+ * confirmation, and a notice on every message was only ever noise. What still
+ * has to be said is that a message did *not* land, because the alternative is
+ * input that disappears — which is what the notice was introduced to stop.
+ */
+type ComposerInputFailure = {
   taskId: string;
-  outcome: TaskInputSendOutcome | { status: "sending" };
+  outcome: Extract<TaskInputSendOutcome, { status: "failed" | "uncertain" }>;
 };
 
-function composerInputStatusMessage(
-  outcome: ComposerInputStatus["outcome"]
+function composerInputFailureMessage(
+  outcome: ComposerInputFailure["outcome"]
 ): string {
-  switch (outcome.status) {
-    case "sending":
-      return "Sending input to the desktop…";
-    case "delivered":
-      return "Input accepted by the desktop; agent processing is not confirmed yet.";
-    case "failed":
-      return `Input was not sent: ${outcome.message} Your text is still here.`;
-    case "uncertain":
-      return `Input delivery is uncertain: ${outcome.message} Check the desktop terminal before retrying. Your text is still here.`;
-  }
-}
-
-function composerInputStatusIconColor(
-  outcome: ComposerInputStatus["outcome"]
-): string {
-  if (outcome.status === "failed" || outcome.status === "uncertain") {
-    return "#FF9A8B";
-  }
-  return "#9BB0CC";
-}
-
-function composerInputStatusIcon(
-  outcome: ComposerInputStatus["outcome"]
-): "warning-outline" | "time-outline" | "checkmark-circle-outline" {
-  if (outcome.status === "failed" || outcome.status === "uncertain") {
-    return "warning-outline";
-  }
-  if (outcome.status === "sending") {
-    return "time-outline";
-  }
-  return "checkmark-circle-outline";
+  return outcome.status === "failed"
+    ? `Not sent: ${outcome.message} Your text is still here.`
+    : `Couldn't confirm this was sent: ${outcome.message} Check the desktop terminal before sending it again. Your text is still here.`;
 }
 
 export function TaskScreen({
@@ -293,23 +270,28 @@ export function TaskScreen({
   const [attachmentErrorMessage, setAttachmentErrorMessage] = useState<
     string | null
   >(null);
-  const [inputDeliveryStatus, setInputDeliveryStatus] =
-    useState<ComposerInputStatus | null>(null);
+  const [inputFailure, setInputFailure] =
+    useState<ComposerInputFailure | null>(null);
   const [inputSendingTaskId, setInputSendingTaskId] = useState<string | null>(
     null
   );
   const [isPickingAttachment, setIsPickingAttachment] = useState(false);
-  const [isComposerScrollable, setIsComposerScrollable] = useState(false);
-  const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [isBackPending, setIsBackPending] = useState(false);
   const [terminalControlTaken, setTerminalControlTaken] = useState(false);
+  const [measuredTerminalCapacity, setMeasuredTerminalCapacity] = useState<{
+    cols: number;
+    rows: number;
+  } | null>(null);
   useEffect(() => {
     // Takeover belongs to one live terminal attachment, not to the task row
     // or screen component. A task switch, reconnect, background expiry, or
     // terminal replacement must never leave the next attachment showing a
     // stale release action.
     setTerminalControlTaken(false);
+    // The next task's page measures itself; the previous task's capacity is
+    // not a proposal for this one.
+    setMeasuredTerminalCapacity(null);
   }, [task.id]);
   useEffect(() => {
     if (terminalStatus !== "live") {
@@ -463,10 +445,22 @@ export function TaskScreen({
       terminalStatus === "restarting");
   const terminalViewport =
     screenViewport ?? { width: windowWidth, height: windowHeight };
-  const terminalGeometry = resolveMobileTerminalGeometry(terminalViewport);
+  // The page measures what this phone can actually show at its current font
+  // and zoom; the native side can only estimate it. Prefer the measurement and
+  // fall back to the estimate only until the first one arrives, so a viewer
+  // never proposes a grid nobody can read.
+  const terminalGeometry =
+    measuredTerminalCapacity ?? resolveMobileTerminalGeometry(terminalViewport);
   const terminalBottomInset = getTerminalBottomInset(
     screenViewport?.height ?? 0,
     composerTop
+  );
+  // The keyboard's share of that inset is presentation only. Measuring
+  // capacity against the resting composer keeps a controlled PTY from
+  // reflowing every time somebody taps Reply.
+  const terminalCapacityInset = Math.max(
+    0,
+    terminalBottomInset - keyboardHeight
   );
   const terminalSelectionToolbarTop =
     getTerminalSelectionToolbarTop(topChromeBottom);
@@ -493,10 +487,8 @@ export function TaskScreen({
   // one that quietly loses the photo.
   const canAttachPhoto = !isAgentTask && desktopSupportsAttachments;
   const isInputSending = inputSendingTaskId === task.id;
-  const activeInputDeliveryStatus =
-    inputDeliveryStatus?.taskId === task.id
-      ? inputDeliveryStatus.outcome
-      : null;
+  const activeInputFailure =
+    inputFailure?.taskId === task.id ? inputFailure.outcome : null;
   const terminalKeysDisabledReason = taskTerminalInputDisabledReason(
     terminalInputUnavailableReason
   );
@@ -521,83 +513,26 @@ export function TaskScreen({
     draftInput: string;
     attachment: PreparedImageAttachment | null;
   } | null>(null);
-  const composerLayoutRef = useRef({
-    contentHeight: TASK_COMPOSER_MIN_HEIGHT,
-    deferredContentHeight: null as number | null,
-    draftChangedSinceExpansion: false,
-    isExpanded: false
-  });
-  const composerInputRef = useRef<TextInput>(null);
-  const composerScrollRef = useRef<ScrollView>(null);
-  const revealComposerCaret = useCallback(() => {
-    requestAnimationFrame(() => {
-      const end = composerSnapshotRef.current.draftInput.length;
-      composerInputRef.current?.setNativeProps({
-        selection: { end, start: end }
-      });
-      composerScrollRef.current?.scrollToEnd({ animated: false });
-    });
-  }, []);
-  const expandComposer = useCallback(() => {
-    if (!composerLayoutRef.current.isExpanded) {
-      composerLayoutRef.current.isExpanded = true;
-      composerLayoutRef.current.deferredContentHeight = null;
-      composerLayoutRef.current.draftChangedSinceExpansion = false;
-      setIsComposerExpanded(true);
-    }
-    const shouldScroll = shouldTaskComposerScroll(
-      composerLayoutRef.current.contentHeight
-    );
-    setIsComposerScrollable(shouldScroll);
-    if (shouldScroll) {
-      revealComposerCaret();
-    }
-  }, [revealComposerCaret]);
-  const collapseComposer = useCallback(() => {
-    composerLayoutRef.current.isExpanded = false;
-    composerScrollRef.current?.scrollTo({ animated: false, y: 0 });
-    setIsComposerExpanded(false);
-  }, []);
-  const applyComposerContentHeight = (contentHeight: number) => {
-    composerLayoutRef.current.contentHeight = contentHeight;
-    const shouldScroll = shouldTaskComposerScroll(contentHeight);
-    setIsComposerScrollable(shouldScroll);
-    if (shouldScroll) {
-      revealComposerCaret();
-    }
-  };
+  // The composer is one multiline TextInput between a one-line minimum and a
+  // five-line maximum, scrolling itself past that. Height is never set from
+  // state, so nothing here measures content, defers a stale measurement, or
+  // moves the caret: the platform's own multiline input does all of it, and
+  // keeps the caret visible while editing mid-draft.
   const updateDraftInput = (nextDraftInput: string) => {
     composerSnapshotRef.current.draftInput = nextDraftInput;
-    composerLayoutRef.current.draftChangedSinceExpansion = true;
-    if (!nextDraftInput) {
-      composerLayoutRef.current.deferredContentHeight = null;
-      composerLayoutRef.current.contentHeight = TASK_COMPOSER_MIN_HEIGHT;
-      setIsComposerScrollable(false);
-    } else if (composerLayoutRef.current.deferredContentHeight !== null) {
-      const deferredContentHeight =
-        composerLayoutRef.current.deferredContentHeight;
-      composerLayoutRef.current.deferredContentHeight = null;
-      applyComposerContentHeight(deferredContentHeight);
-    }
-    if (inputDeliveryStatus?.taskId === task.id) {
-      setInputDeliveryStatus(null);
-    }
     setDraftInput(nextDraftInput);
   };
   const clearDraftInput = () => {
     composerSnapshotRef.current.draftInput = "";
     composerSnapshotRef.current.attachment = null;
-    composerLayoutRef.current.deferredContentHeight = null;
-    composerLayoutRef.current.contentHeight = TASK_COMPOSER_MIN_HEIGHT;
-    setIsComposerScrollable(false);
     setDraftInput("");
     setAttachment(null);
     setAttachmentErrorMessage(null);
   };
   const removeAttachment = () => {
     composerSnapshotRef.current.attachment = null;
-    if (inputDeliveryStatus?.taskId === task.id) {
-      setInputDeliveryStatus(null);
+    if (inputFailure?.taskId === task.id) {
+      setInputFailure(null);
     }
     setAttachment(null);
     setAttachmentErrorMessage(null);
@@ -616,8 +551,8 @@ export function TaskScreen({
         return;
       }
       composerSnapshotRef.current.attachment = picked;
-      if (inputDeliveryStatus?.taskId === task.id) {
-        setInputDeliveryStatus(null);
+      if (inputFailure?.taskId === task.id) {
+        setInputFailure(null);
       }
       setAttachment(picked);
     } catch (error) {
@@ -639,36 +574,6 @@ export function TaskScreen({
     showImageAttachmentSourceMenu((source) => {
       void attachPhotoFrom(source);
     });
-  };
-  const updateComposerInputHeight = (
-    event: TextInputContentSizeChangeEvent
-  ) => {
-    // The input stays intrinsically sized so Fabric reports soft wraps. The
-    // surrounding native viewport owns the cap and scrolling, avoiding the
-    // controlled-height TextInput path that drops both measurements and caret
-    // following on device. Ignore collapsed measurements so refocus restores
-    // the last expanded content height.
-    if (
-      composerSnapshotRef.current.draftInput &&
-      composerLayoutRef.current.isExpanded
-    ) {
-      const contentHeight = event.nativeEvent.contentSize.height;
-      if (
-        !composerLayoutRef.current.draftChangedSinceExpansion &&
-        contentHeight < composerLayoutRef.current.contentHeight &&
-        composerLayoutRef.current.deferredContentHeight === null
-      ) {
-        // Refocusing expands the outer viewport from the retained intrinsic
-        // measurement. Fabric can emit one stale collapsed-height event during
-        // that transition. Defer the first smaller measurement until either a
-        // second measurement proves it stale or onChangeText proves it came
-        // from an edit; Fabric may deliver those callbacks in either order.
-        composerLayoutRef.current.deferredContentHeight = contentHeight;
-        return;
-      }
-      composerLayoutRef.current.deferredContentHeight = null;
-      applyComposerContentHeight(contentHeight);
-    }
   };
   const submitInput = (input: string) => {
     const snapshot = composerSnapshotRef.current;
@@ -695,10 +600,9 @@ export function TaskScreen({
     };
     inputSubmissionRef.current = submission;
     setInputSendingTaskId(snapshot.taskId);
-    setInputDeliveryStatus({
-      taskId: snapshot.taskId,
-      outcome: { status: "sending" }
-    });
+    // A previous failure's notice belongs to the message that failed, not to
+    // this one. The send control's own pending state says a send is in flight.
+    setInputFailure(null);
 
     let sendResult: Promise<TaskInputSendOutcome> | void;
     try {
@@ -730,14 +634,17 @@ export function TaskScreen({
 
       const resolvedOutcome: TaskInputSendOutcome =
         outcome ?? { status: "delivered" };
-      setInputDeliveryStatus({
+      if (resolvedOutcome.status === "delivered") {
+        // Silent success: the text leaving the composer says it went.
+        setInputFailure(null);
+        clearDraftInput();
+        Keyboard.dismiss();
+        return;
+      }
+      setInputFailure({
         taskId: submission.taskId,
         outcome: resolvedOutcome
       });
-      if (resolvedOutcome.status === "delivered") {
-        clearDraftInput();
-        Keyboard.dismiss();
-      }
     };
     const failSubmission = (error: unknown) => {
       // A callback that rejects without mapping its transport error is still
@@ -756,7 +663,7 @@ export function TaskScreen({
       ) {
         return;
       }
-      setInputDeliveryStatus({
+      setInputFailure({
         taskId: submission.taskId,
         outcome: {
           status: "uncertain",
@@ -865,7 +772,7 @@ export function TaskScreen({
     setCompanionModalTaskId(null);
     setDiffModalTaskId(null);
     setPreviewModalTaskId(null);
-    setInputDeliveryStatus(null);
+    setInputFailure(null);
     removeAttachment();
     return () => {
       if (!lifecycle.isOpen) return;
@@ -896,11 +803,9 @@ export function TaskScreen({
 
   useEffect(() => {
     const showSubscription = Keyboard.addListener("keyboardWillShow", (event) => {
-      expandComposer();
       setKeyboardHeight(event.endCoordinates.height);
     });
     const hideSubscription = Keyboard.addListener("keyboardWillHide", () => {
-      collapseComposer();
       setKeyboardHeight(0);
     });
 
@@ -909,7 +814,7 @@ export function TaskScreen({
       showSubscription.remove();
       hideSubscription.remove();
     };
-  }, [collapseComposer, expandComposer]);
+  }, []);
 
   useEffect(() => {
     if (
@@ -929,14 +834,20 @@ export function TaskScreen({
     terminalGeometry.rows
   ]);
 
-  const isComposerViewportScrollable =
-    isComposerScrollable ||
-    (!isComposerExpanded &&
-      composerLayoutRef.current.contentHeight > TASK_COMPOSER_MIN_HEIGHT);
   const sendTerminalInput = useCallback(
     (dataB64: string, kind: TaskTerminalInputKind) =>
       onSendTerminalInput?.(dataB64, kind),
     [onSendTerminalInput]
+  );
+  const handleTerminalCapacityChange = useCallback(
+    (cols: number, rows: number) => {
+      setMeasuredTerminalCapacity((current) =>
+        current?.cols === cols && current.rows === rows
+          ? current
+          : { cols, rows }
+      );
+    },
+    []
   );
 
   return (
@@ -1059,6 +970,7 @@ export function TaskScreen({
                 terminalDirectInputEnabled && terminalKeysDisabledReason === null
               }
               directInputFocusRequest={terminalDirectInputFocusRequest}
+              capacityInset={terminalCapacityInset}
               selectionToolbarTop={terminalSelectionToolbarTop}
               onConsolePress={
                 terminalDirectInputEnabled ? undefined : Keyboard.dismiss
@@ -1066,6 +978,8 @@ export function TaskScreen({
               onMentionedFilesChange={handleTerminalMentionedFilesChange}
               onOpenFile={handleTerminalOpenFile}
               onTerminalInput={sendTerminalInput}
+              onTerminalInput={onSendTerminalInput}
+              onCapacityChange={handleTerminalCapacityChange}
               onRequestScrollback={onRequestTerminalScrollback}
             />
             {onTakeTerminalControl && onReleaseTerminalControl ? (
@@ -1073,6 +987,7 @@ export function TaskScreen({
                 accessibilityRole="button"
                 accessibilityState={{ selected: terminalControlTaken }}
                 style={styles.terminalControlButton}
+                testID={MOBILE_E2E_IDS.taskTerminalControl}
                 onPress={() => {
                   if (terminalControlTaken) {
                     onReleaseTerminalControl();
@@ -1311,6 +1226,31 @@ export function TaskScreen({
           { bottom: getComposerBottomOffset(keyboardHeight) }
         ]}
       >
+        {activeInputFailure ? (
+          <View
+            accessibilityLiveRegion="polite"
+            accessibilityLabel={composerInputFailureMessage(activeInputFailure)}
+            // Absolutely positioned so a failure notice overlays the terminal
+            // instead of pushing the composer down the screen.
+            pointerEvents="box-none"
+            style={styles.inputFailureToast}
+            testID={MOBILE_E2E_IDS.taskInputStatus}
+          >
+            <Ionicons color="#FF9A8B" name="warning-outline" size={16} />
+            <Text style={styles.inputFailureToastText}>
+              {composerInputFailureMessage(activeInputFailure)}
+            </Text>
+            <Pressable
+              accessibilityLabel="Dismiss send failure"
+              accessibilityRole="button"
+              hitSlop={8}
+              onPress={() => setInputFailure(null)}
+              testID={MOBILE_E2E_IDS.taskInputStatusDismiss}
+            >
+              <Text style={styles.inputFailureToastDismiss}>✕</Text>
+            </Pressable>
+          </View>
+        ) : null}
         <View style={styles.composerActions}>
           {!isAgentTask ? (
             <Pressable
@@ -1447,31 +1387,6 @@ export function TaskScreen({
             {attachmentErrorMessage}
           </Text>
         ) : null}
-        {activeInputDeliveryStatus ? (
-          <View
-            accessibilityLiveRegion="polite"
-            accessibilityLabel={composerInputStatusMessage(
-              activeInputDeliveryStatus
-            )}
-            style={[
-              styles.taskInputStatus,
-              activeInputDeliveryStatus.status === "failed" ||
-              activeInputDeliveryStatus.status === "uncertain"
-                ? styles.taskInputStatusError
-                : null
-            ]}
-            testID={MOBILE_E2E_IDS.taskInputStatus}
-          >
-            <Ionicons
-              color={composerInputStatusIconColor(activeInputDeliveryStatus)}
-              name={composerInputStatusIcon(activeInputDeliveryStatus)}
-              size={16}
-            />
-            <Text style={styles.taskInputStatusText}>
-              {composerInputStatusMessage(activeInputDeliveryStatus)}
-            </Text>
-          </View>
-        ) : null}
         {!isAgentTask && terminalDirectInputEnabled ? (
           <View style={styles.terminalKeyStripGroup}>
             <ScrollView
@@ -1555,53 +1470,19 @@ export function TaskScreen({
               )}
             </Pressable>
           ) : null}
-          <ScrollView
-            ref={composerScrollRef}
-            contentContainerStyle={styles.inputFieldContent}
-            keyboardShouldPersistTaps="always"
-            scrollEnabled={isComposerViewportScrollable}
-            showsVerticalScrollIndicator={isComposerViewportScrollable}
+          <TextInput
+            {...TASK_COMPOSER_TEXT_INPUT_PROPS}
+            editable={!isComposerDisabled}
+            onChangeText={updateDraftInput}
+            placeholder="Reply…"
+            placeholderTextColor="#6F89AE"
             style={[
-              styles.inputFieldViewport,
-              {
-                height: !isComposerExpanded
-                  ? TASK_COMPOSER_MIN_HEIGHT
-                  : Math.min(
-                      TASK_COMPOSER_MAX_HEIGHT,
-                      Math.max(
-                        TASK_COMPOSER_MIN_HEIGHT,
-                        composerLayoutRef.current.contentHeight
-                      )
-                    )
-              }
+              styles.inputField,
+              isComposerDisabled ? styles.inputFieldDisabled : null
             ]}
-            testID={MOBILE_E2E_IDS.taskInputViewport}
-          >
-            <TextInput
-              {...TASK_COMPOSER_TEXT_INPUT_PROPS}
-              ref={composerInputRef}
-              editable={!isComposerDisabled}
-              onChangeText={updateDraftInput}
-              onContentSizeChange={updateComposerInputHeight}
-              onBlur={collapseComposer}
-              onFocus={expandComposer}
-              onPressIn={expandComposer}
-              placeholder="Reply…"
-              placeholderTextColor="#6F89AE"
-              scrollEnabled={false}
-              style={[
-                styles.inputField,
-                // Fabric can retain a multiline TextInput's intrinsic native
-                // height after its controlled value becomes empty. Pin the
-                // empty input to one line on the existing native view; omit
-                // the height while editing so it can still report soft wraps.
-                !draftInput ? { height: TASK_COMPOSER_MIN_HEIGHT } : null,
-                isComposerDisabled ? styles.inputFieldDisabled : null
-              ]}
-              testID={MOBILE_E2E_IDS.taskInput}
-              value={draftInput}
-            />
-          </ScrollView>
+            testID={MOBILE_E2E_IDS.taskInput}
+            value={draftInput}
+          />
           <QuickReplySendControl
             disabled={isComposerDisabled || isInputSending}
             gestureScopeKey={task.id}
@@ -2069,28 +1950,6 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     paddingHorizontal: 4
   },
-  taskInputStatus: {
-    alignItems: "center",
-    backgroundColor: "rgba(32, 48, 76, 0.72)",
-    borderColor: "rgba(155, 176, 204, 0.42)",
-    borderRadius: 12,
-    borderWidth: 1,
-    flexDirection: "row",
-    gap: 8,
-    marginBottom: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 9
-  },
-  taskInputStatusError: {
-    backgroundColor: "rgba(92, 34, 31, 0.76)",
-    borderColor: "rgba(255, 154, 139, 0.5)"
-  },
-  taskInputStatusText: {
-    color: "#C6D6EC",
-    flex: 1,
-    fontSize: 12,
-    lineHeight: 17
-  },
   attachButton: {
     alignItems: "center",
     borderRadius: 999,
@@ -2169,23 +2028,48 @@ const styles = StyleSheet.create({
   },
   inputField: {
     color: "#F5F7FB",
+    flex: 1,
     fontSize: 14,
     lineHeight: TASK_COMPOSER_LINE_HEIGHT,
+    // One line to five, then the input scrolls itself. `maxHeight` is a
+    // constraint, not a controlled height: nothing assigns `height` from
+    // state, so the platform keeps its own measurement and caret handling.
+    maxHeight: TASK_COMPOSER_MAX_HEIGHT,
     minHeight: TASK_COMPOSER_MIN_HEIGHT,
     paddingHorizontal: 8,
     paddingVertical: 10,
-    textAlignVertical: "top",
-    width: "100%"
-  },
-  inputFieldContent: {
-    flexGrow: 1
-  },
-  inputFieldViewport: {
-    flex: 1
+    textAlignVertical: "top"
   },
   inputFieldDisabled: {
     color: "#6F89AE",
     opacity: 0.65
+  },
+  inputFailureToast: {
+    alignItems: "flex-start",
+    backgroundColor: "rgba(46, 18, 22, 0.96)",
+    borderColor: "#7A3340",
+    borderRadius: 12,
+    borderWidth: 1,
+    bottom: "100%",
+    flexDirection: "row",
+    gap: 8,
+    left: 0,
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    position: "absolute",
+    right: 0
+  },
+  inputFailureToastText: {
+    color: "#FFD9D2",
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 16
+  },
+  inputFailureToastDismiss: {
+    color: "#FFD9D2",
+    fontSize: 14,
+    paddingHorizontal: 2
   },
   e2eTaskSnapshotMarker: {
     color: "transparent",
