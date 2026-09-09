@@ -503,6 +503,20 @@ mod tests {
             .map(|path| resolve_existing_ancestor(path))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
+        // The fixture creates `root` and nothing under it, so the proof that
+        // asking creates nothing is the listing staying identical, not the
+        // absence of a directory nobody would have created anyway.
+        let listing = |dir: &Path| -> Vec<std::ffi::OsString> {
+            let mut names: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing(&root);
+        assert!(before.is_empty(), "the fixture root starts empty");
+
         assert_eq!(
             protected_match(&production, &protected, &resolved).unwrap(),
             Some(production.clone())
@@ -511,13 +525,18 @@ mod tests {
             protected_match(&root.join("worker/kanna-worker.db"), &protected, &resolved).unwrap(),
             None
         );
-        assert!(!production.parent().unwrap().exists());
         for real in production_database_paths().unwrap() {
             assert_eq!(protected_desktop_database(&real).unwrap(), Some(real));
         }
         assert_eq!(
             protected_desktop_database(&root.join("own.db")).unwrap(),
             None
+        );
+
+        assert_eq!(
+            listing(&root),
+            before,
+            "asking must not create the production parent, the database, or anything else"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
