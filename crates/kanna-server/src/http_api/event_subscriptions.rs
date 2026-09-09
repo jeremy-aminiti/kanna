@@ -400,10 +400,48 @@ async fn step(
         tokio::select! { _ = changed.as_mut() => {}, _ = changes.recv() => {} }
         return Ok(Step::Iterate);
     }
-    let batch = tokio::select! {
-        _ = changed.as_mut() => return Ok(Step::Iterate),
-        _ = changes.recv() => return Ok(Step::Iterate),
-        batch = collect(state.clone(), &row, 240) => batch,
+    // A state notification asks us to revalidate the owner, not to replace
+    // its observation. Dropping collect also drops the aggregate's retained
+    // peer legs, but an admitted relay request keeps running on the peer.
+    // Recreating that wait for every local state edge exhausts its long-poll
+    // permits even with only one subscription.
+    let batch = {
+        let collection = collect(
+            state.clone(),
+            &row,
+            kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS,
+        );
+        tokio::pin!(collection);
+        loop {
+            let mut notification = Box::pin(state.event_subscriptions_changed.notified());
+            notification.as_mut().enable();
+            let current = database(state)?
+                .event_subscription(id)
+                .map_err(|e| e.to_string())?;
+            if !current.is_some_and(|current| {
+                current.active
+                    && current.revision == row.revision
+                    && current.pending.is_none()
+                    && current.query == row.query
+                    && current.cursor == row.cursor
+            }) || !still_bound(state, &row)?
+            {
+                // Genuine retirement or a changed mailbox invalidates this
+                // collect. There is no relay cancellation protocol: at most
+                // one abandoned leg per peer per retirement finishes at its
+                // receiver's own deadline (MAX_WAIT_TIMEOUT_SECS). Repeated
+                // retirements can overlap those holds; this is not a bound on
+                // all historical requests from the subscription. Never put a
+                // cancelled aggregate back in the registry: it may already
+                // have advanced checkpoints for events not yet in the mailbox.
+                return Ok(Step::Iterate);
+            }
+            tokio::select! {
+                _ = notification => {},
+                _ = changes.recv() => {},
+                batch = &mut collection => break batch,
+            }
+        }
     };
     match batch {
         Ok(batch) => accept_page(&mut row, batch, false),

@@ -18,6 +18,8 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
+mod subscription_remote;
+
 fn seed_orchestration(db: &Db) {
     db.insert_test_repo("repo-events", "Events Repo")
         .expect("insert repo");
