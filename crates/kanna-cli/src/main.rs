@@ -1007,7 +1007,7 @@ pub(crate) enum MachineCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
-    /// Report resource stats for this machine and reachable siblings
+    /// Report sampled CPU, top processes, memory and storage for this machine and siblings
     Stats {
         /// Override the local Kanna server base URL
         #[arg(long)]
