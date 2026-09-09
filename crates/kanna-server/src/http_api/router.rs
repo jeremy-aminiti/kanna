@@ -52,8 +52,8 @@ use super::task_logs::task_logs;
 use super::task_ports::{claim_task_ports, release_task_ports};
 use super::task_raw_input::send_task_raw_input;
 use super::tasks::{
-    create_task, get_task, get_task_children, get_task_inputs, list_closed_task_identities,
-    list_recent_tasks, put_task, search_tasks, update_task,
+    create_task, get_task, get_task_children, get_task_inputs, get_tasks,
+    list_closed_task_identities, list_recent_tasks, put_task, search_tasks, update_task,
 };
 use super::transfer_sidecar::{
     clear_cloud_transfer_proxies, ensure_cloud_transfer_proxy, remove_cloud_transfer_proxy,
@@ -200,7 +200,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/tasks/closed-identities",
             get(list_closed_task_identities),
         )
-        .route("/v1/tasks", post(create_task))
+        .route("/v1/tasks", get(get_tasks).post(create_task))
         .route(
             "/v1/tasks/{task_id}",
             get(get_task).put(put_task).patch(update_task),

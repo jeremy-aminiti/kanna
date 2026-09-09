@@ -211,6 +211,18 @@ pub struct PipelineItem {
     pub revision_rounds: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskListSort {
+    UpdatedAt,
+    CreatedAt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskListOrder {
+    Asc,
+    Desc,
+}
+
 /// One direct child of a parent task, as the fan-out history surfaces read it:
 /// its identity, the workflow that classifies it, and its lifecycle timestamps.
 /// The verdict itself lives on the child's latest `stage_run`.

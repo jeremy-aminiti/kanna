@@ -134,6 +134,22 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_get_tasks",
+            TypedToolSurface {
+                command_path: &["task", "get-tasks"],
+                param_args: &[
+                    ("repo_id", "repo_id"),
+                    ("all_repos", "all_repos"),
+                    ("runtime_state", "runtime_state"),
+                    ("sort_by", "sort_by"),
+                    ("order", "order"),
+                    ("limit", "limit"),
+                    ("all_machines", "all_machines"),
+                    ("include_closed", "include_closed"),
+                ],
+            },
+        ),
+        (
             "kanna_list_recent_tasks",
             TypedToolSurface {
                 command_path: &["task", "list"],

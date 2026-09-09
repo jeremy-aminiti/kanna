@@ -433,6 +433,31 @@ pub(crate) fn task_not_found_error(task_id: &str) -> String {
 }
 pub(crate) async fn run(command: TaskCommands) {
     match command {
+        TaskCommands::GetTasks {
+            repo_id,
+            all_repos,
+            runtime_state,
+            sort_by,
+            order,
+            limit,
+            all_machines,
+            include_closed,
+            server_url,
+        } => {
+            let mut args = json!({
+                "all_repos": all_repos,
+                "all_machines": all_machines,
+                "include_closed": include_closed,
+            });
+            insert_optional(&mut args, "repo_id", repo_id);
+            insert_optional(&mut args, "runtime_state", runtime_state);
+            insert_optional(&mut args, "sort_by", sort_by);
+            insert_optional(&mut args, "order", order);
+            if let (Some(object), Some(limit)) = (args.as_object_mut(), limit) {
+                object.insert("limit".to_string(), Value::Number(limit.into()));
+            }
+            run_catalog_task_tool("kanna_get_tasks", &args, server_url.as_deref()).await;
+        }
         TaskCommands::List {
             repo_id,
             all_repos,

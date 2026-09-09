@@ -33,6 +33,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_list_repos",
             "kanna_add_repo",
             "kanna_reconcile_repo_metadata",
+            "kanna_get_tasks",
             "kanna_list_recent_tasks",
             "kanna_get_task",
             "kanna_list_task_children",
@@ -479,6 +480,14 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             ResponseKind::Json,
             "/v1/repos",
             json!({ "path": "/Users/me/project", "name": "Project" }),
+        ),
+        (
+            "kanna_get_tasks",
+            json!({ "runtime_state": "idle", "sort_by": "createdAt", "order": "asc", "limit": 12 }),
+            Method::Get,
+            ResponseKind::Json,
+            "/v1/tasks?runtimeState=idle&sortBy=createdAt&order=asc&limit=12",
+            json!({}),
         ),
         (
             "kanna_list_recent_tasks",
@@ -1074,6 +1083,11 @@ fn task_session_repo_defaulting_is_shared_by_every_catalog_client() {
 
     for (tool, args, expected_path) in [
         (
+            "kanna_get_tasks",
+            json!({}),
+            "/v1/tasks?repoId=repo-current&sortBy=updatedAt&order=desc&limit=50",
+        ),
+        (
             "kanna_list_recent_tasks",
             json!({}),
             "/v1/tasks/recent?repoId=repo-current",
@@ -1140,6 +1154,7 @@ fn explicit_repository_and_machine_wide_scopes_win_over_task_context() {
         ("kanna_wait_events", json!({ "task_ids": ["task-a"] })),
         ("kanna_wait_events", json!({ "parent_task_id": "parent-a" })),
         ("kanna_list_recent_tasks", json!({ "all_repos": true })),
+        ("kanna_get_tasks", json!({ "all_repos": true })),
         (
             "kanna_search_tasks",
             json!({ "query": "x", "all_machines": true }),

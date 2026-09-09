@@ -3677,12 +3677,172 @@ async fn list_recent_tasks_route_filters_by_repo_and_applies_the_requested_limit
 }
 
 #[tokio::test]
+async fn get_tasks_route_filters_runtime_before_limit_and_reports_query_completeness() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for (id, created_at) in [
+            ("unknown-with-idle-activity", "2026-08-24 07:00:00"),
+            ("busy-with-unread-activity", "2026-08-24 08:00:00"),
+            ("idle-b", "2026-08-24 09:00:00"),
+            ("idle-a", "2026-08-24 09:00:00"),
+        ] {
+            db.insert_test_pipeline_item(id, "repo-1", id, Some(id), "in progress", created_at)
+                .unwrap();
+        }
+        db.update_pipeline_item_runtime_status("busy-with-unread-activity", "busy", None)
+            .unwrap();
+        db.update_pipeline_item_activity("busy-with-unread-activity", "unread")
+            .unwrap();
+        for id in ["idle-a", "idle-b"] {
+            db.update_pipeline_item_runtime_status(id, "idle", None)
+                .unwrap();
+        }
+    });
+
+    let response = app
+        .oneshot(
+            Request::get(
+                "/v1/tasks?repoId=repo-1&runtimeState=idle&sortBy=createdAt&order=asc&limit=1",
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(result["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(result["tasks"][0]["id"], "idle-a");
+    assert_eq!(result["tasks"][0]["runtimeState"], "idle");
+    assert!(result["tasks"][0]["updatedAt"].is_string());
+    assert!(result["tasks"][0].get("workflowDefinition").is_none());
+    assert_eq!(result["runtimeState"], "idle");
+    assert_eq!(result["includeClosed"], false);
+    assert_eq!(result["sortBy"], "createdAt");
+    assert_eq!(result["order"], "asc");
+    assert_eq!(result["limit"], 1);
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["scope"]["kind"], "repository");
+    assert_eq!(result["scope"]["repoId"], "repo-1");
+    assert_eq!(
+        result["scope"]["machineIds"],
+        serde_json::json!(["desktop-1"])
+    );
+    assert_eq!(result["machineErrors"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn get_tasks_route_rejects_unknown_runtime_and_sort_values() {
+    let app = super::test_router_with_seed("desktop-1", "Studio Mac", |_| {});
+
+    for path in [
+        "/v1/tasks?runtimeState=unread",
+        "/v1/tasks?sortBy=title",
+        "/v1/tasks?order=sideways",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn get_tasks_all_machines_reports_older_peer_without_unfiltered_fallback() {
+    let state = super::test_state_with_seed("desktop-local", "Local Mac", |db| {
+        db.insert_test_repo("repo-local", "Local Repo").unwrap();
+        db.insert_test_pipeline_item(
+            "local-idle",
+            "repo-local",
+            "local idle",
+            Some("Local idle"),
+            "in progress",
+            "2026-08-24 09:00:00",
+        )
+        .unwrap();
+        db.update_pipeline_item_runtime_status("local-idle", "idle", None)
+            .unwrap();
+    });
+    let mut requests = state.take_desktop_relay_requests().unwrap();
+    state.set_desktop_routing_available(true);
+    let responder = tokio::spawn(async move {
+        let super::super::state::DesktopRelayRequest::ListActive { response, .. } =
+            requests.recv().await.expect("active desktop request")
+        else {
+            panic!("expected active desktop request");
+        };
+        response
+            .send(Ok(vec![
+                "desktop-local".to_string(),
+                "desktop-older".to_string(),
+            ]))
+            .unwrap();
+
+        let super::super::state::DesktopRelayRequest::Invoke {
+            desktop_id,
+            method,
+            path,
+            response,
+            ..
+        } = requests.recv().await.expect("filtered peer request")
+        else {
+            panic!("expected filtered peer request");
+        };
+        assert_eq!(desktop_id, "desktop-older");
+        assert_eq!(method, "GET");
+        assert_eq!(
+            path,
+            "/v1/tasks?includeClosed=false&allMachines=false&allRepos=true&sortBy=createdAt&order=asc&limit=10&runtimeState=idle"
+        );
+        response
+            .send(Ok(crate::http_api::HttpInvokeResponse {
+                status: 404,
+                body: None,
+                error: Some("route not found".to_string()),
+            }))
+            .unwrap();
+    });
+
+    let response = crate::http_api::router(state)
+        .oneshot(
+            Request::get(
+                "/v1/tasks?allMachines=true&allRepos=true&runtimeState=idle&sortBy=createdAt&order=asc&limit=10",
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    responder.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: serde_json::Value = from_slice(&body).unwrap();
+    assert_eq!(result["tasks"][0]["id"], "local-idle");
+    assert_eq!(result["scope"]["kind"], "account");
+    assert_eq!(
+        result["scope"]["machineIds"],
+        serde_json::json!(["desktop-local", "desktop-older"])
+    );
+    assert_eq!(result["machineErrors"][0]["machineId"], "desktop-older");
+    assert_eq!(result["machineErrors"][0]["error"], "route not found");
+}
+
+#[tokio::test]
 async fn task_listing_routes_reject_repo_id_with_all_machines() {
     let app = super::test_router_with_seed("desktop-1", "Studio Mac", |db| {
         db.insert_test_repo("repo-1", "Repo One").unwrap();
     });
 
     for path in [
+        "/v1/tasks?repoId=repo-1&allMachines=true",
         "/v1/tasks/recent?repoId=repo-1&allMachines=true",
         "/v1/tasks/search?query=review&repoId=repo-1&allMachines=true",
     ] {

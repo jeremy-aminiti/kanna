@@ -252,13 +252,17 @@ fn task_looks_stopped(task: &Value) -> bool {
 ///
 /// Both shapes the catalog's GET routes produce are covered: the single task
 /// detail behind `kanna_get_task`, and the `TaskSummary` arrays behind
-/// `kanna_list_recent_tasks`, `kanna_search_tasks`, and
+/// `kanna_get_tasks`, `kanna_list_recent_tasks`, `kanna_search_tasks`, and
 /// `kanna_list_repo_tasks`. A list is exactly as capable of carrying a
 /// mid-redraw misread as a detail read is, and an orchestrator that lists its
 /// children to see which ones are still going would act on it the same way.
 fn response_looks_stopped(value: &Value) -> bool {
     match value {
         Value::Array(tasks) => tasks.iter().any(task_looks_stopped),
+        Value::Object(object) if object.get("tasks").is_some_and(Value::is_array) => object
+            .get("tasks")
+            .and_then(Value::as_array)
+            .is_some_and(|tasks| tasks.iter().any(task_looks_stopped)),
         _ => task_looks_stopped(value),
     }
 }
@@ -1864,6 +1868,7 @@ mod tests {
                 "kanna_list_repos",
                 "kanna_add_repo",
                 "kanna_reconcile_repo_metadata",
+                "kanna_get_tasks",
                 "kanna_list_recent_tasks",
                 "kanna_get_task",
                 "kanna_list_task_children",
@@ -1899,6 +1904,20 @@ mod tests {
                 "kanna_request_revision",
             ]
         );
+    }
+
+    #[test]
+    fn stopped_detection_reads_tasks_inside_generic_query_envelope() {
+        let response = json!({
+            "tasks": [
+                { "id": "busy", "runtimeState": "busy", "activity": "unread" },
+                { "id": "idle", "runtimeState": "idle", "activity": "idle" }
+            ],
+            "truncated": false,
+            "machineErrors": []
+        });
+
+        assert!(response_looks_stopped(&response));
     }
 
     #[test]

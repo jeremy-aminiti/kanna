@@ -167,6 +167,44 @@ pub(crate) enum RepoAgentCommands {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum TaskCommands {
+    /// Get a filtered, explicitly sorted task snapshot
+    GetTasks {
+        /// Limit results to one repository ID
+        #[arg(long)]
+        repo_id: Option<String>,
+
+        /// Query across repositories instead of the current task's repository
+        #[arg(long)]
+        all_repos: bool,
+
+        /// Filter by daemon runtime state
+        #[arg(long, value_parser = ["busy", "waiting", "idle", "exited"])]
+        runtime_state: Option<String>,
+
+        /// Sort timestamp (defaults to updatedAt)
+        #[arg(long, value_parser = ["updatedAt", "createdAt"])]
+        sort_by: Option<String>,
+
+        /// Sort direction (defaults to desc)
+        #[arg(long, value_parser = ["asc", "desc"])]
+        order: Option<String>,
+
+        /// Maximum returned rows (server clamps to 200)
+        #[arg(long)]
+        limit: Option<u32>,
+
+        /// Aggregate the filtered query across reachable account machines
+        #[arg(long)]
+        all_machines: bool,
+
+        /// Include closed tasks in the result
+        #[arg(long)]
+        include_closed: bool,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// List recent tasks from the running desktop server
     List {
         /// Limit results to one repo ID instead of recent tasks across repos

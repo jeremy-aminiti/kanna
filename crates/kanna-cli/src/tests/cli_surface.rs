@@ -503,6 +503,39 @@ fn parses_new_repo_and_task_subcommands() {
     let cli = crate::Cli::try_parse_from([
         "kanna-cli",
         "task",
+        "get-tasks",
+        "--runtime-state",
+        "idle",
+        "--sort-by",
+        "createdAt",
+        "--order",
+        "asc",
+        "--limit",
+        "25",
+    ])
+    .unwrap();
+    match cli.command {
+        crate::Commands::Task {
+            command:
+                crate::TaskCommands::GetTasks {
+                    runtime_state,
+                    sort_by,
+                    order,
+                    limit,
+                    ..
+                },
+        } => {
+            assert_eq!(runtime_state.as_deref(), Some("idle"));
+            assert_eq!(sort_by.as_deref(), Some("createdAt"));
+            assert_eq!(order.as_deref(), Some("asc"));
+            assert_eq!(limit, Some(25));
+        }
+        _ => panic!("expected generic task query command"),
+    }
+
+    let cli = crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
         "rename",
         "--task-id",
         "task-1",
