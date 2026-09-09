@@ -892,6 +892,22 @@ enum StageRestartIntent {
         rejected_run_id: String,
         reason: String,
     },
+    /// The provider positively refused the turn for spent quota before the
+    /// attempt changed anything, and the stage's own ordered candidate list
+    /// names another authorized provider.
+    ///
+    /// The next candidate runs in the *same* workspace with the *same* prompt
+    /// — nothing about the task changes except which CLI is asked. It carries
+    /// the model and effort written beside that candidate in the workflow's
+    /// compact selector, never the rejected candidate's: a selector list gives
+    /// every fallback its own coherent pair, and composing one candidate's
+    /// model onto another provider is exactly the cross-layer mistake
+    /// provider resolution exists to prevent.
+    NextProviderAfterQuotaRejection {
+        rejected_run_id: String,
+        candidate: super::ProviderCandidate,
+        reason: String,
+    },
 }
 
 /// Prepare recovery of the latest interrupted run in the task's existing
@@ -933,6 +949,32 @@ pub(crate) fn prepare_fresh_restart_after_rejected_resume(
     )
 }
 
+/// Prepare the one automatic attempt a quota rejection is allowed: the stage's
+/// next ordered candidate, in the same task, stage and worktree, with that
+/// candidate's own model and effort.
+///
+/// Nothing about the workspace is touched — no reset, no fork, no new task —
+/// so the attempt is a replacement, not a replay of anything that ran.
+pub(crate) fn prepare_provider_fallback_for_api(
+    db: &Db,
+    config: &Config,
+    task_id: &str,
+    rejected_run_id: &str,
+    candidate: super::ProviderCandidate,
+    reason: &str,
+) -> Result<PreparedStageRunSpawn, String> {
+    prepare_stage_restart(
+        db,
+        config,
+        task_id,
+        StageRestartIntent::NextProviderAfterQuotaRejection {
+            rejected_run_id: rejected_run_id.to_string(),
+            candidate,
+            reason: reason.to_string(),
+        },
+    )
+}
+
 fn prepare_stage_restart(
     db: &Db,
     config: &Config,
@@ -957,16 +999,35 @@ fn prepare_stage_restart(
                     run.status, task_id
                 ));
             }
+            // A resume continues *this run's* conversation, so unlike a rerun
+            // it cannot walk to another candidate — re-pointing it would be a
+            // fresh session wearing a resume's name. When the provider that
+            // held that conversation refused this stage for spent quota, the
+            // honest answer is to refuse and say so, rather than reopen a
+            // transcript on an allowance that is gone.
+            if let Some(provider) = run.agent_provider.as_deref() {
+                let refused = db
+                    .providers_rejected_at_stage(task_id, &run.stage)
+                    .map_err(|error| format!("db error: {error}"))?;
+                if refused.iter().any(|name| name == provider) {
+                    return Err(format!(
+                        "{provider} refused this stage for spent quota, and a resume must reopen                          that same provider's conversation. Rerun the stage instead — it                          re-resolves the stage's candidate list around the refusal — or wait for                          the allowance to reset."
+                    ));
+                }
+            }
         }
         // The rejected attempt is deliberately still `running` here: the
         // replacement is prepared before anything is written, so a failed
         // preparation leaves the exit to the caller's normal reporting.
         StageRestartIntent::FreshAfterRejectedResume {
             rejected_run_id, ..
+        }
+        | StageRestartIntent::NextProviderAfterQuotaRejection {
+            rejected_run_id, ..
         } => {
             if &run.id != rejected_run_id {
                 return Err(format!(
-                    "rejected resume attempt {rejected_run_id} is no longer the latest run: {task_id}"
+                    "rejected attempt {rejected_run_id} is no longer the latest run: {task_id}"
                 ));
             }
         }
@@ -1008,7 +1069,8 @@ fn prepare_stage_restart(
     // interrupted run's `feedback` has already been overwritten with the
     // session-interruption marker, which is bookkeeping, not an instruction.
     let requested_changes = match &intent {
-        StageRestartIntent::FreshAfterRejectedResume { .. } => run.feedback.clone(),
+        StageRestartIntent::FreshAfterRejectedResume { .. }
+        | StageRestartIntent::NextProviderAfterQuotaRejection { .. } => run.feedback.clone(),
         StageRestartIntent::ResumeProviderSession => None,
     };
     let superseded = db
@@ -1019,6 +1081,12 @@ fn prepare_stage_restart(
     } else {
         match &intent {
             StageRestartIntent::FreshAfterRejectedResume { reason, .. } => Err(reason.clone()),
+            // A different provider cannot continue the refused one's
+            // conversation, and the refused one produced none: this is always
+            // a fresh session.
+            StageRestartIntent::NextProviderAfterQuotaRejection { reason, .. } => {
+                Err(reason.clone())
+            }
             StageRestartIntent::ResumeProviderSession => match run.cwd.as_deref() {
                 Some(run_cwd)
                     if std::path::Path::new(run_cwd).is_dir()
@@ -1104,21 +1172,34 @@ fn prepare_stage_restart(
         // the run history does not read as an unexplained re-run of the stage.
         requested_changes.clone(),
         source_task.agent_type.as_deref(),
-        // Reproduce the interrupted run unless an explicit workflow edit has
-        // superseded its execution binding.
-        if superseded {
-            SpawnAgentOverrides::default()
-        } else {
-            SpawnAgentOverrides::from_stage_run(&run)
+        // Recovery continues the interrupted run: it must respawn with what
+        // that run was actually using, not with what the stage would resolve
+        // to today. Two exceptions, and only two: an explicit workflow edit
+        // has superseded that run's execution binding, or this is a quota
+        // fallback — which exists precisely because reproducing that run would
+        // ask the same exhausted provider again.
+        match &intent {
+            StageRestartIntent::NextProviderAfterQuotaRejection { candidate, .. } => {
+                SpawnAgentOverrides {
+                    provider: Some(candidate.provider.clone()),
+                    model: candidate.model.clone(),
+                    effort: candidate.effort.clone(),
+                }
+            }
+            _ if superseded => SpawnAgentOverrides::default(),
+            _ => SpawnAgentOverrides::from_stage_run(&run),
         },
         source_task.agent_provider.as_deref(),
         stage_trigger_from_stored(Some(&run.trigger)),
         // Reproducing a run reproduces where its provider came from, so the
-        // record keeps naming whoever picked this stage's model.
-        if superseded {
-            None
-        } else {
-            run.provider_override.clone()
+        // record keeps naming whoever picked this stage's model. A superseded
+        // binding names nobody, and neither does a quota fallback: the engine
+        // walked to that provider, and stamping it as an explicit override
+        // would make the next rerun treat an outage detour as a decision.
+        match &intent {
+            StageRestartIntent::NextProviderAfterQuotaRejection { .. } => None,
+            _ if superseded => None,
+            _ => run.provider_override.clone(),
         },
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;

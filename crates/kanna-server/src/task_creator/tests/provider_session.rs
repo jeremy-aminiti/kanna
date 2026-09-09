@@ -175,16 +175,6 @@ async fn spawn_fake_daemon_broadcasting(
     })
 }
 
-async fn write_fake_daemon_event(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    event: &kanna_daemon::protocol::Event,
-) {
-    writer
-        .write_all(format!("{}\n", serde_json::to_string(event).unwrap()).as_bytes())
-        .await
-        .unwrap();
-}
-
 /// Writes the rollout file the Codex CLI would have left for `uuid` in `cwd`,
 /// so the resume precondition sees a real transcript.
 fn write_codex_rollout(codex_home: &std::path::Path, uuid: &str, cwd: &std::path::Path) {

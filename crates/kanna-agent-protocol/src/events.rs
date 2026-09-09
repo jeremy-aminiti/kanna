@@ -166,6 +166,28 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+    /// The provider refused the turn because the allowance for the scope it
+    /// named is spent.
+    ///
+    /// Its own variant rather than a [`Self::Diagnostic`] string, because
+    /// something has to act on it: a diagnostic is debug text nobody parses,
+    /// and the payload that proves this — the CLI's `rate_limit_info.status`
+    /// — used to be thrown away on the way to one. The claim is exactly what
+    /// the provider stated: `scope` is the model or window it named, and
+    /// `None` means it named none, never "all of this provider".
+    QuotaRejected {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        /// Unix seconds at which the provider said the window replenishes,
+        /// when it said. A passed reset permits reconsidering; it does not
+        /// prove replenishment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "typescript", ts(type = "number | null"))]
+        resets_at: Option<i64>,
+        /// The provider's own wording, kept so a durable record of this can
+        /// be checked rather than believed.
+        detail: String,
+    },
     /// Non-conversational provider output (stderr lines, auth/rate-limit
     /// notices, error detail). Rendered in a collapsed debug section.
     Diagnostic { message: String },

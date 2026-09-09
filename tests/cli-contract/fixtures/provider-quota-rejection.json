@@ -1,0 +1,64 @@
+[
+  {
+    "provider": "claude",
+    "cliVersion": "2.1.266",
+    "capturedAt": "2026-09-08",
+    "capturedFrom": "kanna-daemon terminal recording of task 6b4a48af, the review stage that stranded on an exhausted Fable allowance",
+    "ruleId": "claude/notice/quota-rejection",
+    "scope": "Fable",
+    "frame": [
+      "❯ review branch task-6b4a48af",
+      "  ⎿ You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.",
+      "     /usage-credits to finish what you’re working on.",
+      "     ",
+      "✻ Churned for 0s · done 1:14 PM"
+    ],
+    "wrappedFrame": [
+      "❯ review branch task-6b4a48af",
+      "  ⎿ You've reached your Fable limit. Run /usage-credits to continue or switch",
+      "     models with /model.",
+      "     /usage-credits to finish what you’re working on.",
+      "     ",
+      "✻ Churned for 0s · done 1:14 PM"
+    ],
+    "parksAs": "idle"
+  },
+  {
+    "provider": "codex",
+    "cliVersion": "0.153.4",
+    "capturedAt": "2026-08-18",
+    "capturedFrom": "kanna-daemon terminal recording of task d63bd033 on 2026-08-18. The version tag is the codex-cli this rule is scoped to (the one installed on these machines); the wording was not re-observed on it, because doing so costs a real exhausted account.",
+    "ruleId": "codex/notice/quota-rejection",
+    "scope": null,
+    "frame": [
+      "  finding explicitly with evidence.",
+      "",
+      "■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Aug 20th, 2026 1:04 PM.",
+      "",
+      "› Use /skills to list available skills"
+    ],
+    "wrappedFrame": [
+      "  finding explicitly with evidence.",
+      "",
+      "■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to",
+      "purchase more credits or try again at Aug 20th, 2026 1:04 PM.",
+      "",
+      "› Use /skills to list available skills"
+    ],
+    "parksAs": "idle"
+  },
+  {
+    "provider": "claude",
+    "cliVersion": "2.1.266",
+    "capturedAt": "2026-09-08",
+    "capturedFrom": "hand-written negatives: prose an agent can legitimately write, and the Codex banner that announces available resets rather than a refusal",
+    "ruleId": null,
+    "scope": null,
+    "mustNotMatch": [
+      "The docs say you've reached your limit when the five-hour window is spent.",
+      "  ⎿ Read docs/specs/accounts-and-billing.md (412 lines)",
+      "You have 3 usage limit resets available. Run /usage to use one.",
+      "I hit the rate limit reminders about switching models while reading the transcript."
+    ]
+  }
+]

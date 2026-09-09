@@ -83,7 +83,7 @@ pub(crate) use prompt::RevisionRound;
 pub(crate) use stages::{prepare_advance_stage_for_api, prepare_stage_completion_for_api};
 pub(crate) use stages::{
     prepare_advance_stage_for_api_with_intent, prepare_fresh_restart_after_rejected_resume,
-    prepare_resume_task_for_api, prepare_revision_task_for_api,
+    prepare_provider_fallback_for_api, prepare_resume_task_for_api, prepare_revision_task_for_api,
     prepare_stage_completion_for_api_with_trigger, resolve_revision_budget, resolve_revision_limit,
     resolve_stage_transition, stage_declares_merge_approve_post, RevisionBudget,
     StageAdvanceIntent,
@@ -141,6 +141,100 @@ pub(crate) struct RevisionedWorkflowDefinition {
 pub(crate) struct RevisionedAgentDefinition {
     revision: Option<String>,
     definition: definitions::AgentDefinition,
+}
+
+/// One entry of a stage's ordered provider list, already split into the
+/// provider and the model and effort written beside it.
+///
+/// A workflow stage's `agent_provider` entries are compact selectors
+/// (`claude-fable-hi`, `codex-astra-lo`), and the whole point of the list
+/// shape is that each candidate carries its *own* coherent pair. Anything that
+/// walks the list to the next candidate has to carry that candidate's values,
+/// never the leading one's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProviderCandidate {
+    pub(crate) provider: String,
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
+}
+
+/// The ordered candidate list a task's *pinned* definition names for the stage
+/// it currently occupies, together with that stage's identity.
+///
+/// Read from `pipeline_item.pipeline_def`, never from the repository's files:
+/// the pinned snapshot is what every transition consults, and a stage that
+/// was entered under one definition must not be recovered under another.
+#[derive(Clone, Debug)]
+pub(crate) struct StageProviderCandidates {
+    pub(crate) stage: String,
+    pub(crate) run_kind: &'static str,
+    pub(crate) candidates: Vec<ProviderCandidate>,
+}
+
+/// The candidate list for the stage (or post) the task currently occupies.
+///
+/// `Ok(None)` means the task's definition names no candidates for this stage
+/// at all — the common case, and the reason `single-reviewer` and `no-review`
+/// tasks were untouched by the incident this exists for.
+pub(crate) fn stage_provider_candidates(
+    db: &Db,
+    task_id: &str,
+) -> Result<Option<StageProviderCandidates>, String> {
+    let task = db
+        .get_task_stage_source(task_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| format!("task not found: {task_id}"))?;
+    let repo = db
+        .get_repo(&task.repo_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| format!("repo not found for task: {task_id}"))?;
+    let definitions = RepoDefinitions::resolve(&repo)?;
+    let workflow_name = task
+        .pipeline
+        .clone()
+        .unwrap_or_else(|| FALLBACK_WORKFLOW_NAME.to_string());
+    let workflow = definitions.task_workflow(&workflow_name, task.pipeline_def.as_deref())?;
+    let stage_name = task
+        .stage
+        .clone()
+        .ok_or_else(|| format!("task has no stage: {task_id}"))?;
+    let (stage, run_kind) = match definitions::resolve_stage_position(&workflow, &stage_name)
+        .ok_or_else(|| format!("stage not found in workflow: {stage_name}"))?
+    {
+        definitions::StagePosition::Stage(index) => (workflow.stages[index].clone(), "main"),
+        definitions::StagePosition::Post { owner } => (
+            definitions::post_as_stage(&workflow.stages[owner])
+                .ok_or_else(|| format!("stage has no post: {}", workflow.stages[owner].name))?,
+            "post",
+        ),
+    };
+    let Some(selectors) = stage
+        .agent_provider
+        .as_ref()
+        .filter(|selectors| !selectors.is_empty())
+    else {
+        return Ok(None);
+    };
+    let candidates = selectors
+        .iter()
+        .filter_map(|selector| {
+            kanna_agent_protocol::parse_provider_selector(selector)
+                .ok()
+                .map(|selector| ProviderCandidate {
+                    provider: selector.provider.as_str().to_string(),
+                    model: selector.model,
+                    effort: selector.effort,
+                })
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(StageProviderCandidates {
+        stage: stage.name.clone(),
+        run_kind,
+        candidates,
+    }))
 }
 
 pub(crate) struct TaskWorkflowSnapshot {
@@ -577,28 +671,102 @@ pub(crate) fn prepare_rerun_stage_for_api(
     let previous_run = db
         .latest_stage_run_for_stage(task_id, &stage_name, run_kind)
         .map_err(|e| format!("db error: {}", e))?;
+    // A workflow replacement supersedes the binding the recorded run carried,
+    // so a superseded rerun re-resolves from the newly pinned definition
+    // rather than reproducing anything — including the quota walk below, which
+    // exists only to stop a *reproduced* provider from being asked again.
     let superseded = previous_run
         .as_ref()
         .map(|run| db.stage_run_workflow_superseded(task_id, &run.id))
         .transpose()
         .map_err(|error| format!("db error: {error}"))?
         .unwrap_or(false);
-    let overrides = match previous_run.as_ref() {
-        Some(_) if superseded => SpawnAgentOverrides::default(),
-        Some(run) => SpawnAgentOverrides::from_stage_run(run),
-        None if db
-            .workflow_stage_execution_edited(task_id, &stage_name)
-            .map_err(|error| format!("db error: {error}"))? =>
+    // The one thing a rerun must *not* reproduce is a provider that positively
+    // refused this stage. Feeding that stamp back in as an explicit override
+    // is exactly what re-spawned task 6b4a48af onto an exhausted Fable
+    // allowance twice. When the stage names an ordered candidate list, the
+    // rerun re-resolves through it with every refused provider dropped; when
+    // it does not, there is nothing to re-resolve to and the rerun is refused
+    // with the refusal as the reason, rather than repeating it.
+    let rejected_providers = db
+        .providers_rejected_at_stage(task_id, &stage_name)
+        .map_err(|e| format!("db error: {}", e))?;
+    let reproduces_rejected_provider = !superseded
+        && previous_run.as_ref().is_some_and(|run| {
+            run.agent_provider
+                .as_deref()
+                .is_some_and(|provider| rejected_providers.iter().any(|name| name == provider))
+        });
+    // An explicit single-provider override is a caller's decision about which
+    // provider runs this stage, and quota recovery does not overrule one — not
+    // automatically, and not by quietly re-pointing a rerun either. The
+    // refusal is surfaced as the reason instead.
+    if reproduces_rejected_provider {
+        if let Some(pinned) = previous_run
+            .as_ref()
+            .and_then(|run| run.provider_override.as_ref())
+        {
+            return Err(format!(
+                "this stage is pinned to {} by an explicit provider override, and {} refused it \
+                 for spent quota. Kanna does not overrule an override: rerun with a different \
+                 provider override, or wait for the allowance to reset.",
+                pinned.provider, pinned.provider,
+            ));
+        }
+    }
+    let unrejected_candidate = if reproduces_rejected_provider {
+        let candidate = current_stage
+            .agent_provider
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|selector| kanna_agent_protocol::parse_provider_selector(selector).ok())
+            .find(|selector| {
+                !rejected_providers
+                    .iter()
+                    .any(|name| name == selector.provider.as_str())
+            });
+        let Some(candidate) = candidate else {
+            let refused = rejected_providers.join(", ");
+            return Err(format!(
+                "this stage's recorded provider refused it for spent quota and the stage names no \
+                 other candidate, so rerunning would ask the same exhausted provider again \
+                 (refused: {refused}). Wait for the allowance to reset, or re-point the stage at \
+                 another provider first."
+            ));
+        };
+        Some(SpawnAgentOverrides {
+            provider: Some(candidate.provider.as_str().to_string()),
+            model: candidate.model,
+            effort: candidate.effort,
+        })
+    } else {
+        None
+    };
+    let overrides = match (unrejected_candidate, previous_run.as_ref()) {
+        (Some(candidate), _) => candidate,
+        (None, Some(_)) if superseded => SpawnAgentOverrides::default(),
+        (None, Some(run)) => SpawnAgentOverrides::from_stage_run(run),
+        (None, None)
+            if db
+                .workflow_stage_execution_edited(task_id, &stage_name)
+                .map_err(|error| format!("db error: {error}"))? =>
         {
             SpawnAgentOverrides::default()
         }
-        None => create_intent_agent_overrides(db, task_id),
+        (None, None) => create_intent_agent_overrides(db, task_id),
     };
     // Reproducing a run reproduces where its provider came from too, so the
-    // record keeps naming whoever picked this stage's model.
-    let provider_override = previous_run
-        .filter(|_| !superseded)
-        .and_then(|run| run.provider_override);
+    // record keeps naming whoever picked this stage's model. A rerun that
+    // walked around a refusal reproduces nothing, so it records no override:
+    // the engine chose that provider, not a caller.
+    let provider_override = if reproduces_rejected_provider {
+        None
+    } else {
+        previous_run
+            .filter(|_| !superseded)
+            .and_then(|run| run.provider_override)
+    };
     let provider = resolve_agent_provider(
         overrides.provider.as_deref(),
         current_stage.agent_provider.as_deref(),

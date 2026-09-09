@@ -263,14 +263,76 @@ pub struct AuthStatusMessage {
 }
 
 /// Rate limit event.
+///
+/// The CLI sends one of these routinely, not only when it refuses something:
+/// the `status` inside `rate_limit_info` is what separates a healthy
+/// `allowed` heartbeat from a `rejected` turn. Treating the message type
+/// itself as exhaustion would report every long session as out of quota.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitMessage {
     /// How long to wait before retrying, in seconds.
     #[serde(default)]
     pub retry_after_seconds: Option<f64>,
+    /// The structured window this event describes. Absent on older CLIs,
+    /// which say only that a rate-limit event happened.
+    #[serde(default)]
+    pub rate_limit_info: Option<RateLimitInfo>,
     /// Additional data.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// One rate-limit window as the CLI reports it.
+///
+/// Every field is optional because the CLI is free to add and drop them, and
+/// a sparse payload must deserialize into "we do not know" rather than fail
+/// the whole message. The `camelCase` keys are the CLI's own spelling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RateLimitInfo {
+    /// `allowed`, `allowed_warning`, `rejected` — the CLI's own vocabulary,
+    /// kept verbatim rather than narrowed to an enum here, so an unknown
+    /// value reaches the consumer instead of being silently dropped.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Unix seconds at which this window replenishes.
+    #[serde(default)]
+    pub resets_at: Option<i64>,
+    /// Which window this is — `five_hour`, `seven_day`, and so on.
+    #[serde(default)]
+    pub rate_limit_type: Option<String>,
+    /// The model or scope the window applies to, when the CLI names one.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Whether paid overage is available and whether it is being spent. A
+    /// rejected primary window with overage still allowed is not the same
+    /// state as one with neither.
+    #[serde(default)]
+    pub overage_status: Option<String>,
+    #[serde(default)]
+    pub is_using_overage: Option<bool>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl RateLimitInfo {
+    /// Whether the CLI said it *refused* the turn.
+    ///
+    /// A positive test on the status the CLI stated, never an inference from
+    /// the presence of the event: `allowed` and the warning statuses are the
+    /// common case and mean the session is working normally.
+    pub fn is_rejected(&self) -> bool {
+        self.status.as_deref() == Some("rejected")
+    }
+
+    /// The scope this window covers, as the CLI named it. `None` means the
+    /// CLI did not say — which is not the same as "everything".
+    pub fn scope(&self) -> Option<&str> {
+        self.model
+            .as_deref()
+            .or(self.rate_limit_type.as_deref())
+            .filter(|value| !value.is_empty())
+    }
 }
 
 /// Prompt suggestion for the user.

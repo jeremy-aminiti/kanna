@@ -8,16 +8,21 @@
 
 use std::sync::Arc;
 
-use crate::protocol::{AgentProvider, SessionStatus};
+use crate::protocol::{AgentProvider, ProviderNoticeKind, SessionStatus};
 
 use super::rules::{
-    CompiledPredicate, Matcher, Namespace, ResolvedRules, ResolvedVocabulary, DEFAULT_STATUS_ROWS,
+    CompiledPredicate, CompiledScope, Matcher, Namespace, ResolvedRules, ResolvedVocabulary,
+    DEFAULT_STATUS_ROWS,
 };
 use super::schema::{Channel, ProgressState, VocabularySet};
 use super::version::CliVersion;
 
 const WAITING_PROMPT_MAX_CHARS: usize = 240;
 const WAITING_PROMPT_MAX_LINES: usize = 3;
+/// How much of a provider's stated scope is kept. Long enough for every model
+/// name measured, short enough that a mis-anchored extractor cannot smuggle a
+/// paragraph of transcript into a durable record.
+const NOTICE_SCOPE_MAX_CHARS: usize = 64;
 
 /// What the rendered terminal proves about a session's composer.
 ///
@@ -81,6 +86,22 @@ pub struct Verdict {
     pub status: SessionStatus,
     pub rule_id: String,
     pub channel: Channel,
+}
+
+/// Something the provider *stated*, matched positively on its own chrome.
+///
+/// Carried beside a verdict, never instead of one: the frame that produced
+/// this still classifies as whatever it classifies as. `text` is the matched
+/// line, kept so a durable record can be checked against the pattern that
+/// produced it rather than believed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub kind: ProviderNoticeKind,
+    pub rule_id: String,
+    /// The scope the provider itself named, when its wording carries one.
+    /// `None` is not "everything": it means this CLI did not say.
+    pub scope: Option<String>,
+    pub text: String,
 }
 
 /// A session's view of the detection rules: its provider, the CLI version it
@@ -180,6 +201,13 @@ impl Classifier {
             .unwrap_or(DEFAULT_STATUS_ROWS)
     }
 
+    /// How many rendered rows the notice scan reads.
+    pub fn notice_rows(&mut self) -> usize {
+        self.rules()
+            .map(|rules| rules.notice_rows)
+            .unwrap_or(DEFAULT_STATUS_ROWS)
+    }
+
     /// The arguments that make this provider's CLI print its version.
     pub fn probe_args(&mut self) -> Vec<String> {
         self.rules()
@@ -234,6 +262,34 @@ impl Classifier {
                     channel: rule.channel,
                 });
             }
+        }
+        None
+    }
+
+    /// The first provider-stated notice this frame matches, if any.
+    ///
+    /// Evaluated separately from [`Self::classify`] and with no effect on it:
+    /// a session whose CLI just refused a turn is still parked at its
+    /// composer, and reporting it as anything else would be a lie about a
+    /// live process. `None` is the overwhelmingly common answer and the only
+    /// honest one for a frame that states nothing.
+    pub fn notice(&mut self, evidence: &Evidence<'_>) -> Option<Notice> {
+        let rules = self.rules()?;
+        for notice in &rules.notices {
+            let vocabulary = rules.vocabulary_for(notice.namespace);
+            let Some(matched) = matched_text(&notice.predicate, evidence, vocabulary) else {
+                continue;
+            };
+            let text = bound_waiting_prompt(&matched)?;
+            return Some(Notice {
+                kind: notice.kind,
+                rule_id: notice.id.clone(),
+                scope: notice
+                    .scope
+                    .as_ref()
+                    .and_then(|scope| extract_scope(&text, scope)),
+                text,
+            });
         }
         None
     }
@@ -369,6 +425,64 @@ impl Classifier {
     pub fn is_chrome(&mut self, line: &str) -> bool {
         self.rules().is_some_and(|rules| is_chrome(line, &rules))
     }
+}
+
+/// The line a grid predicate matched, rather than merely whether it did.
+///
+/// A notice has to report the text it matched — a durable "the provider
+/// refused this turn" that cannot be checked against the sentence that proved
+/// it is a rumour. Only grid predicates are answerable here, and
+/// `compile_notices` refuses every other kind at load.
+fn matched_text(
+    predicate: &CompiledPredicate,
+    evidence: &Evidence<'_>,
+    vocabulary: &ResolvedVocabulary,
+) -> Option<String> {
+    match predicate {
+        CompiledPredicate::AnyLine(matcher) => evidence
+            .lines
+            .iter()
+            .find(|line| matches_line(matcher, line, vocabulary))
+            .cloned(),
+        // The wrapped form is what makes a refusal survive a narrow terminal:
+        // Codex breaks its own sentence mid-clause at 80 columns, and a
+        // single-row scan would silently lose the match exactly where the
+        // window is smallest. The joined pair is reported, so the recorded
+        // text is the sentence the reader would have to check.
+        CompiledPredicate::AnyLineWrapped(matcher) => evidence
+            .lines
+            .iter()
+            .find(|line| matches_line(matcher, line, vocabulary))
+            .cloned()
+            .or_else(|| {
+                evidence
+                    .lines
+                    .windows(2)
+                    .map(|pair| format!("{} {}", pair[0], pair[1]))
+                    .find(|joined| matches_line(matcher, joined, vocabulary))
+            }),
+        CompiledPredicate::LastNonEmptyLine(matcher) => {
+            let line = last_non_empty_line(evidence.lines);
+            matches_line(matcher, line, vocabulary).then(|| line.to_string())
+        }
+        CompiledPredicate::Text(_)
+        | CompiledPredicate::ProgressState(_)
+        | CompiledPredicate::Structural(_) => None,
+    }
+}
+
+/// The scope named between the extractor's anchors, bounded.
+fn extract_scope(text: &str, scope: &CompiledScope) -> Option<String> {
+    let lowered = text.to_ascii_lowercase();
+    let after = scope.after.to_ascii_lowercase();
+    let before = scope.before.to_ascii_lowercase();
+    let start = lowered.find(&after)? + after.len();
+    let end = start + lowered.get(start..)?.find(&before)?;
+    let value = text.get(start..end)?.trim();
+    if value.is_empty() || value.chars().count() > NOTICE_SCOPE_MAX_CHARS {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 fn structural(name: &str, lines: &[String], rules: &ResolvedRules) -> bool {

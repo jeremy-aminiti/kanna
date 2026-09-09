@@ -1449,6 +1449,25 @@ cursor-based, not snapshot-diffed:
   themselves. `payload.blocked` is the new state and `payload.blockerTaskIds`
   lists the still-unresolved blockers (empty on `task.unblocked`). Closed tasks
   publish nothing: nothing depends on the blocked state of finished work.
+- `task.provider_quota_rejected` announces that a provider positively refused
+  this task's turn because the allowance for the scope it named is spent. It is
+  matched on the CLI's own rejection chrome at a measured version, or on the
+  headless SDK's `rate_limit_info.status`, and is never inferred from a session
+  going quiet. `payload.provider`, `model`, `effort`, `stage` and `stageRunId`
+  identify the refused attempt; `payload.scope` is what the *provider* named
+  (`null` means it named none, which is never "this provider is unavailable");
+  `payload.source` is `pty` or `sdk`; `payload.ruleId`, `payload.matchedText`
+  and `payload.cliVersion` are the evidence, so the claim can be checked rather
+  than believed. `payload.recovery` is what was done —
+  `fallback-started` with `payload.replacementRunId`, or a `parked-*` verdict.
+  The event never finishes a run, advances a stage, or turns a failure into a
+  success.
+- `task.provider_quota_parked` is the one actionable state: nothing is left to
+  try, so the task is waiting for a person. `payload.reason` is the recovery
+  verdict, `payload.rejectedProviders` lists everything refused at this stage,
+  and `payload.action` says what a human can do about it. Emitted once per
+  refusal that parks — there is no retry loop behind it. See
+  [`docs/specs/provider-quota-recovery.md`](specs/provider-quota-recovery.md).
 - `task.input_delivered` announces a message delivered into a task's agent
   session from outside it. `payload.source` is the caller-declared author
   (`operator`, `manager`, `unspecified`); historical retained events may carry
@@ -1798,6 +1817,38 @@ finalizes the run, so it never fires
 for the orchestrated kills behind a stage swap, rerun, or close. Starting a new
 running `stage_run` clears a stale `exited` back to absent, so a fresh session
 is never reported as already gone.
+
+## Provider Quota Rejection
+
+A CLI that refuses a turn for a spent allowance prints its refusal and parks at
+its composer. The session is alive, the run is `running`, and both `activity`
+and `runtimeState` report a perfectly healthy idle task — which is exactly why a
+day of exhausted quota once read as an ordinary dead session and a rerun
+re-spawned the same exhausted provider.
+
+The server therefore records the refusal as its own durable fact and, where the
+contract allows it, walks the stage's ordered candidate list once:
+
+- The daemon classifies the refusal positively (measured PTY chrome, or the
+  SDK's own `rate_limit_info.status == "rejected"`) and broadcasts
+  `ProviderNotice`. It is a notice, not a status: the session keeps whatever
+  the grid proves about it.
+- `task_provider_rejection` holds one row per `(stage_run, provider, stated
+  scope)`. That uniqueness de-duplicates a replayed or re-adopted announcement,
+  so one refusal is one observation and one attempt.
+- Recovery takes the same single-flight task-mutation guard a close, rerun or
+  stage change takes, closes the refused run as `failed` with the provider's own
+  sentence *before* spawning anything, and starts the next candidate in the same
+  task, stage, workspace and session with that candidate's own model and effort.
+  The workspace is never reset, forked or recreated.
+- An explicit single-provider override is binding, and a refusal that arrives
+  after the workspace changed parks instead of replacing. Every parked verdict
+  is one state with an `action` sentence and no retry loop.
+- `kanna_get_task` reports `providerRejection` for the stage the task currently
+  occupies, including every provider refused there. `rerun_stage` re-resolves
+  around that set; `resume` cannot, and is refused.
+
+Full contract: [`docs/specs/provider-quota-recovery.md`](specs/provider-quota-recovery.md).
 
 ## Activity Confirmation in `kanna-mcp`
 

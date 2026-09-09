@@ -117,7 +117,13 @@ pub fn event_status(event: &AgentEvent) -> Option<SessionStatus> {
         AgentEvent::TurnCompleted { .. } | AgentEvent::SessionEnded { .. } => {
             Some(SessionStatus::Idle)
         }
-        AgentEvent::Diagnostic { .. } | AgentEvent::Raw { .. } => None,
+        // A refusal changes nothing about what the session is doing: the CLI
+        // is still whatever it was, and it will report its own turn outcome.
+        // Deriving a status from it would either invent one or declare a live
+        // process finished.
+        AgentEvent::QuotaRejected { .. }
+        | AgentEvent::Diagnostic { .. }
+        | AgentEvent::Raw { .. } => None,
     }
 }
 
@@ -1015,6 +1021,10 @@ pub struct AgentSessionRecord {
     pub provider_session_id: Option<String>,
     pub status: SessionStatus,
     pub last_assistant_prompt: Option<String>,
+    /// Whether this incarnation already announced a provider quota rejection.
+    /// The CLI keeps emitting rate-limit events while a window is spent, and
+    /// one refused turn is one observation.
+    pub quota_rejection_announced: bool,
     /// Tool names auto-approved for the rest of the session (AllowSession).
     pub session_allowed_tools: HashSet<String>,
     /// Permission request ids awaiting a decision.

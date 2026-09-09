@@ -4,10 +4,11 @@ use tokio::sync::broadcast;
 
 use kanna_agent_protocol::{AgentEvent, PermissionDecision, SessionEndReason, TurnModel};
 use kanna_daemon::agent::{event_status, AgentSessions};
-use kanna_daemon::protocol::{Event, SessionStatus};
+use kanna_daemon::protocol::{Event, ProviderNoticeKind, SessionStatus};
 
 use super::{
-    journal_and_fan_out, journal_without_fanout, log_info, publish_terminal_exit, set_status,
+    broadcast_event, journal_and_fan_out, journal_without_fanout, log_info, publish_terminal_exit,
+    set_status,
 };
 use crate::daemon_lifecycle::{DaemonLifecycle, DaemonLifecycleState};
 
@@ -226,6 +227,7 @@ async fn process_event(
         return;
     }
 
+    let mut provider_notice = None;
     let shared = {
         let mut registry = agents.lock().await;
         // Re-resolve after the brief gap above; a life change here is still
@@ -288,6 +290,33 @@ async fn process_event(
             AgentEvent::PermissionResolved { request_id, .. } => {
                 record.pending_permissions.remove(request_id);
             }
+            AgentEvent::QuotaRejected {
+                scope,
+                resets_at,
+                detail,
+            } => {
+                // The headless twin of the PTY notice: kanna-server acts on
+                // one signal, so the SDK path publishes the same event rather
+                // than a second observation vocabulary nobody else reads.
+                // Latched per incarnation for the same reason the PTY scan
+                // is — the CLI repeats the event as its windows move.
+                if !record.quota_rejection_announced {
+                    record.quota_rejection_announced = true;
+                    provider_notice = Some(Event::ProviderNotice {
+                        session_id: session_id.to_string(),
+                        kind: ProviderNoticeKind::QuotaRejection,
+                        session_kind: kanna_daemon::protocol::SessionKind::Agent,
+                        agent_provider: Some(record.provider),
+                        rule_id: "claude/sdk/rate-limit-rejected".to_string(),
+                        scope: scope.clone(),
+                        text: match resets_at {
+                            Some(resets_at) => format!("{detail}; resets at {resets_at}"),
+                            None => detail.clone(),
+                        },
+                        cli_version: None,
+                    });
+                }
+            }
             _ => {}
         }
 
@@ -315,6 +344,9 @@ async fn process_event(
         sh.journal.set_provider_session_id(&provider_session_id);
     }
 
+    if let Some(notice) = provider_notice {
+        broadcast_event(broadcast_tx, &notice);
+    }
     journal_and_fan_out(session_id, &shared, event).await;
     if let Some(request_id) = auto_resolve {
         journal_and_fan_out(

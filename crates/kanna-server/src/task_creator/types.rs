@@ -263,7 +263,12 @@ pub(crate) struct PreparedStageRunSpawn {
     /// spawned after the transition succeeds, never on rollback.
     pub(super) workspace_teardown: Option<PreparedWorkspaceTeardown>,
     pub(super) stage_agent: Option<String>,
-    pub(super) agent_provider: String,
+    /// The provider resolution actually landed on. Readable outside the
+    /// module because quota recovery has to check that its walk to the next
+    /// candidate was not undone by a higher-precedence layer before it
+    /// spawns — the whole point of the walk is not to ask the refused
+    /// provider again.
+    pub(crate) agent_provider: String,
     pub(super) model: Option<String>,
     pub(super) effort: Option<String>,
     pub(super) completion_transition: WorkflowStageTransition,

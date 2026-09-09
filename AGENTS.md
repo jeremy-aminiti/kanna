@@ -498,6 +498,33 @@ park must bound its own retry loop on a non-`busy` `runtimeState` with a
 `running` `latestRun` instead of re-calling on `timeout` forever. See
 `docs/kanna-server-boundary.md`.
 
+**A spent allowance is a provider event, not a dead session.** A CLI that
+refuses a turn for exhausted quota prints its refusal and parks at its
+composer — a healthy `idle` session with a `running` run — so nothing about the
+runtime says what happened. Kanna classifies it as a **notice**: a positive
+match on the provider's own rejection chrome, at a CLI version measured in
+`tests/cli-contract/fixtures/provider-quota-rejection.json`, or on the headless
+SDK's `rate_limit_info.status == "rejected"` (`allowed` and warning statuses are
+the common case and mean nothing is wrong). Notices are their own channel
+beside `busy`/`waiting`/`idle`, never a fourth status, and — unlike a status
+rule — a version-bounded notice is refused for an unmeasured CLI, because a
+rejection is a claim that drives automatic recovery rather than a verdict about
+a screen. **The claim is exactly as wide as the provider made it**: Claude names
+the model, Codex names only the account, and a null scope means the CLI did not
+say. When the stage's *pinned* definition names an ordered candidate list and
+the refused attempt left no uncommitted change, the next candidate starts once
+— same task, stage, workspace and session, carrying that candidate's own model
+and effort from its own selector. The refused run is closed `failed` with the
+provider's sentence before the replacement spawns, so a refusal is never
+finished as a success; the workspace is never reset, forked or recreated; and an
+explicit single-provider override is binding in both directions. Anything else
+parks the task in one actionable state (`task.provider_quota_parked`, plus
+`providerRejection` on task detail) with no retry loop. `rerun_stage` re-resolves
+the stage's candidate list around a recorded refusal and is refused, naming it,
+when nothing is left; `resume` cannot walk anywhere and is refused outright.
+None of this disturbs the `agentProviders` / `config.local.json` / frontmatter
+precedence chain. See `docs/specs/provider-quota-recovery.md`.
+
 **A scheduled transfer is not a moved task.** Moving a task between machines is
 a first-class agent surface — `kanna_push_task` / `kanna_pull_task` /
 `kanna_task_transfers` / `kanna_list_transfer_peers`, with matching

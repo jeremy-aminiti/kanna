@@ -507,6 +507,48 @@ pub(crate) async fn terminal_state_watcher_once(
                     }
                 }
             }
+            DaemonEvent::ProviderNotice {
+                session_id,
+                kind,
+                session_kind,
+                agent_provider,
+                rule_id,
+                scope,
+                text,
+                cli_version,
+            } => match kind {
+                kanna_daemon::protocol::ProviderNoticeKind::QuotaRejection => {
+                    // A notice the daemon could not attribute to a provider
+                    // cannot be recorded against one, and "some provider
+                    // refused" is not a fact anything can act on.
+                    let Some(provider) = agent_provider else {
+                        log::warn!(
+                            "[quota] ignoring a rejection for {session_id} with no provider"
+                        );
+                        continue;
+                    };
+                    http_api::handle_quota_rejection(
+                        state,
+                        http_api::QuotaRejectionNotice {
+                            session_id,
+                            provider: provider.as_str().to_string(),
+                            scope,
+                            rule_id,
+                            text,
+                            cli_version,
+                            source: match session_kind {
+                                kanna_daemon::protocol::SessionKind::Pty => {
+                                    crate::db::QuotaRejectionSource::Pty
+                                }
+                                kanna_daemon::protocol::SessionKind::Agent => {
+                                    crate::db::QuotaRejectionSource::Sdk
+                                }
+                            },
+                        },
+                    )
+                    .await;
+                }
+            },
             DaemonEvent::ComposerChanged {
                 session_id,
                 composer_text,

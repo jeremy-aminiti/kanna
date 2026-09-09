@@ -36,6 +36,12 @@ const IMAGE_LINK_EXTENSION = /\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp)(?:[?#].
 const HIDDEN_EVENT_TYPES = new Set<string>([
   "raw",
   "diagnostic",
+  // A provider quota rejection is plumbing here too: it is not something the
+  // agent said, and the surfaces that act on it are the task's own —
+  // `providerRejection` on task detail and the `task.provider_quota_*` events.
+  // Giving it a rendered treatment in the conversation is a deliberate part of
+  // the usage-visibility work, not a side effect of classifying the refusal.
+  "quota_rejected",
   "permission_resolved",
   "tool_call",
   "tool_result",
