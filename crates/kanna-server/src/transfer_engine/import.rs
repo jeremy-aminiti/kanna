@@ -718,7 +718,7 @@ async fn import_verified_task_bundle(
         super::git::import_task_bundle_refs(
             &repo_path,
             &fetched,
-            transfer_id,
+            &transfer_id,
             &source_ref,
             &expected_head,
             &source_base_ref,
