@@ -216,5 +216,165 @@ shutdown` returned exit 0 before recording the blocked stage result.
 **Not ready:** canonical full gate exit 1, canonical remote gate exit 1,
 desktop-mock tail exit 1, and unresolved stream/runtime observation failures.
 Focused actual-adapter tests and the positive separate-process timing test do not
-waive these failures. The three remote specs skipped by fail-fast, live Codex TUI
-compatibility and the separate unattended release boundary remain unverified.
+waive these failures. At this checkpoint the three remote specs skipped by fail-fast were unverified;
+the follow-up below records their execution. Live Codex TUI compatibility and
+the separate unattended release boundary remain unverified.
+
+
+## Matched-main stream investigation
+
+The follow-up compares committed branch `495fd541d` with authoritative main
+`0c8bab681974b80912e35bb7483137471191a4a9` (including machine-resource PR #1405).
+Main was exported with `git archive` under this task's `.tmp/verification/baseline-main`;
+no main checkout, other task worktree or branch was changed. Offline frozen-lockfile
+installation downloaded no packages. A blob-by-blob comparison after the run found
+one changed tracked file in the exported source: terminal-flow's existing
+`keepArtifacts: true` option. All production files matched the main commit.
+
+Both runs selected only `sends remote input to the agent PTY and rejects input
+after exit`, used the original accelerated one-second test cursor TTL, retained
+runtime artifacts, and used the same task-local Firebase emulator cache. The
+branch's temporary `expireShortCursors: true, keepArtifacts: true` fixture setting
+was restored to its committed production-retention setting immediately afterward.
+Both ran with:
+
+```sh
+CARGO_BUILD_JOBS=2 KANNA_APP_ENV=dev KANNA_REMOTE_E2E_ENV=dev \
+KANNA_E2E_DEBUG_TERMINAL_EVENTS=1 \
+RUST_LOG=info,kanna_server::ksp=debug,kanna_daemon::output=debug \
+FIREBASE_EMULATORS_PATH="$TASK_ROOT/.tmp/verification/firebase-emulators" \
+GIT_CEILING_DIRECTORIES="$TASK_ROOT/.tmp/verification" \
+TMPDIR="$RUNTIME_ROOT" \
+pnpm --dir "$SOURCE_ROOT/tests/remote-e2e" exec vitest run \
+  --no-file-parallelism --maxWorkers=1 --maxConcurrency=1 \
+  --hookTimeout=240000 --testTimeout=120000 src/terminal-flow.e2e.test.ts \
+  -t 'sends remote input to the agent PTY and rejects input after exit'
+```
+
+`TASK_ROOT` denotes this worktree. `SOURCE_ROOT` was the exported main tree or
+this worktree, and `RUNTIME_ROOT` was the corresponding `.tmp/verification/runtime-baseline`
+or `runtime-branch`. These are path substitutions, not differences in test policy.
+`GIT_CEILING_DIRECTORIES` prevents the source tarball from falsely reporting its
+containing branch's Git identity. It does not change the independently initialized
+scripted task repositories.
+
+| Run | Exit and assertion | Full producer/consumer log under `.tmp/verification/` |
+| --- | --- | --- |
+| Main `0c8bab681`, isolated representative | **1**; 1 failed, 14 skipped; 45.13s. `SCRIPT_READY` timeout, output `(none)`. | `remote-stream-matched-baseline-local-cache.log` |
+| Branch `495fd541d`, equivalent fixture/env | **1**; 1 failed, 15 skipped; 75.71s. Same `SCRIPT_READY` timeout, output `(none)`. | `remote-stream-matched-branch-clean-cache.log` |
+
+Both logs show successful task spawn, daemon PTY output chunks, collector
+`connected: true` and input availability, but no collector snapshot/output event.
+The count of skipped cases differs only because the branch adds the timing case.
+This establishes that the representative no-output failure occurs on current
+main without the filtering/timing additions. It does not establish the root defect
+within terminal transport, or waive every other stream failure.
+
+The compared producer/consumer path is scripted agent → daemon output → server
+KSP/relay → relay tunnel → mobile `relayClient`/`StreamClient` → terminal collector.
+Those production sources and the scripted-agent and Node relay fixtures are
+identical between branch and main. The changed collector utility signature is
+only the `pinSingleStageWorkflow` harness type; runtime terminal collection is
+unchanged. Filtering acts on durable event waits and subscription delivery, which
+this representative case never registers. No terminal repair was made.
+
+Two setup failures are retained separately, not counted as the matched assertion:
+
+- `remote-stream-matched-baseline.log`: exit 1 before tests; Firestore's shared
+  cached JAR disappeared and Java reported `NoSuchFileException`. The existing
+  `FIREBASE_EMULATORS_PATH` option isolated both retries from the shared cache.
+- `remote-stream-matched-branch.log`: exit 1 before tests; Cargo's reused cache
+  retained main's catalog artifact, missing the branch relevance export. A scoped
+  `cargo clean -p kanna-tool-catalog` (exit 0) rebuilt that dependency. No source
+  change or full clean was needed. Main and branch reused only this task's build
+  cache; source comparisons and full logs retain the distinction.
+
+The worker `KANNA_DB_PATH` and desktop terminal-buffer registration failures keep
+their separate dispositions. This matched stream result supplies no evidence
+about either of them. The predecessor pinned collection still matches current
+main exactly. Main's newer machine-resource change has not been merged into this
+branch; the three-dot main-relative diff contains only the intended notification
+work, and future reconciliation must retain that independent resource change.
+
+
+### Previously skipped remote specs
+
+These are the three files the canonical fail-fast runner did not reach, run
+individually and sequentially with its existing Vitest arguments, not a full-suite
+rerun. Each used `CARGO_BUILD_JOBS=2 KANNA_APP_ENV=dev KANNA_REMOTE_E2E_ENV=dev`,
+the task-local `FIREBASE_EMULATORS_PATH` above, and `TMPDIR` set to `runtime-branch`:
+
+```sh
+pnpm --dir tests/remote-e2e exec vitest run --no-file-parallelism \
+  --maxWorkers=1 --maxConcurrency=1 --hookTimeout=240000 --testTimeout=120000 \
+  src/task-listing-actions.e2e.test.ts
+# Subsequent sequential invocations select src/lan-layer.e2e.test.ts
+# and src/task-image-attachment.e2e.test.ts with the same arguments.
+```
+
+Task-listing/actions returned **exit 1: 2 passed, 5 failed, 50.27s**. Its full log
+is `remote-skipped-task-listing.log`. Failures are recorded separately:
+
+- Task creation's terminal observation timed out on `SCRIPT_READY` with no output.
+- Parent-scoped events expected `/^kh1\.[0-9a-f]{8}$/`, but received a
+  `kh1.<issuer>.<nonce>` handle. Both the formatter and this test file are
+  byte-identical to current main: this is a source-confirmed fixture-contract
+  mismatch, not a changed cursor format in this branch.
+- The durable relay-cursor case returned 404 `task not found` after creating an
+  additional legacy-identity desktop.
+- The repository singleton case expected a directory refusal but received 503
+  `target desktop-secret authentication is required` from that peer.
+- The stage/merge case also received the peer-authentication 503.
+
+The last three are not disposed by the matched stream comparison. The listing
+fixture and its additional-desktop default identity behavior are unchanged from
+main, but no matched runtime baseline of those cases was run. No authentication,
+terminal or cursor-fixture repair was folded into this task.
+
+
+LAN returned **exit 1: 3 passed, 8 failed, 262.79s**. Its full log is
+`remote-skipped-lan.log`. Seven cases failed on terminal-ready/output sentinels
+(`SCRIPT_READY`, `SCRIPT_INPUT_READY` or `MOBILE_PTY_SNAPSHOT_SENTINEL`), including
+window/scrollback, remount, draft input and LAN/relay parity. The Activity-dismissal
+case separately expected a task id in the mobile result and received an empty
+array. The representative relay baseline does not dispose of these LAN or
+Activity assertions; no matched baseline of this spec was run.
+
+
+Image attachments returned **exit 1: 4 failed, 142.15s**. Its full log is
+`remote-skipped-images.log`. Each case stopped at `SCRIPT_READY` with output
+`(none)` before its photo upload/refusal/removal assertions. They are now executed,
+but those downstream attachment assertions remain unproven.
+
+### Independent-review handoff and explicit failure matrix
+
+The bounded investigation changed only this verification note. Temporary fixture
+settings were restored; all owned services were stopped, both inventories cleaned
+without failed entries, and no current-worktree build/temp executable remained.
+Baseline source, full combined producer/consumer logs and individual daemon/server
+logs remain under `.tmp/verification/` for inspection. No full suite was rerun,
+no terminal repair was made, and no branch, PR or release was published.
+
+The review target is the filtering/timing implementation and causal fixtures
+through `495fd541d`, plus this evidence update. Compare against `0c8bab681` using
+the three-dot diff; the reviewed permit predecessor is retained byte-for-byte.
+The newer main machine-resource additions must be retained during any later
+reconciliation. The reviewer should assess the default selection, collector
+checkpoints/retained legs, admission-before-CAS, ack/recovery invariants and the
+passing actual-adapter/process timing evidence against the documented contract.
+
+| Finding | Evidence and disposition for review |
+| --- | --- |
+| Representative relay `SCRIPT_READY`/no-output failure | Reproduced on exported main and branch with matched fixture/environment; occurs without any event subscription registration. Shared current-main/harness failure, not dependent on this branch's relevance/timing code. Root terminal defect intentionally not repaired. |
+| Short-cursor expectation | Source-confirmed mismatch already present on main: unchanged three-part producer versus unchanged two-part fixture regex. No claim that all other cursor assertions passed. |
+| Peer-authentication/404 listing failures | Exact refusals retained; baseline source comparison exists, but matched runtime disposition remains open. |
+| Other relay/LAN/Activity failures and image assertions blocked by readiness | Execution results retained; no blanket extension of the representative baseline. Downstream assertions remain unproven. |
+| Worker database-path failure | Same compiled binary passes after removing only inherited `KANNA_DB_PATH`; canonical exit remains 1. This is independent evidence, not a stream disposition. |
+| Desktop terminal registration | Canonical tail exit 1, missing buffer registration; no matched baseline or repair. Remains open. |
+
+This is a concrete packet for independent technical review and failure disposition,
+not a green-gate or Ship handoff. All previously skipped specs have execution
+results; completing their blocked assertions still requires the shared harness/
+transport and other failure dispositions above. That engineering work is not
+replaced by an owner waiver. Merge and Ship remain held until independent review
+explicitly resolves these findings and the required release evidence is satisfied.
