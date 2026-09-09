@@ -121,6 +121,102 @@ describe("useTransferFailureToasts", () => {
     expect(toastError).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * The defect the reviewer caught: an alert has no marker to click and no
+   * task to sit on, so nothing ever set `dismissed_at` for it and the same
+   * refusal toasted at every window mount for the life of the database.
+   */
+  it("retires an alert on the server once it has been announced", async () => {
+    const alerts = ref<TransferAlert[]>([]);
+    const toastError = vi.fn();
+    const dismissAlert = vi.fn();
+    useTransferFailureToasts(
+      ref<PipelineItem[]>([]),
+      toastError,
+      () => "Task transfer failed",
+      alerts,
+      (taskId) => `The other machine will not send task ${taskId}`,
+      dismissAlert,
+    );
+
+    alerts.value = [
+      {
+        transferId: "refused-pull-1",
+        direction: "incoming",
+        sourceTaskId: "afed27d1",
+        error: "its rollout could not be found",
+      },
+    ];
+    await nextTick();
+    expect(toastError).toHaveBeenCalledTimes(1);
+    expect(dismissAlert).toHaveBeenCalledWith("refused-pull-1");
+    expect(dismissAlert).toHaveBeenCalledTimes(1);
+
+    // The row stays in this window's snapshot until the next refresh; it is
+    // dismissed once, not on every tick of the watcher.
+    alerts.value = [...alerts.value];
+    await nextTick();
+    expect(dismissAlert).toHaveBeenCalledTimes(1);
+    expect(toastError).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The retirement is server-side, so the next window's snapshot no longer
+   * carries the alert — which is what stops it announcing at every launch.
+   */
+  it("says nothing in a fresh window once the server has retired the alert", async () => {
+    const announced: TransferAlert[] = [
+      {
+        transferId: "refused-pull-1",
+        direction: "incoming",
+        sourceTaskId: "afed27d1",
+        error: "its rollout could not be found",
+      },
+    ];
+    const retired = new Set<string>();
+    const mount = () => {
+      const toastError = vi.fn();
+      useTransferFailureToasts(
+        ref<PipelineItem[]>([]),
+        toastError,
+        () => "Task transfer failed",
+        ref(announced.filter((alert) => !retired.has(alert.transferId))),
+        (taskId) => `The other machine will not send task ${taskId}`,
+        (transferId) => retired.add(transferId),
+      );
+      return toastError;
+    };
+
+    const first = mount();
+    await nextTick();
+    expect(first).toHaveBeenCalledTimes(1);
+
+    const second = mount();
+    await nextTick();
+    expect(second).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A failure that rides a task keeps the sidebar's `⇄✗` marker as its
+   * standing surface, so announcing it must not retire it behind the
+   * operator's back.
+   */
+  it("never retires a failure that has a task of its own", async () => {
+    const dismissAlert = vi.fn();
+    useTransferFailureToasts(
+      ref<PipelineItem[]>([
+        item({ transfer_status: "failed", transfer_error: "peer unreachable" }),
+      ]),
+      vi.fn(),
+      () => "Task transfer failed",
+      ref<TransferAlert[]>([]),
+      (taskId) => `will not send ${taskId}`,
+      dismissAlert,
+    );
+    await nextTick();
+    expect(dismissAlert).not.toHaveBeenCalled();
+  });
+
   it("says nothing about an alert the source gave no reason for", async () => {
     const alerts = ref<TransferAlert[]>([
       { transferId: "refused-pull-1", direction: "incoming", sourceTaskId: "t-1", error: "  " },

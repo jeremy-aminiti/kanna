@@ -12,11 +12,21 @@ import type { PipelineItem } from "../types/kanna";
  * engine and a window — and this turns it into the one thing a snapshot cannot
  * express on its own: a notification the operator sees without looking.
  *
- * Two sources, because a failure does not always have a task here to ride on.
- * A push that is refused rides its own task. A *pull* that is refused has no
- * task on this machine at all — nothing arrived and nothing will — so it
- * arrives as a transfer alert instead, which is the only news the machine that
- * asked for the move ever gets.
+ * Two sources, because a failure does not always have a task here to ride on,
+ * and they retire differently for exactly that reason:
+ *
+ * - A failure that rides a **task** keeps the sidebar's `⇄✗` marker as its
+ *   standing surface, so it is retired when the operator clicks that marker.
+ *   Announcing it here is a nudge, not the whole telling.
+ * - A **task-less** failure — a pull the source refused, an import that died
+ *   before it created anything — has no surface at all: nothing arrived and
+ *   nothing will. The toast *is* the telling, so it is dismissed as soon as it
+ *   has been told. Without that, `dismissed_at` had no caller reachable for
+ *   these rows and the same alert toasted at every window mount for the life
+ *   of the database, which is the defect this composable exists to remove.
+ *
+ * The durable record is untouched either way — `kanna_task_transfers` still
+ * answers "where has this been?" with it. Only the news is retired.
  *
  * Reactive rather than imperative, so it works the same whether the failure
  * arrives while the window is open, or is already there when it mounts.
@@ -27,6 +37,7 @@ export function useTransferFailureToasts(
   transferFailedLabel: () => string,
   alerts?: Ref<TransferAlert[]>,
   refusedPullLabel?: (sourceTaskId: string) => string,
+  dismissAlert?: (transferId: string) => void,
 ) {
   // Keyed by the failure's identity *and* its reason: a retry that fails again
   // for a new reason is new information, and the same reason twice is not.
@@ -39,11 +50,13 @@ export function useTransferFailureToasts(
   const announced = new Set<string>();
   const key = (id: string, reason: string) => JSON.stringify([id, reason]);
 
-  function announce(live: Set<string>, announcementKey: string, message: string): void {
+  /** True when this call is what put the message on screen. */
+  function announce(live: Set<string>, announcementKey: string, message: string): boolean {
     live.add(announcementKey);
-    if (announced.has(announcementKey)) return;
+    if (announced.has(announcementKey)) return false;
     announced.add(announcementKey);
     toastError(message);
+    return true;
   }
 
   const stop = watch(
@@ -64,7 +77,10 @@ export function useTransferFailureToasts(
         const label = refusedPullLabel && alert.sourceTaskId
           ? refusedPullLabel(alert.sourceTaskId)
           : transferFailedLabel();
-        announce(live, key(alert.transferId, reason), `${label}: ${reason}`);
+        const announcedNow = announce(live, key(alert.transferId, reason), `${label}: ${reason}`);
+        // Retired on the server, not just in this window: `announced` above
+        // dies with the window, and the next one would say it all again.
+        if (announcedNow) dismissAlert?.(alert.transferId);
       }
       // Forget failures that are no longer reported, so a task whose retry
       // fails the same way later is announced again rather than silently.

@@ -237,7 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "068_task_transfer_dismissed_at");
+    assert_eq!(latest_migration, "069_retire_pre_existing_transfer_alerts");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -1014,6 +1014,116 @@ fn a_failed_transfer_with_no_local_task_is_reported_as_a_snapshot_alert() {
         db.list_task_transfers("afed27d1").expect("list").len(),
         1,
         "a dismissed refusal is still on the record"
+    );
+
+    // The alert is deliberately *not* narrowed to refusals. An import that
+    // died before it created anything is the same class of news — a move onto
+    // this machine that did not arrive — and it has no task to be reported on
+    // either, so it alerts and retires by the same path.
+    db.insert_task_transfer(&crate::db::NewTaskTransfer {
+        id: "incoming-that-never-landed".into(),
+        direction: "incoming".into(),
+        status: "pending".into(),
+        source_peer_id: Some("peer-a".into()),
+        target_peer_id: None,
+        source_desktop_id: None,
+        target_desktop_id: None,
+        source_task_id: Some("b0b0b0b0".into()),
+        local_task_id: None,
+        error: None,
+        payload_json: Some("{}".into()),
+    })
+    .expect("insert incoming");
+    assert!(
+        db.ui_snapshot()
+            .expect("snapshot")
+            .transfer_alerts
+            .is_empty(),
+        "an import still in flight is not a failure to announce"
+    );
+    assert!(db
+        .fail_incoming_task_transfer(
+            "incoming-that-never-landed",
+            "the repo could not be acquired"
+        )
+        .expect("fail the import"));
+    let alerts = db.ui_snapshot().expect("snapshot").transfer_alerts;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].transfer_id, "incoming-that-never-landed");
+    assert!(db
+        .dismiss_failed_task_transfer("incoming-that-never-landed")
+        .expect("dismiss"));
+    assert!(db
+        .ui_snapshot()
+        .expect("snapshot")
+        .transfer_alerts
+        .is_empty());
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Every task-less failure is news, so the first launch after upgrading would
+/// have announced every one this database had ever accumulated — for moves the
+/// operator can no longer do anything about. Migration 067 retires them, and
+/// only them: a failure that has a task keeps its `⇄✗` marker, which is a
+/// standing surface the operator retires deliberately.
+#[test]
+fn the_alert_migration_retires_history_without_touching_a_task_s_own_marker() {
+    let path = Db::test_db_path("snapshot-transfer-alert-backfill");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Kanna").expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-marked",
+        "repo-1",
+        "a task whose move broke",
+        None,
+        "in progress",
+        "2026-09-08 00:00:00",
+    )
+    .expect("insert task");
+    for (id, local_task_id) in [
+        ("historical-alert", None),
+        ("historical-marker", Some("task-marked")),
+    ] {
+        db.insert_task_transfer(&crate::db::NewTaskTransfer {
+            id: id.into(),
+            direction: "incoming".into(),
+            status: "failed".into(),
+            source_peer_id: Some("peer-a".into()),
+            target_peer_id: None,
+            source_desktop_id: None,
+            target_desktop_id: None,
+            source_task_id: Some("older".into()),
+            local_task_id: local_task_id.map(str::to_string),
+            error: Some("from before this shipped".into()),
+            payload_json: None,
+        })
+        .expect("insert historical failure");
+    }
+
+    // The migration ran when the schema was created, so replay it against rows
+    // that predate it — which is exactly what an upgrade does.
+    crate::db::retire_pre_existing_transfer_alerts(&db.conn).expect("replay the backfill");
+
+    assert!(
+        db.ui_snapshot()
+            .expect("snapshot")
+            .transfer_alerts
+            .is_empty(),
+        "history must not announce itself at the next launch"
+    );
+    let marked = db
+        .ui_snapshot()
+        .expect("snapshot")
+        .entries
+        .into_iter()
+        .flat_map(|entry| entry.items)
+        .find(|item| item.id == "task-marked")
+        .expect("the task");
+    assert_eq!(
+        marked.transfer_status.as_deref(),
+        Some("failed"),
+        "a failure with a task keeps the marker the operator retires by hand"
     );
 
     let _ = std::fs::remove_file(path);

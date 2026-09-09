@@ -140,6 +140,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "066_durable_task_event_cursor_handles",
     "067_remove_input_hold_state",
     "068_task_transfer_dismissed_at",
+    "069_retire_pre_existing_transfer_alerts",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2056,6 +2057,38 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         add_column(conn, "task_transfer", "dismissed_at", "TEXT")
     })?;
 
+    // A `failed` transfer with no local task is now reported to the window as
+    // a snapshot alert, and every one of those is *news* — a move onto this
+    // machine that did not arrive. History is not news. Without this, the
+    // first launch after upgrading would announce every incoming transfer that
+    // ever died before it created a task, all at once, for failures the
+    // operator can no longer do anything about. The rows themselves are
+    // untouched; `kanna_task_transfers` still answers with them.
+    run_migration(
+        conn,
+        "069_retire_pre_existing_transfer_alerts",
+        retire_pre_existing_transfer_alerts,
+    )?;
+
+    Ok(())
+}
+
+/// Marks every task-less failure this database already holds as read.
+///
+/// Named rather than inlined into its migration so the test that pins the
+/// upgrade can replay the real thing against rows that predate it, which is
+/// the only way to observe what an upgrading operator sees.
+pub(crate) fn retire_pre_existing_transfer_alerts(
+    conn: &Connection,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE task_transfer
+         SET dismissed_at = datetime('now')
+         WHERE status = 'failed'
+           AND local_task_id IS NULL
+           AND dismissed_at IS NULL",
+        [],
+    )?;
     Ok(())
 }
 
