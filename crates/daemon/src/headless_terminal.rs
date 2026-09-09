@@ -875,6 +875,27 @@ mod tests {
     }
 
     #[test]
+    fn captured_handoff_footer_variants_remain_busy() {
+        let claude = verdict_for(
+            AgentProvider::Claude,
+            &[
+                "✽ Channeling… (25m 21s · esc to interrupt)",
+                "✔ Update installed · Restart to update",
+                "Waiting for task (esc to give additional instructions)",
+            ],
+        )
+        .expect("captured Claude handoff frame should classify");
+        assert_eq!(claude.status, SessionStatus::Busy);
+
+        let codex = verdict_for(
+            AgentProvider::Codex,
+            &["Waiting for background terminal (20m 39s • esc to interrupt)"],
+        )
+        .expect("captured Codex handoff frame should classify");
+        assert_eq!(codex.status, SessionStatus::Busy);
+    }
+
+    #[test]
     fn headless_terminal_snapshot_tracks_output_and_resize() {
         let mut headless_terminal = HeadlessTerminal::new(80, 24, 10_000).unwrap();
         headless_terminal.write(b"abc");

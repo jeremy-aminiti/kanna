@@ -1076,6 +1076,7 @@ impl SessionHandle {
         let cwd = pty.cwd.clone();
         drop(pty);
         let status = self.status().await;
+        let status_observed = self.state.lock().await.status_observed;
 
         SessionInfo {
             session_id,
@@ -1084,6 +1085,7 @@ impl SessionHandle {
             state,
             idle_seconds,
             status,
+            status_observed,
             kind: crate::protocol::SessionKind::Pty,
             composer_text: self.composer_line().await,
             composer_attestation: self.composer_attestation(),
@@ -1226,6 +1228,7 @@ impl SessionHandle {
             agent_provider: state.agent_provider,
             cli_version: state.classifier.version().cloned(),
             status: state.status,
+            status_observed: state.status_observed,
             operator_input_only: state.operator_input_only,
             input_policy_classified: state.input_policy_classified,
             raw_input_draft_active: input_coordination.raw_input_draft_active,
@@ -1248,6 +1251,7 @@ pub struct SessionHandoffParts {
     pub agent_provider: Option<AgentProvider>,
     pub cli_version: Option<CliVersion>,
     pub status: SessionStatus,
+    pub status_observed: bool,
     pub operator_input_only: bool,
     pub input_policy_classified: bool,
     pub raw_input_draft_active: bool,
@@ -1681,9 +1685,14 @@ fn detect_headless_terminal_status_if_due(
         if next_status == SessionStatus::Idle && !options.allow_idle {
             return Ok(None);
         }
+        let was_observed = *status_observed;
         *last_status_check_at = Some(options.now);
         *status_observed = true;
-        return Ok(if status != next_status {
+        // The first verdict has to cross the daemon/server boundary even
+        // when it equals the internal bootstrap value. After a handoff the
+        // server correctly projects that bootstrap as unknown, so suppressing
+        // this edge would strand the task at null until a later transition.
+        return Ok(if !was_observed || status != next_status {
             Some(next_status)
         } else {
             None

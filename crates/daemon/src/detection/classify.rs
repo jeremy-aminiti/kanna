@@ -376,6 +376,16 @@ fn structural(name: &str, lines: &[String], rules: &ResolvedRules) -> bool {
         "claude-working-footer" => lines
             .iter()
             .any(|line| animated_in_flight_footer(line.trim(), &rules.vocabulary)),
+        // The updater confirmation remains visible while Claude starts the
+        // next turn. It is busy evidence only when the same captured frame
+        // also has Claude's animated in-flight footer; the confirmation by
+        // itself is an idle composer footer.
+        "claude-update-installed-active" => {
+            lines.iter().any(|line| line.contains("Update installed"))
+                && lines
+                    .iter()
+                    .any(|line| animated_in_flight_footer(line.trim(), &rules.vocabulary))
+        }
         "claude-active-subagent" => active_subagent(lines, rules),
         "claude-parked-composer" => parked_composer(lines, rules),
         "claude-selected-menu-option" => lines

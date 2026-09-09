@@ -372,6 +372,7 @@ async fn spawn_listing_fake_daemon(
                 state: kanna_daemon::protocol::SessionState::Active,
                 idle_seconds: 0,
                 status: kanna_daemon::protocol::SessionStatus::Busy,
+                status_observed: true,
                 kind: Default::default(),
                 composer_text: None,
                 composer_attestation: Default::default(),

@@ -1875,6 +1875,7 @@ async fn send_task_input_rejects_a_finished_task_without_a_live_daemon_session()
                         state: SessionState::Exited(1),
                         idle_seconds: 0,
                         status: SessionStatus::Idle,
+                        status_observed: true,
                         kind: Default::default(),
                         composer_text: None,
                         composer_attestation: Default::default(),
@@ -2001,6 +2002,7 @@ async fn send_task_input_delivers_to_a_live_session_after_a_finished_run() {
                         state: SessionState::Active,
                         idle_seconds: 0,
                         status: SessionStatus::Idle,
+                        status_observed: true,
                         kind: Default::default(),
                         composer_text: None,
                         composer_attestation: Default::default(),
@@ -2270,6 +2272,7 @@ fn spawn_live_session_daemon(
                         state: SessionState::Active,
                         idle_seconds: 0,
                         status: SessionStatus::Idle,
+                        status_observed: true,
                         kind: Default::default(),
                         // This helper's sessions accept delivered input; the
                         // refusal path has its own tests on main.
@@ -2490,6 +2493,7 @@ async fn send_task_input_reports_daemon_write_failure_as_delivery_uncertain() {
                         state: SessionState::Active,
                         idle_seconds: 0,
                         status: SessionStatus::Idle,
+                        status_observed: true,
                         kind: Default::default(),
                         composer_text: None,
                         composer_attestation: Default::default(),

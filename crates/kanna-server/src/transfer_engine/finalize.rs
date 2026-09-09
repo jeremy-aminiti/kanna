@@ -883,6 +883,7 @@ mod tests {
                             state: SessionState::Active,
                             idle_seconds: 0,
                             status,
+                            status_observed: true,
                             kind: SessionKind::default(),
                             composer_text: None,
                             composer_attestation: Default::default(),

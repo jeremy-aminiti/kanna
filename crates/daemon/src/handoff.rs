@@ -1134,6 +1134,7 @@ pub(crate) async fn handle_handoff(
                     agent_provider: parts.agent_provider,
                     cli_version: parts.cli_version.as_ref().map(ToString::to_string),
                     status: parts.status,
+                    status_observed: parts.status_observed,
                     kind: protocol::SessionKind::Pty,
                     provider_session_id: None,
                     agent_fd_count: 0,
@@ -1238,6 +1239,7 @@ pub(crate) async fn handle_handoff(
             // rendered chrome, so no rule set is selected for them.
             cli_version: None,
             status: record.status,
+            status_observed: true,
             kind: protocol::SessionKind::Agent,
             provider_session_id: record.provider_session_id.clone(),
             agent_fd_count,

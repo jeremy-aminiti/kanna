@@ -225,6 +225,22 @@
           "when": { "structural": "claude-active-subagent" }
         },
         {
+          "id": "claude/busy/update-installed-active",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 42,
+          "when": { "structural": "claude-update-installed-active" }
+        },
+        {
+          "id": "claude/busy/active-task",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 45,
+          "when": { "anyLineWrapped": { "contains": "Waiting for task" } }
+        },
+        {
           "id": "claude/waiting/selected-menu-option",
           "status": "waiting",
           "channel": "grid",
@@ -318,6 +334,14 @@
           "versions": "*",
           "priority": 20,
           "when": { "anyLineWrapped": { "contains": "esc to interrupt" } }
+        },
+        {
+          "id": "codex/busy/background-terminal",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 25,
+          "when": { "anyLineWrapped": { "contains": "Waiting for background terminal" } }
         },
         {
           "id": "codex/idle/composer",

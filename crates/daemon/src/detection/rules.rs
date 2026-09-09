@@ -19,6 +19,7 @@ use super::version::{CliVersion, VersionRange};
 /// reintroduce exactly the silent-degradation failure this file exists to end.
 pub const STRUCTURAL_PREDICATES: &[&str] = &[
     "claude-working-footer",
+    "claude-update-installed-active",
     "claude-active-subagent",
     "claude-parked-composer",
     "claude-selected-menu-option",

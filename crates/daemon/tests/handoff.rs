@@ -2939,9 +2939,9 @@ fn test_adopted_session_refuses_signals_but_quits_on_injected_input() {
 }
 
 #[test]
-fn test_adopted_pty_tracks_status_before_first_attach() {
+fn test_adopted_pty_remeasures_an_unclassified_snapshot_before_first_attach() {
     let dir = test_dir("status-before-attach");
-    let release_path = dir.join("release-idle");
+    let release_path = dir.join("release-spinner");
 
     let daemon_a = DaemonHandle::start_in(&dir);
     let mut conn_a = daemon_a.connect();
@@ -2955,7 +2955,11 @@ fn test_adopted_pty_tracks_status_before_first_attach() {
         executable: "/bin/sh".to_string(),
         args: vec![
             "-c".to_string(),
-            "printf 'Header\\r\\n• Working (0s • esc to interrupt)\\r\\n› Run /review'; while [ ! -f \"$KANNA_HANDOFF_RELEASE\" ]; do sleep 0.05; done; printf '\\033[2J\\033[HHeader\\r\\n› '; sleep 30".to_string(),
+            // The snapshot deliberately ends on an unclassifiable updater
+            // footer. After handoff the child keeps painting a Codex busy
+            // footer; no viewer is ever attached, so this pins the adopted
+            // reader's next-frame remeasurement path.
+            "printf 'Header\\r\\n✔ Update installed · Restart to update\\r\\n› '; while [ ! -f \"$KANNA_HANDOFF_RELEASE\" ]; do sleep 0.05; done; while :; do printf '\\033[2J\\033[HHeader\\r\\n• Waiting for background terminal (20m 39s • esc to interrupt)\\r\\n› '; sleep 0.05; done".to_string(),
         ],
         cwd: "/tmp".to_string(),
         env,
@@ -2968,13 +2972,6 @@ fn test_adopted_pty_tracks_status_before_first_attach() {
         Evt::SessionCreated { .. } => {}
         other => panic!("expected SessionCreated, got: {:?}", other),
     }
-    wait_for_session_status(
-        &mut conn_a,
-        "sess-adopted-stream",
-        SessionStatus::Busy,
-        Duration::from_secs(2),
-    );
-
     drop(conn_a);
     let daemon_b = DaemonHandle::start_in(&dir);
     let mut conn_b = daemon_b.connect();
@@ -2985,7 +2982,7 @@ fn test_adopted_pty_tracks_status_before_first_attach() {
     wait_for_session_status(
         &mut conn_b,
         "sess-adopted-stream",
-        SessionStatus::Idle,
+        SessionStatus::Busy,
         Duration::from_secs(2),
     );
 

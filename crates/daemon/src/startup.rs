@@ -34,12 +34,18 @@ fn adopted_runtime_status(
     headless_terminal: &mut headless_terminal::HeadlessTerminal,
     classifier: &mut crate::detection::Classifier,
     inherited_status: kanna_daemon::protocol::SessionStatus,
+    handoff_status_observed: bool,
+    snapshot_present: bool,
 ) -> Result<(kanna_daemon::protocol::SessionStatus, bool), Box<dyn std::error::Error + Send + Sync>>
 {
-    let agent_provider = classifier.provider();
     let detected_status = headless_terminal.visible_status(classifier)?;
-    let status_observed = detected_status.is_some()
-        || inherited_status != headless_terminal::initial_session_status(agent_provider);
+    // The snapshot is newer evidence than the status beside it. If it is
+    // present but cannot classify, an old verdict may already be stale; keep
+    // its value only as an internal transition baseline and report unknown
+    // until a later PTY frame measures. With no snapshot, the sender's
+    // explicitly observed verdict is the best available handoff evidence.
+    let status_observed =
+        detected_status.is_some() || (!snapshot_present && handoff_status_observed);
     Ok((detected_status.unwrap_or(inherited_status), status_observed))
 }
 
@@ -339,6 +345,8 @@ pub(crate) async fn run_daemon() {
                 &mut headless_terminal,
                 &mut adopted_classifier,
                 handoff.status,
+                handoff.status_observed,
+                handoff.snapshot.is_some(),
             ) {
                 Ok(derived) => derived,
                 Err(error) => {
@@ -629,6 +637,8 @@ mod adopted_runtime_status_tests {
             &mut terminal,
             &mut crate::detection::Classifier::new(Some(AgentProvider::Claude)),
             SessionStatus::Busy,
+            true,
+            true,
         )
         .unwrap();
 

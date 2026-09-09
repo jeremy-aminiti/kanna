@@ -136,6 +136,10 @@ pub struct HandoffSession {
     pub cli_version: Option<String>,
     #[serde(default)]
     pub status: SessionStatus,
+    /// Whether the sender had a rendered verdict for `status`. Absent on
+    /// older handoff payloads means unknown, never an implicit idle verdict.
+    #[serde(default)]
+    pub status_observed: bool,
     #[serde(default)]
     pub kind: SessionKind,
     /// Agent sessions: the provider's own session id (for resume), captured
@@ -610,6 +614,11 @@ pub struct SessionInfo {
     pub state: SessionState,
     pub idle_seconds: u64,
     pub status: SessionStatus,
+    /// Whether `status` came from a rendered terminal frame.  A live session
+    /// with this false has no runtime verdict yet; consumers must not turn its
+    /// internal bootstrap value into an asserted idle state.
+    #[serde(default)]
+    pub status_observed: bool,
     #[serde(default)]
     pub kind: SessionKind,
     /// The text rendered on this session's composer line, when its frame draws
@@ -1052,6 +1061,7 @@ mod tests {
                 agent_provider: None,
                 cli_version: None,
                 status: SessionStatus::Idle,
+                status_observed: true,
                 kind: SessionKind::Pty,
                 provider_session_id: None,
                 agent_fd_count: 0,
@@ -1187,6 +1197,7 @@ mod tests {
             state: SessionState::Active,
             idle_seconds: 30,
             status: SessionStatus::Idle,
+            status_observed: true,
             kind: SessionKind::Pty,
             composer_text: None,
             composer_attestation: ComposerAttestation::NotTyped,
@@ -1217,6 +1228,7 @@ mod tests {
                 state: SessionState::Suspended,
                 idle_seconds: 10,
                 status: SessionStatus::Idle,
+                status_observed: true,
                 kind: SessionKind::Pty,
                 composer_text: Some("half typed".to_string()),
                 composer_attestation: ComposerAttestation::Typed,

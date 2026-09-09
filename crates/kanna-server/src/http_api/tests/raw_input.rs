@@ -45,6 +45,7 @@ fn live_session(task_id: &str, pid: u32) -> SessionInfo {
         state: SessionState::Active,
         idle_seconds: 0,
         status: SessionStatus::Waiting,
+        status_observed: true,
         kind: Default::default(),
         composer_text: None,
         composer_attestation: Default::default(),
