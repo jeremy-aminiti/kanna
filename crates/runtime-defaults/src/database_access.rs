@@ -303,16 +303,23 @@ fn account_home() -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
-    /// A root no other test can be handed. The clock alone does not guarantee
-    /// that: `create_dir_all` succeeds on a directory that already exists, so
-    /// two tests starting within one tick would silently share a root and see
-    /// each other's files.
+    /// A root owned by exactly one test invocation. The test harness runs
+    /// these tests on parallel threads, and `SystemTime` is not fine enough
+    /// to tell two of them apart -- two fixtures minted in the same clock
+    /// tick shared a root, and whichever finished first removed the other's.
+    /// A process-wide counter makes every root distinct regardless of the
+    /// clock; the pid and timestamp keep it distinct across processes.
     fn fixture() -> (PathBuf, PathBuf) {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "kanna-db-access-{}-{}",
+            "kanna-db-access-{}-{}-{}",
             std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
