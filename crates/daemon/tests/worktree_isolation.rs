@@ -1,8 +1,10 @@
+mod support;
+
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// Starting a process and having it publish a socket is an eventual event with
 /// no product latency contract. This deadline only contains a wedged child.
@@ -12,12 +14,10 @@ fn compute_socket_path(dir: &Path) -> PathBuf {
     kanna_runtime_defaults::socket_path(dir)
 }
 
+/// The test removes this itself on every exit but a kill; under the process's
+/// test root, a kill is what the next run's sweep is for.
 fn unique_temp_root(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("kanna-{name}-{}-{nanos}", std::process::id()))
+    support::test_paths::unique_test_path(&format!("kanna-{name}"))
 }
 
 /// Wait for *this* daemon generation to publish a connectable socket.

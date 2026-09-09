@@ -16,20 +16,16 @@
 
 #[path = "../build_support/git_identity.rs"]
 mod git_identity;
+mod support;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Nothing here removes what it creates: the roots live under this process's
+/// test root, which the next run reclaims.
 fn unique_temp_root(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let root = std::env::temp_dir().join(format!("kanna-{name}-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&root).expect("temp root should be created");
-    root
+    support::test_paths::unique_test_dir(&format!("kanna-{name}"))
 }
 
 fn git(repo: &Path, args: &[&str]) -> String {
