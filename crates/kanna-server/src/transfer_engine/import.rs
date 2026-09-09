@@ -354,6 +354,16 @@ async fn run_import(
             payload.task.head_oid.as_deref().ok_or_else(|| {
                 ImportFailure::Terminal("task bundle has no expected head".into())
             })?;
+        db.upsert_transferred_task_manifest(
+            transfer_id,
+            &repo_id,
+            local_task_id.as_deref(),
+            expected_head,
+            payload.task.base_oid.as_deref().unwrap_or_default(),
+        )
+        .map_err(|error| {
+            ImportFailure::Terminal(format!("transfer manifest admission failed: {error}"))
+        })?;
         let destination_branch = format!("task-{}", local_task_id.as_deref().unwrap_or_default());
         let history_proved = {
             let (repo_path, expected_head, destination_branch) = (
@@ -371,6 +381,11 @@ async fn run_import(
                 "destination task branch {destination_branch} does not contain transferred head {expected_head}"
             )));
         }
+
+        db.mark_transferred_task_manifest_prepared(transfer_id)
+            .map_err(|error| {
+                ImportFailure::Terminal(format!("transfer manifest preparation failed: {error}"))
+            })?;
 
         if !db
             .mark_incoming_transfer_importing(

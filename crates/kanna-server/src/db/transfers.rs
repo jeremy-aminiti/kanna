@@ -111,6 +111,52 @@ pub struct NewTaskTransferProvenance {
 }
 
 impl Db {
+    pub fn upsert_transferred_task_manifest(
+        &self,
+        transfer_id: &str,
+        repo_id: &str,
+        local_task_id: Option<&str>,
+        head_oid: &str,
+        base_oid: &str,
+    ) -> Result<(), rusqlite::Error> {
+        if let Some((_, existing_head, existing_base, _, _)) =
+            self.transferred_task_manifest(transfer_id)?
+        {
+            if existing_head != head_oid || existing_base != base_oid {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "conflicting transferred task manifest".into(),
+                ));
+            }
+        }
+        self.conn.execute(
+            "INSERT INTO transferred_task_manifest
+             (transfer_id,repo_id,local_task_id,head_oid,base_oid,state)
+             VALUES (?,?,?,?,?,'importing')
+             ON CONFLICT(transfer_id) DO UPDATE SET
+               repo_id=excluded.repo_id, local_task_id=COALESCE(excluded.local_task_id, transferred_task_manifest.local_task_id),
+               head_oid=CASE WHEN transferred_task_manifest.head_oid=excluded.head_oid THEN transferred_task_manifest.head_oid ELSE transferred_task_manifest.head_oid END,
+               base_oid=CASE WHEN transferred_task_manifest.base_oid=excluded.base_oid THEN transferred_task_manifest.base_oid ELSE transferred_task_manifest.base_oid END",
+            (transfer_id, repo_id, local_task_id, head_oid, base_oid),
+        )?;
+        Ok(())
+    }
+
+    pub fn transferred_task_manifest(
+        &self,
+        transfer_id: &str,
+    ) -> Result<Option<(String, String, String, Option<String>, String)>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT repo_id,head_oid,base_oid,local_task_id,state FROM transferred_task_manifest WHERE transfer_id=?",
+            [transfer_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))
+            .optional()
+    }
+
+    pub fn mark_transferred_task_manifest_prepared(
+        &self,
+        transfer_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        Ok(self.conn.execute("UPDATE transferred_task_manifest SET state='prepared', prepared_at=datetime('now') WHERE transfer_id=? AND state='importing'", [transfer_id])? == 1)
+    }
     /// Stores the source-pinned workflow/context before a transferred task's
     /// first agent spawn. Replays must carry the same transfer identity.
     pub fn upsert_transferred_task_context(
