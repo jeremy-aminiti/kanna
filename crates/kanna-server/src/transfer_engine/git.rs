@@ -162,6 +162,7 @@ pub fn resolve_commit_ref(repo_path: &Path, reference: &str) -> Result<(String, 
 /// Fetches the source task ref into a transfer-private namespace and proves it
 /// resolves to the exact commit named by the finalized payload. Existing
 /// branches are never overwritten.
+#[cfg(test)]
 pub fn import_task_bundle_ref(
     repo_path: &Path,
     bundle_path: &Path,

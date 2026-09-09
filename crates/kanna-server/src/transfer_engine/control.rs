@@ -12,7 +12,6 @@ use std::sync::Arc;
 pub struct PreflightResult {
     pub transfer_id: String,
     pub source_peer_id: String,
-    pub target_has_repo: bool,
 }
 
 async fn control(state: &Arc<AppState>, operation: &str, params: Value) -> Result<Value, String> {
@@ -79,12 +78,6 @@ pub async fn preflight(
     Ok(PreflightResult {
         transfer_id: required_string(&response, "transferId")?,
         source_peer_id: required_string(&response, "sourcePeerId")?,
-        target_has_repo: response
-            .get("targetHasRepo")
-            .and_then(Value::as_bool)
-            .ok_or_else(|| {
-                "transfer sidecar preflight response missing targetHasRepo".to_string()
-            })?,
     })
 }
 
