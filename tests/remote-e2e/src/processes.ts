@@ -114,7 +114,7 @@ export async function runCommand(command: string, args: string[], options: RunCo
         return;
       }
       const suffix = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
-      reject(new Error(`${command} ${args.join(" ")} exited with ${suffix}\n${stderr || stdout}`));
+      reject(new Error(`${command} ${args.join(" ")} exited with ${suffix}\nstdout:\n${stdout}\nstderr:\n${stderr}`));
     });
   });
 }
