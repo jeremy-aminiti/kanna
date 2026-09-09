@@ -55,20 +55,35 @@ One initial command form (`test:e2e:real -- ...`) accidentally selected the
 entire `real/` directory and was terminated before test execution with exit
 143; it is not a test result. Its exact owned tmux session was then stopped.
 
-## Next focused desktop proof
+## Dedicated real desktop proof — failed at the local active-view boundary
 
-The runnable selection should be a dedicated target:
+Command (exit 1):
 
 ```sh
-pnpm --dir apps/desktop test:e2e -- real/remote-active-view-restoration.test.ts
+CARGO_BUILD_JOBS=2 pnpm --dir apps/desktop test:e2e -- real/remote-active-view-restoration.test.ts
 ```
 
-It must be added to the existing runner's two-instance, emulator, relay, and
-isolated-agent-provider plan, then run only after the dedicated desktop slot is
-released. The fixture must create a private owner task and select its viewer
-projection by `ownerDesktopId` plus `ownerLocalTaskId` from
-`cloudSnapshot.terminalRefs`, as the existing isolated
-`remote-task-graph-refusal.test.ts` does. The old companion suite's prompt
-matching admits stale projected tasks, which is the direct prerequisite failure
-above. The new target should then assert foregrounding the real primary
-terminal restores its measured grid without sending terminal input.
+The isolated two-instance runner started both desktops, Firebase emulators, and
+the relay, then ran only
+`real/remote-active-view-restoration.test.ts`. The private owner identity
+projection succeeded. The remote foreground phase passed its daemon/buffer-
+dimension equality and captured `remote-active-view-controls-grid.png`, but
+visual inspection found that image blank rather than a rendered terminal. It
+is therefore not visual proof of the remote grid. The focus-only primary
+handback then timed out at the assertion that the daemon dimensions equal the
+primary rendered dimensions. No primary-restoration screenshot was produced,
+so restoration is not proven.
+
+The causal boundary is the active-view notification, not task discovery or
+relay setup: `CloudTerminalView` calls `subscription.activate()` when the
+remote view starts, while the owning local lifecycle only calls
+`activateTerminalViewer` during attach, reconnect, and resize. Moving terminal
+focus back to the already-attached local view does not emit an
+`ActiveViewer` command, so the daemon correctly retains the remote controller.
+This needs a real local-terminal focus-to-active-viewer notification, plus a
+rendered-cell assertion that rejects the blank capture, before a fresh native
+retry; no fake endpoint or authentication workaround is involved.
+
+Complete nested output is retained at
+`.tmp/desktop-active-view-restoration-isolated.log`. The runner cleaned its
+owned desktop, relay, and emulator processes after its exit.
