@@ -160,6 +160,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "072_human_review_decision",
     "074_transferred_task_input_provenance",
     "075_transferred_task_context",
+    "076_transferred_task_manifest",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2212,6 +2213,21 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
                 previous_main_result TEXT,
                 revision_feedback TEXT,
                 recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )
+    })?;
+
+    run_migration(conn, "076_transferred_task_manifest", |conn| {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS transferred_task_manifest (
+                transfer_id TEXT PRIMARY KEY,
+                repo_id TEXT NOT NULL,
+                local_task_id TEXT,
+                head_oid TEXT NOT NULL,
+                base_oid TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('importing','prepared','failed')),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                prepared_at TEXT
             );",
         )
     })?;
