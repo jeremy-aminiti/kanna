@@ -198,6 +198,57 @@ describe("createRelayDesktopClient", () => {
     await expect(invocation).rejects.toThrow("desktop failed");
   });
 
+  it("parses a structured refusal body out of the error frame", async () => {
+    const socket = createSocket();
+    const client = createRelayDesktopClient({
+      createSocket: () => socket,
+      getIdToken: async () => "id-token-1",
+      nextId: () => "invoke-refusal",
+      relayUrl: "wss://relay.example"
+    });
+
+    const invocation = client.invokeDesktop({
+      desktopId: "desktop-1",
+      method: "POST",
+      path: "/v1/tasks/task-1/input",
+      body: { text: "hello" }
+    });
+    socket.onopen?.();
+    await flushPromises();
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok", userId: "user-1" }) });
+    await flushPromises();
+    // The desktop's body arrives verbatim in `error`. Left unparsed, a screen
+    // showing it printed the JSON at the owner.
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: "response",
+        id: "invoke-refusal",
+        status: 409,
+        error: JSON.stringify({
+          message: "no live agent session for this task",
+          ok: false,
+          reason: "session_not_found"
+        })
+      })
+    });
+
+    await invocation.then(
+      () => {
+        throw new Error("expected the refusal to reject");
+      },
+      (error: unknown) => {
+        const refusal = error as {
+          detail: string | null;
+          reason: string | null;
+          status: number;
+        };
+        expect(refusal.detail).toBe("no live agent session for this task");
+        expect(refusal.reason).toBe("session_not_found");
+        expect(refusal.status).toBe(409);
+      }
+    );
+  });
+
   it("lists active desktop ids through a relay command", async () => {
     const socket = createSocket();
     const client = createRelayDesktopClient({

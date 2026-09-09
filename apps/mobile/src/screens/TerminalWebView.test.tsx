@@ -178,6 +178,7 @@ async function renderTerminalWebView(input: {
     dataB64: string,
     kind: "draft" | "submission" | "control"
   ) => void;
+  onCapacityChange?: (cols: number, rows: number) => void;
   onRequestScrollback?: () => void;
   terminalOutputSource?: TaskTerminalOutputSource;
 }): Promise<ElementNode> {
@@ -202,6 +203,7 @@ async function renderTerminalWebView(input: {
     onMentionedFilesChange: input.onMentionedFilesChange,
     onOpenFile: input.onOpenFile,
     onTerminalInput: input.onTerminalInput,
+    onCapacityChange: input.onCapacityChange,
     onRequestScrollback: input.onRequestScrollback,
     terminalOutputSource: input.terminalOutputSource
   }) as ElementNode;
@@ -222,8 +224,14 @@ async function renderTerminalWebView(input: {
   return webView;
 }
 
-function bottomInsetScript(bottomInset: number): string {
-  return `window.__setTerminalBottomInset(${JSON.stringify({ bottomInset })}); true;`;
+function bottomInsetScript(
+  bottomInset: number,
+  capacityInset: number = bottomInset
+): string {
+  return `window.__setTerminalBottomInset(${JSON.stringify({
+    bottomInset,
+    capacityInset
+  })}); true;`;
 }
 
 interface BurstTerminalBuffer {
@@ -808,6 +816,26 @@ describe("TerminalWebView", () => {
       "G1s8NjU7MTsxTQ==",
       "control"
     );
+  });
+
+  it("forwards the page's measured capacity", async () => {
+    const onCapacityChange = vi.fn();
+    const webView = await renderTerminalWebView({ onCapacityChange });
+    const post = (payload: unknown) =>
+      (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+        nativeEvent: { data: JSON.stringify(payload) }
+      } as WebViewMessageEvent);
+
+    post({ type: "terminal-capacity", cols: 65, rows: 34 });
+    expect(onCapacityChange).toHaveBeenCalledWith(65, 34);
+
+    // A page that has not laid out reports nothing; a malformed one is not a
+    // proposal either. Neither may reach the daemon as a geometry request.
+    post({ type: "terminal-capacity", cols: 0, rows: 34 });
+    post({ type: "terminal-capacity", cols: 65.5, rows: 34 });
+    post({ type: "terminal-capacity", cols: "65", rows: 34 });
+    post({ type: "terminal-capacity" });
+    expect(onCapacityChange).toHaveBeenCalledOnce();
   });
 
   it("forwards a near-the-top scroll as a scrollback request", async () => {

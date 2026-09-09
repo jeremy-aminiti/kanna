@@ -62,11 +62,18 @@ interface TerminalWebViewProps {
   bottomInset?: number;
   directInputEnabled?: boolean;
   directInputFocusRequest?: number;
+  /** The composer's resting obstruction, with the software keyboard excluded.
+   * Capacity is measured against this so opening the keyboard does not reflow
+   * the PTY of a session this viewer controls. Defaults to `bottomInset`. */
+  capacityInset?: number;
   selectionToolbarTop?: number;
   onConsolePress?: () => void;
   onMentionedFilesChange?: (history: TerminalFileMentionHistory) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onTerminalInput?: (dataB64: string, kind: TaskTerminalInputKind) => void;
+  /** What this phone can display at its current zoom, measured inside the
+   * page. The daemon owns the grid; this is only what the viewer proposes. */
+  onCapacityChange?: (cols: number, rows: number) => void;
   /** The reader scrolled near the top of the loaded buffer. Whether there is
    * older scrollback to fetch is the app's question, not the page's. */
   onRequestScrollback?: () => void;
@@ -125,11 +132,13 @@ export function TerminalWebViewComponent({
   bottomInset,
   directInputEnabled = false,
   directInputFocusRequest = 0,
+  capacityInset,
   selectionToolbarTop,
   onConsolePress,
   onMentionedFilesChange,
   onOpenFile,
   onTerminalInput,
+  onCapacityChange,
   onRequestScrollback
 }: TerminalWebViewProps) {
   const webViewRef = useRef<TerminalWebViewHandle>(null);
@@ -192,9 +201,10 @@ export function TerminalWebViewComponent({
   // source object across renders so a re-render never walks it as a prop diff
   // candidate, let alone reloads it.
   const source = useMemo(() => ({ html: document }), [document]);
+  const resolvedCapacityInset = capacityInset ?? resolvedBottomInset;
   const bottomInsetScript = useMemo(
-    () => buildTerminalBottomInsetScript(resolvedBottomInset),
-    [resolvedBottomInset]
+    () => buildTerminalBottomInsetScript(resolvedBottomInset, resolvedCapacityInset),
+    [resolvedBottomInset, resolvedCapacityInset]
   );
 
   const terminalDiagnosticDetails = () => ({
@@ -468,6 +478,8 @@ export function TerminalWebViewComponent({
       dataB64?: unknown;
       kind?: unknown;
       contentRevision?: unknown;
+      cols?: unknown;
+      rows?: unknown;
     };
 
     try {
@@ -534,6 +546,20 @@ export function TerminalWebViewComponent({
           payload.kind === "control")
       ) {
         onTerminalInput?.(payload.dataB64, payload.kind);
+      }
+      return;
+    }
+
+    if (payload.type === "terminal-capacity") {
+      if (
+        typeof payload.cols === "number" &&
+        Number.isInteger(payload.cols) &&
+        payload.cols > 0 &&
+        typeof payload.rows === "number" &&
+        Number.isInteger(payload.rows) &&
+        payload.rows > 0
+      ) {
+        onCapacityChange?.(payload.cols, payload.rows);
       }
       return;
     }

@@ -274,6 +274,10 @@ export interface MobileRelayHarness {
   prepareTaskUnreadForMarkRead(): Promise<void>;
   setTaskBusyRead(): Promise<void>;
   restoreTallTerminalGeometry(): Promise<void>;
+  observeAuthoritativeTerminalGeometry(
+    timeoutMs?: number,
+  ): Promise<{ cols: number; rows: number }>;
+  restoreDesktopTerminalControl(): Promise<void>;
   resyncTerminalConnection(): Promise<void>;
   setTaskBusyUnread(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
@@ -659,6 +663,41 @@ export async function startMobileRelayHarness(
           harness,
           task: localTask
         });
+      },
+      async observeAuthoritativeTerminalGeometry(timeoutMs = 20_000) {
+        // The daemon owns the grid. A fresh observer's initial snapshot is
+        // that authority stated out loud, independent of what any renderer
+        // believes it is showing.
+        // The local KSP path, the same one this lane's desktop-shaped viewer
+        // uses; the relay collector does not carry terminal snapshots here.
+        // Read-only: a collector registers a viewer on resize() and nothing
+        // else, so observing cannot perturb the election it is measuring.
+        const observer = await remote.terminal.collectLocalTerminalEvents(
+          harness,
+          localTask.taskId
+        );
+        try {
+          const snapshot = await observer.waitForSnapshot(
+            { minEncodedChars: 0, sentinel: "" },
+            timeoutMs
+          );
+          return { cols: snapshot.cols, rows: snapshot.rows };
+        } finally {
+          observer.close();
+        }
+      },
+      async restoreDesktopTerminalControl() {
+        // Put the desktop-shaped viewer back in charge, the way releasing on
+        // the phone hands the terminal back to the machine it lives on.
+        // Restore whatever grid the fixture currently expects rather than a
+        // hardcoded pair: the lane's authoritative size is a fixture fact and
+        // has already changed once, and handing back the wrong one fails the
+        // rendering assertions that follow.
+        terminalEvents?.resize(
+          terminalFixture.expectedCols,
+          terminalFixture.expectedRows
+        );
+        terminalEvents?.takeControl();
       },
       async resyncTerminalConnection() {
         // Replace the daemon beneath the live KSP subscription. This forces

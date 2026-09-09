@@ -5,12 +5,13 @@ import {
 } from "./mobileTerminalGeometry";
 
 describe("resolveMobileTerminalGeometry", () => {
-  it("uses 80x48 for a phone-sized task detail surface", () => {
-    expect(DEFAULT_MOBILE_TERMINAL_GEOMETRY).toEqual({ cols: 80, rows: 48 });
-    expect(Object.isFrozen(DEFAULT_MOBILE_TERMINAL_GEOMETRY)).toBe(true);
+  it("estimates what the phone can show rather than a desktop-shaped floor", () => {
+    // A phone is ~390pt wide. Proposing 80 columns from it asked the daemon
+    // for a grid twice as wide as the screen, which is the horizontal
+    // scrolling the owner was reading through.
     expect(resolveMobileTerminalGeometry({ width: 390, height: 844 })).toEqual({
-      cols: 80,
-      rows: 48
+      cols: 48,
+      rows: 41
     });
   });
 
@@ -32,8 +33,16 @@ describe("resolveMobileTerminalGeometry", () => {
     null,
     { width: 0, height: 844 },
     { width: 390, height: Number.NaN },
-    { width: Number.POSITIVE_INFINITY, height: 844 }
-  ])("falls back to 80x48 for an unusable layout: %o", (layout) => {
-    expect(resolveMobileTerminalGeometry(layout)).toEqual({ cols: 80, rows: 48 });
+    { width: Number.POSITIVE_INFINITY, height: 844 },
+    // Laid out, but too small to be anyone's terminal: still settling.
+    { width: 100, height: 844 },
+    { width: 390, height: 180 }
+  ])("falls back to the conventional grid for an unusable layout: %o", (layout) => {
+    expect(resolveMobileTerminalGeometry(layout)).toEqual({ cols: 80, rows: 24 });
+  });
+
+  it("exposes the conventional grid as the frozen fallback", () => {
+    expect(DEFAULT_MOBILE_TERMINAL_GEOMETRY).toEqual({ cols: 80, rows: 24 });
+    expect(Object.isFrozen(DEFAULT_MOBILE_TERMINAL_GEOMETRY)).toBe(true);
   });
 });

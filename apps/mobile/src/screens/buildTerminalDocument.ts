@@ -109,6 +109,10 @@ export function buildTerminalDocument({
       const FitAddonCtor = globalThis.FitAddon && globalThis.FitAddon.FitAddon;
       const TERMINAL_COLS = 220;
       const BASE_FONT_SIZE = 13;
+      // A measured capacity below this is layout still settling, not a grid
+      // anybody could read. Never propose one to the daemon.
+      const MIN_MEASURED_COLS = 20;
+      const MIN_MEASURED_ROWS = 8;
       const MIN_FONT_SCALE = 0.75;
       const MAX_FONT_SCALE = 1.8;
       const SMOOTH_SCROLL_DURATION_MS = 80;
@@ -174,10 +178,15 @@ export function buildTerminalDocument({
       });
       const fitAddon = new FitAddonCtor();
       let bottomInset = ${initialBottomInset};
+      // The composer's resting obstruction, which the software keyboard does
+      // not change. Capacity is measured against this, so tapping the composer
+      // does not reflow the agent's PTY under an owner who holds control.
+      let capacityInset = ${initialBottomInset};
       let stickyToBottom = true;
       let viewportPinnedToBottom = true;
       let pinnedCols = 0;
       let pinnedRows = 0;
+      let reportedCapacity = null;
       let fontScale = 1;
       let touchScroll = null;
       let pinch = null;
@@ -964,6 +973,10 @@ export function buildTerminalDocument({
         }
         const shouldStick = shouldFollowTerminalBottom();
         bottomInset = Math.max(0, Math.ceil(nextBottomInset));
+        const nextCapacityInset = Number(state && state.capacityInset);
+        capacityInset = Number.isFinite(nextCapacityInset)
+          ? Math.max(0, Math.ceil(nextCapacityInset))
+          : bottomInset;
         applyBottomInset();
         fitTerminal();
         stickyToBottom = shouldStick;
@@ -973,7 +986,56 @@ export function buildTerminalDocument({
         scheduleViewportAlignment();
       };
 
+      // What this phone can show at the current font, measured rather than
+      // estimated, and deliberately independent of the grid being rendered.
+      // The authoritative grid comes from the daemon and may be far wider than
+      // the screen; this is the proposal that says how wide it *could* be, and
+      // computing it from term.cols would close a render/resize loop.
+      function terminalCapacity() {
+        const { width, height } = cellDimensions();
+        const availableWidth = viewport.clientWidth;
+        const availableHeight = viewport.clientHeight - capacityInset;
+        if (
+          !(width > 0) ||
+          !(height > 0) ||
+          !(availableWidth > 0) ||
+          !(availableHeight > 0)
+        ) {
+          return null;
+        }
+        const cols = Math.floor(availableWidth / width);
+        const rows = Math.floor(availableHeight / height);
+        if (cols < MIN_MEASURED_COLS || rows < MIN_MEASURED_ROWS) {
+          return null;
+        }
+        return { cols, rows };
+      }
+
+      function notifyTerminalCapacity() {
+        if (!window.ReactNativeWebView || !window.ReactNativeWebView.postMessage) {
+          return;
+        }
+        const capacity = terminalCapacity();
+        if (!capacity) {
+          return;
+        }
+        if (
+          reportedCapacity &&
+          reportedCapacity.cols === capacity.cols &&
+          reportedCapacity.rows === capacity.rows
+        ) {
+          return;
+        }
+        reportedCapacity = capacity;
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: "terminal-capacity",
+          cols: capacity.cols,
+          rows: capacity.rows
+        }));
+      }
+
       function fitTerminal() {
+        notifyTerminalCapacity();
         // Once the desktop PTY dimensions are known, render at exactly that grid
         // (current font, scroll on overflow) instead of refitting to the device.
         if (pinnedCols && pinnedRows) {
@@ -1714,8 +1776,14 @@ export function buildTerminalResizeScript(cols: number, rows: number): string {
   return `window.__setTerminalDims(${JSON.stringify({ cols, rows })}); true;`;
 }
 
-export function buildTerminalBottomInsetScript(bottomInset: number): string {
-  return `window.__setTerminalBottomInset(${JSON.stringify({ bottomInset })}); true;`;
+export function buildTerminalBottomInsetScript(
+  bottomInset: number,
+  capacityInset: number = bottomInset
+): string {
+  return `window.__setTerminalBottomInset(${JSON.stringify({
+    bottomInset,
+    capacityInset
+  })}); true;`;
 }
 
 export function buildTerminalDirectInputScript(enabled: boolean): string {

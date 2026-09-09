@@ -93,6 +93,8 @@ function createTerminalSubscriptionMock(): {
       close: vi.fn(),
       sendInput: vi.fn(),
       resize: vi.fn(),
+      takeControl: vi.fn(),
+      releaseControl: vi.fn(),
       requestScrollback: vi.fn(),
       setListener(nextListener) {
         listener = nextListener;
@@ -2972,21 +2974,45 @@ describe("createMobileController", () => {
     const store = createSessionStore();
     const client = createClientMock();
     const uncertain = new ServerRefusalError(
-      "terminal input delivery is uncertain: daemon response lost",
+      "LAN request failed (503) for /v1/tasks/task-1/input: terminal input delivery is uncertain: daemon response lost",
       "delivery_uncertain",
-      503
+      503,
+      "terminal input delivery is uncertain: daemon response lost"
     );
     client.sendTaskInput.mockRejectedValueOnce(uncertain);
     const controller = createMobileController(client, store);
 
+    // The desktop's own sentence, not the transport's framing of it.
     await expect(
       controller.sendTaskInput("task-1", "do not resend this")
     ).resolves.toEqual({
       status: "uncertain",
-      message: uncertain.message
+      message: "terminal input delivery is uncertain: daemon response lost"
     });
     expect(client.sendTaskInput).toHaveBeenCalledOnce();
     expect(store.getState().connectionState).not.toBe("error");
+  });
+
+  it("never shows a refusal body it could not read as a sentence", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    // What the owner was shown on their phone: the desktop's raw 409 body,
+    // JSON braces and all, rendered as though it were an explanation.
+    client.sendTaskInput.mockRejectedValueOnce(
+      new ServerRefusalError(
+        'Remote desktop request failed with status 409. {"message":"logical input refused","ok":false,"reason":"input_blocked"}',
+        null,
+        409
+      )
+    );
+    const controller = createMobileController(client, store);
+
+    const outcome = await controller.sendTaskInput("task-1", "hello");
+    expect(outcome).toEqual({
+      status: "failed",
+      reason: "server_rejected",
+      message: "The desktop refused the request (409)."
+    });
   });
 
   it("does not start a persisted unresolved task stream before its live snapshot", async () => {
@@ -5025,7 +5051,7 @@ describe("createMobileController", () => {
       agentProvider: "claude",
       agentType: "pty",
       terminalCols: 80,
-      terminalRows: 48
+      terminalRows: 24
     });
 
     pendingCreate.resolve({
@@ -5247,7 +5273,7 @@ describe("createMobileController", () => {
         agentProvider: "claude",
         agentType: "pty",
         terminalCols: 80,
-        terminalRows: 48
+        terminalRows: 24
       });
     }
 
@@ -5444,7 +5470,7 @@ describe("createMobileController", () => {
       agentProvider: pendingTaskCreation.agentProvider,
       agentType: "pty",
       terminalCols: 80,
-      terminalRows: 48
+      terminalRows: 24
     });
     expect(store.getState()).toMatchObject({
       isComposerOpen: true,
@@ -6061,7 +6087,7 @@ describe("createMobileController", () => {
       agentProvider: "copilot",
       agentType: "pty",
       terminalCols: 80,
-      terminalRows: 48
+      terminalRows: 24
     });
   });
 
@@ -6317,7 +6343,7 @@ describe("createMobileController", () => {
       agentProvider: "opencode",
       agentType: "pty",
       terminalCols: 80,
-      terminalRows: 48
+      terminalRows: 24
     });
   });
 
@@ -6491,7 +6517,7 @@ describe("createMobileController", () => {
       agentProvider: "codex",
       agentType: "pty",
       terminalCols: 80,
-      terminalRows: 48
+      terminalRows: 24
     });
     expect(store.getState()).toMatchObject({
       connectionState: "connected",
@@ -6595,7 +6621,7 @@ describe("createMobileController", () => {
       agentProvider: "claude",
       agentType: "pty",
       terminalCols: 80,
-      terminalRows: 48
+      terminalRows: 24
     });
     expect(store.getState()).toMatchObject({
       connectionState: "connected",
@@ -6964,6 +6990,53 @@ describe("createMobileController", () => {
     controller.resizeTaskTerminal("task-1", 128, 72);
     expect(resize).toHaveBeenCalledTimes(2);
     expect(resize).toHaveBeenLastCalledWith(128, 72);
+  });
+
+  it("registers the measured viewport before asking to control the terminal", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const { resize, takeControl, releaseControl } =
+      client.__terminalStream.subscription as unknown as {
+        resize: ReturnType<typeof vi.fn>;
+        takeControl: ReturnType<typeof vi.fn>;
+        releaseControl: ReturnType<typeof vi.fn>;
+      };
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    controller.resizeTaskTerminal("task-1", 65, 34);
+    resize.mockClear();
+
+    // The daemon adopts the controller's registered viewport, so a takeover
+    // that does not restate the measurement wins control of a terminal it
+    // then sizes to whatever it happened to register earlier — which is the
+    // "taking control doesn't resize it for mobile" the owner reported.
+    controller.takeTaskTerminalControl("task-1");
+
+    expect(resize).toHaveBeenCalledWith(65, 34);
+    expect(takeControl).toHaveBeenCalledOnce();
+    expect(resize.mock.invocationCallOrder[0]).toBeLessThan(
+      takeControl.mock.invocationCallOrder[0]
+    );
+
+    controller.releaseTaskTerminalControl("task-1");
+    expect(releaseControl).toHaveBeenCalledOnce();
+  });
+
+  it("ignores control requests aimed at a task that is not attached", async () => {
+    const store = createSessionStore();
+    const client = createClientMock();
+    const controller = createMobileController(client, store);
+    const { takeControl } = client.__terminalStream.subscription as unknown as {
+      takeControl: ReturnType<typeof vi.fn>;
+    };
+
+    await controller.bootstrap();
+    controller.openTask("task-1");
+    controller.takeTaskTerminalControl("task-2");
+
+    expect(takeControl).not.toHaveBeenCalled();
   });
 
   it("replaces stale replay output with an authoritative reconnect snapshot", async () => {

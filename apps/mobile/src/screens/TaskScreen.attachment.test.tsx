@@ -286,11 +286,11 @@ describe("TaskScreen photo attachments", () => {
     expect(
       tree.root
         .findByProps({ testID: MOBILE_E2E_IDS.taskInputStatus })
-        .findByType("Text" as unknown as React.ComponentType).props.children
+        .props.accessibilityLabel
     ).toContain("Your text is still here.");
   });
 
-  it("announces the desktop-accepted outcome through the native status element", async () => {
+  it("says nothing at all when the desktop accepts the input", async () => {
     const harness = createHarness();
     harness.onSendInput.mockResolvedValue({ status: "delivered" });
     const tree = await renderScreen(harness);
@@ -298,10 +298,35 @@ describe("TaskScreen photo attachments", () => {
     await typeDraft(tree, "continue");
     await sendComposer(tree);
 
+    // The sent text leaving the composer is the confirmation. A notice on the
+    // overwhelmingly common path was noise that also pushed the composer down
+    // the screen; only a send that did not land still has something to say.
     expect(
-      tree.root.findByProps({ testID: MOBILE_E2E_IDS.taskInputStatus }).props
-        .accessibilityLabel
-    ).toContain("accepted by the desktop");
+      tree.root.findAllByProps({ testID: MOBILE_E2E_IDS.taskInputStatus })
+    ).toHaveLength(0);
+  });
+
+  it("dismisses a failure notice without touching the retained draft", async () => {
+    const harness = createHarness();
+    harness.onSendInput.mockResolvedValue({
+      status: "failed",
+      reason: "server_rejected",
+      message: "no live agent session"
+    });
+    const tree = await renderScreen(harness);
+
+    await typeDraft(tree, "keep this dictated message");
+    await sendComposer(tree);
+    expect(has(tree, MOBILE_E2E_IDS.taskInputStatus)).toBe(true);
+
+    await press(tree, MOBILE_E2E_IDS.taskInputStatusDismiss);
+
+    expect(
+      tree.root.findAllByProps({ testID: MOBILE_E2E_IDS.taskInputStatus })
+    ).toHaveLength(0);
+    expect(
+      tree.root.findByProps({ testID: MOBILE_E2E_IDS.taskInput }).props.value
+    ).toBe("keep this dictated message");
   });
 
   it("does not clear a newer native draft when an earlier send completes", async () => {
