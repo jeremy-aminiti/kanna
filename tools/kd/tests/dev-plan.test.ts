@@ -406,42 +406,45 @@ describe("linuxDesktopWebkitEnv", () => {
   };
 
   it("adds nothing on macOS", () => {
-    expect(
-      linuxDesktopWebkitEnv({ ...base, env: {}, platform: "darwin", canUseDrmRenderNode: () => false })
-    ).toEqual({});
+    expect(linuxDesktopWebkitEnv({ ...base, env: {}, platform: "darwin" })).toEqual({});
   });
 
-  it("leaves a Linux machine with a usable render node on WebKit's own renderer", () => {
-    expect(
-      linuxDesktopWebkitEnv({ ...base, env: {}, platform: "linux", canUseDrmRenderNode: () => true })
-    ).toEqual({});
+  /**
+   * The decision moved into the desktop binary, which is the only place that
+   * also covers an installed run. `kd` re-deciding here would be a second
+   * source of truth for the one setting that decides whether Linux paints.
+   */
+  it("no longer probes for a render node", () => {
+    expect(linuxDesktopWebkitEnv({ ...base, env: {}, platform: "linux" })).toEqual({});
   });
 
-  it("disables the DMA-BUF renderer when no render node can be opened", () => {
-    // Without this the WebProcess never starts and the app runs with no
-    // window, silently — see the function's own comment.
-    expect(
-      linuxDesktopWebkitEnv({ ...base, env: {}, platform: "linux", canUseDrmRenderNode: () => false })
-    ).toEqual({ WEBKIT_DISABLE_DMABUF_RENDERER: "1" });
-  });
-
-  it("respects an explicit setting rather than re-deciding for the user", () => {
+  it("carries an explicit setting through, in both directions", () => {
     expect(
       linuxDesktopWebkitEnv({
         ...base,
         env: { WEBKIT_DISABLE_DMABUF_RENDERER: "0" },
         platform: "linux",
-        canUseDrmRenderNode: () => false,
       })
     ).toEqual({ WEBKIT_DISABLE_DMABUF_RENDERER: "0" });
+    expect(
+      linuxDesktopWebkitEnv({
+        ...base,
+        env: { WEBKIT_DISABLE_DMABUF_RENDERER: "1" },
+        platform: "linux",
+      })
+    ).toEqual({ WEBKIT_DISABLE_DMABUF_RENDERER: "1" });
   });
 
+  /**
+   * A respawned tmux window that dropped an operator's explicit setting would
+   * silently re-enable a renderer they turned off, so the forwarding still has
+   * to reach the window.
+   */
   it("reaches the desktop window", () => {
     const plan = buildDevPlan({
       ...base,
-      env: {},
+      env: { WEBKIT_DISABLE_DMABUF_RENDERER: "1" },
       platform: "linux",
-      canUseDrmRenderNode: () => false,
     });
     expect(plan.windows[0]?.env.WEBKIT_DISABLE_DMABUF_RENDERER).toBe("1");
   });

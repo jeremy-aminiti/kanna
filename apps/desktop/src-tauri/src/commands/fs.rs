@@ -87,13 +87,28 @@ pub async fn get_pipeline_socket_path(
 }
 
 /// Resolve the built-in resources directory.
-/// In release builds: `$RESOURCE/` (inside the app bundle).
+/// In macOS release builds: `$RESOURCE/` (inside the app bundle).
+/// In an installed Linux package: beside the executable, per the installed
+/// layout in `kanna_runtime_defaults::linux_install`.
 /// In dev builds: walk up from cwd to find the repo root containing `.kanna/`.
 fn builtin_resource_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     // Check the bundled resource dir first (works in release builds)
     if let Ok(resource_dir) = app.path().resource_dir() {
         if resource_dir.join(".kanna").is_dir() {
             return Ok(resource_dir);
+        }
+    }
+
+    // An installed Linux package has no bundle. Tauri derives its Linux
+    // resource directory from the product name and the `/usr/bin` launcher,
+    // which is not where the package puts the files — the package puts every
+    // Kanna-owned file in one directory so the runtime's existing sidecar
+    // search finds it. Ask that same layout, so the two never disagree.
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            if exe_dir.join(".kanna").is_dir() {
+                return Ok(exe_dir.to_path_buf());
+            }
         }
     }
 

@@ -4,6 +4,7 @@ mod daemon_client;
 mod daemon_lifecycle;
 #[cfg(debug_assertions)]
 mod dev_url;
+pub mod linux_graphics;
 mod macos;
 mod menu;
 mod menu_accelerators;
