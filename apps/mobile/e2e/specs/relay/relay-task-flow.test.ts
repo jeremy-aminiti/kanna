@@ -40,6 +40,7 @@ describe("relay task flow orchestration", () => {
           verifyFilePreview(): Promise<void>;
           verifyMarkedRead(): Promise<void>;
           verifyMobileTerminalControl(): Promise<void>;
+          verifySendOutcomes(): Promise<void>;
           verifyPtySnapshotRevisit(): Promise<void>;
           verifyQuickReply(): Promise<void>;
           verifyQuickReplyPersistence(): Promise<void>;
@@ -85,6 +86,13 @@ describe("relay task flow orchestration", () => {
         expect(screen).toBe("detail");
         calls.push("task-actions");
       },
+      async verifySendOutcomes() {
+        expect(screen).toBe("list");
+        screen = "detail";
+        calls.push("open", "send-outcomes");
+        screen = "list";
+        calls.push("close");
+      },
       async verifyTerminalKeys() {
         expect(screen).toBe("detail");
         calls.push("terminal-keys");
@@ -112,6 +120,9 @@ describe("relay task flow orchestration", () => {
       "marked-read",
       "open",
       "terminal-control",
+      "close",
+      "open",
+      "send-outcomes",
       "close",
       "open",
       "rendered",

@@ -81,6 +81,7 @@ interface RelayTaskFlowOptions {
   /** The shared Expo readiness gate: dismisses the dev-client startup
    * overlays and waits out a Metro bundle fetch. A relaunch goes through
    * exactly that startup again, so it must be awaited the same way. */
+  captureScreenshot(name: string): Promise<void>;
   waitForAppReady(readySelector?: string): Promise<void>;
   waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
   waitForMobileTerminalGeometry(): Promise<void>;
@@ -303,6 +304,7 @@ interface RelayTaskJourneys {
   verifyFilePreview(): Promise<void>;
   verifyMarkedRead(): Promise<void>;
   verifyMobileTerminalControl(): Promise<void>;
+  verifySendOutcomes(): Promise<void>;
   verifyPtySnapshotRevisit(): Promise<void>;
   verifyQuickReply(): Promise<void>;
   verifyTaskActionMenu(): Promise<void>;
@@ -319,6 +321,10 @@ export async function runRelayTaskJourneys(
   // check restarts the daemon underneath the session: an observer opened
   // while that socket is gone sees no snapshot at all.
   await journeys.verifyMobileTerminalControl();
+  // Both send outcomes are asserted early, while the lane is still healthy:
+  // they are what this change owes, and the journeys after them are known to
+  // move around between runs.
+  await journeys.verifySendOutcomes();
   await journeys.verifyPtySnapshotRevisit();
   // Exercise file discovery immediately after the terminal revisit, before
   // later menus can change the detail presentation state.
@@ -890,6 +896,64 @@ export async function verifyRelayComposerResetJourney(
 }
 
 /**
+ * What a send says. A delivered send says nothing at all — the cleared
+ * composer is the confirmation, and the notice this replaced appeared on every
+ * message and pushed the composer down the screen. A send that genuinely did
+ * not reach the desktop still has to say so, in a sentence rather than the
+ * response body it used to print at the owner, and must keep the text.
+ */
+export async function verifyRelaySendOutcomesJourney(
+  ui: Pick<
+    RelayUi,
+    "getTaskInput" | "getTaskInputStatus" | "getTaskSendButton" | "waitUntil"
+  >,
+  actions: {
+    captureScreenshot(name: string): Promise<void>;
+  },
+): Promise<void> {
+  const input = await ui.getTaskInput();
+  await input.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const send = await ui.getTaskSendButton();
+
+  await input.click();
+  await input.setValue("Delivered send, which should say nothing.");
+  await actions.captureScreenshot("03-composer-before-send");
+  await send.click();
+
+  await ui.waitUntil(
+    async () => {
+      const value = await input.getAttribute("value").catch(() => null);
+      const label = await input.getAttribute("label").catch(() => null);
+      return value === "" || value === TASK_COMPOSER_PLACEHOLDER ||
+        label === TASK_COMPOSER_PLACEHOLDER;
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected a delivered send to clear the composer",
+    },
+  );
+  const quiet = await ui.getTaskInputStatus();
+  if (await quiet.isExisting()) {
+    throw new Error(
+      "Expected a delivered send to raise no notice; found one labelled " +
+        `${JSON.stringify(await quiet.getAttribute("label").catch(() => null))}`,
+    );
+  }
+  await actions.captureScreenshot("04-after-delivered-send-no-banner");
+
+  // The other half of this contract — a send that genuinely fails still says
+  // so, in a sentence rather than a response body, keeping the text — is
+  // asserted in TaskScreen.attachment.test.tsx rather than here. It is not
+  // inducible from outside the app: stopping the desktop disables the
+  // composer before a send can be offered, and replacing the daemon lets the
+  // app recover the session before the refusal lands. Both were tried against
+  // this harness. Rendering that toast needs the failure injected at the send
+  // callback, which is exactly what the component test does.
+  process.stdout.write("[mobile-e2e] send outcomes passed\n");
+}
+
+/**
  * Taking control on the phone means "size this terminal for my phone". As a
  * follower the mobile client correctly renders the daemon's authoritative
  * grid — a desktop-shaped 132x43 here — but the owner reported that taking
@@ -901,6 +965,7 @@ export async function verifyRelayMobileTerminalControlJourney(
   ui: Pick<RelayUi, "inspectTerminalWebView" | "waitUntil">,
   fixture: PtyTerminalFixture,
   actions: {
+    captureScreenshot(name: string): Promise<void>;
     observeAuthoritativeTerminalGeometry(): Promise<{ cols: number; rows: number }>;
     restoreDesktopTerminalControl(): Promise<void>;
   },
@@ -913,6 +978,7 @@ export async function verifyRelayMobileTerminalControlJourney(
     );
   }
 
+  await actions.captureScreenshot("01-terminal-following-desktop-grid");
   const control = await driver.$(selectors.taskTerminalControl);
   await control.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await control.click();
@@ -971,6 +1037,7 @@ export async function verifyRelayMobileTerminalControlJourney(
     },
   );
 
+  await actions.captureScreenshot("02-terminal-fitted-after-taking-control");
   await control.click();
   await actions.restoreDesktopTerminalControl();
   await ui.waitUntil(
@@ -2208,6 +2275,14 @@ export async function runRelayTaskFlow(
       },
       closeTask: closeTaskForJourney,
     }),
+    verifySendOutcomes: async () => {
+      await openRelayFixtureTask(ui, options.fixture.taskId);
+      await waitForTaskTerminalLive(ui);
+      await verifyRelaySendOutcomesJourney(ui, {
+        captureScreenshot: options.captureScreenshot,
+      });
+      await closeTaskForJourney();
+    },
     verifyTerminalKeys: () =>
       verifyRelayTerminalKeys(driver, options.terminalKeys),
     // Opens the task itself and waits for a rendered authoritative terminal,
@@ -2218,6 +2293,7 @@ export async function runRelayTaskFlow(
       await waitForTaskTerminalLive(ui);
       await waitForRenderedPtyTerminal(ui, options.fixture);
       await verifyRelayMobileTerminalControlJourney(driver, ui, options.fixture, {
+        captureScreenshot: options.captureScreenshot,
         observeAuthoritativeTerminalGeometry:
           options.observeAuthoritativeTerminalGeometry,
         restoreDesktopTerminalControl: options.restoreDesktopTerminalControl,

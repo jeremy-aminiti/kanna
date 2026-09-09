@@ -1,6 +1,11 @@
-import { dirname, resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Browser } from "webdriverio";
+
+const execFileAsync = promisify(execFile);
 import { processIdentity, processInventoryPath, recordInventoryResource, removeInventoryResource, terminateInventoryProcess } from "../../../tools/kd/src/runtime/process-inventory";
 import {
   createPhysicalDeviceCapabilities,
@@ -393,6 +398,21 @@ async function main(): Promise<void> {
         taskRow: relayHarness.taskRow,
         taskOrdering: relayHarness.taskOrdering,
         terminalKeys: relayHarness.terminalKeys,
+        // Visual verification for the changed states, captured from the lane
+        // that already drives them. Written outside the bundle, never committed.
+        async captureScreenshot(name) {
+          if (!simulatorDevice) return;
+          const dir = join(
+            projectRoot,
+            "../..",
+            "docs/task-screenshots/8f342d4f-screenshots"
+          );
+          await mkdir(dir, { recursive: true });
+          await execFileAsync("xcrun", [
+            "simctl", "io", simulatorDevice.udid, "screenshot",
+            join(dir, `${name}.png`)
+          ]);
+        },
         waitForAppReady: (readySelector) =>
           waitForExpoAppReady(driver!, readySelector),
         waitForLocalTaskActivity: relayHarness.waitForLocalTaskActivity,
