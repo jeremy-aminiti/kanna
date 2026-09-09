@@ -1721,17 +1721,22 @@ describe("remote desktop visual companion", () => {
         await secondary.screenshot(`${screenshotDir}/geometry-follower-takeover.png`);
       }
 
-      await typeLocalTerminalInput("y");
-      await waitForTerminalLine(primary, task.taskId, "INPUT:y");
+      // Returning the owner terminal to the foreground is sufficient to take
+      // sizing back. No terminal bytes are sent for this handback.
+      await focusRenderedTerminal(primary);
+      await refreshRenderedTerminal(primary, task.taskId);
       await assertRemoteTerminalDimensionsPropagated(task.taskId);
       expect(await ownerTerminalDimensions(task.taskId)).toEqual(ownerBeforeFollower);
-      const ownerAfterRelease = await readRenderedTerminal(primary, task.taskId, "INPUT:y");
-      const followerAfterRelease = await readRenderedTerminal(secondary, task.taskId, "INPUT:y");
+      const ownerAfterRelease = await readRenderedTerminal(primary, task.taskId, "REMOTE_TUI_STREAM_");
+      const followerAfterRelease = await readRenderedTerminal(secondary, task.taskId, "REMOTE_TUI_STREAM_");
       expect(comparableRenderedTerminalState(ownerAfterRelease)).toEqual(
         comparableRenderedTerminalState(followerAfterRelease),
       );
       expect(ownerAfterRelease.cols).toBe(ownerBeforeFollower.cols);
       expect(ownerAfterRelease.rows).toBe(ownerBeforeFollower.rows);
+      if (screenshotDir) {
+        await primary.screenshot(`${screenshotDir}/geometry-owner-restored-without-input.png`);
+      }
     } finally {
       // The geometry journey deliberately narrows the follower. Restore the
       // shared secondary instance before the subsequent paired-LAN journeys,

@@ -191,24 +191,20 @@ async function main(): Promise<void> {
   if (!supportedSmokeModes.includes(mode as (typeof supportedSmokeModes)[number])) {
     throw new Error(`Unsupported mobile E2E mode: ${mode}`);
   }
-  if (
-    (mode === "relay" || mode === "relay-terminal-control" || mode === "hybrid" || mode === "profile-disconnected") &&
-    !process.env.KANNA_E2E_DESKTOP_SERVER_URL
-  ) {
-    process.env.KANNA_E2E_DESKTOP_SERVER_URL = "http://127.0.0.1:1";
-  }
   const modeAppEnv = resolveSmokeModeAppEnv(mode, process.env.KANNA_APP_ENV);
   if (modeAppEnv) {
     process.env.KANNA_APP_ENV = modeAppEnv;
   }
 
+  const relayHarnessOwnsDesktopEndpoint =
+    mode === "relay" || mode === "relay-terminal-control" || mode === "hybrid" || mode === "profile-disconnected";
   const env = resolveRequiredMobileE2eEnv(
-    process.env as Record<string, string | undefined>
+    process.env as Record<string, string | undefined>,
+    { requireDesktopServerUrl: !relayHarnessOwnsDesktopEndpoint },
   );
-  const desktopServerUrl = resolveDesktopServerUrlForTarget(
-    env.desktopServerUrl,
-    env.target
-  );
+  const desktopServerUrl = relayHarnessOwnsDesktopEndpoint
+    ? ""
+    : resolveDesktopServerUrlForTarget(env.desktopServerUrl, env.target);
   if ((mode === "hybrid" || mode === "profile-disconnected") && env.target !== "simulator") {
     throw new Error(
       `The mobile ${mode} E2E mode is simulator-only; it must not install or launch a physical device.`
@@ -217,6 +213,11 @@ async function main(): Promise<void> {
   if (mode === "shell-visual" && env.target !== "simulator") {
     throw new Error(
       "The mobile shell visual E2E mode is simulator-only so screenshot geometry and colors remain pinned."
+    );
+  }
+  if (mode === "relay-terminal-control" && env.target !== "simulator") {
+    throw new Error(
+      "The focused relay terminal-control journey is simulator-only because it requires retained simctl screenshots."
     );
   }
   await assertXcuitestDriverInstalled(process.env as Record<string, string | undefined>);
@@ -383,7 +384,9 @@ async function main(): Promise<void> {
         observeAuthoritativeTerminalGeometry: relayHarness.observeAuthoritativeTerminalGeometry,
         restoreDesktopTerminalControl: relayHarness.restoreDesktopTerminalControl,
         async captureScreenshot(name) {
-          if (!simulatorDevice) return;
+          if (!simulatorDevice) {
+            throw new Error("Focused relay terminal-control screenshots require a simulator device");
+          }
           const dir = join(projectRoot, "../..", "docs/task-screenshots/5c82e022-screenshots");
           await mkdir(dir, { recursive: true });
           await execFileAsync("xcrun", ["simctl", "io", simulatorDevice.udid, "screenshot", join(dir, `${name}.png`)]);

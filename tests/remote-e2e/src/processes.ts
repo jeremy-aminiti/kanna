@@ -110,6 +110,12 @@ export async function runCommand(command: string, args: string[], options: RunCo
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       if (code === 0) {
+        // The parent command boundary is the durable diagnostic record for a
+        // focused child lane. Preserve both streams on success as well as
+        // failure so grid transitions and screenshot paths survive fixture
+        // cleanup and outer log capture.
+        if (stdout) process.stdout.write(stdout);
+        if (stderr) process.stderr.write(stderr);
         resolve();
         return;
       }

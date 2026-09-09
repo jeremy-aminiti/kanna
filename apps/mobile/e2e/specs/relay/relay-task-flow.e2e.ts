@@ -1095,22 +1095,58 @@ export async function verifyRelayMobileTerminalControlJourney(
     restoreDesktopTerminalControl(): Promise<void>;
   },
 ): Promise<void> {
-  const taken = await actions.observeAuthoritativeTerminalGeometry();
-  if (taken.cols >= fixture.expectedCols) {
-    throw new Error(
-      `Expected the phone's measured grid to be narrower than the desktop's ` +
-        `${fixture.expectedCols} columns; opening selected ${taken.cols}x${taken.rows}`,
-    );
+  // First establish that the phone renderer has made a real measurement. Do
+  // not use the fixture's desktop grid as readiness: opening this view is
+  // precisely what replaces that grid.
+  let phoneMeasurement: Awaited<ReturnType<RelayUi["inspectTerminalWebView"]>> | null = null;
+  await ui.waitUntil(
+    async () => {
+      phoneMeasurement = await ui.inspectTerminalWebView();
+      return phoneMeasurement.kind === "rendered"
+        && phoneMeasurement.byteCount >= fixture.minDecodedBytes
+        && phoneMeasurement.frameCount > 0
+        && phoneMeasurement.cols !== null
+        && phoneMeasurement.rows !== null
+        && phoneMeasurement.cols > 0
+        && phoneMeasurement.rows > 0
+        && phoneMeasurement.text.includes(fixture.sentinel);
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected a measured phone terminal before geometry election; last inspection ${JSON.stringify(phoneMeasurement)}`,
+    },
+  );
+  // TypeScript cannot carry assignments made by the polling callback across
+  // the await, so read the settled renderer once at the ownership boundary.
+  const settledPhoneMeasurement = await ui.inspectTerminalWebView();
+  if (
+    settledPhoneMeasurement.kind !== "rendered" ||
+    settledPhoneMeasurement.cols === null ||
+    settledPhoneMeasurement.rows === null
+  ) {
+    throw new Error("Phone terminal measurement disappeared before geometry election");
   }
-  if (taken.cols < 20 || taken.rows < 8) {
-    throw new Error(
-      `Expected a readable measured grid, not a still-settling layout; ` +
-        `opening selected ${taken.cols}x${taken.rows}`,
-    );
-  }
+  const measuredPhoneGrid = {
+    cols: settledPhoneMeasurement.cols,
+    rows: settledPhoneMeasurement.rows,
+  };
+
+  let taken: { cols: number; rows: number } | null = null;
+  await ui.waitUntil(
+    async () => {
+      taken = await actions.observeAuthoritativeTerminalGeometry();
+      return taken.cols === measuredPhoneGrid.cols && taken.rows === measuredPhoneGrid.rows;
+    },
+    {
+      interval: GEOMETRY_POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected daemon grid to equal measured phone viewport ${measuredPhoneGrid.cols}x${measuredPhoneGrid.rows}; last daemon grid ${JSON.stringify(taken)}`,
+    },
+  );
 
   process.stdout.write(
-    `[mobile-e2e] phone active view: daemon grid ${taken.cols}x${taken.rows} ` +
+    `[mobile-e2e] phone active view: measured ${measuredPhoneGrid.cols}x${measuredPhoneGrid.rows}, daemon grid ${taken!.cols}x${taken!.rows} ` +
       `(measured on this device at its current zoom)\n`,
   );
 
@@ -1121,20 +1157,23 @@ export async function verifyRelayMobileTerminalControlJourney(
       lastInspection = await ui.inspectTerminalWebView();
       return (
         lastInspection.kind === "rendered" &&
-        lastInspection.cols === taken.cols &&
-        lastInspection.rows === taken.rows
+        lastInspection.cols === measuredPhoneGrid.cols &&
+        lastInspection.rows === measuredPhoneGrid.rows
       );
     },
     {
       interval: POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
       timeoutMsg:
-        `Expected the WebView to render the grid it now owns (${taken.cols}x${taken.rows}); ` +
+        `Expected the WebView to render the grid it now owns (${measuredPhoneGrid.cols}x${measuredPhoneGrid.rows}); ` +
         `last inspection ${JSON.stringify(lastInspection)}`,
     },
   );
 
   await actions.captureScreenshot("02-terminal-fitted-after-phone-open");
+  // This is an authenticated protocol-viewer handback, intentionally kept
+  // separate from the desktop UI E2E that proves a real desktop view restores
+  // itself without terminal input.
   await actions.restoreDesktopTerminalControl();
   await ui.waitUntil(
     async () => {
@@ -1151,8 +1190,9 @@ export async function verifyRelayMobileTerminalControlJourney(
     },
   );
   await verifyRelayPtyRenderedGridAndCursor(ui, fixture);
+  await actions.captureScreenshot("03-terminal-restored-after-protocol-handback");
   process.stdout.write(
-    `[mobile-e2e] terminal active-view ownership passed at ${taken.cols}x${taken.rows}\n`,
+    `[mobile-e2e] terminal active-view ownership passed at ${measuredPhoneGrid.cols}x${measuredPhoneGrid.rows}\n`,
   );
 }
 
