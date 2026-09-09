@@ -547,11 +547,11 @@ export function createRelayDesktopClient({
         resize(cols: number, rows: number) {
           client.sendTermResize(taskId, cols, rows);
         },
-        takeControl() {
-          client.takeTerminalControl(taskId);
+        activate() {
+          client.activateTerminalViewer(taskId);
         },
-        releaseControl() {
-          client.releaseTerminalControl(taskId);
+        setViewerVisible(visible: boolean) {
+          client.setTerminalViewerVisibility(taskId, visible);
         },
         requestScrollback(request) {
           client.requestTerminalScrollback(taskId, request);

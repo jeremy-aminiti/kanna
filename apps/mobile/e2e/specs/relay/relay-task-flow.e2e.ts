@@ -1083,14 +1083,10 @@ export async function verifyRelaySendOutcomesJourney(
 }
 
 /**
- * Taking control on the phone means "size this terminal for my phone". As a
- * follower the mobile client correctly renders the daemon's authoritative
- * grid — a desktop-shaped 132x43 here — but the owner reported that taking
- * control changed nothing, because the phone registered a viewport it had
- * never measured.
+ * Opening the rendered phone terminal makes its measured viewport active.
  */
 export async function verifyRelayMobileTerminalControlJourney(
-  driver: Browser,
+  _driver: Browser,
   ui: Pick<RelayUi, "inspectTerminalWebView" | "waitUntil">,
   fixture: PtyTerminalFixture,
   actions: {
@@ -1099,51 +1095,23 @@ export async function verifyRelayMobileTerminalControlJourney(
     restoreDesktopTerminalControl(): Promise<void>;
   },
 ): Promise<void> {
-  const followed = await actions.observeAuthoritativeTerminalGeometry();
-  if (followed.cols !== fixture.expectedCols || followed.rows !== fixture.expectedRows) {
-    throw new Error(
-      `Expected the desktop-owned grid ${fixture.expectedCols}x${fixture.expectedRows} ` +
-        `before the phone takes control; observed ${followed.cols}x${followed.rows}`,
-    );
-  }
-
-  await actions.captureScreenshot("01-terminal-following-desktop-grid");
-  const control = await driver.$(selectors.taskTerminalControl);
-  await control.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await control.click();
-
-  let taken: { cols: number; rows: number } = followed;
-  await ui.waitUntil(
-    async () => {
-      taken = await actions.observeAuthoritativeTerminalGeometry();
-      return taken.cols !== followed.cols || taken.rows !== followed.rows;
-    },
-    {
-      // Each probe opens its own observer, so poll far less often than the UI.
-      interval: GEOMETRY_POLL_INTERVAL_MS,
-      timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg:
-        "Expected taking terminal control on the phone to resize the daemon's PTY; " +
-        `it stayed at ${followed.cols}x${followed.rows}`,
-    },
-  );
-
-  if (taken.cols >= followed.cols) {
+  const taken = await actions.observeAuthoritativeTerminalGeometry();
+  if (taken.cols >= fixture.expectedCols) {
     throw new Error(
       `Expected the phone's measured grid to be narrower than the desktop's ` +
-        `${followed.cols} columns; it took control at ${taken.cols}x${taken.rows}`,
+        `${fixture.expectedCols} columns; opening selected ${taken.cols}x${taken.rows}`,
     );
   }
   if (taken.cols < 20 || taken.rows < 8) {
     throw new Error(
       `Expected a readable measured grid, not a still-settling layout; ` +
-        `the phone took control at ${taken.cols}x${taken.rows}`,
+        `opening selected ${taken.cols}x${taken.rows}`,
     );
   }
 
   process.stdout.write(
-    `[mobile-e2e] phone took control: daemon grid ${followed.cols}x${followed.rows} ` +
-      `-> ${taken.cols}x${taken.rows} (measured on this device at its current zoom)\n`,
+    `[mobile-e2e] phone active view: daemon grid ${taken.cols}x${taken.rows} ` +
+      `(measured on this device at its current zoom)\n`,
   );
 
   // Every renderer still shows the daemon's grid, which is now the phone's.
@@ -1166,8 +1134,7 @@ export async function verifyRelayMobileTerminalControlJourney(
     },
   );
 
-  await actions.captureScreenshot("02-terminal-fitted-after-taking-control");
-  await control.click();
+  await actions.captureScreenshot("02-terminal-fitted-after-phone-open");
   await actions.restoreDesktopTerminalControl();
   await ui.waitUntil(
     async () => {
@@ -1180,12 +1147,12 @@ export async function verifyRelayMobileTerminalControlJourney(
       interval: GEOMETRY_POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
       timeoutMsg:
-        "Expected releasing control on the phone to hand the grid back to the desktop",
+        "Expected making the desktop terminal active to restore the desktop grid",
     },
   );
   await verifyRelayPtyRenderedGridAndCursor(ui, fixture);
   process.stdout.write(
-    `[mobile-e2e] terminal control take/release passed at ${taken.cols}x${taken.rows}\n`,
+    `[mobile-e2e] terminal active-view ownership passed at ${taken.cols}x${taken.rows}\n`,
   );
 }
 

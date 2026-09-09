@@ -177,6 +177,8 @@ export function createTerminalSessionLifecycle(params: {
           // Establish the owning local role on the same KSP control path
           // before the attach can become interactive or emit a resize.
           client.registerTerminalViewer?.(params.sessionId, initialViewer.cols, initialViewer.rows)
+          client.setTerminalViewerVisibility?.(params.sessionId, true)
+          client.activateTerminalViewer?.(params.sessionId)
         }
         client.attachTerminal(params.sessionId, {
           onSnapshot: (cols, rows, dataB64, agentProvider) => {
@@ -613,6 +615,9 @@ export function createTerminalSessionLifecycle(params: {
 
   function pause() {
     params.state.paused = true
+    void params.getTerminalStreamClient().then((client) => {
+      client.setTerminalViewerVisibility?.(params.sessionId, false)
+    })
     outputPerf?.dispose()
     outputPerf = null
     params.state.connectionGeneration += 1
@@ -706,6 +711,10 @@ export function createTerminalSessionLifecycle(params: {
     try {
       const { cols, rows } = params.terminal.value
       await params.layout.resizeLiveSession(cols, rows, false)
+      const client = await params.getTerminalStreamClient()
+      client.registerTerminalViewer(params.sessionId, cols, rows)
+      client.setTerminalViewerVisibility?.(params.sessionId, true)
+      client.activateTerminalViewer?.(params.sessionId)
     } catch {
       params.state.attached = false
       await startListening()

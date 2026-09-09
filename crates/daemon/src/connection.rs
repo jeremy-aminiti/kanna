@@ -1495,7 +1495,7 @@ pub(crate) async fn handle_command(
             }
         }
 
-        Command::TakeoverViewer { session_id } => {
+        Command::ActiveViewer { session_id } => {
             let writer_id = Arc::as_ptr(&writer) as usize;
             let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
             let _lifecycle_guard = lifecycle.lock().await;
@@ -1503,7 +1503,7 @@ pub(crate) async fn handle_command(
                 .lock()
                 .await
                 .get_mut(&session_id)
-                .and_then(|state| state.takeover(writer_id));
+                .and_then(|state| state.activate(writer_id));
             if let Some((cols, rows)) = resize {
                 if let Some(session) = session_handle(&sessions, &session_id).await {
                     if session.resize(cols, rows).await.is_ok() {
@@ -1519,28 +1519,15 @@ pub(crate) async fn handle_command(
             }
         }
 
+        Command::TakeoverViewer { session_id } => {
+            // Compatibility with pre-active-viewer clients. Explicit control
+            // must never override the active viewer.
+            log::debug!("ignoring retired terminal takeover for {session_id}");
+        }
+
         Command::ReleaseViewer { session_id } => {
-            let writer_id = Arc::as_ptr(&writer) as usize;
-            let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
-            let _lifecycle_guard = lifecycle.lock().await;
-            let resize = session_sizes
-                .lock()
-                .await
-                .get_mut(&session_id)
-                .and_then(|state| state.release(writer_id));
-            if let Some((cols, rows)) = resize {
-                if let Some(session) = session_handle(&sessions, &session_id).await {
-                    if session.resize(cols, rows).await.is_ok() {
-                        if let Some(state) = session_sizes.lock().await.get_mut(&session_id) {
-                            state.mark_applied((cols, rows));
-                        }
-                        recovery_manager
-                            .resize_session(&session_id, cols, rows)
-                            .await;
-                        publish_resize_snapshot(&session_id, &session, &fanouts).await;
-                    }
-                }
-            }
+            // See TakeoverViewer above.
+            log::debug!("ignoring retired terminal release for {session_id}");
         }
 
         Command::Signal { session_id, signal } => {

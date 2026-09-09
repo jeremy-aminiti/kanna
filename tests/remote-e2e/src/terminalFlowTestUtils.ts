@@ -64,7 +64,7 @@ export interface TerminalEventCollector {
   close(): void;
   outputText(): string;
   resize(cols: number, rows: number): void;
-  takeControl(): void;
+  activate(): void;
   sendInput(dataB64: string, submissionBoundary?: boolean, controlInput?: boolean): void;
   waitForExit(expectedCode: number, timeoutMs?: number): Promise<void>;
   waitForOutput(marker: string, timeoutMs?: number): Promise<string>;
@@ -259,8 +259,10 @@ export async function collectLocalTerminalEvents(
       // followers must observe the daemon-elected grid, and the control route
       // deliberately has one latest-value slot before it binds.
       resize(cols, rows) { client.registerTerminalViewer(taskId, cols, rows); },
-      takeControl() { client.takeTerminalControl(taskId); },
-      releaseControl() { client.releaseTerminalControl(taskId); },
+      activate() {
+        client.setTerminalViewerVisibility(taskId, true);
+        client.activateTerminalViewer(taskId);
+      },
       sendInput(dataB64, submissionBoundary, controlInput) {
         client.sendTermInput(taskId, dataB64, submissionBoundary, controlInput);
       },
@@ -527,8 +529,8 @@ class TerminalEventCollectorImpl implements TerminalEventCollector {
     this.subscription.resize?.(cols, rows);
   }
 
-  takeControl(): void {
-    this.subscription.takeControl?.();
+  activate(): void {
+    this.subscription.activate?.();
   }
 
   sendInput(dataB64: string, submissionBoundary = false, controlInput = false): void {

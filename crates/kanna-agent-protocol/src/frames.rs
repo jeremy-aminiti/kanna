@@ -267,9 +267,17 @@ pub enum ClientFrame {
         #[serde(default = "default_true")]
         visible: bool,
     },
+    /// The already-registered terminal is now the actively viewed task view.
+    TermViewerActive {
+        task_id: String,
+    },
+    /// Retired compatibility command. New clients use the active-viewer
+    /// signal to select geometry ownership; new daemons accept this as a
+    /// no-op.
     TermViewerTakeover {
         task_id: String,
     },
+    /// Retired compatibility command. New daemons accept this as a no-op.
     TermViewerRelease {
         task_id: String,
     },

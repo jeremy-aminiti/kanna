@@ -17,10 +17,13 @@ pub(crate) type TerminalEmulatorClients = Arc<Mutex<HashMap<String, HashSet<usiz
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TerminalViewer {
     pub viewer_id: String,
-    pub role: TerminalViewerRole,
     pub cols: u16,
     pub rows: u16,
     pub visible: bool,
+    /// Registration is passive. This turns true only after the client says
+    /// the rendered terminal is actively viewed.
+    pub active: bool,
+    pub active_sequence: u64,
     pub generation: u64,
 }
 
@@ -40,7 +43,7 @@ pub(crate) struct SessionSizeState {
     pub viewers: HashMap<usize, TerminalViewer>,
     pub legacy_sizes: HashMap<usize, (u16, u16)>,
     pub controller: Option<usize>,
-    pub explicit_controller: Option<usize>,
+    pub(crate) active_sequence: u64,
 }
 
 impl SessionSizeState {
@@ -50,7 +53,7 @@ impl SessionSizeState {
             viewers: HashMap::new(),
             legacy_sizes: HashMap::new(),
             controller: None,
-            explicit_controller: None,
+            active_sequence: 0,
         }
     }
 
@@ -61,16 +64,16 @@ impl SessionSizeState {
     }
 
     fn elected_candidate(&self) -> Option<usize> {
-        let mut candidates: Vec<(u8, &str, usize)> = self
+        let mut candidates: Vec<(std::cmp::Reverse<u64>, &str, usize)> = self
             .viewers
             .iter()
-            .filter(|(_, viewer)| viewer.eligible())
+            .filter(|(_, viewer)| viewer.active && viewer.eligible())
             .map(|(writer_id, viewer)| {
-                let class = match viewer.role {
-                    TerminalViewerRole::Local => 0,
-                    TerminalViewerRole::Remote => 1,
-                };
-                (class, viewer.viewer_id.as_str(), *writer_id)
+                (
+                    std::cmp::Reverse(viewer.active_sequence),
+                    viewer.viewer_id.as_str(),
+                    *writer_id,
+                )
             })
             .collect();
         candidates.sort_unstable_by(|left, right| {
@@ -82,35 +85,13 @@ impl SessionSizeState {
         candidates.first().map(|candidate| candidate.2)
     }
 
-    fn has_eligible_local(&self) -> bool {
-        self.viewers
-            .values()
-            .any(|viewer| viewer.eligible() && viewer.role == TerminalViewerRole::Local)
-    }
-
     fn elect(&mut self) -> bool {
         let old_controller = self.controller;
-        if let Some(explicit) = self.explicit_controller {
-            if self
-                .viewers
-                .get(&explicit)
-                .is_some_and(TerminalViewer::eligible)
-            {
-                self.controller = Some(explicit);
-                return old_controller != self.controller;
-            }
-            self.explicit_controller = None;
-        }
-
         let current_is_eligible = self
             .controller
             .and_then(|writer_id| self.viewers.get(&writer_id))
-            .is_some_and(TerminalViewer::eligible);
-        let current_is_remote = self
-            .controller
-            .and_then(|writer_id| self.viewers.get(&writer_id))
-            .is_some_and(|viewer| viewer.role == TerminalViewerRole::Remote);
-        if current_is_eligible && !(current_is_remote && self.has_eligible_local()) {
+            .is_some_and(|viewer| viewer.active && viewer.eligible());
+        if current_is_eligible {
             return false;
         }
         self.controller = self.elected_candidate();
@@ -137,7 +118,7 @@ impl SessionSizeState {
         &mut self,
         writer_id: usize,
         viewer_id: String,
-        role: TerminalViewerRole,
+        _role: TerminalViewerRole,
         cols: u16,
         rows: u16,
         visible: bool,
@@ -150,14 +131,21 @@ impl SessionSizeState {
         {
             return None;
         }
+        let retained_active = self
+            .viewers
+            .get(&writer_id)
+            .filter(|viewer| viewer.generation == generation && visible)
+            .map(|viewer| (viewer.active, viewer.active_sequence))
+            .unwrap_or((false, 0));
         self.viewers.insert(
             writer_id,
             TerminalViewer {
                 viewer_id,
-                role,
                 cols,
                 rows,
                 visible,
+                active: retained_active.0,
+                active_sequence: retained_active.1,
                 generation,
             },
         );
@@ -182,24 +170,19 @@ impl SessionSizeState {
         self.pending_resize()
     }
 
-    pub(crate) fn takeover(&mut self, writer_id: usize) -> Option<(u16, u16)> {
+    /// An active-viewer notification is the only event that transfers geometry.
+    pub(crate) fn activate(&mut self, writer_id: usize) -> Option<(u16, u16)> {
         if self
             .viewers
             .get(&writer_id)
             .is_some_and(TerminalViewer::eligible)
         {
-            self.explicit_controller = Some(writer_id);
+            self.active_sequence = self.active_sequence.wrapping_add(1);
+            if let Some(viewer) = self.viewers.get_mut(&writer_id) {
+                viewer.active = true;
+                viewer.active_sequence = self.active_sequence;
+            }
             self.controller = Some(writer_id);
-            return self.pending_resize();
-        }
-        None
-    }
-
-    pub(crate) fn release(&mut self, writer_id: usize) -> Option<(u16, u16)> {
-        if self.explicit_controller == Some(writer_id) {
-            self.explicit_controller = None;
-            self.controller = None;
-            self.elect();
             return self.pending_resize();
         }
         None
@@ -208,11 +191,9 @@ impl SessionSizeState {
     pub(crate) fn remove(&mut self, writer_id: usize) -> Option<(u16, u16)> {
         self.viewers.remove(&writer_id);
         let removed_legacy = self.legacy_sizes.remove(&writer_id).is_some();
-        let controlled =
-            self.controller == Some(writer_id) || self.explicit_controller == Some(writer_id);
+        let controlled = self.controller == Some(writer_id);
         if controlled {
             self.controller = None;
-            self.explicit_controller = None;
             self.elect();
             return self.pending_resize();
         }
@@ -344,23 +325,23 @@ mod tests {
     }
 
     #[test]
-    fn local_controller_wins_without_minimum_sizing() {
+    fn registration_alone_never_selects_a_controller() {
         let mut state = SessionSizeState::new((80, 24));
         register(&mut state, 1, "phone", TerminalViewerRole::Remote, 40, 20);
         register(&mut state, 2, "desktop", TerminalViewerRole::Local, 220, 48);
 
-        assert_eq!(state.controller, Some(2));
-        assert_eq!(state.proposed_size(), (220, 48));
-        assert_eq!(state.last_applied, (220, 48));
+        assert_eq!(state.controller, None);
+        assert_eq!(state.proposed_size(), (80, 24));
+        assert_eq!(state.activate(2), Some((220, 48)));
     }
 
     #[test]
-    fn same_class_candidates_are_deterministic_and_followers_do_not_resize() {
+    fn most_recent_active_viewer_wins_and_follower_resizes_are_passive() {
         let mut state = SessionSizeState::new((80, 24));
         register(&mut state, 2, "z", TerminalViewerRole::Remote, 200, 40);
         register(&mut state, 1, "a", TerminalViewerRole::Remote, 120, 30);
-        // The first eligible same-class viewer remains controller; a later
-        // viewer does not compete merely because it proposed a smaller grid.
+        assert_eq!(state.activate(2), Some((200, 40)));
+        state.mark_applied((200, 40));
         assert_eq!(state.controller, Some(2));
         assert_eq!(state.proposed_size(), (200, 40));
         assert_eq!(state.resize(1, 20, 10), None);
@@ -380,22 +361,76 @@ mod tests {
             65,
         );
 
-        assert_eq!(state.controller, Some(1));
-        assert_eq!(state.proposed_size(), (203, 81));
+        assert_eq!(state.activate(1), Some((203, 81)));
+        state.mark_applied((203, 81));
         assert_eq!(state.resize(2, 171, 65), None);
         assert_eq!(state.proposed_size(), (203, 81));
         assert_eq!(state.last_applied, (203, 81));
     }
 
     #[test]
-    fn takeover_lasts_until_release_then_re_elects_local() {
+    fn active_viewer_steals_sizing_between_remote_and_local_viewers() {
         let mut state = SessionSizeState::new((80, 24));
         register(&mut state, 1, "desktop", TerminalViewerRole::Local, 220, 48);
         register(&mut state, 2, "phone", TerminalViewerRole::Remote, 40, 20);
-        assert_eq!(state.takeover(2), Some((40, 20)));
+        assert_eq!(state.activate(1), Some((220, 48)));
+        state.mark_applied((220, 48));
+        assert_eq!(state.activate(2), Some((40, 20)));
         state.mark_applied((40, 20));
+        assert_eq!(state.resize(1, 240, 50), None, "resize is passive");
+        assert_eq!(state.activate(1), Some((240, 50)));
+        assert_eq!(state.controller, Some(1));
+    }
+
+    #[test]
+    fn passive_registration_resize_and_reconnect_do_not_steal_control() {
+        let mut state = SessionSizeState::new((80, 24));
+        register(&mut state, 1, "desktop", TerminalViewerRole::Local, 220, 48);
+        register(&mut state, 2, "phone", TerminalViewerRole::Remote, 40, 20);
+        assert_eq!(state.activate(1), Some((220, 48)));
+        state.mark_applied((220, 48));
+        assert_eq!(state.activate(2), Some((40, 20)));
+        state.mark_applied((40, 20));
+
+        // A resize or a replacement viewer registration is passive, including
+        // the registration sent while a reconnect rehydrates its snapshot.
         assert_eq!(state.resize(1, 240, 50), None);
-        assert_eq!(state.release(2), Some((240, 50)));
+        assert_eq!(
+            state.register(
+                3,
+                "phone-reconnected".into(),
+                TerminalViewerRole::Remote,
+                50,
+                22,
+                true,
+                1
+            ),
+            None
+        );
+        assert_eq!(state.controller, Some(2));
+        assert_eq!(state.proposed_size(), (40, 20));
+    }
+
+    #[test]
+    fn hidden_or_zero_size_viewer_cannot_take_control() {
+        let mut state = SessionSizeState::new((80, 24));
+        register(&mut state, 1, "desktop", TerminalViewerRole::Local, 220, 48);
+        assert_eq!(state.activate(1), Some((220, 48)));
+        state.mark_applied((220, 48));
+        assert_eq!(
+            state.register(
+                2,
+                "hidden-phone".into(),
+                TerminalViewerRole::Remote,
+                40,
+                20,
+                false,
+                1
+            ),
+            None
+        );
+        assert_eq!(state.activate(2), None);
+        assert_eq!(state.resize(2, 0, 0), None);
         assert_eq!(state.controller, Some(1));
     }
 
@@ -403,6 +438,8 @@ mod tests {
     fn no_viewer_retains_last_geometry_and_stale_generation_is_ignored() {
         let mut state = SessionSizeState::new((100, 30));
         register(&mut state, 1, "desktop", TerminalViewerRole::Local, 220, 48);
+        assert_eq!(state.activate(1), Some((220, 48)));
+        state.mark_applied((220, 48));
         assert_eq!(state.remove(1), None);
         assert_eq!(state.proposed_size(), (220, 48));
         register(

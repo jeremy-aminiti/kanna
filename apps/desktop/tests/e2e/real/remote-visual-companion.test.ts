@@ -988,8 +988,8 @@ async function sendRemoteTerminalInput(taskId: string, data: string): Promise<vo
 }
 
 async function typeRemoteTerminalInput(taskId: string, data: string): Promise<void> {
-  // Exercise the real remote viewer input path after explicit takeover. The
-  // terminal buffer hook remains observation-only for this acceptance lane.
+  // Exercise the real remote viewer input path. Active viewing owns geometry;
+  // the buffer hook remains observation-only.
   const selector = `.cloud-terminal-shell[data-owner-task-id="${taskId}"] .xterm-helper-textarea`;
   const input = await secondary.waitForElement(selector, 5_000);
   await secondary.executeSync(`
@@ -997,6 +997,15 @@ async function typeRemoteTerminalInput(taskId: string, data: string): Promise<vo
     if (input instanceof HTMLElement) input.focus();
   `);
   await secondary.sendKeys(input, data);
+}
+
+async function typeLocalTerminalInput(data: string): Promise<void> {
+  const input = await primary.waitForElement(".terminal-panel .xterm-helper-textarea", 5_000);
+  await primary.executeSync(`
+    const input = document.querySelector(".terminal-panel .xterm-helper-textarea");
+    if (input instanceof HTMLElement) input.focus();
+  `);
+  await primary.sendKeys(input, data);
 }
 
 async function assertRemoteDropRefused(taskId: string): Promise<void> {
@@ -1597,7 +1606,7 @@ describe("remote desktop visual companion", () => {
     await waitForRemoteTerminalLine(task.taskId, "  REMOTE_TUI_STREAM_界");
   }, 180_000);
 
-  it("keeps a wide local owner and a narrow authenticated desktop follower on one rendered grid", async () => {
+  it("lets the actively viewed remote terminal steal sizing and restores it on the local view", async () => {
     const task = await createFullscreenOwnerTask({ keepOwnerAttached: true });
     const screenshotDir = process.env.KANNA_E2E_SCREENSHOT_DIR;
     try {
@@ -1622,9 +1631,9 @@ describe("remote desktop visual companion", () => {
       await focusRenderedTerminal(secondary);
       await refreshRenderedTerminal(primary, task.taskId);
       await refreshRenderedTerminal(secondary, task.taskId);
-      const wideOwnerDimensions = await ownerTerminalDimensions(task.taskId);
-      expect(wideOwnerDimensions.cols).toBeGreaterThan(80);
-      expect(wideOwnerDimensions.rows).toBeGreaterThan(24);
+      const activeRemoteDimensions = await ownerTerminalDimensions(task.taskId);
+      expect(activeRemoteDimensions.cols).toBeLessThan(ownerBeforeFollower.cols);
+      expect(activeRemoteDimensions.rows).toBeLessThan(ownerBeforeFollower.rows);
 
       const ownerInitial = await waitForRenderedTerminal(
         primary,
@@ -1649,8 +1658,8 @@ describe("remote desktop visual companion", () => {
       expect(comparableRenderedTerminalState(ownerInitial)).toEqual(
         comparableRenderedTerminalState(followerInitial),
       );
-      expect(ownerInitial.cols).toBe(wideOwnerDimensions.cols);
-      expect(ownerInitial.rows).toBe(wideOwnerDimensions.rows);
+      expect(ownerInitial.cols).toBe(activeRemoteDimensions.cols);
+      expect(ownerInitial.rows).toBe(activeRemoteDimensions.rows);
       expect(ownerInitial.cursorColumn).toBe(6);
       expect(ownerInitial.cursorRow).toBe(2);
 
@@ -1666,65 +1675,20 @@ describe("remote desktop visual companion", () => {
         await primary.screenshot(`${screenshotDir}/geometry-owner-wide.png`);
       }
 
-      // A changed follower viewport is presentation-only while the local
-      // owner remains the eligible controller.
+      // Resizing an already-active remote viewer updates its own grid but does
+      // not transfer sizing to another viewer.
       await secondary.setWindowRect({ width: 1600, height: 800, x: 100, y: 100 });
       await assertRemoteTerminalDimensionsPropagated(task.taskId);
-      expect(await ownerTerminalDimensions(task.taskId)).toEqual(wideOwnerDimensions);
-
-      const takeControl = await secondary.waitForText(
-        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
-        "Take terminal control",
-        10_000,
-      );
-      await secondary.click(takeControl);
-      await secondary.waitForText(
-        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
-        "Release terminal control",
-        10_000,
-      );
-      let takeoverDimensions = await ownerTerminalDimensions(task.taskId);
-      const takeoverDeadline = Date.now() + 10_000;
-      while (
-        takeoverDimensions.cols === wideOwnerDimensions.cols
-        && takeoverDimensions.rows === wideOwnerDimensions.rows
-        && Date.now() < takeoverDeadline
-      ) {
-        await sleep(100);
-        takeoverDimensions = await ownerTerminalDimensions(task.taskId);
-      }
-      if (
-        takeoverDimensions.cols === wideOwnerDimensions.cols
-        && takeoverDimensions.rows === wideOwnerDimensions.rows
-      ) {
-        const diagnostics = await secondary.executeSync(`
-          const shell = document.querySelector(
-            ".main-panel .cloud-terminal-shell[data-owner-task-id=\\"${task.taskId}\\"]"
-          );
-          const container = shell?.querySelector(".terminal-container");
-          const rect = container?.getBoundingClientRect();
-          return {
-            window: { width: window.innerWidth, height: window.innerHeight },
-            shell: shell?.getBoundingClientRect().toJSON?.() ?? null,
-            container: rect?.toJSON?.() ?? null,
-          };
-        `);
-        throw new Error(
-          `remote takeover did not apply its registered viewport: ${JSON.stringify({
-            wideOwnerDimensions,
-            takeoverDimensions,
-            diagnostics,
-          })}`,
-        );
-      }
-      expect(takeoverDimensions.cols).toBeLessThan(wideOwnerDimensions.cols);
-      expect(takeoverDimensions.rows).toBeLessThan(wideOwnerDimensions.rows);
 
       await secondary.waitForElement(
         ".main-panel .cloud-terminal-shell[data-status=\"live\"]",
         10_000,
       );
       await typeRemoteTerminalInput(task.taskId, "x");
+      const takeoverDimensions = await ownerTerminalDimensions(task.taskId);
+      expect(takeoverDimensions.cols).toBeLessThan(ownerBeforeFollower.cols);
+      expect(takeoverDimensions.rows).toBeLessThan(ownerBeforeFollower.rows);
+
       await waitForTerminalLine(primary, task.taskId, "INPUT:x");
       await waitForTerminalLine(secondary, task.taskId, "INPUT:x");
       const takeoverRendered = await waitForRenderedTerminalEquality(
@@ -1757,63 +1721,17 @@ describe("remote desktop visual companion", () => {
         await secondary.screenshot(`${screenshotDir}/geometry-follower-takeover.png`);
       }
 
-      const releaseControl = await secondary.waitForText(
-        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
-        "Release terminal control",
-        10_000,
-      );
-      await secondary.click(releaseControl);
-      await secondary.waitForText(
-        `.cloud-terminal-shell[data-owner-task-id="${task.taskId}"] .terminal-control-control`,
-        "Take terminal control",
-        10_000,
-      );
+      await typeLocalTerminalInput("y");
+      await waitForTerminalLine(primary, task.taskId, "INPUT:y");
       await assertRemoteTerminalDimensionsPropagated(task.taskId);
-      expect(await ownerTerminalDimensions(task.taskId)).toEqual(wideOwnerDimensions);
-      const ownerAfterRelease = await readRenderedTerminal(primary, task.taskId, "INPUT:x");
-      const followerAfterRelease = await readRenderedTerminal(secondary, task.taskId, "INPUT:x");
+      expect(await ownerTerminalDimensions(task.taskId)).toEqual(ownerBeforeFollower);
+      const ownerAfterRelease = await readRenderedTerminal(primary, task.taskId, "INPUT:y");
+      const followerAfterRelease = await readRenderedTerminal(secondary, task.taskId, "INPUT:y");
       expect(comparableRenderedTerminalState(ownerAfterRelease)).toEqual(
         comparableRenderedTerminalState(followerAfterRelease),
       );
-      expect(ownerAfterRelease.cols).toBe(wideOwnerDimensions.cols);
-      expect(ownerAfterRelease.rows).toBe(wideOwnerDimensions.rows);
-
-      // Reload the independent secondary app to exercise the real relay
-      // attachment/reconnect path. The owner remains wide throughout.
-      await secondary.reload();
-      await secondary.setWindowRect({ width: 1600, height: 800, x: 100, y: 100 });
-      const reconnectedRemote = await waitForRemoteTask({
-        prompt: task.prompt,
-        transport: "cloud",
-        expectedOwnerDesktopId: primaryDesktopId,
-        expectedOwnerTaskId: task.taskId,
-      });
-      await selectRemoteTask({
-        ...reconnectedRemote,
-        prompt: task.prompt,
-        transport: "cloud",
-      });
-      await waitForTerminalLine(secondary, task.taskId, "INPUT:x");
-      await assertRemoteTerminalDimensionsPropagated(task.taskId);
-      const ownerAfterReconnect = await readRenderedTerminal(primary, task.taskId, "INPUT:x");
-      const followerAfterReconnect = await readRenderedTerminal(secondary, task.taskId, "INPUT:x");
-      expect(comparableRenderedTerminalState(ownerAfterReconnect)).toEqual(
-        comparableRenderedTerminalState(followerAfterReconnect),
-      );
-      expect(comparableRenderedTerminalState(ownerAfterReconnect)).toEqual(
-        comparableRenderedTerminalState(ownerAfterRelease),
-      );
-      expect(await ownerTerminalDimensions(task.taskId)).toEqual(wideOwnerDimensions);
-      if (screenshotDir) {
-        await focusRenderedTerminal(primary);
-        await refreshRenderedTerminal(primary, task.taskId);
-        await sleep(1_000);
-        await primary.screenshot(`${screenshotDir}/geometry-owner-after-reconnect.png`);
-        await focusRenderedTerminal(secondary);
-        await refreshRenderedTerminal(secondary, task.taskId);
-        await sleep(1_000);
-        await secondary.screenshot(`${screenshotDir}/geometry-follower-after-reconnect.png`);
-      }
+      expect(ownerAfterRelease.cols).toBe(ownerBeforeFollower.cols);
+      expect(ownerAfterRelease.rows).toBe(ownerBeforeFollower.rows);
     } finally {
       // The geometry journey deliberately narrows the follower. Restore the
       // shared secondary instance before the subsequent paired-LAN journeys,

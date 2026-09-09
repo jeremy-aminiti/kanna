@@ -487,9 +487,17 @@ pub enum Command {
         #[serde(default = "default_true")]
         visible: bool,
     },
+    /// A registered viewer became the actively viewed terminal.
+    ActiveViewer {
+        session_id: String,
+    },
+    /// Retained as a no-op for clients released before activity-based geometry
+    /// control. New clients never send it.
     TakeoverViewer {
         session_id: String,
     },
+    /// Retained as a no-op for clients released before activity-based geometry
+    /// control. New clients never send it.
     ReleaseViewer {
         session_id: String,
     },

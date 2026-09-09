@@ -68,8 +68,6 @@ let inputEventContainer: HTMLElement | null = null;
 let relayClient: DesktopRemoteTaskClient | null = null;
 let subscription: DesktopRemoteTerminalSubscription | null = null;
 let companionOwnership: DesktopCompanionRemoteOwnership | null = null;
-const terminalControlTaken = ref(false);
-const terminalControlAvailable = ref(false);
 let currentRemoteKey: string | null = null;
 let lastRemoteViewerProposal: { cols: number; rows: number } | null = null;
 let pendingRemoteViewerProposal: { cols: number; rows: number } | null = null;
@@ -129,16 +127,6 @@ function closeInputQueue() {
   inputQueue.pending = [];
   inputQueue.pendingChars = 0;
   inputQueue = null;
-}
-
-function takeTerminalControl() {
-  subscription?.takeControl?.();
-  terminalControlTaken.value = true;
-}
-
-function releaseTerminalControl() {
-  subscription?.releaseControl?.();
-  terminalControlTaken.value = false;
 }
 
 function drainRemoteInput(queue: RemoteInputQueue) {
@@ -402,8 +390,11 @@ async function start() {
         writeRemoteTerminalError(event.message);
       },
     });
-    terminalControlAvailable.value = Boolean(subscription.takeControl);
     refreshRemoteViewer();
+    // This component only starts for the selected, rendered remote task.
+    // Registration provides its measured viewport; active viewing transfers
+    // daemon-owned sizing without a separate UI action.
+    subscription.activate?.();
   } catch (error) {
     if (unmounted || generation !== lifecycleGeneration) {
       if (acquiredClient && !adopted) acquiredClient.close();
@@ -434,8 +425,6 @@ function stopSubscription() {
     // The manager still owns the parent transport.
   }
   subscription = null;
-  terminalControlAvailable.value = false;
-  terminalControlTaken.value = false;
   companionOwnership?.release();
   companionOwnership = null;
   relayClient = null;
@@ -712,16 +701,6 @@ onUnmounted(() => {
     >
       {{ t("visualCompanion.open") }}
     </button>
-    <button
-      v-if="terminalControlAvailable"
-      type="button"
-      class="terminal-control-control"
-      :aria-pressed="terminalControlTaken"
-      :title="terminalControlTaken ? t('terminalGeometry.releaseControl') : t('terminalGeometry.takeControl')"
-      @click="terminalControlTaken ? releaseTerminalControl() : takeTerminalControl()"
-    >
-      {{ terminalControlTaken ? t("terminalGeometry.releaseControl") : t("terminalGeometry.takeControl") }}
-    </button>
     <div ref="containerRef" class="terminal-container"></div>
     <div v-if="status === 'error' && errorMessage" class="cloud-terminal-status">
       {{ errorMessage }}
@@ -756,28 +735,6 @@ onUnmounted(() => {
   font-size: 11px;
   cursor: pointer;
   opacity: 0.78;
-}
-
-.terminal-control-control {
-  position: absolute;
-  z-index: 2;
-  top: 8px;
-  left: 12px;
-  padding: 5px 8px;
-  border: 1px solid var(--kn-border-default);
-  border-radius: 5px;
-  background: var(--kn-bg-panel-raised);
-  color: var(--kn-text-secondary);
-  font: inherit;
-  font-size: 11px;
-  cursor: pointer;
-  opacity: 0.78;
-}
-
-.terminal-control-control:hover,
-.terminal-control-control:focus-visible {
-  color: var(--kn-text-primary);
-  opacity: 1;
 }
 
 .open-companion-control:hover,

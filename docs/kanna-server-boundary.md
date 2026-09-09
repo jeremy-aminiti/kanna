@@ -363,22 +363,23 @@ the client falls back to a bounded snapshot.
 ## Terminal Geometry Ownership
 
 Terminal geometry is daemon runtime state, not task or database state. New KSP
-clients negotiate `terminal_geometry`, then register each visible terminal on
-the authenticated control path with `term_viewer_register` before input or
-resize. The role is explicit: the owning desktop may declare `local`; paired,
+clients negotiate `terminal_geometry`, then register each terminal's measured
+viewport on the authenticated control path with `term_viewer_register`. A
+rendered client marks that viewer visible and sends `term_viewer_active` only
+when the terminal is actively viewed. The role is explicit: the owning desktop may declare `local`; paired,
 LAN, relay, observer, and shared-tap clients are `remote` and cannot claim
 that role. An undeclared peer is legacy and is never implicitly local.
 
-The daemon elects one controller per PTY. It retains the current eligible local
-controller, otherwise chooses a deterministic local candidate, then does the
-same for remote candidates. A local arrival preempts an automatically selected
-remote controller. Remote/mobile viewers therefore render the authoritative
-desktop-sized grid and use their existing pan/scroll presentation; fitting a
-remote viewport never resizes the owner. A sole phone can still become the
-automatic controller. `term_viewer_takeover` explicitly grants any authorized
-viewer control until `term_viewer_release` or disconnect; focus and input do
-not reclaim it. A transient transport loss may relinquish takeover, without a
-heartbeat or timeout loop.
+The daemon elects one controller per PTY. A registered, visible, positive-size
+viewer that sends `term_viewer_active` because its terminal became the actively
+viewed task terminal steals controller sizing; its measured viewport is applied
+atomically. Opening the phone task therefore sizes the PTY to the phone, and
+bringing the desktop terminal back into view restores the desktop grid. Input,
+resize, scrolling, rotation, and background hydration are not ownership
+signals. Hidden, backgrounded, and zero-size viewers are ineligible. Commands
+are serialized, so active-view notifications are ordered by the daemon. A
+reconnect re-registers and rehydrates without an active-view notification and
+does not steal control.
 
 Only the elected viewer's measured proposal changes the PTY and headless
 terminal. Registration and election are serialized with resize and snapshot
@@ -390,9 +391,10 @@ resize request. Geometry does not clear draft bytes or alter composer
 attestation.
 
 Mixed versions are deliberately conservative. New clients against an old owner
-suppress automatic remote sizing and report that takeover is unavailable. On a
-new owner, legacy resize remains a compatibility minimum only for all-legacy
-sessions and cannot shrink a declared controller. New event fields are sent
+do not obtain automatic remote sizing. On a new owner, the retired
+`term_viewer_takeover` and `term_viewer_release` commands are accepted as
+no-ops for old clients; legacy resize remains a compatibility minimum only for
+all-legacy sessions and cannot shrink a declared controller. New event fields are sent
 only after capability negotiation; upgrading the server cannot make an old
 renderer a faithful follower. In particular, old mobile/new owner, new
 mobile/old owner, new server/old daemon, and rollback combinations must be

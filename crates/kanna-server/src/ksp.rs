@@ -1933,6 +1933,7 @@ enum TerminalControlCommand {
         rows: u16,
         visible: bool,
     },
+    Active,
     Takeover,
     Release,
 }
@@ -1977,6 +1978,7 @@ impl TerminalControlCommand {
                 rows,
                 visible,
             },
+            Self::Active => DaemonCommand::ActiveViewer { session_id },
             Self::Takeover => DaemonCommand::TakeoverViewer { session_id },
             Self::Release => DaemonCommand::ReleaseViewer { session_id },
         }
@@ -2436,6 +2438,7 @@ async fn run_terminal_control(
                         && matches!(
                             &daemon_command,
                             DaemonCommand::RegisterViewer { .. }
+                                | DaemonCommand::ActiveViewer { .. }
                                 | DaemonCommand::TakeoverViewer { .. }
                                 | DaemonCommand::ReleaseViewer { .. }
                         )
@@ -3143,6 +3146,7 @@ impl StreamConn {
                 | ClientFrame::TermInputControl { task_id, .. }
                 | ClientFrame::TermResize { task_id, .. }
                 | ClientFrame::TermViewerRegister { task_id, .. }
+                | ClientFrame::TermViewerActive { task_id }
                 | ClientFrame::TermViewerTakeover { task_id }
                 | ClientFrame::TermViewerRelease { task_id }
                 | ClientFrame::TermScrollbackRequest { task_id, .. }
@@ -3406,6 +3410,18 @@ impl StreamConn {
                         Some(task_id),
                         "terminal_geometry_unsupported",
                         "terminal takeover is unavailable on this desktop".into(),
+                    )
+                    .await;
+                }
+            }
+            ClientFrame::TermViewerActive { task_id } => {
+                if self.supports_terminal_geometry {
+                    self.enqueue_terminal_control(task_id, TerminalControlCommand::Active);
+                } else {
+                    self.error(
+                        Some(task_id),
+                        "terminal_geometry_unsupported",
+                        "terminal active-viewer geometry is unavailable on this desktop".into(),
                     )
                     .await;
                 }

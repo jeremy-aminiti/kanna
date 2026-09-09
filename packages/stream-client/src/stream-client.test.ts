@@ -2872,7 +2872,7 @@ describe("StreamClient", () => {
     client.close();
   });
 
-  it("registers a remote viewport without sending a legacy owner resize", () => {
+  it("registers a remote viewport passively, then announces active viewing without a legacy resize", () => {
     const client = new StreamClient({
       url: "ws://test/v1/stream",
       webSocketFactory: factory,
@@ -2906,7 +2906,7 @@ describe("StreamClient", () => {
       generation: 1,
       cols: 42,
       rows: 18,
-      visible: true,
+      visible: false,
     }, {
       type: "attach",
       task_id: "task-pty",
@@ -2916,6 +2916,16 @@ describe("StreamClient", () => {
     expect(socket.sent).not.toContainEqual(
       expect.objectContaining({ type: "term_resize" }),
     );
+    client.setTerminalViewerVisibility("task-pty", true);
+    client.activateTerminalViewer("task-pty");
+    expect(socket.sent.slice(-2)).toEqual([
+      expect.objectContaining({
+        type: "term_viewer_register",
+        task_id: "task-pty",
+        visible: true,
+      }),
+      { type: "term_viewer_active", task_id: "task-pty" },
+    ]);
     client.close();
   });
 
@@ -3120,30 +3130,6 @@ describe("StreamClient", () => {
       expect.objectContaining({ type: "term_viewer_register", cols: 42, rows: 18 }),
       { type: "attach", task_id: "task-pty", kind: "terminal", from_seq: 0 },
     ]);
-    client.close();
-  });
-
-  it("suppresses remote geometry control against an old owner", () => {
-    const client = new StreamClient({
-      url: "ws://test/v1/stream",
-      webSocketFactory: factory,
-      terminalViewerRole: "remote",
-    });
-    const socket = sockets[0];
-    socket.open();
-    socket.receive({ type: "auth_ok", capabilities: ["term_input_boundary"] });
-    client.attachTerminal("task-pty", { onOutput() {} });
-    client.sendTermResize("task-pty", 42, 18);
-    client.takeTerminalControl("task-pty");
-    client.releaseTerminalControl("task-pty");
-
-    expect(socket.sent).toHaveLength(2);
-    expect(socket.sent[1]).toEqual({
-      type: "attach",
-      task_id: "task-pty",
-      kind: "terminal",
-      from_seq: 0,
-    });
     client.close();
   });
 

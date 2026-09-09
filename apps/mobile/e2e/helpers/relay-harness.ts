@@ -167,7 +167,7 @@ interface TerminalEventCollector {
   close(): void;
   outputText(): string;
   resize(cols: number, rows: number): void;
-  takeControl(): void;
+  activate(): void;
   waitForSnapshot(
     expectation: {
       cols?: number;
@@ -689,8 +689,8 @@ export async function startMobileRelayHarness(
         }
       },
       async restoreDesktopTerminalControl() {
-        // Put the desktop-shaped viewer back in charge, the way releasing on
-        // the phone hands the terminal back to the machine it lives on.
+        // A desktop active-view event, not an explicit control action, returns
+        // the measured desktop-shaped viewer to control.
         // Restore whatever grid the fixture currently expects rather than a
         // hardcoded pair: the lane's authoritative size is a fixture fact and
         // has already changed once, and handing back the wrong one fails the
@@ -699,7 +699,7 @@ export async function startMobileRelayHarness(
           terminalFixture.expectedCols,
           terminalFixture.expectedRows
         );
-        terminalEvents?.takeControl();
+        terminalEvents?.activate();
       },
       async dropRelayTunnels(whileDown) {
         // Take the relay down and bring it straight back. Every tunnel through
@@ -727,7 +727,7 @@ export async function startMobileRelayHarness(
       },
       async restoreTallTerminalGeometry() {
         terminalEvents?.resize(132, 43);
-        terminalEvents?.takeControl();
+        terminalEvents?.activate();
         terminalFixture.expectedRows = 43;
         terminalFixture.expectBottomAnchored = false;
       },
@@ -847,7 +847,7 @@ export async function startMobileRelayHarness(
         const deadline = Date.now() + timeoutMs;
         let lastDimensions = "unobserved";
         terminalEvents?.resize(132, 20);
-        terminalEvents?.takeControl();
+        terminalEvents?.activate();
         while (Date.now() < deadline) {
           const observer = remote.terminal.collectTerminalEvents(
             harness,

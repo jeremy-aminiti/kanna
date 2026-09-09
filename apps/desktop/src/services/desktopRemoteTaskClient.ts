@@ -13,8 +13,8 @@ export type DesktopRemoteTerminalEvent =
 export interface DesktopRemoteTerminalSubscription {
   close(): void;
   registerViewer?(cols: number, rows: number): void;
-  takeControl?(): void;
-  releaseControl?(): void;
+  setViewerVisible?(visible: boolean): void;
+  activate?(): void;
 }
 
 export interface ObserveDesktopRemoteTerminalOptions {
