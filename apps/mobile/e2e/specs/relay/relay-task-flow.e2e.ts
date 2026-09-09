@@ -444,7 +444,26 @@ export async function verifyRelayPtyAuthoritativeScrollback(
 ): Promise<void> {
   const scrollTop = await driver.$(selectors.terminalScrollTop);
   await scrollTop.waitForExist({ timeout: SCREEN_TIMEOUT_MS });
+  const inspectionBeforeScroll = await (await driver.$(selectors.terminalInspection))
+    .getAttribute("value")
+    .catch(() => null);
   await scrollTop.click();
+
+  // Activating the native scroll affordance can briefly detach the WebView
+  // accessibility bridge. Wait for that exact inspection surface to return
+  // before asking the context inspector for the xterm grid.
+  await driver.waitUntil(
+    async () => {
+      const inspection = await driver.$(selectors.terminalInspection);
+      const value = await inspection.getAttribute("value").catch(() => null);
+      return value !== null && value !== inspectionBeforeScroll;
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected fresh terminal inspection after scroll-to-top",
+    },
+  );
 
   const expectedHistoryRow = /^MOBILE_PTY_HISTORY_\d{5}_X{100}$/;
   let lastInspection: Awaited<ReturnType<RelayUi["inspectTerminalWebView"]>> | null = null;

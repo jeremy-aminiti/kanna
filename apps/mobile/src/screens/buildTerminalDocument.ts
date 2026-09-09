@@ -1399,7 +1399,7 @@ export function buildTerminalDocument({
             rows: Number.parseInt(root.dataset.kannaRows || "", 10) || null,
             text: renderedTerminalText(),
             visibleRows: Array.from({ length: term.rows }, (_, row) => {
-              const line = term.buffer.active.getLine(term.buffer.active.baseY + row);
+              const line = term.buffer.active.getLine(term.buffer.active.viewportY + row);
               return line ? line.translateToString(true) : "";
             })
           }
