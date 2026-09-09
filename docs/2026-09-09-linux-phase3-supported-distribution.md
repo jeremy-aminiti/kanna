@@ -23,6 +23,17 @@ arm."* Both architectures are required for a Linux publish;
 `release-policy.json` declares `linux.requiredArchitectures:
 ["x86_64","arm64"]` and `optionalArchitectures: []`.
 
+Where that directive lives matters, because it is easy to reach the wrong
+conclusion from the record. It was given directly in the terminal, so it is
+**not** a `task_input` row — `kanna_task_inputs` for this task shows only the
+earlier manager decision and the x86-only directive it superseded. A reader who
+checks the input ledger, finds the optional-ARM instruction and no later row
+will conclude ARM is optional. It is not. The quote above is the later
+instruction; the plan that was recorded and approved after it explicitly
+replaces the x86-only one, and a subsequent manager message restated "Both
+architectures still ship". Do not revert the policy to optional ARM, and do not
+read the ledger's silence as absence of owner instruction.
+
 **x86-64 acceptance hardware, 2026-09-09.** Verbatim: *"We won't have intel mac
 access for a while. It's in Japan and i'm in canada for a month. Don't let that
 gate."* The approved plan's workstream 1 — a native x86-64 Ubuntu 24.04
@@ -360,6 +371,31 @@ root. Window chrome is not what changed.
 One cosmetic observation, left alone deliberately because it is outside this
 revision's scope: in the unknown state the fixed hint and the backend `detail`
 say nearly the same thing twice. It reads as redundant rather than wrong.
+
+## 7b. The one gate failure, and where its fix lives
+
+`./kd test all` on this branch stops in the `rust` lane on exactly one test:
+`terminal_watcher::tests::watcher_applies_attached_busy_as_working` in
+`kanna-server` (`terminal_watcher.rs:1898`, `left: Some("unread")` /
+`right: Some("working")`).
+
+It is not this branch's. It reproduces byte-identically at the branch base
+`7f8991f0e` — checked in a throwaway worktree — and this branch never touches
+`kanna-server`. The cause is upstream of both: PR #1380 (`9d0679cc3`) made a
+busy runtime frame keep `unread` activity, updated the adjacent spurious-idle
+test, and missed this one, which still seeded `unread` and asserted `working`.
+
+**The fix is already on `origin/main`: `fefec7071`**, "test(server): seed the
+attached-busy watcher test as idle, not unread" — a one-line change to the
+test's seed (`update_pipeline_item_activity("task-child", "idle")`), test-only,
+in a file this branch does not modify.
+
+It is deliberately **not** cherry-picked, rebased or merged here. The review
+asked that it not be, importing an unrelated main commit would widen this PR's
+diff for no functional reason, and the gate is under a capacity hold anyway so
+there is nothing to make green right now. Any base that contains `fefec7071`
+runs this lane clean; that is the reconciliation, and it needs no change on this
+branch.
 
 ## 8. E2E coverage note
 

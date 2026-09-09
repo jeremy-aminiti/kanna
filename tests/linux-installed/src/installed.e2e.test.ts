@@ -98,9 +98,18 @@ describe("installing the package", () => {
     requireHost();
     const bare = { ...process.env, PATH: "/usr/bin:/bin", HOME: process.env.HOME };
     for (const name of ["kanna-cli", "kanna-worker", "kanna-daemon"]) {
-      const version = await run(paths.executable(name), ["--version"], bare);
-      expect([0, 1]).toContain(version.code);
-      expect(`${version.stdout}${version.stderr}`).not.toMatch(
+      // `--help`, not `--version`. All three answer it and exit 0: `kanna-cli`
+      // through clap, `kanna-worker` and `kanna-daemon` through explicit arms.
+      // `--version` would be wrong for the probe *and* wrong as a loose
+      // assertion — `kanna-cli` declares no clap `version` attribute, so clap
+      // rejects the flag as an unexpected argument and exits 2, which this
+      // check would have reported as a launch failure on the first real run.
+      const help = await run(paths.executable(name), ["--help"], bare);
+      expect(help.code, `${name} --help: ${help.stderr || help.stdout}`).toBe(0);
+      // The point of the probe: a binary that starts at all with a bare PATH
+      // has its runtime dependencies satisfied by the package, not by
+      // developer tooling that happens to be on this host.
+      expect(`${help.stdout}${help.stderr}`).not.toMatch(
         /error while loading shared libraries|No such file or directory/
       );
     }
