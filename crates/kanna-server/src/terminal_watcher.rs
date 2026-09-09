@@ -1901,9 +1901,13 @@ mod tests {
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
         seed_plain_task(&config);
+        // A read, stopped task: busy must still move it to `working` while a
+        // terminal client is attached, unlike attached idle, which the watcher
+        // leaves to the client. (`unread` would not move — busy never marks
+        // unread output read, see `activity_for_runtime_status`.)
         Db::open(&config.db_path)
             .unwrap()
-            .update_pipeline_item_activity("task-child", "unread")
+            .update_pipeline_item_activity("task-child", "idle")
             .unwrap();
         let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
         let state = http_api::AppState::new(config.clone());
