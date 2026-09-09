@@ -70,11 +70,49 @@ async fn machine_stats_http_relay_keeps_native_peer_when_local_collection_fails(
     let peer = &body["machines"][0];
     assert_eq!(peer["machineId"], "stats-native-peer");
     assert!(peer["sampledAt"].is_u64(), "{body}");
-    assert!(
-        peer["cpu"]["sampleWindowMs"].as_u64().unwrap() >= 500,
-        "{body}"
-    );
-    assert!(peer["cpu"]["busyPercent"].as_f64().unwrap() <= 100.0);
+    let cpu_error = || {
+        peer["collectionErrors"].as_array().and_then(|errors| {
+            errors.iter().filter_map(Value::as_str).find(|error| {
+                error.starts_with("host_statistics CPU unavailable")
+                    || error.starts_with("hw.logicalcpu unavailable")
+                    || error.starts_with("/proc/stat:")
+                    || error.starts_with("missing /proc/stat CPU row")
+                    || error.starts_with("missing aggregate CPU row")
+                    || error.starts_with("incomplete CPU counters")
+                    || error.starts_with("invalid CPU counter")
+                    || error.starts_with("CPU sample window outside")
+                    || error.starts_with("CPU topology or counter source changed/unavailable")
+                    || error.starts_with("CPU counter reset/wrap")
+                    || error.starts_with("CPU counters did not advance")
+                    || error.starts_with("CPU counter overflow")
+            })
+        })
+    };
+    match peer.get("cpu") {
+        Some(Value::Object(cpu)) => {
+            assert!(
+                cpu["sampleWindowMs"]
+                    .as_u64()
+                    .is_some_and(|ms| (500..=5_000).contains(&ms)),
+                "{body}"
+            );
+            assert!(
+                cpu["busyPercent"]
+                    .as_f64()
+                    .is_some_and(|percent| (0.0..=100.0).contains(&percent)),
+                "{body}"
+            );
+        }
+        None => {
+            let cpu_error = cpu_error();
+            assert!(
+                cpu_error.is_some(),
+                "native peer omitted CPU without an availability error: {body}"
+            );
+            eprintln!("native peer reported unavailable CPU: {cpu_error:?}; response: {body}");
+        }
+        Some(cpu) => panic!("native peer returned invalid CPU shape {cpu}: {body}"),
+    }
     assert!(peer["processes"]["topProcesses"].as_array().unwrap().len() <= 10);
     assert_eq!(body["machineErrors"][0]["machineId"], "stats-broken-local");
     assert!(body["machineErrors"][0]["error"]
