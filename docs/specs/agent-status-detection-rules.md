@@ -123,7 +123,13 @@ across the whole file, because the id is what an override replaces by.
 A rule is `{ id, status, channel, versions, priority, when }`. Rules are
 evaluated in ascending `priority`, then in file order; the first match wins and
 its `id` is the classification's provenance. `status` is exactly `busy`,
-`waiting` or `idle`.
+`waiting` or `idle`. Because the first match wins, a rule that specialises
+another — Codex's `Working (… esc to interrupt) · N background terminal running`
+row against the bare `esc to interrupt` marker — must carry the *lower*
+`priority`, or it can never fire: the verdict would still be right, but
+attributed to the generic rule, and the specific rule would be dead text. Write
+a provider's rules most-specific first, and keep the file order matching the
+evaluation order so the two never disagree.
 
 `channel` names the evidence the rule reads:
 

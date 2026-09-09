@@ -1,0 +1,37 @@
+[
+  {
+    "provider": "codex",
+    "cliVersion": "0.153.4",
+    "capturedAt": "2026-09-09",
+    "capturedFrom": "the owner's MacBook Pro at 06:11 UTC while the daemon reported a live Codex review session idle; the row is clipped by the real 80-column terminal",
+    "ruleId": "codex/busy/working-background-terminal",
+    "status": "busy",
+    "frame": [
+      "• Working (1m 58s • esc to interrupt) · 1 background terminal running · /ps to …"
+    ]
+  },
+  {
+    "provider": "codex",
+    "cliVersion": "0.153.4",
+    "capturedAt": "2026-09-08",
+    "capturedFrom": "the Codex footer captured across a daemon handoff while a background terminal was running (commit e1ed07a55)",
+    "ruleId": "codex/busy/background-terminal",
+    "status": "busy",
+    "frame": [
+      "Waiting for background terminal (20m 39s • esc to interrupt)"
+    ]
+  },
+  {
+    "provider": "codex",
+    "cliVersion": "0.153.4",
+    "capturedAt": "2026-08-18",
+    "capturedFrom": "the plain Codex working footer as drawn in the checked-in v0.140 capture (tests/tui-fidelity/fixtures/codex-pwd-tool.ansi) and replayed by crates/daemon/tests/reconnect.rs; no background terminal is running, so only the generic interrupt hint applies",
+    "ruleId": "codex/busy/interrupt-marker",
+    "status": "busy",
+    "frame": [
+      "• Working (43s • esc to interrupt)",
+      "› Improve documentation in @filename",
+      "gpt-5.5 high · /tmp/kanna-codex-fixture-root"
+    ]
+  }
+]
