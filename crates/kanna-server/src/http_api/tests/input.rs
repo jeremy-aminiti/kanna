@@ -17,7 +17,9 @@ async fn expect_task_state_changed(
 }
 
 async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, agent: &str) {
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState, SessionStatus,
+    };
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -56,19 +58,37 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, 
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
-        for _ in 0..1 {
+        for _ in 0..2 {
             let command = read_test_daemon_command(&mut reader, &mut write_half).await;
-            match command {
-                DaemonCommand::SubmitInput { session_id, data } => {
-                    assert_eq!(session_id, "merge-session");
+            let event = match command {
+                DaemonCommand::List => DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-merge".to_string(),
+                        pid: 42,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: SessionStatus::Idle,
+                        status_observed: true,
+                        kind: Default::default(),
+                        composer_text: None,
+                        composer_attestation: Default::default(),
+                    }],
+                },
+                DaemonCommand::SubmitInputIfSession {
+                    session_id,
+                    expected_pid,
+                    data,
+                } => {
+                    assert_eq!(session_id, "task-merge");
+                    assert_eq!(expected_pid, 42);
                     inputs.push(data);
+                    DaemonEvent::Ok
                 }
-                other => panic!("expected semantic SubmitInput command, got {other:?}"),
-            }
+                other => panic!("expected live-session input command, got {other:?}"),
+            };
             write_half
-                .write_all(
-                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
-                )
+                .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
                 .await
                 .unwrap();
         }
@@ -941,7 +961,9 @@ fn merge_test_config(unique: &str, daemon_dir: &Path) -> Config {
 
 #[tokio::test]
 async fn merge_handoff_route_sends_an_ordinary_repo_policy_request() {
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState, SessionStatus,
+    };
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -955,18 +977,36 @@ async fn merge_handoff_route_sends_an_ordinary_repo_policy_request() {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut inputs = Vec::new();
-        for _ in 0..1 {
-            match read_test_daemon_command(&mut reader, &mut write_half).await {
-                DaemonCommand::SubmitInput { session_id, data } => {
-                    assert_eq!(session_id, "merge-session");
+        for _ in 0..2 {
+            let event = match read_test_daemon_command(&mut reader, &mut write_half).await {
+                DaemonCommand::List => DaemonEvent::SessionList {
+                    sessions: vec![SessionInfo {
+                        session_id: "task-merge".to_string(),
+                        pid: 42,
+                        cwd: "/tmp".to_string(),
+                        state: SessionState::Active,
+                        idle_seconds: 0,
+                        status: SessionStatus::Idle,
+                        status_observed: true,
+                        kind: Default::default(),
+                        composer_text: None,
+                        composer_attestation: Default::default(),
+                    }],
+                },
+                DaemonCommand::SubmitInputIfSession {
+                    session_id,
+                    expected_pid,
+                    data,
+                } => {
+                    assert_eq!(session_id, "task-merge");
+                    assert_eq!(expected_pid, 42);
                     inputs.push(data);
+                    DaemonEvent::Ok
                 }
-                other => panic!("expected SubmitInput command, got {other:?}"),
-            }
+                other => panic!("expected live-session input command, got {other:?}"),
+            };
             write_half
-                .write_all(
-                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
-                )
+                .write_all(format!("{}\n", serde_json::to_string(&event).unwrap()).as_bytes())
                 .await
                 .unwrap();
         }
@@ -1050,7 +1090,10 @@ async fn merge_handoff_route_sends_an_ordinary_repo_policy_request() {
 
 #[tokio::test]
 async fn merge_handoff_does_not_signal_when_the_local_singleton_rejects_the_write() {
-    use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, ErrorCode, Event as DaemonEvent, SessionInfo, SessionState,
+        SessionStatus,
+    };
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
@@ -1064,9 +1107,36 @@ async fn merge_handoff_does_not_signal_when_the_local_singleton_rejects_the_writ
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+        assert!(matches!(command, DaemonCommand::List));
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionList {
+                        sessions: vec![SessionInfo {
+                            session_id: "task-merge".to_string(),
+                            pid: 42,
+                            cwd: "/tmp".to_string(),
+                            state: SessionState::Active,
+                            idle_seconds: 0,
+                            status: SessionStatus::Idle,
+                            status_observed: true,
+                            kind: Default::default(),
+                            composer_text: None,
+                            composer_attestation: Default::default(),
+                        }],
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         assert!(matches!(
             command,
-            DaemonCommand::SubmitInput { ref session_id, .. } if session_id == "merge-session"
+            DaemonCommand::SubmitInputIfSession { ref session_id, expected_pid: 42, .. }
+                if session_id == "task-merge"
         ));
         write_half
             .write_all(
@@ -2897,7 +2967,9 @@ async fn terminal_exit_with_legacy_notify_registration_uses_events_not_task_inpu
 /// they fail if the engine ever goes back to trusting the prompt.
 mod merge_handoff_on_close {
     use super::*;
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use kanna_daemon::protocol::{
+        Command as DaemonCommand, Event as DaemonEvent, SessionInfo, SessionState, SessionStatus,
+    };
     use std::sync::Mutex;
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -3105,7 +3177,7 @@ mod merge_handoff_on_close {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|(session_id, data)| session_id == "merge-session" && data != b"\r")
+                .filter(|(session_id, data)| session_id == "task-merge" && data != b"\r")
                 .map(|(_, data)| String::from_utf8_lossy(data).to_string())
                 .collect()
         }
@@ -3155,7 +3227,23 @@ mod merge_handoff_on_close {
                         read_test_daemon_command_optional(&mut reader, &mut write_half).await
                     {
                         let response = match command {
-                            DaemonCommand::SubmitInput { session_id, data } => {
+                            DaemonCommand::List => DaemonEvent::SessionList {
+                                sessions: vec![SessionInfo {
+                                    session_id: "task-merge".to_string(),
+                                    pid: 42,
+                                    cwd: "/tmp".to_string(),
+                                    state: SessionState::Active,
+                                    idle_seconds: 0,
+                                    status: SessionStatus::Idle,
+                                    status_observed: true,
+                                    kind: Default::default(),
+                                    composer_text: None,
+                                    composer_attestation: Default::default(),
+                                }],
+                            },
+                            DaemonCommand::SubmitInputIfSession {
+                                session_id, data, ..
+                            } => {
                                 recorded.lock().unwrap().push((session_id, data));
                                 DaemonEvent::Ok
                             }

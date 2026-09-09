@@ -227,6 +227,40 @@ pub(super) async fn send_task_input(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<TaskInputRequest>,
 ) -> Result<Response, TaskInputHttpError> {
+    send_task_input_impl(state, task_id, payload).await
+}
+
+/// Deliver server-originated speech through the same live-session discovery,
+/// PID fence, logical-input boundary, and durable ledger as `/tasks/{id}/input`.
+///
+/// Singleton signals must not use a stage run's historical session id directly:
+/// a daemon handoff or stage replacement can leave that id naming a retired PTY.
+pub(crate) async fn deliver_server_task_input(
+    state: Arc<AppState>,
+    task_id: String,
+    input: String,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    match send_task_input_impl(
+        state,
+        task_id,
+        TaskInputRequest {
+            input,
+            source: None,
+            attachment: None,
+        },
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err((status, Json(failure))) => Err((status, failure.message)),
+    }
+}
+
+async fn send_task_input_impl(
+    state: Arc<AppState>,
+    task_id: String,
+    payload: TaskInputRequest,
+) -> Result<Response, TaskInputHttpError> {
     #[cfg(test)]
     if let Some(task_input_sender) = state.task_input_sender.clone() {
         return task_input_sender(task_id, payload.input)
