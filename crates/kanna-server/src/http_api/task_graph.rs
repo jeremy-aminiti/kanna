@@ -3,11 +3,17 @@ use super::state::{AppState, TunneledHttpInvoke};
 use super::task_files::AuthenticatedTaskFileAccess;
 use crate::db::Db;
 use crate::task_graph::{TaskGraph, TaskGraphError};
-use axum::extract::{ConnectInfo, Extension, Path, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TaskGraphQuery {
+    from_ref: Option<String>,
+}
 
 pub(super) async fn get_task_graph(
     State(state): State<Arc<AppState>>,
@@ -16,6 +22,7 @@ pub(super) async fn get_task_graph(
     tunneled: Option<Extension<TunneledHttpInvoke>>,
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(task_id): Path<String>,
+    Query(query): Query<TaskGraphQuery>,
 ) -> Result<Json<TaskGraph>, (StatusCode, String)> {
     let desktop_local = tunneled.is_none()
         && peer.is_some_and(|Extension(ConnectInfo(addr))| addr.ip().is_loopback());
@@ -32,7 +39,7 @@ pub(super) async fn get_task_graph(
                 format!("db error: {error}"),
             )
         })?;
-        crate::task_graph::read_task_graph(&db, &task_id)
+        crate::task_graph::read_task_graph(&db, &task_id, query.from_ref.as_deref())
             .map(Json)
             .map_err(map_task_graph_error)
     })

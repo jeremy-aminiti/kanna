@@ -19,7 +19,7 @@ const { t } = useI18n();
 const props = defineProps<{
   repoPath: string;
   worktreePath?: string;
-  remoteGraphLoader?: () => Promise<RemoteTaskGraphContent>;
+  remoteGraphLoader?: (request: { fromRef?: "HEAD" }) => Promise<RemoteTaskGraphContent>;
   /**
    * Whether this view is the one in front. `useLessScroll` binds window-level
    * keys, and a tab stays mounted behind another one, so without this a
@@ -346,7 +346,7 @@ async function loadGraph() {
     const path = props.worktreePath || props.repoPath;
     const fromRef = mode.value === "auto" ? "HEAD" : undefined;
     const result = props.remoteGraphLoader
-      ? await props.remoteGraphLoader()
+      ? await props.remoteGraphLoader({ fromRef })
       : await invoke<GraphResult>("git_graph", { repoPath: path, fromRef });
     headCommit.value = "headCommit" in result ? result.headCommit : result.head_commit;
     layout.value = layoutCommitGraph(result.commits);

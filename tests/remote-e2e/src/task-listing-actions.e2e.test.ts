@@ -123,11 +123,17 @@ describe("remote task listing, creation, and actions E2E", () => {
     await writeFile(`${task.worktreePath}/remote-graph-owner.txt`, "owned by the remote desktop\n");
     await execFileAsync("git", ["add", "remote-graph-owner.txt"], { cwd: task.worktreePath });
     await execFileAsync("git", ["commit", "-m", "remote graph owner commit"], { cwd: task.worktreePath });
+    const { stdout: ownerBranch } = await execFileAsync("git", ["branch", "--show-current"], { cwd: task.worktreePath });
+    await execFileAsync("git", ["checkout", "-b", "remote-graph-divergent-ref"], { cwd: task.worktreePath });
+    await writeFile(`${task.worktreePath}/remote-graph-divergent.txt`, "only all refs sees this\n");
+    await execFileAsync("git", ["add", "remote-graph-divergent.txt"], { cwd: task.worktreePath });
+    await execFileAsync("git", ["commit", "-m", "remote graph divergent ref"], { cwd: task.worktreePath });
+    await execFileAsync("git", ["checkout", ownerBranch.trim()], { cwd: task.worktreePath });
 
     const graph = asRecord(await harness.client.invokeDesktop({
       desktopId: remote.desktopId,
       method: "GET",
-      path: `/v1/tasks/${task.taskId}/graph`,
+      path: `/v1/tasks/${task.taskId}/graph?fromRef=HEAD`,
       body: null
     }));
     expect(getString(graph, "taskId")).toBe(task.taskId);
@@ -135,6 +141,19 @@ describe("remote task listing, creation, and actions E2E", () => {
     expect(Array.isArray(commits)).toBe(true);
     expect(commits).toEqual(expect.arrayContaining([
       expect.objectContaining({ message: "remote graph owner commit" })
+    ]));
+    expect(commits).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ message: "remote graph divergent ref" })
+    ]));
+
+    const allGraph = asRecord(await harness.client.invokeDesktop({
+      desktopId: remote.desktopId,
+      method: "GET",
+      path: `/v1/tasks/${task.taskId}/graph`,
+      body: null
+    }));
+    expect(allGraph.commits).toEqual(expect.arrayContaining([
+      expect.objectContaining({ message: "remote graph divergent ref" })
     ]));
   }, 120_000);
 

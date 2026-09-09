@@ -5992,6 +5992,20 @@ impl TaskDiffRouteFixture {
         .await
     }
 
+    async fn get_graph_through_authenticated_relay_with_query(
+        &self,
+        task_id: &str,
+        query: &str,
+    ) -> crate::http_api::HttpInvokeResponse {
+        crate::http_api::dispatch_authenticated_http_invoke(
+            Arc::clone(&self.state),
+            "GET",
+            &format!("/v1/tasks/{task_id}/graph?{query}"),
+            serde_json::Value::Null,
+        )
+        .await
+    }
+
     async fn get_as_desktop_loopback(&self, task_id: &str) -> axum::response::Response {
         self.app
             .clone()
@@ -6258,6 +6272,64 @@ async fn task_graph_route_reads_the_owner_worktree_through_relay() {
     assert_eq!(body["taskId"], "task-diff");
     assert_eq!(body["commits"][0]["message"], "owner graph commit");
     assert!(body["headCommit"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn task_graph_route_limits_head_and_expands_all_refs_on_the_owner() {
+    let fixture = TaskDiffRouteFixture::new();
+    let owner_branch = String::from_utf8(
+        Command::new("git")
+            .current_dir(&fixture.worktree)
+            .args(["branch", "--show-current"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .current_dir(&fixture.worktree)
+        .args(["checkout", "-b", "owner-divergent-graph-ref"])
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(fixture.worktree.join("divergent.txt"), "only all refs\n").unwrap();
+    assert!(Command::new("git")
+        .current_dir(&fixture.worktree)
+        .args(["add", "divergent.txt"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .current_dir(&fixture.worktree)
+        .args(["commit", "-m", "divergent owner ref"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .current_dir(&fixture.worktree)
+        .args(["checkout", owner_branch.trim()])
+        .status()
+        .unwrap()
+        .success());
+
+    let head = fixture
+        .get_graph_through_authenticated_relay_with_query("task-diff", "fromRef=HEAD")
+        .await;
+    let all = fixture
+        .get_graph_through_authenticated_relay("task-diff")
+        .await;
+    assert_eq!(head.status, StatusCode::OK.as_u16());
+    assert_eq!(all.status, StatusCode::OK.as_u16());
+    assert!(!head.body.unwrap()["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|commit| commit["message"] == "divergent owner ref"));
+    assert!(all.body.unwrap()["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|commit| commit["message"] == "divergent owner ref"));
 }
 
 #[tokio::test]

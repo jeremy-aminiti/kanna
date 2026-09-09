@@ -29,6 +29,7 @@ import { createConfiguredDesktopLanTaskViewClient } from "../services/desktopLan
 import type {
   DesktopRemoteTaskViewClient,
   RemoteTaskDiffRequest,
+  RemoteTaskGraphRequest,
 } from "../services/desktopRemoteTaskClient";
 
 export type DiffScope = "branch" | "working";
@@ -322,11 +323,11 @@ export function useAppModals({
     });
   }
 
-  async function readRemoteTaskGraph() {
+  async function readRemoteTaskGraph(request: RemoteTaskGraphRequest) {
     const route = activeRemoteTaskRoute.value;
     if (!route) throw new Error("Remote task route is unavailable.");
     const client = await getRemoteTaskViewClient(route.transport);
-    return client.readTaskGraph({ desktopId: route.desktopId, taskId: route.taskId });
+    return client.readTaskGraph({ desktopId: route.desktopId, taskId: route.taskId, request });
   }
 
   onUnmounted(() => {

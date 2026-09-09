@@ -1706,6 +1706,7 @@ impl TransferRuntime {
         &self,
         target_peer_id: &str,
         task_id: &str,
+        from_ref: Option<&str>,
     ) -> Result<Value, RuntimeError> {
         let target_peer = self.find_peer(target_peer_id).await?;
         self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
@@ -1715,7 +1716,7 @@ impl TransferRuntime {
                 &target_peer,
                 "read_task_graph",
                 &request_id,
-                serde_json::json!({ "task_id": task_id }),
+                serde_json::json!({ "task_id": task_id, "from_ref": from_ref }),
             )
             .await?;
         let response = self
@@ -1725,6 +1726,7 @@ impl TransferRuntime {
                     request_id: request_id.clone(),
                     requester_peer_id: self.config.peer_id.clone(),
                     task_id: task_id.to_owned(),
+                    from_ref: from_ref.map(str::to_owned),
                     sealed_payload: Some(sealed_payload),
                 },
             )

@@ -479,6 +479,7 @@ export function createDesktopLanTerminalClient(): DesktopRemoteTaskViewClient {
       const response = await invoke("read_transfer_peer_task_graph", {
         peerId: options.desktopId,
         taskId: options.taskId,
+        fromRef: options.request.fromRef,
       });
       return parseTaskGraphContent(response);
     },

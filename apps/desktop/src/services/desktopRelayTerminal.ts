@@ -337,8 +337,11 @@ export function createDesktopRelayTerminalClient({
       return parseTaskDiffContent(response.body);
     },
     async readTaskGraph(options) {
+      const query = options.request.fromRef
+        ? `?fromRef=${encodeURIComponent(options.request.fromRef)}`
+        : "";
       const response = await clientForDesktop(options.desktopId).request(
-        "GET", `/v1/tasks/${encodeURIComponent(options.taskId)}/graph`, null,
+        "GET", `/v1/tasks/${encodeURIComponent(options.taskId)}/graph${query}`, null,
       );
       assertSuccessfulTaskAction(response, "task graph read");
       return parseTaskGraphContent(response.body);

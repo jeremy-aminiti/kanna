@@ -276,6 +276,7 @@ pub async fn dispatch(
                     json!({
                         "target_peer_id": required_string(&params, &["peerId"] )?,
                         "task_id": required_string(&params, &["taskId"] )?,
+                        "from_ref": params.get("fromRef").and_then(Value::as_str),
                     }),
                 )
                 .await

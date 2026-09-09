@@ -750,7 +750,9 @@ describe("createDesktopRelayTerminalClient", () => {
       taskId: "owner-task",
       request: { scope: "working", mode: "staged" },
     });
-    const graphPromise = client.readTaskGraph({ desktopId: "desktop-owner", taskId: "owner-task" });
+    const graphPromise = client.readTaskGraph({
+      desktopId: "desktop-owner", taskId: "owner-task", request: { fromRef: "HEAD" },
+    });
 
     await openRelayTunnel(socket);
     socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
@@ -769,7 +771,7 @@ describe("createDesktopRelayTerminalClient", () => {
     );
     expect(firstDirectory).toMatchObject({ type: "request", method: "GET", body: null });
     expect(diff).toMatchObject({ type: "request", method: "GET", body: null });
-    const graph = firstRequests.find((entry) => entry.path === "/v1/tasks/owner-task/graph");
+    const graph = firstRequests.find((entry) => entry.path === "/v1/tasks/owner-task/graph?fromRef=HEAD");
     expect(graph).toMatchObject({ type: "request", method: "GET", body: null });
 
     socket.onmessage?.({

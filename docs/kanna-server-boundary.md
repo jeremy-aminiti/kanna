@@ -2418,7 +2418,9 @@ git, or search-in-files operations.
 
 `GET /v1/tasks/{task_id}/graph` reads the commit graph from the task owner's
 current worktree and returns the task id, HEAD commit, and graph commits
-(parents, refs, author, timestamp, and summary). It has the same authenticated
+(parents, refs, author, timestamp, and summary). `?fromRef=HEAD` limits the
+walk to HEAD ancestry; omitting it walks all owner local and remote refs. It
+has the same authenticated
 relay / paired-LAN access boundary as task files and diffs. Remote desktop
 clients must use this route rather than running a local git command with the
 owner's `worktreePath`; that path is machine-local. Mobile has no commit-graph

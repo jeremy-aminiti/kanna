@@ -151,7 +151,9 @@ describe("createDesktopLanTerminalClient", () => {
       taskId: "task-1",
       request: { scope: "branch", mode: "all" },
     })).resolves.toMatchObject({ truncated: true });
-    await expect(client.readTaskGraph({ desktopId: "peer-primary", taskId: "task-1" }))
+    await expect(client.readTaskGraph({
+      desktopId: "peer-primary", taskId: "task-1", request: { fromRef: "HEAD" },
+    }))
       .resolves.toMatchObject({ headCommit: "abc123" });
 
     expect(invoke).toHaveBeenNthCalledWith(1, "read_transfer_peer_task_directory", {
@@ -177,7 +179,7 @@ describe("createDesktopLanTerminalClient", () => {
       mode: "all",
     });
     expect(invoke).toHaveBeenNthCalledWith(4, "read_transfer_peer_task_graph", {
-      peerId: "peer-primary", taskId: "task-1",
+      peerId: "peer-primary", taskId: "task-1", fromRef: "HEAD",
     });
   });
 

@@ -458,12 +458,13 @@ pub async fn read_transfer_peer_task_graph(
     app: tauri::AppHandle,
     peer_id: String,
     task_id: String,
+    from_ref: Option<String>,
 ) -> Result<Value, String> {
     let response = transfer_control(
         &app,
         "read-peer-task-graph",
         json!({
-            "peerId": peer_id, "taskId": task_id,
+            "peerId": peer_id, "taskId": task_id, "fromRef": from_ref,
         }),
     )
     .await?;

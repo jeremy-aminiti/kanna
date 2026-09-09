@@ -46,7 +46,11 @@ impl std::error::Error for TaskGraphError {}
 /// Reads the graph from the task owner's worktree. This deliberately resolves
 /// the task id in the owner's database; callers must never pass a worktree
 /// path from another machine across the desktop boundary.
-pub fn read_task_graph(db: &Db, task_or_branch_id: &str) -> Result<TaskGraph, TaskGraphError> {
+pub fn read_task_graph(
+    db: &Db,
+    task_or_branch_id: &str,
+    from_ref: Option<&str>,
+) -> Result<TaskGraph, TaskGraphError> {
     let task_id = db
         .resolve_pipeline_item_id(task_or_branch_id)
         .map_err(|error| TaskGraphError::Internal(format!("db error: {error}")))?
@@ -93,9 +97,14 @@ pub fn read_task_graph(db: &Db, task_or_branch_id: &str) -> Result<TaskGraph, Ta
     let mut walk = repo
         .revwalk()
         .map_err(|error| TaskGraphError::Internal(error.to_string()))?;
-    walk.push_glob("refs/heads/*")
-        .map_err(|error| TaskGraphError::Internal(error.to_string()))?;
-    let _ = walk.push_glob("refs/remotes/*");
+    if let Some(from_ref) = from_ref {
+        walk.push_ref(from_ref)
+            .map_err(|error| TaskGraphError::Internal(error.to_string()))?;
+    } else {
+        walk.push_glob("refs/heads/*")
+            .map_err(|error| TaskGraphError::Internal(error.to_string()))?;
+        let _ = walk.push_glob("refs/remotes/*");
+    }
     walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
         .map_err(|error| TaskGraphError::Internal(error.to_string()))?;
     let mut commits = Vec::new();

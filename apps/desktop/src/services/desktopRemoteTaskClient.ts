@@ -111,6 +111,11 @@ export interface RemoteTaskGraphContent {
   headCommit: string | null;
 }
 
+/** Omit `fromRef` to walk every owner ref; HEAD limits the graph to task HEAD. */
+export interface RemoteTaskGraphRequest {
+  fromRef?: "HEAD";
+}
+
 export interface DesktopRemoteTerminalClient {
   close(): void;
   observeTerminal(
@@ -137,5 +142,7 @@ export interface DesktopRemoteTaskViewClient extends DesktopRemoteTaskClient {
   readTaskDiff(
     options: RemoteTaskActionOptions & { request: RemoteTaskDiffRequest },
   ): Promise<RemoteTaskDiffContent>;
-  readTaskGraph(options: RemoteTaskActionOptions): Promise<RemoteTaskGraphContent>;
+  readTaskGraph(
+    options: RemoteTaskActionOptions & { request: RemoteTaskGraphRequest },
+  ): Promise<RemoteTaskGraphContent>;
 }

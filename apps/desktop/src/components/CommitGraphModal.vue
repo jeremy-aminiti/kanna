@@ -10,7 +10,7 @@ import {
 const props = defineProps<EmbeddableViewProps & {
   repoPath: string;
   worktreePath?: string;
-  remoteGraphLoader?: () => Promise<RemoteTaskGraphContent>;
+  remoteGraphLoader?: (request: { fromRef?: "HEAD" }) => Promise<RemoteTaskGraphContent>;
 }>();
 
 const { zIndex, bringToFront, overlayClass, overlayStyle, dismissOnScrimClick, isForeground } =

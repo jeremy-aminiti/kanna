@@ -119,6 +119,8 @@ pub enum ControlRequest {
         request_id: String,
         target_peer_id: String,
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_ref: Option<String>,
     },
     MarkPeerTaskRead {
         request_id: String,
@@ -563,6 +565,8 @@ pub enum PeerRequest {
         request_id: String,
         requester_peer_id: String,
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_ref: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sealed_payload: Option<String>,
     },
