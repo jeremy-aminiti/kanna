@@ -1,6 +1,5 @@
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import {
   preflightNotarizationCredentials,
@@ -8,6 +7,7 @@ import {
   setupNotarizationCredentials
 } from "../src/runtime/notarization";
 import type { CommandRunner } from "../src/runtime/process";
+import { kdTestScratchDir } from "./test-paths";
 
 describe("notarization credential selection", () => {
   it("requires both the profile and absolute Keychain selector", () => {
@@ -24,7 +24,7 @@ describe("notarization credential selection", () => {
   });
 
   it("runs online validation with the exact profile and Keychain pair", async () => {
-    const root = await mkdtemp(join(tmpdir(), "kanna-notary-preflight-"));
+    const root = await kdTestScratchDir("kanna-notary-preflight-");
     const keychainPath = join(root, "login.keychain-db");
     await writeFile(keychainPath, "keychain fixture\n");
     const calls: Array<{ command: string; args: string[] }> = [];
@@ -79,7 +79,7 @@ describe("notarization credential selection", () => {
       /Apple rejected the configured notarization credentials/
     ]
   ])("classifies %s without echoing command output", async (_label, stderr, expected) => {
-    const root = await mkdtemp(join(tmpdir(), "kanna-notary-preflight-"));
+    const root = await kdTestScratchDir("kanna-notary-preflight-");
     const keychainPath = join(root, "login.keychain-db");
     await writeFile(keychainPath, "keychain fixture\n");
     const runner: CommandRunner = {
@@ -125,7 +125,7 @@ describe("notarization credential selection", () => {
 
 describe("notarization setup", () => {
   it("stores credentials interactively before writing owner-only machine selectors", async () => {
-    const root = await mkdtemp(join(tmpdir(), "kanna-notary-setup-"));
+    const root = await kdTestScratchDir("kanna-notary-setup-");
     const homeDir = join(root, "home");
     const keychainPath = join(root, "login.keychain-db");
     await mkdir(homeDir);
@@ -186,7 +186,7 @@ describe("notarization setup", () => {
   });
 
   it("does not write selector config when credential validation fails", async () => {
-    const root = await mkdtemp(join(tmpdir(), "kanna-notary-setup-"));
+    const root = await kdTestScratchDir("kanna-notary-setup-");
     const homeDir = join(root, "home");
     const keychainPath = join(root, "login.keychain-db");
     await writeFile(keychainPath, "keychain fixture\n");

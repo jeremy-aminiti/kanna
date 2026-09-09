@@ -1,5 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseCliArgs } from "../cli";
@@ -13,6 +12,7 @@ import {
   type MobileIosArchivePlan
 } from "./mobile-archive";
 import { nodeCommandRunner, type CommandRunner } from "./process";
+import { kdTestScratchDir } from "../../tests/test-paths";
 
 const HEAD_COMMIT = "9c8b7a6d5e4f30210123456789abcdef01234567";
 const SHORT_COMMIT = HEAD_COMMIT.slice(0, 12);
@@ -107,7 +107,7 @@ describe("kd mobile archive", () => {
   });
 
   it("builds an archive and export plan that allows automatic provisioning updates", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-plan-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-plan-");
     await writeMinimalRepo(repoRoot);
 
     const plan = await buildMobileIosArchivePlan({
@@ -166,7 +166,7 @@ describe("kd mobile archive", () => {
     expect(parseXcodeMajorVersion("Xcode 26.0\nBuild version 17A123")).toBe(26);
     expect(parseXcodeMajorVersion("Xcode 25.4\nBuild version 16F6")).toBe(25);
 
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-xcode-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-xcode-");
     await writeMinimalRepo(repoRoot);
     const calls: string[] = [];
     const runner = archiveRunner({ calls, xcodeVersion: "Xcode 25.4\nBuild version 16F6\n" });
@@ -186,7 +186,7 @@ describe("kd mobile archive", () => {
   });
 
   it("requires an explicit --ref and a clean worktree", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-ref-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-ref-");
     await writeMinimalRepo(repoRoot);
 
     await expect(
@@ -205,7 +205,7 @@ describe("kd mobile archive", () => {
   });
 
   it("dry-runs without invoking archive or upload commands", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-dry-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-dry-");
     await writeMinimalRepo(repoRoot);
     const calls: string[] = [];
     const runner = archiveRunner({ calls });
@@ -236,7 +236,7 @@ describe("kd mobile archive", () => {
   });
 
   it("pushes an annotated archive provenance tag before an optional upload", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-ledger-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-ledger-");
     await writeMinimalRepo(repoRoot);
     const calls: string[] = [];
     let tagRecord: unknown;
@@ -346,7 +346,7 @@ describe("kd mobile archive", () => {
   }
 
   it("reuses a valid existing annotated provenance tag without rewriting it", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-existing-valid-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-existing-valid-");
     await writeMinimalRepo(repoRoot);
     const calls: string[] = [];
     const result = await executeMobileIosArchiveWithContext(
@@ -373,7 +373,7 @@ describe("kd mobile archive", () => {
       expected: "runtimeVersion"
     }
   ])("rejects a $name archive tag before push or upload", async ({ tagType, contents, expected }) => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-existing-invalid-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-existing-invalid-");
     await writeMinimalRepo(repoRoot);
     const calls: string[] = [];
     const result = await executeMobileIosArchiveWithContext(
@@ -404,7 +404,7 @@ describe("kd mobile archive", () => {
     calls: string[];
     runner: CommandRunner;
   }> {
-    const root = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-git-"));
+    const root = await kdTestScratchDir("kanna-mobile-archive-git-");
     const repoRoot = join(root, "repo");
     const remote = join(root, "origin.git");
     await mkdir(repoRoot);
@@ -557,7 +557,7 @@ describe("kd mobile archive", () => {
   });
 
   it("falls back to the repository VERSION when apps/mobile/VERSION is absent", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-fallback-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-fallback-");
     await writeMinimalRepo(repoRoot, null);
 
     const plan = await buildMobileIosArchivePlan({
@@ -572,7 +572,7 @@ describe("kd mobile archive", () => {
   });
 
   it("fails loudly when apps/mobile/VERSION is empty", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-empty-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-empty-");
     await writeMinimalRepo(repoRoot, "  ");
     const mobileVersionPath = join(repoRoot, "apps/mobile/VERSION");
 
@@ -585,7 +585,7 @@ describe("kd mobile archive", () => {
   });
 
   it("fails loudly when apps/mobile/VERSION is malformed", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-malformed-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-malformed-");
     await writeMinimalRepo(repoRoot, "not-a-version");
     const mobileVersionPath = join(repoRoot, "apps/mobile/VERSION");
 
@@ -673,7 +673,7 @@ describe("kd mobile archive", () => {
   }
 
   it("reuses a matching archive instead of rebuilding", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-reuse-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-reuse-");
     await writeMinimalRepo(repoRoot);
     await seedArtifacts(repoRoot, "1.0.0", "7");
     const calls: string[] = [];
@@ -690,7 +690,7 @@ describe("kd mobile archive", () => {
   });
 
   it("rebuilds when the existing archive is a different build number", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-stale-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-stale-");
     await writeMinimalRepo(repoRoot);
     await seedArtifacts(repoRoot, "1.0.0", "6");
     const calls: string[] = [];
@@ -708,7 +708,7 @@ describe("kd mobile archive", () => {
     // archives and then stops before Apple consumes the number leaves an
     // archive behind under a number that is still free, so a rerun at another
     // commit with the same number must not reuse it.
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-othercommit-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-othercommit-");
     await writeMinimalRepo(repoRoot);
     await seedArtifacts(repoRoot, "1.0.0", "7", "1111111111111111111111111111111111111111");
     const calls: string[] = [];
@@ -726,7 +726,7 @@ describe("kd mobile archive", () => {
   });
 
   it("rebuilds when the existing archive bakes in no source commit at all", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-nocommit-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-nocommit-");
     await writeMinimalRepo(repoRoot);
     await seedArtifacts(repoRoot, "1.0.0", "7", null);
     const calls: string[] = [];
@@ -741,7 +741,7 @@ describe("kd mobile archive", () => {
   });
 
   it("rebuilds when no artifacts exist", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-fresh-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-fresh-");
     await writeMinimalRepo(repoRoot);
     const calls: string[] = [];
     const result = await executeMobileIosArchiveWithContext(
@@ -753,7 +753,7 @@ describe("kd mobile archive", () => {
   });
 
   it("rebuilds a matching archive when --force-rebuild is passed", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-force-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-force-");
     await writeMinimalRepo(repoRoot);
     await seedArtifacts(repoRoot, "1.0.0", "7");
     const calls: string[] = [];
@@ -767,7 +767,7 @@ describe("kd mobile archive", () => {
   });
 
   it("fails before building when the uploader is unavailable for --upload", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-notransporter-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-notransporter-");
     await writeMinimalRepo(repoRoot);
     const calls: string[] = [];
     const runner: CommandRunner = {
@@ -807,7 +807,7 @@ describe("kd mobile archive", () => {
   });
 
   it("uploads with altool rather than iTMSTransporter", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-mobile-archive-uploader-"));
+    const repoRoot = await kdTestScratchDir("kanna-mobile-archive-uploader-");
     await writeMinimalRepo(repoRoot);
     const plan = await buildMobileIosArchivePlan({ repoRoot, buildNumber: "3", upload: true });
     const upload = plan.commands.find((command) => command.kind === "upload");

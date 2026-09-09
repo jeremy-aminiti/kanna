@@ -1,6 +1,8 @@
-import { existsSync, lstatSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterAll } from "vitest";
 
 const ROOT_PREFIX = "kanna-kd-tests-";
 
@@ -24,7 +26,9 @@ export function sweepKdTestScratchRoots(
     const match = new RegExp(`^${ROOT_PREFIX}(\\d+)$`).exec(entry);
     if (!match) continue;
     const path = join(temporaryDirectory, entry);
-    if (!lstatSync(path).isDirectory()) continue;
+    // Another worker's `afterAll` may remove its root between the listing
+    // and this stat; a root that is already gone needs nothing from us.
+    if (!lstatSync(path, { throwIfNoEntry: false })?.isDirectory()) continue;
     const pid = Number(match[1]);
     if (Number.isSafeInteger(pid) && isAlive(pid)) continue;
     rmSync(path, { recursive: true, force: true });
@@ -35,9 +39,13 @@ export function sweepKdTestScratchRoots(
 
 const processRoot = join(tmpdir(), `${ROOT_PREFIX}${process.pid}`);
 sweepKdTestScratchRoots();
-mkdirSync(processRoot, { recursive: true });
-// Normal test completion leaves no root behind. SIGKILL and machine crashes
-// cannot run this handler; the startup sweep above covers those cases.
+// Normal completion leaves no root behind. Vitest tears its fork workers down
+// without firing `exit`, so the file's `afterAll` is what removes the root in
+// a suite; the exit handler covers a helper run outside one. SIGKILL and
+// machine crashes run neither, and the startup sweep above covers those.
+afterAll(() => {
+  rmSync(processRoot, { recursive: true, force: true });
+});
 process.once("exit", () => {
   rmSync(processRoot, { recursive: true, force: true });
 });
@@ -48,5 +56,22 @@ process.once("exit", () => {
  * run, instead of stranding large trees directly in /private/tmp.
  */
 export function kdTestScratchPrefix(name: string): string {
+  // Created on demand: an earlier file's `afterAll` may have removed it.
+  mkdirSync(processRoot, { recursive: true });
   return join(processRoot, name);
+}
+
+/**
+ * `mkdtemp` under this process's root: a fresh directory whose lifetime is the
+ * root's, so a test that never removes it still leaves nothing behind. Use it
+ * in place of `mkdtemp(join(tmpdir(), name))`, which strands the directory in
+ * the shared temp root — a leak the Mac Studio measured at 73k directories.
+ */
+export function kdTestScratchDir(name: string): Promise<string> {
+  return mkdtemp(kdTestScratchPrefix(name));
+}
+
+/** [`kdTestScratchDir`] for a synchronous fixture. */
+export function kdTestScratchDirSync(name: string): string {
+  return mkdtempSync(kdTestScratchPrefix(name));
 }

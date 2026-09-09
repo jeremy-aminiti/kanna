@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   executeDevDownWithContext,
   executeDevUpWithContext,
@@ -14,6 +13,7 @@ import {
   listStagingRelayActiveDesktopIds
 } from "../src/tasks/registry";
 import type { CommandRunner } from "../src/runtime/process";
+import { kdTestScratchDir } from "./test-paths";
 
 async function writeStagingDesktopAuth(home: string): Promise<void> {
   const dir = join(home, ".kanna", "developer", "staging");
@@ -31,8 +31,8 @@ describe("task executors", () => {
   });
 
   it("authenticates staging relay active-desktop lookup with the Firebase id token", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-relay-active-"));
-    const home = await mkdtemp(join(tmpdir(), "kanna-kd-relay-home-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-relay-active-");
+    const home = await kdTestScratchDir("kanna-kd-relay-home-");
     await mkdir(join(repoRoot, "apps", "mobile", "src"), { recursive: true });
     await writeFile(
       join(repoRoot, "apps", "mobile", "src", "mobileEnvironments.json"),
@@ -228,7 +228,7 @@ describe("task executors", () => {
   });
 
   it("starts only mobile against the installed staging desktop", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-staging-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-staging-");
     const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; stdin?: string }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
@@ -287,8 +287,8 @@ describe("task executors", () => {
   });
 
   it("does not inject staging desktop credentials for staging mobile up", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-staging-creds-"));
-    const home = await mkdtemp(join(tmpdir(), "kanna-kd-staging-creds-home-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-staging-creds-");
+    const home = await kdTestScratchDir("kanna-kd-staging-creds-home-");
     await writeStagingDesktopAuth(home);
     const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; stdin?: string }> = [];
     const runner: CommandRunner = {
@@ -337,8 +337,8 @@ describe("task executors", () => {
   });
 
   it("starts dev desktop against staging cloud with opt-in desktop credentials", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-dev-up-staging-creds-"));
-    const home = await mkdtemp(join(tmpdir(), "kanna-kd-dev-up-staging-creds-home-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-dev-up-staging-creds-");
+    const home = await kdTestScratchDir("kanna-kd-dev-up-staging-creds-home-");
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     await writeFile(
       join(repoRoot, "firebase.json"),
@@ -419,7 +419,7 @@ describe("task executors", () => {
   });
 
   it("reconciles a running worktree session when the desktop cloud profile changes", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-dev-profile-switch-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-dev-profile-switch-");
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     await writeFile(
       join(repoRoot, "firebase.json"),
@@ -509,7 +509,7 @@ describe("task executors", () => {
   });
 
   it("replaces a worktree Metro plan before starting installed-owner mobile", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-mobile-owner-switch-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-mobile-owner-switch-");
     const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
     let sessionExists = true;
     let reconcileKey = "dev:build=dev, owner=worktree, cloud=emulators";
@@ -579,8 +579,8 @@ describe("task executors", () => {
   });
 
   it("starts dev desktop with emulator seed credentials when opt-in credentials are requested", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-dev-up-creds-"));
-    const home = await mkdtemp(join(tmpdir(), "kanna-kd-dev-up-creds-home-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-dev-up-creds-");
+    const home = await kdTestScratchDir("kanna-kd-dev-up-creds-home-");
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     await writeFile(
       join(repoRoot, "firebase.json"),
@@ -650,7 +650,7 @@ describe("task executors", () => {
   });
 
   it("restarts only the desktop tmux window against staging cloud env", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-restart-staging-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-restart-staging-");
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
     const runner: CommandRunner = {
@@ -717,8 +717,8 @@ describe("task executors", () => {
   });
 
   it("injects staging desktop credentials on staging desktop restart", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-restart-staging-creds-"));
-    const home = await mkdtemp(join(tmpdir(), "kanna-kd-restart-staging-creds-home-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-restart-staging-creds-");
+    const home = await kdTestScratchDir("kanna-kd-restart-staging-creds-home-");
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     await writeStagingDesktopAuth(home);
     const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
@@ -768,7 +768,7 @@ describe("task executors", () => {
   });
 
   it("injects dev emulator desktop credentials on dev desktop restart", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-restart-dev-creds-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-restart-dev-creds-");
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
     const runner: CommandRunner = {
@@ -1188,7 +1188,7 @@ describe("task executors", () => {
   });
 
   it("starts dev mobile with emulators before building and launching on a physical device", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-run-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-device-run-");
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     await writeFile(
       join(repoRoot, "firebase.json"),
@@ -1327,7 +1327,7 @@ describe("task executors", () => {
   });
 
   it("boots a simulator and reuses the worktree server stack before installing the dev client", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-simulator-run-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-simulator-run-");
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     await writeFile(
       join(repoRoot, "firebase.json"),
@@ -1470,7 +1470,7 @@ describe("task executors", () => {
   });
 
   it("recovers when Expo reports a transient post-launch Metro failure and Metro becomes reachable", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-run-transient-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-device-run-transient-");
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     await writeFile(
       join(repoRoot, "firebase.json"),
@@ -1583,7 +1583,7 @@ describe("task executors", () => {
   });
 
   it("fails clearly when Metro never becomes reachable for a physical-device launch", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-run-persistent-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-device-run-persistent-");
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     await writeFile(
       join(repoRoot, "firebase.json"),
@@ -1665,7 +1665,7 @@ describe("task executors", () => {
   });
 
   it("runs the dev mobile identity against the installed staging owner and staging cloud", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-staging-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-device-staging-");
     const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv; cwd?: string }> = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
@@ -1794,7 +1794,7 @@ describe("task executors", () => {
       explicitVersion: "9.8.7"
     }
   ])("$name", async ({ explicitVersion }) => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-staging-install-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-device-staging-install-");
     await mkdir(join(repoRoot, "apps", "mobile", "ios", "KannaStaging.xcworkspace"), {
       recursive: true
     });
@@ -1991,7 +1991,7 @@ describe("task executors", () => {
   });
 
   it("blocks staging physical-device launch when the installed staging desktop is absent from the relay", async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), "kanna-kd-device-staging-offline-"));
+    const repoRoot = await kdTestScratchDir("kanna-kd-device-staging-offline-");
     await mkdir(join(repoRoot, "apps", "desktop", "src-tauri"), { recursive: true });
     const calls: Array<{ command: string; args: string[] }> = [];
     const runner: CommandRunner = {

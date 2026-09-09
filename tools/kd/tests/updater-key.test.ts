@@ -1,6 +1,5 @@
 import { createHash, generateKeyPairSync, sign as signDigest } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { CommandRunner } from "../src/runtime/process";
@@ -11,6 +10,7 @@ import {
   resolveUpdaterSigningKey,
   updaterSignerEnvironment
 } from "../src/runtime/updater-key";
+import { kdTestScratchDir } from "./test-paths";
 
 const testKeyPair = generateKeyPairSync("ed25519");
 const testKeyId = Buffer.from("0102030405060708", "hex");
@@ -38,7 +38,7 @@ async function privateKeyFixture(
   contents = "secret updater key\n",
   mode = 0o600
 ): Promise<{ root: string; keyPath: string }> {
-  const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-"));
+  const root = await kdTestScratchDir("kanna-updater-key-");
   const keyPath = join(root, "updater-private.key");
   await writeFile(keyPath, contents, { mode });
   await chmod(keyPath, mode);
@@ -63,7 +63,7 @@ describe("updater private key file", () => {
   });
 
   it("rejects a missing path and a directory", async () => {
-    const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-"));
+    const root = await kdTestScratchDir("kanna-updater-key-");
     await expect(resolveUpdaterSigningKey({
       env: { TAURI_PRIVATE_KEY_PATH: join(root, "missing.key") }
     })).rejects.toThrow(/not found/);
@@ -113,7 +113,7 @@ describe("updater private key file", () => {
 
 describe("updater signing key compatibility", () => {
   it("passes material only through the signer child environment", async () => {
-    const root = await mkdtemp(join(tmpdir(), "kanna-updater-key-verify-"));
+    const root = await kdTestScratchDir("kanna-updater-key-verify-");
     const calls: Array<{ args: string[]; env?: NodeJS.ProcessEnv }> = [];
     const runner: CommandRunner = {
       async run(_command, args, options) {
@@ -197,7 +197,7 @@ describe("release updater preflight wiring", () => {
     repoRoot: string;
     keyPath: string;
   }> {
-    const root = await mkdtemp(join(tmpdir(), "kanna-updater-preflight-"));
+    const root = await kdTestScratchDir("kanna-updater-preflight-");
     const repoRoot = join(root, "repo");
     const tauriDir = join(repoRoot, "apps", "desktop", "src-tauri");
     const keyPath = join(root, "updater-private.key");
