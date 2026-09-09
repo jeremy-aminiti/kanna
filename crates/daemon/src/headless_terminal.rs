@@ -875,6 +875,43 @@ mod tests {
     }
 
     #[test]
+    fn captured_handoff_footer_variants_remain_busy() {
+        let claude = verdict_for(
+            AgentProvider::Claude,
+            &[
+                "✽ Channeling… (25m 21s · esc to interrupt)",
+                "✔ Update installed · Restart to update",
+                "Waiting for task (esc to give additional instructions)",
+            ],
+        )
+        .expect("captured Claude handoff frame should classify");
+        assert_eq!(claude.status, SessionStatus::Busy);
+
+        let codex = verdict_for(
+            AgentProvider::Codex,
+            &["Waiting for background terminal (20m 39s • esc to interrupt)"],
+        )
+        .expect("captured Codex handoff frame should classify");
+        assert_eq!(codex.status, SessionStatus::Busy);
+
+        // Captured on the owner's MacBook Pro at 06:11 UTC on 2026-09-09
+        // while the daemon incorrectly reported this review session idle.
+        // The line is clipped by the real 80-column terminal, but its active
+        // spinner, interrupt hint, and running background-terminal count are
+        // all visible evidence of a live Codex turn.
+        let codex_working_background = verdict_for(
+            AgentProvider::Codex,
+            &["• Working (1m 58s • esc to interrupt) · 1 background terminal running · /ps to …"],
+        )
+        .expect("captured active Codex background-terminal frame should classify");
+        assert_eq!(codex_working_background.status, SessionStatus::Busy);
+        assert_eq!(
+            codex_working_background.rule_id,
+            "codex/busy/working-background-terminal"
+        );
+    }
+
+    #[test]
     fn headless_terminal_snapshot_tracks_output_and_resize() {
         let mut headless_terminal = HeadlessTerminal::new(80, 24, 10_000).unwrap();
         headless_terminal.write(b"abc");

@@ -30,6 +30,9 @@ describe("sidebar runtime and read state", () => {
           'claude', datetime('now'), datetime('now')),
          ('task-state-idle-read', 'repo-seed-app', 'Idle and read',
           'Idle and read', 'default', 'in progress', 'idle', 'idle',
+          'claude', datetime('now'), datetime('now')),
+         ('task-state-unmeasured-after-adoption', 'repo-seed-app', 'Awaiting runtime measurement',
+          'Awaiting runtime measurement', 'default', 'in progress', 'idle', NULL,
           'claude', datetime('now'), datetime('now'))`,
     );
     await client.reload();
@@ -43,7 +46,21 @@ describe("sidebar runtime and read state", () => {
          'task-seed-onboarding': ['unread', 'idle', 'unread'],
          'task-state-waiting': ['idle', 'waiting', 'read'],
          'task-state-idle-read': ['idle', 'idle', 'read'],
+         // After daemon adoption the server must preserve an unmeasured
+         // runtime as null, rather than inventing an idle runtime state.
+         'task-state-unmeasured-after-adoption': ['idle', null, 'read'],
        };
+       const unmeasuredAfterAdoption = items.find(
+         (item) => item.id === 'task-state-unmeasured-after-adoption',
+       );
+       if (
+         !unmeasuredAfterAdoption
+         || unmeasuredAfterAdoption.activity !== 'idle'
+         || unmeasuredAfterAdoption.runtime_state !== null
+         || unmeasuredAfterAdoption.read_state !== 'read'
+       ) {
+         throw new Error('server did not preserve the post-adoption task state');
+       }
        for (const item of items) {
          const state = states[item.id];
          if (!state) continue;
@@ -64,6 +81,7 @@ describe("sidebar runtime and read state", () => {
         ['busyRead', 'task-seed-perf-audit'],
         ['idleUnread', 'task-seed-onboarding'],
         ['idleRead', 'task-state-idle-read'],
+        ['unmeasuredAfterAdoption', 'task-state-unmeasured-after-adoption'],
         ['waiting', 'task-state-waiting'],
         ['blocked', 'task-seed-blocked-migration'],
       ].map(([key, id]) => {
@@ -84,6 +102,7 @@ describe("sidebar runtime and read state", () => {
     expect(rows.busyRead).toMatchObject({ fontStyle: "italic", fontWeight: "400" });
     expect(rows.idleUnread).toMatchObject({ fontStyle: "normal", fontWeight: "700" });
     expect(rows.idleRead).toMatchObject({ fontStyle: "normal", fontWeight: "400" });
+    expect(rows.unmeasuredAfterAdoption).toMatchObject({ fontStyle: "normal", fontWeight: "400" });
     expect(rows.waiting).toMatchObject({ fontStyle: "normal", fontWeight: "400" });
     expect(rows.blocked).toMatchObject({ fontStyle: "normal", fontWeight: "400" });
     expect(rows.blocked.color).not.toBe(rows.idleUnread.color);

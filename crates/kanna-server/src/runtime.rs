@@ -338,6 +338,7 @@ mod tests {
             state: kanna_daemon::protocol::SessionState::Active,
             idle_seconds: 0,
             status: kanna_daemon::protocol::SessionStatus::Idle,
+            status_observed: true,
             kind,
             composer_text: None,
             composer_attestation: Default::default(),

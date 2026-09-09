@@ -2128,6 +2128,7 @@ async fn stage_start_emits_one_settled_working_edge_and_suppresses_a_resume_flic
                 state: SessionState::Active,
                 idle_seconds: 0,
                 status: SessionStatus::Busy,
+                status_observed: true,
                 kind: Default::default(),
                 composer_text: None,
                 composer_attestation: Default::default(),

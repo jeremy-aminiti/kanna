@@ -335,15 +335,35 @@ pub(crate) async fn terminal_state_watcher_once(
                         false
                     }
                 };
-                match apply_watcher_runtime_status(state, &session.session_id, session.status, None)
-                {
-                    Ok(Some(result)) => changed |= result.changed,
-                    Ok(None) => {}
-                    Err(error) => log::warn!(
-                        "failed to reconcile terminal status for {}: {}",
-                        session.session_id,
-                        error
-                    ),
+                if session.status_observed {
+                    match apply_watcher_runtime_status(
+                        state,
+                        &session.session_id,
+                        session.status,
+                        None,
+                    ) {
+                        Ok(Some(result)) => changed |= result.changed,
+                        Ok(None) => {}
+                        Err(error) => log::warn!(
+                            "failed to reconcile terminal status for {}: {}",
+                            session.session_id,
+                            error
+                        ),
+                    }
+                } else {
+                    // A daemon handoff may have a live PTY before any frame
+                    // can be classified.  Null is the truthful projection;
+                    // never retain or invent idle during that interval.
+                    match crate::db::Db::open(&config.db_path)
+                        .and_then(|db| db.clear_unobserved_live_runtime_status(&session.session_id))
+                    {
+                        Ok(cleared) => changed |= cleared,
+                        Err(error) => log::warn!(
+                            "failed to clear unobserved terminal status for {}: {}",
+                            session.session_id,
+                            error
+                        ),
+                    }
                 }
                 // Every daemon generation is reconciled here, which matters
                 // for this field more than for status: an adopted session's
@@ -1195,6 +1215,7 @@ mod tests {
                 state: SessionState::Active,
                 idle_seconds: 0,
                 status: kanna_daemon::protocol::SessionStatus::Idle,
+                status_observed: true,
                 kind: Default::default(),
                 composer_text: Some("check again in a minute".to_string()),
                 composer_attestation: ComposerAttestation::NotTyped,
@@ -1252,6 +1273,70 @@ mod tests {
             .unwrap()
             .unwrap();
         drop(listener);
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+    }
+
+    #[tokio::test]
+    async fn watcher_projects_unobserved_adoption_to_unknown_then_busy_event() {
+        let unique = unique_name("terminal-watcher-unmeasured-adoption");
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        let config = test_config(&unique, &daemon_dir);
+        seed_plain_task(&config);
+        Db::open(&config.db_path)
+            .unwrap()
+            .update_pipeline_item_runtime_status("task-child", "idle", None)
+            .unwrap();
+        let (listener, socket_path) = bind_daemon_listener(&daemon_dir);
+
+        let server = tokio::spawn(async move {
+            let mut subscriber = expect_subscribe_with_sessions(
+                &listener,
+                vec![SessionInfo {
+                    session_id: "task-child".to_string(),
+                    pid: 42,
+                    cwd: "/tmp".to_string(),
+                    state: SessionState::Active,
+                    idle_seconds: 0,
+                    // This is the daemon's bootstrap field, not a frame
+                    // verdict. It must never overwrite the DB as idle.
+                    status: kanna_daemon::protocol::SessionStatus::Idle,
+                    status_observed: false,
+                    kind: Default::default(),
+                    composer_text: None,
+                    composer_attestation: ComposerAttestation::Unknown,
+                }],
+            )
+            .await;
+            // The next PTY repaint is measured by the adopted daemon. Its
+            // Busy event, not a reconnect or viewer attach, restores the
+            // runtime projection from the honest unknown value.
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::StatusChanged {
+                    session_id: "task-child".to_string(),
+                    status: kanna_daemon::protocol::SessionStatus::Busy,
+                    waiting_prompt_snippet: None,
+                },
+            )
+            .await;
+            write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
+        });
+
+        terminal_state_watcher_once(
+            &http_api::AppState::new(config.clone()),
+            &session_replacements::SessionReplacements::default(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let task = Db::open(&config.db_path)
+            .unwrap()
+            .get_pipeline_item("task-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.runtime_status.as_deref(), Some("busy"));
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }
@@ -1920,6 +2005,7 @@ mod tests {
                         state: SessionState::Active,
                         idle_seconds: 0,
                         status: kanna_daemon::protocol::SessionStatus::Idle,
+                        status_observed: true,
                         kind: Default::default(),
                         composer_text: None,
                         composer_attestation: Default::default(),
@@ -2012,6 +2098,7 @@ mod tests {
                     state: SessionState::Active,
                     idle_seconds: 0,
                     status: kanna_daemon::protocol::SessionStatus::Busy,
+                    status_observed: true,
                     kind: Default::default(),
                     composer_text: None,
                     composer_attestation: Default::default(),
@@ -2091,6 +2178,7 @@ mod tests {
                         state: SessionState::Active,
                         idle_seconds: 0,
                         status: kanna_daemon::protocol::SessionStatus::Busy,
+                        status_observed: true,
                         kind: Default::default(),
                         composer_text: None,
                         composer_attestation: Default::default(),

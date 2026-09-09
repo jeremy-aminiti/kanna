@@ -814,6 +814,23 @@ impl Db {
         Ok(rows_affected > 0)
     }
 
+    /// A live daemon session with no rendered verdict is unknown, including
+    /// immediately after a handoff.  Clear any stale projection rather than
+    /// presenting the predecessor's idle value as current evidence.
+    pub fn clear_unobserved_live_runtime_status(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE pipeline_item
+             SET runtime_status = NULL, runtime_event_pending_at = NULL,
+                 updated_at = datetime('now')
+             WHERE id = ? AND closed_at IS NULL",
+            [session_id],
+        )?;
+        Ok(rows_affected > 0)
+    }
+
     #[cfg(test)]
     pub fn get_pipeline_item_runtime_status(
         &self,
