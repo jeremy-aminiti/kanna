@@ -46,14 +46,6 @@ pub enum ErrorCode {
     RetryOnSuccessor,
     InputUnauthorized,
     ProtectedInputProtocolRequired,
-    SessionNotIdle,
-    /// Wire compatibility with daemons from before logical input became an
-    /// unconditional one-buffer submission. Current daemons never emit these
-    /// values, but an independently deployed predecessor can still answer a
-    /// current server with one after handoff/version skew.
-    InheritedDraftStateUnknown,
-    LogicalInputHeldByDraft,
-    LogicalInputSubmissionUnproven,
 }
 
 /// Whether a session is a PTY terminal or a headless agent (NDJSON pipes).
@@ -405,22 +397,13 @@ pub enum Command {
     /// One logical message for a PTY session. Unlike raw terminal input, the
     /// daemon keeps the message and its synthesized Enter atomic, frames
     /// multiline text as one bracketed paste when the terminal requested that
-    /// mode, and submits it immediately regardless of composer state.
+    /// mode, and defers the delivery while a raw composer draft is active.
     SubmitInput {
         session_id: String,
         data: Vec<u8>,
     },
     /// Logical input fenced to the PTY process ID observed by `List`.
     SubmitInputIfSession {
-        session_id: String,
-        expected_pid: u32,
-        data: Vec<u8>,
-    },
-    /// Finalization-only logical input, fenced to both the observed PTY process
-    /// and a positively classified idle runtime. Unlike ordinary task input,
-    /// this fails without writing when the session is Busy, Waiting, or still
-    /// carries an unobserved bootstrap status.
-    SubmitInputIfSessionIdle {
         session_id: String,
         expected_pid: u32,
         data: Vec<u8>,
@@ -439,7 +422,7 @@ pub enum Command {
         data: Vec<u8>,
     },
     /// Latency-sensitive producer-declared terminal control. It preserves the
-    /// current draft-state attestation.
+    /// current draft state and cannot release queued logical messages.
     InputControlNoReply {
         session_id: String,
         data: Vec<u8>,
@@ -521,11 +504,6 @@ pub enum Command {
     /// There is no `Ok` reply — the snapshot is the reply, and every later
     /// `Output` is ordered strictly after it. Failures reply `Event::Error`.
     ObserveSnapshot {
-        session_id: String,
-    },
-    /// Atomically register transfer finalization as an observer of one session
-    /// incarnation and return that same incarnation's identity/runtime state.
-    ObserveFinalization {
         session_id: String,
     },
     Unobserve {
@@ -673,13 +651,6 @@ pub enum Event {
         /// provider-specific snapshot behavior.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_provider: Option<AgentProvider>,
-    },
-    /// First event for `ObserveFinalization`, queued under the same lifecycle
-    /// and fanout locks as observer registration so identity cannot be mixed
-    /// with a same-id replacement.
-    FinalizationObserved {
-        session: SessionInfo,
-        snapshot: TerminalSnapshot,
     },
     HandoffReady {
         sessions: Vec<HandoffSession>,
@@ -849,29 +820,6 @@ mod tests {
                 assert_eq!(data, b"hello");
             }
             _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn finalization_idle_submission_roundtrips() {
-        let command = Command::SubmitInputIfSessionIdle {
-            session_id: "s1".to_string(),
-            expected_pid: 42,
-            data: b"prepare".to_vec(),
-        };
-        let decoded: Command =
-            serde_json::from_str(&serde_json::to_string(&command).unwrap()).unwrap();
-        match decoded {
-            Command::SubmitInputIfSessionIdle {
-                session_id,
-                expected_pid,
-                data,
-            } => {
-                assert_eq!(session_id, "s1");
-                assert_eq!(expected_pid, 42);
-                assert_eq!(data, b"prepare");
-            }
-            other => panic!("wrong variant: {other:?}"),
         }
     }
 
@@ -1288,27 +1236,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_logical_input_errors_keep_their_deployed_wire_names() {
-        for (wire_name, expected) in [
-            (
-                "logical_input_held_by_draft",
-                ErrorCode::LogicalInputHeldByDraft,
-            ),
-            (
-                "logical_input_submission_unproven",
-                ErrorCode::LogicalInputSubmissionUnproven,
-            ),
-        ] {
-            let json =
-                format!(r#"{{"type":"Error","code":"{wire_name}","message":"legacy daemon"}}"#);
-            match serde_json::from_str::<Event>(&json).expect("decode deployed error") {
-                Event::Error { code, .. } => assert_eq!(code, Some(expected)),
-                other => panic!("expected Error, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
     fn retry_on_successor_error_roundtrips_with_its_stable_wire_name() {
         let json = serde_json::to_string(&Event::Error {
             code: Some(ErrorCode::RetryOnSuccessor),
@@ -1474,19 +1401,6 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
-    }
-
-    #[test]
-    fn test_command_observe_finalization_roundtrip() {
-        let command = Command::ObserveFinalization {
-            session_id: "s1".to_string(),
-        };
-        let decoded: Command =
-            serde_json::from_str(&serde_json::to_string(&command).unwrap()).unwrap();
-        assert!(matches!(
-            decoded,
-            Command::ObserveFinalization { session_id } if session_id == "s1"
-        ));
     }
 
     #[test]

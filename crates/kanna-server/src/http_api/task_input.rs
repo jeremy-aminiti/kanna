@@ -146,11 +146,10 @@ pub(crate) enum TaskInputError {
 
 /// Write one semantic logical message into a daemon session.
 ///
-/// A current daemon types the text and its submission boundary as one write. It
-/// does not consult the composer: the message reaches the PTY, the session is
-/// gone, or the round trip was lost. Legacy protected-input-v3 daemons can still
-/// return their retired held/unproven answers, which are decoded below as
-/// uncertain delivery for safe version skew.
+/// The daemon types the text and its submission boundary as one write. It does
+/// not consult the composer, so there is no held, parked, or refused answer to
+/// map here: the message reaches the PTY, the session is gone, or the round
+/// trip was lost.
 async fn send_logical_session_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
@@ -186,70 +185,11 @@ async fn send_logical_session_input(
             code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
             message,
         } => Err(TaskInputError::Uncertain(message)),
-        // Daemons through v0.3.0-staging.12 shared protected-input protocol v3
-        // but could retain a logical message behind a draft or write its text
-        // and withhold Enter. Either result may still reach the provider later,
-        // so a current server must decode it and refuse a blind retry.
-        DaemonEvent::Error {
-            code:
-                Some(
-                    kanna_daemon::protocol::ErrorCode::LogicalInputHeldByDraft
-                    | kanna_daemon::protocol::ErrorCode::LogicalInputSubmissionUnproven,
-                ),
-            message,
-        } => Err(TaskInputError::Uncertain(message)),
         DaemonEvent::Error { message, .. }
             if message.to_ascii_lowercase().contains("session not found") =>
         {
             Err(TaskInputError::SessionNotFound)
         }
-        DaemonEvent::Error { message, .. } => Err(TaskInputError::Other(message)),
-        other => Err(TaskInputError::Other(format!(
-            "unexpected daemon response: {:?}",
-            other
-        ))),
-    }
-}
-
-/// Write one lifecycle message only if the daemon still positively classifies
-/// the exact PTY incarnation as idle. This condition belongs to transfer
-/// finalization; ordinary user and manager input remains unconditional.
-async fn send_idle_finalization_input(
-    daemon: &mut crate::daemon_client::DaemonClient,
-    session_id: &str,
-    expected_pid: u32,
-    data: Vec<u8>,
-) -> Result<(), TaskInputError> {
-    let event = daemon
-        .send_command(&DaemonCommand::SubmitInputIfSessionIdle {
-            session_id: session_id.to_string(),
-            expected_pid,
-            data,
-        })
-        .await
-        .map_err(|e| TaskInputError::Uncertain(format!("daemon response lost: {e}")))?;
-    match event {
-        DaemonEvent::Ok => Ok(()),
-        DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
-            ..
-        }
-        | DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::SessionIncarnationMismatch),
-            ..
-        } => Err(TaskInputError::SessionNotFound),
-        DaemonEvent::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::WriteFailed),
-            message,
-        } => Err(TaskInputError::Uncertain(message)),
-        DaemonEvent::Error {
-            code:
-                Some(
-                    kanna_daemon::protocol::ErrorCode::LogicalInputHeldByDraft
-                    | kanna_daemon::protocol::ErrorCode::LogicalInputSubmissionUnproven,
-                ),
-            message,
-        } => Err(TaskInputError::Uncertain(message)),
         DaemonEvent::Error { message, .. } => Err(TaskInputError::Other(message)),
         other => Err(TaskInputError::Other(format!(
             "unexpected daemon response: {:?}",
@@ -277,22 +217,6 @@ pub(crate) async fn try_submit_task_input_if_session(
     input: &str,
 ) -> Result<(), TaskInputError> {
     try_submit_task_input_to_session(daemon, session_id, Some(expected_pid), input).await
-}
-
-pub(crate) async fn try_submit_task_input_if_session_idle(
-    daemon: &mut crate::daemon_client::DaemonClient,
-    session_id: &str,
-    expected_pid: u32,
-    input: &str,
-) -> Result<(), TaskInputError> {
-    let message = task_input_message(input);
-    send_idle_finalization_input(
-        daemon,
-        session_id,
-        expected_pid,
-        message.as_bytes().to_vec(),
-    )
-    .await
 }
 
 async fn try_submit_task_input_to_session(

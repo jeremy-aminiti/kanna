@@ -952,23 +952,6 @@ impl SessionHandle {
         self.state.lock().await.status
     }
 
-    /// Enqueue finalization input only while the daemon has a positive idle
-    /// verdict. Holding the runtime-state lock through enqueue closes the race
-    /// between observing a permission prompt and accepting the CR that would
-    /// answer it. Ordinary task input deliberately does not use this gate.
-    pub async fn enqueue_logical_input_if_observed_idle(
-        &self,
-        data: Vec<u8>,
-    ) -> Result<Option<oneshot::Receiver<()>>, InputQueueError> {
-        let state = self.state.lock().await;
-        if !state.status_observed || state.status != SessionStatus::Idle {
-            return Ok(None);
-        }
-        let written = self.enqueue_logical_input(data)?;
-        drop(state);
-        Ok(Some(written))
-    }
-
     pub async fn agent_provider(&self) -> Option<AgentProvider> {
         self.state.lock().await.agent_provider
     }
@@ -1948,55 +1931,6 @@ mod tests {
 
         pending.acknowledge_written();
         written.await.expect("PTY writer acknowledgement");
-        handle.kill().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn finalization_input_requires_an_observed_idle_state_at_enqueue() {
-        let mut record = spawn_test_record(AgentProvider::Codex, SessionStatus::Idle).unwrap();
-        record.status_observed = false;
-        let handle = Arc::new(SessionHandle::new(record));
-        let mut input_rx = handle.take_input_rx().await.expect("input queue");
-
-        assert!(
-            handle
-                .enqueue_logical_input_if_observed_idle(b"prepare".to_vec())
-                .await
-                .expect("conditional enqueue")
-                .is_none(),
-            "bootstrap Idle authorized finalization input"
-        );
-        assert!(input_rx.try_recv().is_err(), "bootstrap Idle wrote bytes");
-
-        {
-            let mut state = handle.state.lock().await;
-            state.status_observed = true;
-            state.status = SessionStatus::Waiting;
-        }
-        assert!(
-            handle
-                .enqueue_logical_input_if_observed_idle(b"prepare".to_vec())
-                .await
-                .expect("conditional enqueue")
-                .is_none(),
-            "Waiting authorized finalization input"
-        );
-        assert!(input_rx.try_recv().is_err(), "Waiting wrote bytes");
-
-        {
-            let mut state = handle.state.lock().await;
-            state.status = SessionStatus::Idle;
-        }
-        let _written = handle
-            .enqueue_logical_input_if_observed_idle(b"prepare".to_vec())
-            .await
-            .expect("conditional enqueue")
-            .expect("observed Idle should authorize input");
-        assert_eq!(
-            input_rx.recv().await.expect("logical input").data,
-            b"prepare\r"
-        );
-
         handle.kill().await.unwrap();
     }
 

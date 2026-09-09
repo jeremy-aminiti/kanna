@@ -800,11 +800,10 @@ async fn run_finalization(
         )
         .map_err(|error| format!("db error: {error}"))?;
 
-    // observed idle → submit → causal completion marker → settled idle → quit
-    // → exit. Artifacts are staged only after this returns, so a clean
-    // transcript includes the wrap-up and the Codex rollout is final rather
-    // than mid-write. A degraded path still stages what exists before later
-    // source teardown.
+    // submit → observed busy → settled idle → quit → exit. Artifacts are staged
+    // only after this returns, so a clean transcript includes the wrap-up and
+    // the Codex rollout is final rather than mid-write. A degraded path still
+    // stages what exists before any later source teardown.
     let finalization_outcome = finalize::finalize_source_session(
         state,
         work,

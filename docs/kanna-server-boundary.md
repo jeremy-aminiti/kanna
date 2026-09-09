@@ -1294,55 +1294,27 @@ A push cannot ship a conversation the source agent is still writing to, so the
 engine shuts that agent down first — by **typing at it**, not by signalling it
 (`transfer_engine/finalize.rs`):
 
-1. wait for an existing turn to reach a positively observed `Idle` (the enum's
-   bootstrap value on a newly adopted or older session is not a verdict). The
-   finalization observer's initial snapshot, PID, and runtime verdict are
-   registered and returned under one daemon session-lifecycle lock, so a
-   same-id replacement cannot be mixed with the old session's event stream;
-2. inject a wrap-up message through the same logical-input helper every other
-   Kanna input path uses, but through its finalization-only conditional command:
-   the daemon atomically requires a positively observed `Idle` while fencing to
-   the PTY process observed at attach. Current daemons write the message and its
-   trailing CR as one buffer and acknowledge only after all of it reaches the
-   PTY;
-3. require the provider to emit a per-transfer completion marker that was not
-   present in the submitted prompt, then reach settled `Idle` after an observed
-   `Busy`; idle silence or an unrelated lifecycle edge is not completion;
-4. inject the provider's quit command (`AgentProvider::quit_command`);
-5. wait for the daemon `Exit`, and only then stage artifacts.
+1. inject a wrap-up message through the same logical-input helper every other
+   Kanna input path uses, fenced to the PTY process observed at attach; current
+   daemons write the message and its trailing CR as one buffer and acknowledge
+   only after all of it reaches the PTY;
+2. apply the existing settled-`Idle` sequencing policy on the daemon's status
+   stream — status carries no input identity and is not proof of submission or
+   provider completion; `Waiting` is a permission prompt;
+3. inject the provider's quit command (`AgentProvider::quit_command`);
+4. wait for the daemon `Exit`, and only then stage artifacts.
 
 The durable at-most-once phase claim is crash protection, not delivery proof.
 If recovery finds the wrap-up phase already claimed, or the daemon response was
 lost after a possible write, finalization does not resend or treat the phase as
-success: it records a degraded result. The per-transfer marker causally ties the
-following settled-idle verdict to provider output from preparation; a quiet
-composer or a competing turn never substitutes for that proof.
+success: it records a degraded result. A fresh acknowledgement is still only
+the responding daemon's delivery contract; provider parsing and completion are
+not inferred from it.
 
-`v0.3.0-staging.10` through `.12` and current daemons all advertise protected
-input protocol v3, but those older daemons could retain a message or write its
-text and withhold Enter. Their legacy `logical_input_held_by_draft` and
-`logical_input_submission_unproven` errors remain decodable by current servers
-and are treated as uncertain delivery: no resend and no quit. Staging `.13` and
-`.14` contain the one-buffer submission behavior.
-
-The idle-conditional finalization command is deliberately a distinct command,
-not a new gate on ordinary task input. A daemon old enough not to recognize it
-closes the request without interpreting or writing the payload; the server
-records that lost response as uncertain, retains the at-most-once phase claim,
-and sends no quit. User and manager inputs keep the unconditional always-submit
-contract.
-
-On 2026-09-09, five owner-authorized Studio → MBP review transfers on staging
-`.14` (Codex sources) visibly submitted preparation and produced wrap-up
-replies. The engine then recorded `quit-sent` with `/quit`, but each source
-failed to exit within 60 seconds and correctly shipped a degraded finalization.
-That is evidence for separate preparation/quit delivery, not evidence that the
-current Codex CLI successfully executes `/quit` in this flow.
-
-Nothing is typed while the session is `Waiting`. Preparation is sent only from
-a positively observed idle session; quit additionally sits behind
-preparation's causal completion marker and settled-idle lifecycle. The status
-reported at attach is checked before waiting begins. The helper's trailing CR is the keystroke that accepts a permission prompt's
+Nothing is typed while the session is `Waiting`. Step 3 gets that from step 2 —
+it is only reached on `Idle` — but step 1 has nothing in front of it, so the
+status the daemon reported at attach is checked before the wrap-up goes out. The
+helper's trailing CR is the keystroke that accepts a permission prompt's
 highlighted option, so a wrap-up typed at a parked session approves whatever
 tool call it is holding, in the operator's name — and silently, because the
 agent then resumes, goes idle, quits on cue and ships `cleanlyFinalized: true`.
@@ -1354,10 +1326,9 @@ any session the daemon had **adopted** through a handoff: the daemon refuses
 signals for a child it never forked, because the pid cannot be pinned across
 `kill(2)`. Every session older than the running daemon is adopted, so after
 every app upgrade no pre-existing task could be finalized. Fenced
-`Command::SubmitInputIfSessionIdle` has no child-ownership check and verifies
-the observed PTY pid instead, which is what makes injection work where
-signalling cannot. It additionally checks the daemon's current observed-idle
-state in the same critical section that enqueues the lifecycle input.
+`Command::SubmitInputIfSession` has no child-ownership check and verifies the
+observed PTY pid instead, which is what makes injection work where signalling
+cannot (pinned in `crates/daemon/tests/handoff.rs`).
 
 Each step appends `task.transfer_finalizing` to the task event feed with a
 `payload.phase`, because a wrap-up is legitimately minutes of latency and has to
@@ -1381,8 +1352,8 @@ answer. The server's own budget must fit inside it — `WRAP_UP_TIMEOUT` plus
 artifacts, and a unit test in `finalize.rs` fails if that stops holding. The
 destination allows the same window plus one ordinary request window, so the
 source's answer — including its own timeout report — always arrives while the
-destination is still listening. Injection failure or a session that never
-produces the required preparation lifecycle degrades the finalization — artifacts are staged as they
+destination is still listening. Injection failure or a session
+that never goes idle degrades the finalization — artifacts are staged as they
 stand and the payload carries `cleanlyFinalized: false` with the reason —
 rather than failing the transfer. Destructive teardown stays last and stays
 *after* staging: it is the source task's own close, once the destination has

@@ -355,54 +355,6 @@ pub(crate) async fn handle_connection(
                 );
                 drop(fanout_state);
             }
-            Some(Command::ObserveFinalization { session_id }) => {
-                let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
-                let _lifecycle_guard = lifecycle.lock().await;
-                let Some(session) = session_handle(&sessions, &session_id).await else {
-                    let evt = error_event(
-                        Some(protocol::ErrorCode::SessionNotFound),
-                        format!("session not found: {session_id}"),
-                    );
-                    let _ = write_event(&mut *writer.lock().await, &evt).await;
-                    continue;
-                };
-                let fanout = session_fanout(&fanouts, &session_id).await;
-                let mut fanout_state = fanout.state.lock().await;
-                let snapshot = match session.snapshot(&session_id).await {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        let (rows, cols) = session.rows_cols().await;
-                        log::warn!(
-                            "[observe_finalization] snapshot not ready for session {}: {}; falling back to blank snapshot",
-                            session_id,
-                            error
-                        );
-                        blank_snapshot(rows, cols)
-                    }
-                };
-                if !registration_is_current(&sessions, &fanouts, &session_id, &session, &fanout)
-                    .await
-                {
-                    let evt = error_event(
-                        Some(protocol::ErrorCode::SessionNotFound),
-                        format!("session incarnation changed: {session_id}"),
-                    );
-                    drop(fanout_state);
-                    let _ = write_event(&mut *writer.lock().await, &evt).await;
-                    continue;
-                }
-                let session_info = session.info(session_id.clone()).await;
-                fanout_state.register(
-                    &session_id,
-                    SubscriberKind::Observer,
-                    &writer,
-                    &[Event::FinalizationObserved {
-                        session: session_info,
-                        snapshot,
-                    }],
-                );
-                drop(fanout_state);
-            }
             Some(Command::Unobserve { session_id }) => {
                 if let Some(fanout) =
                     crate::fanout::existing_session_fanout(&fanouts, &session_id).await
@@ -1079,74 +1031,6 @@ pub(crate) async fn handle_command(
                 return;
             }
             let evt = logical_input_event(&session, &session_id, data).await;
-            let _ = write_event(&mut *writer.lock().await, &evt).await;
-        }
-
-        Command::SubmitInputIfSessionIdle {
-            session_id,
-            expected_pid,
-            data,
-        } => {
-            let daemon_lifecycle_guard = daemon_lifecycle.read().await;
-            if *daemon_lifecycle_guard != DaemonLifecycleState::Running {
-                let evt = error_event(
-                    Some(protocol::ErrorCode::RetryOnSuccessor),
-                    "daemon handoff already committed; submit input to the adopting daemon",
-                );
-                let _ = write_event(&mut *writer.lock().await, &evt).await;
-                return;
-            }
-            let Some(session) = session_handle(&sessions, &session_id).await else {
-                let evt = error_event(
-                    Some(protocol::ErrorCode::SessionNotFound),
-                    format!("session not found: {session_id}"),
-                );
-                let _ = write_event(&mut *writer.lock().await, &evt).await;
-                return;
-            };
-            let actual_pid = session.pty.lock().await.pid();
-            if actual_pid != expected_pid {
-                let evt = error_event(
-                    Some(protocol::ErrorCode::SessionIncarnationMismatch),
-                    format!(
-                        "session incarnation changed for {session_id}: expected pid {expected_pid}, found {actual_pid}"
-                    ),
-                );
-                let _ = write_event(&mut *writer.lock().await, &evt).await;
-                return;
-            }
-            if session.operator_input_only().await {
-                let evt = error_event(
-                    Some(protocol::ErrorCode::InputUnauthorized),
-                    format!("session requires authenticated operator input: {session_id}"),
-                );
-                let _ = write_event(&mut *writer.lock().await, &evt).await;
-                return;
-            }
-            let evt = match session
-                .enqueue_logical_input_if_observed_idle(data)
-                .await
-            {
-                Ok(Some(written)) => match written.await {
-                    Ok(()) => Event::Ok,
-                    Err(_) => error_event(
-                        Some(protocol::ErrorCode::WriteFailed),
-                        format!(
-                            "finalization input for session {session_id} was accepted but its terminal writer ended before the message was written; inspect that terminal before retrying"
-                        ),
-                    ),
-                },
-                Ok(None) => error_event(
-                    Some(protocol::ErrorCode::SessionNotIdle),
-                    format!(
-                        "session {session_id} is not positively idle; finalization input was not written"
-                    ),
-                ),
-                Err(_) => error_event(
-                    Some(protocol::ErrorCode::WriteFailed),
-                    format!("input queue closed for session: {session_id}"),
-                ),
-            };
             let _ = write_event(&mut *writer.lock().await, &evt).await;
         }
 
@@ -1984,10 +1868,7 @@ pub(crate) async fn handle_command(
             let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }
 
-        Command::Observe { .. }
-        | Command::ObserveSnapshot { .. }
-        | Command::ObserveFinalization { .. }
-        | Command::Unobserve { .. } => {
+        Command::Observe { .. } | Command::ObserveSnapshot { .. } | Command::Unobserve { .. } => {
             // Handled in handle_connection before dispatch
             let _ = write_event(&mut *writer.lock().await, &Event::Ok).await;
         }

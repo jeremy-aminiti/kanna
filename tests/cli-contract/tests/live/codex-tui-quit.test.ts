@@ -6,15 +6,16 @@ import { describe, expect, it } from "vitest";
 import { findCodexBinary } from "../../helpers/codex";
 import { codexBinaryOrNull, ptyBridgeAvailable } from "../../helpers/availability";
 import { makeRealTempDir, removeDir } from "../../helpers/background";
-import { startPtySession, type PtySession } from "../../helpers/pty";
+import { SUBMIT_ENTER_DELAY_MS, sleep, startPtySession, type PtySession } from "../../helpers/pty";
 
 // WHAT BREAKS IN KANNA IF THIS PIN FAILS: transfer finalization sequencing for
 // Codex tasks (Decision 3 step 3 — inject the provider quit command).
 //
-// The daemon submits the whole slash command and its terminating CR in one
-// buffer. Codex's composer opens a command popup on `/`, so the question is
-// whether a burst-written command survives that path or lands on the model as
-// chat text. It survives and executes `/quit`, which is what lets
+// kanna-server submits input as "write the whole message, wait 150 ms, send CR"
+// (daemon/session.rs, LOGICAL_INPUT_SUBMIT_DELAY_MS). Codex's composer opens a command popup
+// on `/`, so the question is whether a burst-written slash command survives that
+// popup or lands on the model as chat text. It survives — the popup offers
+// `/quit  exit Codex` and the discrete CR executes it — which is what lets
 // finalization reuse the ordinary input helper for Codex instead of growing a
 // provider-specific keystroke pacer.
 //
@@ -96,10 +97,23 @@ describe("codex TUI quit command", () => {
     try {
       if (!(await reachComposer(setup, ctx))) return;
 
-      await setup.session.submit("/quit");
+      // The message half of try_submit_task_input: one write, no per-character
+      // pacing. Codex's `/` popup has to cope with the whole string arriving at
+      // once.
+      setup.session.write("/quit");
+      expect(
+        await setup.session.waitForOutput(QUIT_POPUP, 10_000),
+        `codex did not offer /quit in its command popup after a burst write. The composer ` +
+        `now needs paced keystrokes, so the ordinary input helper would deliver the quit ` +
+        `command to the model as chat text. TUI tail:\n${setup.session.output.slice(-800)}`,
+      ).toBe(true);
+
+      // …and the CR half, sent as a discrete keystroke after the same delay.
+      await sleep(SUBMIT_ENTER_DELAY_MS);
+      setup.session.write("\r");
       expect(
         await setup.session.waitForExit(20_000),
-        `codex did not execute /quit from one logical-input buffer. Finalization would wait for an Exit that never ` +
+        `codex did not exit on /quit. Finalization would wait for an Exit that never ` +
         `arrives and fall through to destructive teardown. TUI tail:\n` +
         setup.session.output.slice(-800),
       ).toBe(0);

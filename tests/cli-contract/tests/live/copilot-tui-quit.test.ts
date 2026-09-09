@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { findCopilotBinary } from "../../helpers/copilot";
 import { copilotBinaryOrNull, ptyBridgeAvailable } from "../../helpers/availability";
 import { makeRealTempDir, removeDir } from "../../helpers/background";
-import { startPtySession, type PtySession } from "../../helpers/pty";
+import { SUBMIT_ENTER_DELAY_MS, sleep, startPtySession, type PtySession } from "../../helpers/pty";
 
 // WHAT BREAKS IN KANNA IF THIS PIN FAILS: transfer finalization sequencing for
 // Copilot tasks (Decision 3 step 3 — inject the provider quit command).
@@ -15,9 +15,9 @@ import { startPtySession, type PtySession } from "../../helpers/pty";
 // its TUI, read off the provider registry
 // (`AgentProvider::quit_command`, crates/kanna-agent-protocol/src/providers.rs).
 // Copilot's is `/exit`, and like Codex its composer opens a command popup on
-// `/`, so the open question is whether a slash command and its terminating CR
-// delivered in the daemon's one logical-input buffer survive that popup. They
-// do.
+// `/`, so the open question was whether a burst-written slash command — which
+// is how kanna-server submits input: the whole message in one write, 150 ms,
+// then a lone CR — survives that popup. It does.
 //
 // If this pin ever fails, injecting `/exit` sends Copilot a chat message
 // instead of quitting: finalization waits out its whole quit budget for an Exit
@@ -33,6 +33,7 @@ import { startPtySession, type PtySession } from "../../helpers/pty";
 // PtySession.compactOutput).
 const TRUST_PROMPT = /trust.{0,20}(files|contents|folder)/i;
 const COMPOSER = /commands·\?help|\/commands/i;
+const QUIT_POPUP = /\/exit/;
 
 async function startCopilotTui(): Promise<{ session: PtySession; cwd: string }> {
   const binary = await findCopilotBinary();
@@ -88,10 +89,22 @@ describe("copilot TUI quit command", () => {
     try {
       if (!(await reachComposer(session, ctx))) return;
 
-      await session.submit("/exit");
+      // The message half of try_submit_task_input: one write, no per-character
+      // pacing. Copilot's `/` popup has to cope with the whole string at once.
+      session.write("/exit");
+      expect(
+        await session.waitForOutput(QUIT_POPUP, 10_000),
+        `copilot did not show /exit after a burst write, so the composer now needs paced `
+        + `keystrokes and the ordinary input helper would deliver the quit command to the `
+        + `model as chat text. TUI tail:\n${session.output.slice(-800)}`,
+      ).toBe(true);
+
+      // …and the CR half, sent as a discrete keystroke after the same delay.
+      await sleep(SUBMIT_ENTER_DELAY_MS);
+      session.write("\r");
       expect(
         await session.waitForExit(30_000),
-        `copilot did not execute /exit from one logical-input buffer. Finalization would wait for an Exit that never `
+        `copilot did not exit on /exit. Finalization would wait for an Exit that never `
         + `arrives and fall through to destructive teardown. TUI tail:\n`
         + session.output.slice(-800),
       ).toBe(0);
