@@ -26,6 +26,7 @@ export const unattendedRealE2eFiles = [
   "native-window-theme.test.ts",
   "pty-runtime-status.test.ts",
   "pty-session.test.ts",
+  "remote-task-graph-refusal.test.ts",
   "remote-visual-companion.test.ts",
   "shell-modal-prewarmed-session.test.ts",
   "stage-continue-agent-submit.test.ts",

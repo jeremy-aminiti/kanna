@@ -149,7 +149,7 @@ describe("remote task graph and local action refusal", () => {
     await secondary.deleteSession().catch(() => undefined);
   });
 
-  it("renders the owning desktop graph and refuses a viewer-local IDE action", async () => {
+  it("renders the owning desktop graph and refuses viewer-local path actions", async () => {
     const owner = await createOwnerTask();
     await writeFile(join(owner.worktreePath, "remote-graph-proof.txt"), "owned by remote desktop\n");
     await execFileAsync("git", ["add", "remote-graph-proof.txt"], { cwd: owner.worktreePath });
@@ -177,6 +177,16 @@ describe("remote task graph and local action refusal", () => {
       toast.classList.remove("toast-enter-from", "toast-enter-active");
     `);
     await capture("remote-local-action-refusal.png");
+
+    await secondary.executeSync(buildGlobalKeydownScript({ key: "p", meta: true }));
+    await secondary.waitForText(".toast.warning .toast-message", "This action is not available for a task on another machine.", 10_000);
+    await secondary.waitForNoElement(".picker-modal", 10_000);
+    await capture("remote-file-picker-refusal.png");
+
+    await secondary.executeSync(buildGlobalKeydownScript({ key: "j", meta: true, shift: true }));
+    await secondary.waitForText(".toast.warning .toast-message", "Shell is only available for local tasks.", 10_000);
+    await secondary.waitForNoElement(".shell-modal", 10_000);
+    await capture("remote-repo-shell-refusal.png");
 
     const identity = await secondary.executeSync(`
       const diagnostics = window.__KANNA_E2E__?.setupState?.remoteTaskDiagnostics;

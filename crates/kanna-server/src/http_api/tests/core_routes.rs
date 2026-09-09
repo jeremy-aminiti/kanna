@@ -6250,7 +6250,9 @@ async fn task_graph_route_reads_the_owner_worktree_through_relay() {
         .unwrap()
         .success());
 
-    let response = fixture.get_graph_through_authenticated_relay("task-diff").await;
+    let response = fixture
+        .get_graph_through_authenticated_relay("task-diff")
+        .await;
     assert_eq!(response.status, StatusCode::OK.as_u16());
     let body = response.body.expect("graph body");
     assert_eq!(body["taskId"], "task-diff");
@@ -6261,8 +6263,17 @@ async fn task_graph_route_reads_the_owner_worktree_through_relay() {
 #[tokio::test]
 async fn task_graph_route_requires_remote_task_access_and_maps_missing_workspace() {
     let fixture = TaskDiffRouteFixture::new();
-    assert_eq!(fixture.get_graph("task-diff", false).await.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(fixture.get_graph("task-diff-no-workspace", true).await.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        fixture.get_graph("task-diff", false).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        fixture
+            .get_graph("task-diff-no-workspace", true)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
 }
 
 #[tokio::test]

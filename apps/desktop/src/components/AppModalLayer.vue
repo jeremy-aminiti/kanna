@@ -72,7 +72,7 @@ function setFilePickerRef(component: Element | ComponentPublicInstance | null) {
     @update:full-mode="m.shortcutsStartFull.value = $event"
   />
   <div
-    v-if="(m.showFilePickerModal.value || m.filePickerHidden.value) && !c.isMobile && c.store.selectedRepo?.path"
+    v-if="(m.showFilePickerModal.value || m.filePickerHidden.value) && !c.isMobile && !m.activeTaskViewIsRemote.value && c.store.selectedRepo?.path"
     v-show="m.showFilePickerModal.value"
   >
     <FilePickerModal
