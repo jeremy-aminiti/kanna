@@ -382,6 +382,7 @@ async function main(): Promise<void> {
         customizedReply: relayHarness.quickReply.text,
         fixture: relayHarness.fixture,
         prepareTaskUnreadForMarkRead: relayHarness.prepareTaskUnreadForMarkRead,
+        restoreTallTerminalGeometry: relayHarness.restoreTallTerminalGeometry,
         resyncTerminalConnection: relayHarness.resyncTerminalConnection,
         setTaskActivity: relayHarness.setTaskActivity,
         taskRow: relayHarness.taskRow,

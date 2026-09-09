@@ -49,6 +49,7 @@ interface RelayTaskFlowOptions {
   customizedReply: string;
   fixture: PtyTerminalFixture;
   prepareTaskUnreadForMarkRead(): Promise<void>;
+  restoreTallTerminalGeometry(): Promise<void>;
   resyncTerminalConnection(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: RelayTaskRowExpectation;
@@ -394,6 +395,12 @@ export async function verifyRelayPtyRenderedGridAndCursor(
       const cursorRow = lastInspection.cursorRow;
       const expectedCell = fixture.expectedCell;
       const expectedCursor = fixture.expectedCursor;
+      const bottomLayoutMatches = !fixture.expectBottomAnchored || (
+        typeof lastInspection.gridTopGap === "number" &&
+        lastInspection.gridTopGap > 0 &&
+        typeof lastInspection.gridBottomGap === "number" &&
+        lastInspection.gridBottomGap <= 1
+      );
       const renderedCell = expectedCell && lastInspection.visibleRows
         ? lastInspection.visibleRows[expectedCell.row]?.slice(
             expectedCell.column,
@@ -414,7 +421,8 @@ export async function verifyRelayPtyRenderedGridAndCursor(
         cursorRow < fixture.expectedRows &&
         (!expectedCell || renderedCell === expectedCell.text) &&
         (!expectedCursor ||
-          (cursorColumn === expectedCursor.column && cursorRow === expectedCursor.row))
+          (cursorColumn === expectedCursor.column && cursorRow === expectedCursor.row)) &&
+        bottomLayoutMatches
       );
     },
     {
@@ -423,7 +431,8 @@ export async function verifyRelayPtyRenderedGridAndCursor(
       timeoutMsg:
         `Expected the mobile WebView to render ${fixture.expectedCols}x${fixture.expectedRows} ` +
         `with cursor ${JSON.stringify(fixture.expectedCursor)} and cell ` +
-        `${JSON.stringify(fixture.expectedCell)}; last inspection ${JSON.stringify(lastInspection)}`,
+        `${JSON.stringify(fixture.expectedCell)}, excess space above the grid, and ` +
+        `its last row adjacent to the input chrome; last inspection ${JSON.stringify(lastInspection)}`,
     },
   );
 }
@@ -435,7 +444,26 @@ export async function verifyRelayPtyAuthoritativeScrollback(
 ): Promise<void> {
   const scrollTop = await driver.$(selectors.terminalScrollTop);
   await scrollTop.waitForExist({ timeout: SCREEN_TIMEOUT_MS });
+  const inspectionBeforeScroll = await (await driver.$(selectors.terminalInspection))
+    .getAttribute("value")
+    .catch(() => null);
   await scrollTop.click();
+
+  // Activating the native scroll affordance can briefly detach the WebView
+  // accessibility bridge. Wait for that exact inspection surface to return
+  // before asking the context inspector for the xterm grid.
+  await driver.waitUntil(
+    async () => {
+      const inspection = await driver.$(selectors.terminalInspection);
+      const value = await inspection.getAttribute("value").catch(() => null);
+      return value !== null && value !== inspectionBeforeScroll;
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected fresh terminal inspection after scroll-to-top",
+    },
+  );
 
   const expectedHistoryRow = /^MOBILE_PTY_HISTORY_\d{5}_X{100}$/;
   let lastInspection: Awaited<ReturnType<RelayUi["inspectTerminalWebView"]>> | null = null;
@@ -1901,7 +1929,16 @@ export async function runRelayTaskFlow(
         await waitForTaskTerminalLive(ui);
         await waitForRenderedPtyTerminal(ui, options.fixture);
         await verifyRelayPtyRenderedGridAndCursor(ui, options.fixture);
-        await verifyRelayPtyAuthoritativeScrollback(driver, ui, options.fixture);
+        const terminalScreenshotPath =
+          process.env.KANNA_E2E_TERMINAL_SCREENSHOT_PATH?.trim();
+        if (terminalScreenshotPath && renderedTerminalVisits === 0) {
+          await driver.saveScreenshot(terminalScreenshotPath);
+        }
+        if (renderedTerminalVisits === 0) {
+          await options.restoreTallTerminalGeometry();
+        } else {
+          await verifyRelayPtyAuthoritativeScrollback(driver, ui, options.fixture);
+        }
         process.stdout.write(
           `[mobile-e2e] authoritative terminal render visit ${renderedTerminalVisits + 1} passed\n`,
         );
