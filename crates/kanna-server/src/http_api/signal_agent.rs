@@ -653,6 +653,7 @@ async fn deliver_merge_handoff_message(
         "merge".to_string(),
         message.render(&task_id),
         SingletonAgentOverrides::default(),
+        true,
     )
     .await
 }
