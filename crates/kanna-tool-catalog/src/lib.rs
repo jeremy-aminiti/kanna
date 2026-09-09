@@ -187,6 +187,37 @@ const BUNDLED_CATALOG: &str = include_str!("catalog.json");
 /// MCP clients abort a `tools/call` on their own timer — Codex and Claude Code
 /// both cut at 300s — and when they do the calling agent loses the result
 /// entirely, including the tool's own "still running" answer.
+/// Header every first-party Kanna HTTP client sets so the server can name the
+/// caller in an error log.
+///
+/// Every request on the local listener arrives from `127.0.0.1`, so the peer
+/// address separates nothing: the CLI, this adapter, the desktop, and a
+/// sidecar are indistinguishable. A runaway client once wrote a million
+/// identical 400s into `kanna-server.log` and the line named neither the
+/// process that sent it nor the query it failed on. This is diagnostic only —
+/// it is caller-declared, unverified, and grants no authority whatsoever.
+pub const CLIENT_IDENTITY_HEADER: &str = "x-kanna-client";
+
+/// `<name>/<version> pid=<pid>[ task=<task id>]` — enough to find the process
+/// while it is still running, and to name the task session it belongs to after
+/// it is gone.
+pub fn client_identity_header_value(name: &str, version: &str) -> String {
+    let mut identity = format!("{name}/{version} pid={}", std::process::id());
+    if let Some(task_id) = std::env::var("KANNA_TASK_ID")
+        .ok()
+        .map(|task_id| task_id.trim().to_string())
+        .filter(|task_id| {
+            !task_id.is_empty()
+                && task_id
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        })
+    {
+        identity.push_str(&format!(" task={task_id}"));
+    }
+    identity
+}
+
 pub const CLIENT_TOOL_CALL_BUDGET_SECS: u64 = 300;
 
 /// Hard ceiling on a single `kanna_wait_task` window, enforced here rather than

@@ -227,7 +227,12 @@ impl AggregateWaitRegistry {
         Some(entry.cursor.clone())
     }
 
-    fn issue_short_cursor(&mut self, cursor: String, reuse_handle: Option<&str>) -> String {
+    fn issue_short_cursor(
+        &mut self,
+        issuer: &str,
+        cursor: String,
+        reuse_handle: Option<&str>,
+    ) -> String {
         let now = tokio::time::Instant::now();
         self.evict_expired(now);
         // A cursor is a consumer checkpoint, not a response id. Updating the
@@ -261,7 +266,7 @@ impl AggregateWaitRegistry {
             self.short_cursors.remove(&oldest);
         }
         loop {
-            let handle = new_short_cursor_handle(SHORT_CURSOR_PREFIX);
+            let handle = new_short_cursor_handle(issuer);
             if !self.short_cursors.contains_key(&handle) {
                 self.short_cursors.insert(
                     handle.clone(),
@@ -296,10 +301,41 @@ impl AggregateWaitRegistry {
     }
 }
 
-fn new_short_cursor_handle(prefix: &str) -> String {
+/// A short handle names the server that issued it. A handle is only
+/// resolvable on that server — its process cache and its `task_event_cursor_handle`
+/// rows are local — so a handle replayed against another machine can never
+/// succeed, and reporting that as "expired" sent an operator hunting for a
+/// retention bug instead of a misrouted wait. Derived from the desktop id with
+/// SHA-256 rather than `DefaultHasher` so a handle minted by an older build
+/// still identifies its issuer after a toolchain upgrade.
+fn issuer_token(desktop_id: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(desktop_id.as_bytes());
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3]
+    )
+}
+
+const SHORT_CURSOR_ISSUER_LEN: usize = 8;
+const SHORT_CURSOR_NONCE_LEN: usize = 8;
+
+/// `kh1.<issuer>.<nonce>`. Handles minted before the issuer field carry only
+/// the nonce; they are attributed to this server, which is where they were
+/// resolvable before the field existed.
+fn short_cursor_issuer(handle: &str) -> Option<&str> {
+    let body = handle.strip_prefix(SHORT_CURSOR_PREFIX)?;
+    let (issuer, nonce) = body.split_once('.')?;
+    (issuer.len() == SHORT_CURSOR_ISSUER_LEN
+        && nonce.len() == SHORT_CURSOR_NONCE_LEN
+        && issuer.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then_some(issuer)
+}
+
+fn new_short_cursor_handle(issuer: &str) -> String {
     let nonce = SHORT_CURSOR_NONCE.fetch_add(1, Ordering::Relaxed);
     let mut hasher = DefaultHasher::new();
-    prefix.hash(&mut hasher);
+    issuer.hash(&mut hasher);
     nonce.hash(&mut hasher);
     std::process::id().hash(&mut hasher);
     std::time::SystemTime::now()
@@ -307,23 +343,49 @@ fn new_short_cursor_handle(prefix: &str) -> String {
         .unwrap_or_default()
         .as_nanos()
         .hash(&mut hasher);
-    format!("{prefix}{:08x}", hasher.finish() as u32)
-}
-
-fn expired_short_cursor() -> (axum::http::StatusCode, String) {
-    (
-        axum::http::StatusCode::BAD_REQUEST,
-        "task-event cursor handle is invalid or expired; restart without a cursor to safely replay retained history"
-            .to_string(),
+    format!(
+        "{SHORT_CURSOR_PREFIX}{issuer}.{:08x}",
+        hasher.finish() as u32
     )
 }
 
-fn expand_short_cursor(
+fn foreign_short_cursor(
+    handle: &str,
+    issuer: &str,
+    state: &Arc<AppState>,
+) -> (axum::http::StatusCode, String) {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        format!(
+            "task-event cursor handle {handle} was issued by another machine ({issuer}); \
+             this server is {} ({}). A short cursor handle is only resolvable on the \
+             server that issued it, so retrying it here can never succeed: route the wait \
+             to the issuing machine, or retry without a cursor to start a wait this \
+             server owns.",
+            state.config().desktop_id,
+            issuer_token(&state.config().desktop_id),
+        ),
+    )
+}
+
+/// What a supplied cursor resolved to.
+enum ShortCursorResolution {
+    /// Not a short handle, or a handle this server could resolve. Carries the
+    /// native cursor to wait on.
+    Cursor(Option<String>),
+    /// This server issued the handle but no longer holds its checkpoint. The
+    /// wait restarts from retained history — the recovery the old 400 asked
+    /// the caller to perform — so a caller that re-arms mechanically makes
+    /// progress instead of spinning on a request that can only ever fail.
+    Reset(String),
+}
+
+fn resolve_short_cursor(
     state: &Arc<AppState>,
     cursor: Option<&str>,
-) -> Result<Option<String>, (axum::http::StatusCode, String)> {
+) -> Result<ShortCursorResolution, (axum::http::StatusCode, String)> {
     let Some(handle) = cursor.filter(|cursor| cursor.starts_with(SHORT_CURSOR_PREFIX)) else {
-        return Ok(cursor.map(str::to_string));
+        return Ok(ShortCursorResolution::Cursor(cursor.map(str::to_string)));
     };
     if let Some(cursor) = state
         .aggregate_task_event_waits
@@ -331,13 +393,24 @@ fn expand_short_cursor(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .resolve_short_cursor(handle)
     {
-        return Ok(Some(cursor));
+        return Ok(ShortCursorResolution::Cursor(Some(cursor)));
     }
-    Db::open(&state.config().db_path)
+    if let Some(cursor) = Db::open(&state.config().db_path)
         .and_then(|db| db.resolve_task_event_cursor_handle(handle))
         .map_err(db_error)?
-        .map(Some)
-        .ok_or_else(expired_short_cursor)
+    {
+        return Ok(ShortCursorResolution::Cursor(Some(cursor)));
+    }
+    let local_issuer = issuer_token(&state.config().desktop_id);
+    if let Some(issuer) = short_cursor_issuer(handle) {
+        if issuer != local_issuer {
+            return Err(foreign_short_cursor(handle, issuer, state));
+        }
+    }
+    Ok(ShortCursorResolution::Reset(format!(
+        "task-event cursor handle {handle} is no longer held by this server, so this wait \
+         restarted from retained history and returns a new handle"
+    )))
 }
 
 fn shorten_response_cursor(
@@ -355,12 +428,13 @@ fn shorten_response_cursor(
             )
         })?
         .to_string();
+    let issuer = issuer_token(&state.config().desktop_id);
     // The durable row is the checkpoint of record.  In particular, do not
     // advance the cache first: a SQLite failure after forming this response
     // must leave a retry of the same handle at its previous position.
     let handle = reuse_handle
         .map(str::to_owned)
-        .unwrap_or_else(|| new_short_cursor_handle(SHORT_CURSOR_PREFIX));
+        .unwrap_or_else(|| new_short_cursor_handle(&issuer));
     Db::open(&state.config().db_path)
         .and_then(|db| db.store_task_event_cursor_handle(&handle, &cursor))
         .map_err(db_error)?;
@@ -368,18 +442,19 @@ fn shorten_response_cursor(
         .aggregate_task_event_waits
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .issue_short_cursor(cursor.clone(), Some(&handle));
+        .issue_short_cursor(&issuer, cursor.clone(), Some(&handle));
     response["cursor"] = Value::String(handle);
     Ok(Json(response))
 }
 
 #[cfg(test)]
 pub(super) fn issue_expired_short_cursor_for_test(state: &Arc<AppState>) -> String {
+    let issuer = issuer_token(&state.config().desktop_id);
     let mut registry = state
         .aggregate_task_event_waits
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let handle = registry.issue_short_cursor("0".to_string(), None);
+    let handle = registry.issue_short_cursor(&issuer, "0".to_string(), None);
     if let Some(entry) = registry.short_cursors.get_mut(&handle) {
         entry.last_touched = tokio::time::Instant::now() - AGGREGATE_WAIT_SESSION_TTL;
     }
@@ -2088,7 +2163,7 @@ pub(super) async fn wait_task_events(
     account_wide_access: AccountWideTaskEventAccess,
     tunneled: Option<Extension<TunneledHttpInvoke>>,
 ) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
-    let input_short_cursor = query
+    let mut input_short_cursor = query
         .cursor
         .as_deref()
         .filter(|cursor| cursor.starts_with(SHORT_CURSOR_PREFIX))
@@ -2098,7 +2173,20 @@ pub(super) async fn wait_task_events(
             .cursor
             .as_deref()
             .is_some_and(|cursor| cursor.starts_with(SHORT_CURSOR_PREFIX));
-    query.cursor = expand_short_cursor(&state, query.cursor.as_deref())?;
+    let cursor_reset = match resolve_short_cursor(&state, query.cursor.as_deref())? {
+        ShortCursorResolution::Cursor(cursor) => {
+            query.cursor = cursor;
+            None
+        }
+        ShortCursorResolution::Reset(reason) => {
+            log::warn!("[task-events] {reason}");
+            // A fresh handle, so the response cursor visibly differs from the
+            // one the caller replayed and the reset cannot pass unnoticed.
+            input_short_cursor = None;
+            query.cursor = None;
+            Some(reason)
+        }
+    };
 
     let result = if tunneled.is_some() || query.local_only {
         wait_local_task_events(Arc::clone(&state), query, tunneled.is_some()).await
@@ -2142,11 +2230,18 @@ pub(super) async fn wait_task_events(
         }
     }?;
 
-    if use_short_cursor {
-        shorten_response_cursor(&state, input_short_cursor.as_deref(), result)
+    let mut result = if use_short_cursor {
+        shorten_response_cursor(&state, input_short_cursor.as_deref(), result)?
     } else {
-        Ok(result)
+        result
+    };
+    if let Some(reason) = cursor_reset {
+        if let Some(response) = result.0.as_object_mut() {
+            response.insert("cursorReset".to_string(), Value::Bool(true));
+            response.insert("cursorResetReason".to_string(), Value::String(reason));
+        }
     }
+    Ok(result)
 }
 
 #[cfg(test)]

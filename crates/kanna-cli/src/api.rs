@@ -222,8 +222,30 @@ pub(crate) fn task_logs_path_with_agent_view(
     }
 }
 
+/// One client for every request this process makes, carrying the identity
+/// header the server logs when a request fails. Built once: a runaway caller
+/// must be identifiable, and a fresh `reqwest::Client` per call also throws
+/// away the connection pool.
+pub(crate) fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        let identity = kanna_tool_catalog::client_identity_header_value(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        );
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Ok(value) = reqwest::header::HeaderValue::from_str(&identity) {
+            headers.insert(kanna_tool_catalog::CLIENT_IDENTITY_HEADER, value);
+        }
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap_or_default()
+    })
+}
+
 pub(crate) async fn get_json<T: DeserializeOwned>(base_url: &str, path: &str) -> Result<T, String> {
-    let mut request = reqwest::Client::new().get(join_server_url(base_url, path));
+    let mut request = http_client().get(join_server_url(base_url, path));
     if path.split('?').next() == Some("/v1/task-events") {
         if let Some(token) = read_task_events_token_from_env()? {
             request = request.bearer_auth(token);
@@ -274,7 +296,7 @@ pub(crate) async fn require_success(
 }
 
 pub(crate) async fn get_text(base_url: &str, path: &str) -> Result<String, String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .get(join_server_url(base_url, path))
         .send()
         .await
@@ -291,7 +313,7 @@ pub(crate) async fn post_json<B: Serialize, T: DeserializeOwned>(
     path: &str,
     body: &B,
 ) -> Result<T, String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .post(join_server_url(base_url, path))
         .json(body)
         .send()
@@ -309,7 +331,7 @@ pub(crate) async fn patch_json<B: Serialize, T: DeserializeOwned>(
     path: &str,
     body: &B,
 ) -> Result<T, String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .patch(join_server_url(base_url, path))
         .json(body)
         .send()
@@ -327,7 +349,7 @@ pub(crate) async fn post_no_content_json<B: Serialize>(
     path: &str,
     body: &B,
 ) -> Result<(), String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .post(join_server_url(base_url, path))
         .json(body)
         .send()
@@ -343,7 +365,7 @@ pub(crate) async fn post_catalog_json(
     path: &str,
     body: &Value,
 ) -> Result<Value, String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .post(join_server_url(base_url, path))
         .json(body)
         .send()
@@ -364,7 +386,7 @@ pub(crate) async fn patch_catalog_json(
     path: &str,
     body: &Value,
 ) -> Result<Value, String> {
-    let response = reqwest::Client::new()
+    let response = http_client()
         .patch(join_server_url(base_url, path))
         .json(body)
         .send()

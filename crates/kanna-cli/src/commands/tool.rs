@@ -395,7 +395,7 @@ async fn bind_request_to_spawned_run(
 }
 
 async fn get_runtime_status(base_url: &str, path: &str) -> Result<Value, String> {
-    let response = reqwest::Client::new()
+    let response = crate::api::http_client()
         .get(crate::api::join_server_url(base_url, path))
         .send()
         .await

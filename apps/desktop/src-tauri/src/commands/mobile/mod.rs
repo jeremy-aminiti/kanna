@@ -760,25 +760,93 @@ fn app_data_dir_for_server_config(config_path: &Path) -> Result<PathBuf, String>
         .ok_or_else(|| "mobile config path missing app data directory".to_string())
 }
 
-/// kanna-server logs through env_logger to stderr; discarding it leaves API
-/// 500s with no server-side record anywhere. Append stderr to a log file next
-/// to `server.toml` (the same directory the daemon logs into). Errors-only by
-/// default, so the file stays small.
+/// Most this capture may occupy. The server duplicates every log record to
+/// stderr, so a runaway logger writes it here too — and unlike the server's
+/// own file, nothing rotated or truncated this one, not even a restart. It
+/// reached 22.8 GB and 123 million lines on a staging machine, filling the
+/// disk, while the same records sat in the server's file beside it.
+const MAX_SERVER_STDERR_LOG_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Capture the sidecar's stderr — its duplicated log records, plus the panics
+/// and dynamic-loader complaints that reach no other sink. Discarding it
+/// leaves a crash with no record anywhere.
+///
+/// Truncating at spawn is not enough on its own: the flood that filled a disk
+/// happened inside one eleven-hour run. The writer below therefore checks the
+/// size as it appends and starts over when it crosses the cap, leaving a
+/// marker. The server's own `kanna-server_<pid>.log` — rotated, timestamped,
+/// and keeping several files of history — is the durable record; this is a
+/// bounded tail.
 fn server_stderr_log(config_path: &Path) -> std::process::Stdio {
     let Some(dir) = config_path.parent() else {
         eprintln!("[mobile] cannot derive kanna-server log directory; discarding server stderr");
         return std::process::Stdio::null();
     };
-    match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("kanna-server.log"))
-    {
-        Ok(file) => std::process::Stdio::from(file),
+    let path = dir.join("kanna-server-stderr.log");
+    let (reader, writer) = match std::io::pipe() {
+        Ok(pair) => pair,
         Err(err) => {
-            eprintln!("[mobile] failed to open kanna-server.log: {err}; discarding server stderr");
-            std::process::Stdio::null()
+            eprintln!("[mobile] failed to create stderr pipe: {err}; discarding server stderr");
+            return std::process::Stdio::null();
         }
+    };
+    if let Err(err) = std::thread::Builder::new()
+        .name("kanna-server-stderr".to_string())
+        .spawn(move || drain_server_stderr(reader, &path))
+    {
+        eprintln!("[mobile] failed to start stderr writer: {err}; discarding server stderr");
+        return std::process::Stdio::null();
+    }
+    std::process::Stdio::from(writer)
+}
+
+/// Append the sidecar's stderr to `path`, restarting the file whenever it
+/// crosses [`MAX_SERVER_STDERR_LOG_BYTES`]. Returns when the sidecar's stderr
+/// closes.
+fn drain_server_stderr(mut reader: std::io::PipeReader, path: &Path) {
+    use std::io::{Read, Write};
+
+    let open = || {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|err| {
+                eprintln!(
+                    "[mobile] failed to open {}: {err}; discarding server stderr",
+                    path.display()
+                );
+            })
+    };
+    let Ok(mut file) = open() else { return };
+    let mut written = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(read) => read,
+            // The sidecar exited, or the pipe broke; either way there is
+            // nothing left to record.
+            Err(_) => return,
+        };
+        if written >= MAX_SERVER_STDERR_LOG_BYTES {
+            match std::fs::File::create(path) {
+                Ok(fresh) => {
+                    file = fresh;
+                    written = 0;
+                    let _ = writeln!(
+                        file,
+                        "--- kanna-server stderr restarted: exceeded {} MiB ---",
+                        MAX_SERVER_STDERR_LOG_BYTES / (1024 * 1024)
+                    );
+                }
+                Err(err) => eprintln!("[mobile] failed to restart {}: {err}", path.display()),
+            }
+        }
+        if file.write_all(&buffer[..read]).is_err() {
+            return;
+        }
+        written = written.saturating_add(read as u64);
     }
 }
 
@@ -1219,11 +1287,11 @@ mod tests {
     use super::config::{build_server_config, sidecar_sha256_config_line};
     use super::{
         adopt_native_desktop, app_data_dir_for_server_config, current_server_version,
-        default_desktop_name_from_sources, desktop_id, escape_toml_string,
+        default_desktop_name_from_sources, desktop_id, drain_server_stderr, escape_toml_string,
         generate_uuid_v4_from_reader, is_current_server_status, listening_server_pid,
         resolved_db_path, server_base_url, server_stderr_log, stop_server_on_port,
         stopped_snapshot, MobilePairingSession, MobileServerManager, MobileServerState,
-        MobileServerStatus, WritePathHealth,
+        MobileServerStatus, WritePathHealth, MAX_SERVER_STDERR_LOG_BYTES,
     };
     use crate::daemon_client::DaemonClient;
     use std::collections::HashMap;
@@ -1414,7 +1482,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).expect("create log dir");
         let config_path = root.join("server.toml");
-        let log_path = root.join("kanna-server.log");
+        let log_path = root.join("kanna-server-stderr.log");
         std::fs::write(&log_path, "earlier run\n").expect("seed log");
 
         let stdio = server_stderr_log(&config_path);
@@ -1425,12 +1493,69 @@ mod tests {
             .expect("run child with captured stderr");
         assert!(status.success());
 
-        let contents = std::fs::read_to_string(&log_path).expect("read log");
+        // The capture is drained on its own thread, so the write lands
+        // shortly after the child exits rather than before.
+        let mut contents = String::new();
+        for _ in 0..200 {
+            contents = std::fs::read_to_string(&log_path).unwrap_or_default();
+            if contents.contains("server error") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(
             contents.starts_with("earlier run\n"),
             "log must append, not truncate: {contents}"
         );
-        assert!(contents.contains("server error"));
+        assert!(contents.contains("server error"), "{contents}");
+        // The server owns `kanna-server.log` (a symlink to its own rotated
+        // file). Capturing stderr there duplicated every record into a file
+        // nothing bounds.
+        assert!(
+            !root.join("kanna-server.log").exists(),
+            "the stderr capture must not claim the server's own log name"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The flood that filled a disk happened inside a single run, so a cap
+    /// that only applies at spawn is no cap at all.
+    #[test]
+    fn the_stderr_capture_restarts_when_it_crosses_its_size_cap() {
+        use std::io::Write;
+
+        let root = std::env::temp_dir().join(format!(
+            "kanna-server-stderr-cap-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create log dir");
+        let path = root.join("kanna-server-stderr.log");
+
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        let drain_path = path.clone();
+        let drain = std::thread::spawn(move || drain_server_stderr(reader, &drain_path));
+
+        // Well past the cap: an unbounded writer would keep every byte.
+        let line = vec![b'x'; 64 * 1024];
+        let mut sent = 0u64;
+        while sent < MAX_SERVER_STDERR_LOG_BYTES * 3 {
+            writer.write_all(&line).expect("write to pipe");
+            sent += line.len() as u64;
+        }
+        drop(writer);
+        drain.join().expect("drain thread");
+
+        let size = std::fs::metadata(&path).expect("stat log").len();
+        assert!(
+            size <= MAX_SERVER_STDERR_LOG_BYTES + line.len() as u64,
+            "capture kept {size} bytes of {sent} written, above the cap"
+        );
+        assert!(size > 0, "the capture must still hold a recent tail");
 
         let _ = std::fs::remove_dir_all(root);
     }

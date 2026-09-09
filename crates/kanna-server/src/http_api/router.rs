@@ -468,16 +468,81 @@ fn cors_layer() -> CorsLayer {
         .max_age(std::time::Duration::from_secs(600))
 }
 
+const MAX_LOGGED_CLIENT_IDENTITY: usize = 120;
+
+/// Query keys whose values never belong in a log file.
+fn is_sensitive_query_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    ["token", "secret", "password", "credential", "signature"]
+        .iter()
+        .any(|needle| key.contains(needle))
+}
+
+/// The request target with credential-shaped query values removed. The query
+/// is what makes a repeated error actionable — which cursor, which task — and
+/// dropping it is why the same 400 could be logged a million times without
+/// anyone being able to tell what it was about.
+fn loggable_target(uri: &axum::http::Uri) -> String {
+    let path = uri.path();
+    let Some(query) = uri.query() else {
+        return path.to_string();
+    };
+    let redacted = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _)) if is_sensitive_query_key(key) => format!("{key}=<redacted>"),
+            _ => pair.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{path}?{redacted}")
+}
+
+/// Any local process can set this header, so it is sanitized before it reaches
+/// the log: control characters would let a caller forge log lines.
+fn loggable_client_identity(headers: &axum::http::HeaderMap) -> Option<String> {
+    let value = headers
+        .get(kanna_tool_catalog::CLIENT_IDENTITY_HEADER)?
+        .to_str()
+        .ok()?;
+    let sanitized = value
+        .chars()
+        .filter(|character| character.is_ascii_graphic() || *character == ' ')
+        .take(MAX_LOGGED_CLIENT_IDENTITY)
+        .collect::<String>();
+    let sanitized = sanitized.trim();
+    (!sanitized.is_empty()).then(|| sanitized.to_string())
+}
+
 /// Log every error response with its body. Clients see the body too, but a
 /// crashed or headless client leaves no trace — this is the server-side
 /// record of what actually failed (request-revision once returned a bare 500
 /// that nothing recorded).
+///
+/// A relay or KSP invoke is dispatched through this same router, so its
+/// `ConnectInfo` is a synthetic loopback address; `TunneledHttpInvoke` is what
+/// separates a tunnelled caller from a real socket, and without that
+/// distinction "no relay prefix on the line" reads as "a local process" when
+/// it may not be.
 async fn log_error_responses(
     request: Request<Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let method = request.method().clone();
-    let path = request.uri().path().to_string();
+    let target = loggable_target(request.uri());
+    let origin = if request.extensions().get::<TunneledHttpInvoke>().is_some() {
+        "tunneled".to_string()
+    } else {
+        request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+            .map(|axum::extract::ConnectInfo(peer)| format!("peer {peer}"))
+            .unwrap_or_else(|| "peer unknown".to_string())
+    };
+    let client = loggable_client_identity(request.headers())
+        .map(|client| format!(" [{client}]"))
+        .unwrap_or_default();
+    let caller = format!("{origin}{client}");
     let response = next.run(request).await;
     let status = response.status();
     if !(status.is_client_error() || status.is_server_error()) {
@@ -487,13 +552,15 @@ async fn log_error_responses(
     match axum::body::to_bytes(body, usize::MAX).await {
         Ok(bytes) => {
             log::error!(
-                "{method} {path} -> {status}: {}",
+                "{method} {target} -> {status} ({caller}): {}",
                 String::from_utf8_lossy(&bytes)
             );
             axum::response::Response::from_parts(parts, Body::from(bytes))
         }
         Err(error) => {
-            log::error!("{method} {path} -> {status}: failed to read error body: {error}");
+            log::error!(
+                "{method} {target} -> {status} ({caller}): failed to read error body: {error}"
+            );
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("failed to read error response body: {error}"),
@@ -668,4 +735,83 @@ pub async fn serve(state: Arc<AppState>) -> Result<(), String> {
     )
     .await
     .map_err(|e| format!("LAN API server failed: {}", e))
+}
+
+#[cfg(test)]
+mod error_log_tests {
+    use super::*;
+
+    fn uri(target: &str) -> axum::http::Uri {
+        target.parse().expect("uri")
+    }
+
+    /// The line that repeated a million times said only
+    /// `GET /v1/task-events -> 400`. Which cursor, which scope, which task —
+    /// all of it was in the query, and none of it was logged.
+    #[test]
+    fn the_logged_target_keeps_the_query_that_makes_an_error_actionable() {
+        assert_eq!(
+            loggable_target(&uri(
+                "/v1/task-events?taskIds=12c80ef0&shortCursor=true&cursor=kh1.a1b2c3d4.24247388"
+            )),
+            "/v1/task-events?taskIds=12c80ef0&shortCursor=true&cursor=kh1.a1b2c3d4.24247388"
+        );
+        assert_eq!(loggable_target(&uri("/v1/status")), "/v1/status");
+    }
+
+    #[test]
+    fn credential_shaped_query_values_are_redacted() {
+        assert_eq!(
+            loggable_target(&uri("/v1/thing?token=abc&deviceSecret=xyz&taskIds=a")),
+            "/v1/thing?token=<redacted>&deviceSecret=<redacted>&taskIds=a"
+        );
+    }
+
+    /// Any local process can set the identity header, so it must not be able
+    /// to write its own log lines through it.
+    #[test]
+    fn a_client_identity_cannot_forge_log_lines() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            kanna_tool_catalog::CLIENT_IDENTITY_HEADER,
+            axum::http::HeaderValue::from_str("kanna-cli/0.1.0 pid=1234 task=aba11c5d")
+                .expect("header"),
+        );
+        assert_eq!(
+            loggable_client_identity(&headers).as_deref(),
+            Some("kanna-cli/0.1.0 pid=1234 task=aba11c5d")
+        );
+
+        // A header value cannot carry a raw newline, but a tab is legal in one
+        // and would still let a caller shape the log line.
+        headers.insert(
+            kanna_tool_catalog::CLIENT_IDENTITY_HEADER,
+            axum::http::HeaderValue::from_bytes(b"evil\tclient").expect("header"),
+        );
+        let sanitized = loggable_client_identity(&headers).expect("identity");
+        assert_eq!(sanitized, "evilclient");
+        assert!(
+            sanitized
+                .chars()
+                .all(|character| character.is_ascii_graphic() || character == ' '),
+            "{sanitized}"
+        );
+
+        // Non-UTF-8 bytes are legal in a header value and have no business in
+        // a log line: drop the whole value rather than guess at it.
+        headers.insert(
+            kanna_tool_catalog::CLIENT_IDENTITY_HEADER,
+            axum::http::HeaderValue::from_bytes(b"client\xff\xfe").expect("header"),
+        );
+        assert_eq!(loggable_client_identity(&headers), None);
+
+        headers.insert(
+            kanna_tool_catalog::CLIENT_IDENTITY_HEADER,
+            axum::http::HeaderValue::from_str(&"a".repeat(4_096)).expect("header"),
+        );
+        assert_eq!(
+            loggable_client_identity(&headers).map(|identity| identity.len()),
+            Some(MAX_LOGGED_CLIENT_IDENTITY)
+        );
+    }
 }
