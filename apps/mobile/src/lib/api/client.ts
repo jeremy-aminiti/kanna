@@ -23,6 +23,8 @@ import type {
   RepoCommandCatalog,
   RunRepoCommandResponse,
   DesktopSummary,
+  HumanReviewDecisionRequest,
+  MergeHandoffSignalResponse,
   MobileServerStatus,
   PushPairingMaterial,
   TaskActionResponse,
@@ -211,6 +213,20 @@ export interface KannaTransport {
   abortTaskCreation(input: AbortTaskCreationRequest): Promise<void>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
+  /**
+   * Hand a human's merge authorization for a reviewed pull request to the
+   * repository's merge singleton.
+   *
+   * Optional on purpose: a desktop that predates this contract does not have
+   * the route, and the caller must say so rather than fall back to a generic
+   * merge request — a request without the recorded decision is an agent-shaped
+   * one, and sending it would misrepresent who authorized the merge.
+   */
+  queueReviewedPrForMerge?(
+    taskId: string,
+    decision: HumanReviewDecisionRequest,
+    summary: string
+  ): Promise<MergeHandoffSignalResponse>;
   resumeTask?(taskId: string): Promise<TaskActionResponse>;
   markTaskRead(
     taskId: string,
@@ -289,6 +305,20 @@ export interface KannaClient {
   abortTaskCreation(input: AbortTaskCreationRequest): Promise<void>;
   runMergeAgent(taskId: string): Promise<TaskActionResponse>;
   advanceTaskStage(taskId: string): Promise<TaskActionResponse>;
+  /**
+   * Hand a human's merge authorization for a reviewed pull request to the
+   * repository's merge singleton.
+   *
+   * Optional on purpose: a desktop that predates this contract does not have
+   * the route, and the caller must say so rather than fall back to a generic
+   * merge request — a request without the recorded decision is an agent-shaped
+   * one, and sending it would misrepresent who authorized the merge.
+   */
+  queueReviewedPrForMerge?(
+    taskId: string,
+    decision: HumanReviewDecisionRequest,
+    summary: string
+  ): Promise<MergeHandoffSignalResponse>;
   resumeTask?(taskId: string): Promise<TaskActionResponse>;
   markTaskRead(
     taskId: string,
@@ -434,6 +464,15 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     abortTaskCreation: (input) => transport.abortTaskCreation(input),
     runMergeAgent: (taskId) => transport.runMergeAgent(taskId),
     advanceTaskStage: (taskId) => transport.advanceTaskStage(taskId),
+    ...(transport.queueReviewedPrForMerge
+      ? {
+          queueReviewedPrForMerge: (
+            taskId: string,
+            decision: HumanReviewDecisionRequest,
+            summary: string
+          ) => transport.queueReviewedPrForMerge!(taskId, decision, summary)
+        }
+      : {}),
     ...(resumeTask
       ? { resumeTask: (taskId: string) => resumeTask(taskId) }
       : {}),

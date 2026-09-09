@@ -399,6 +399,81 @@ export interface TaskLatestRun {
   finishedAt?: string | null;
 }
 
+/**
+ * What a review task is reviewing, as the forge identifies it.
+ *
+ * Candidate information published by the review or triage agent — never an
+ * approval. It is what lets this app name the pull request and show the
+ * operator the exact commit their decision is pinned to.
+ */
+export interface TaskReviewContext {
+  /** Bumped on every refresh; a decision records the version it was taken against. */
+  version: number;
+  prUrl: string;
+  headRepo?: string | null;
+  headRef?: string | null;
+  headSha: string;
+  baseRef: string;
+  baseSha?: string | null;
+  producingTaskId?: string | null;
+  producingMachineId?: string | null;
+  triageParentTaskId?: string | null;
+  triageRank?: number | null;
+  relatedPrUrls?: string[];
+  updatedAt: string;
+}
+
+/**
+ * A recorded human merge authorization for one reviewed head.
+ *
+ * `deliveryStatus` is kept beside the decision, never inside it: `uncertain`
+ * means the merge agent may already hold the request and a person must
+ * reconcile that session rather than send it again.
+ */
+export interface HumanReviewDecision {
+  id: string;
+  taskId: string;
+  reviewContextVersion: number;
+  prUrl: string;
+  head?: string | null;
+  headSha: string;
+  baseRef: string;
+  baseSha?: string | null;
+  actionText: string;
+  origin: string;
+  sourceMachineId?: string | null;
+  createdAt: string;
+  deliveryStatus: "pending" | "delivered" | "failed" | "uncertain";
+  deliveryDetail?: string | null;
+  deliveredAt?: string | null;
+  mergeTaskId?: string | null;
+  ownerDesktopId?: string | null;
+}
+
+/**
+ * One operator's merge authorization, as the control collects it.
+ *
+ * It carries no pull-request identity of its own — the server derives that
+ * from the task's stored review context — so a caller cannot confirm one PR
+ * and queue another. What it does carry is what the operator was looking at,
+ * which is how a decision taken against a head that has since moved is
+ * refused instead of applied.
+ */
+export interface HumanReviewDecisionRequest {
+  reviewContextVersion: number;
+  headSha: string;
+  actionText: string;
+}
+
+/** What the merge singleton answered when a human decision was handed to it. */
+export interface MergeHandoffSignalResponse {
+  /** The merge singleton task the request went to. */
+  taskId: string;
+  created: boolean;
+  /** The desktop whose lifecycle owns that merge task — not always this one. */
+  ownerDesktopId?: string | null;
+}
+
 export interface TaskDetail extends TaskSummary {
   workflowName?: string | null;
   stageTransition?: string | null;
@@ -420,4 +495,8 @@ export interface TaskDetail extends TaskSummary {
   revisionRounds?: number;
   /** Rounds the task's workflow allows before it parks for its human; 0 = unlimited. */
   revisionLimit?: number;
+  /** Absent when this task is not a pull-request review with a published PR identity. */
+  reviewContext?: TaskReviewContext | null;
+  /** The most recent human merge authorization recorded on this task. */
+  humanReviewDecision?: HumanReviewDecision | null;
 }

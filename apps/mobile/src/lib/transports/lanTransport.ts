@@ -23,6 +23,8 @@ import type {
   RepoFileRange,
   RepoCommandCatalog,
   RunRepoCommandResponse,
+  HumanReviewDecisionRequest,
+  MergeHandoffSignalResponse,
   TaskActionResponse,
   TaskActivityResponse,
   TaskDiffContent,
@@ -242,6 +244,22 @@ export function createLanTransport(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ source: "operator" })
       }),
+    queueReviewedPrForMerge: (
+      taskId: string,
+      decision: HumanReviewDecisionRequest,
+      summary: string
+    ) =>
+      request<MergeHandoffSignalResponse>(
+        `/v1/tasks/${encodeURIComponent(taskId)}/actions/signal-merge-handoff`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // No branch or target: the server derives the head and base from the
+          // task's stored review context, so this request cannot name one pull
+          // request in the confirmation and another on the wire.
+          body: JSON.stringify({ summary, humanReviewDecision: decision })
+        }
+      ),
     resumeTask: (taskId: string) =>
       request<TaskActionResponse>(`/v1/tasks/${encodeURIComponent(taskId)}/actions/resume`, {
         method: "POST"

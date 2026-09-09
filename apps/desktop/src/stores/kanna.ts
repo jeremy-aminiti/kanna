@@ -189,6 +189,7 @@ Use this branch as the default when the user does not specify a target branch. B
 
     advanceStage: workflow.advanceStage,
     requestRevision: workflow.requestRevision,
+    queueReviewedPrForMerge: workflow.queueReviewedPrForMerge,
     rerunStage: workflow.rerunStage,
     loadWorkflow: workflow.loadWorkflow,
     loadAgent: workflow.loadAgent,

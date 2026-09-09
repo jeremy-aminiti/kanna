@@ -801,6 +801,17 @@ function TaskDetailRoute({
         navigation.goBack();
         return true;
       }}
+      reviewState={state.selectedTaskReviewState}
+      onQueueReviewedPrForMerge={(decision, summary) => {
+        const durableTaskId = resolveDurableTaskId(state, routeTaskId);
+        if (!durableTaskId) {
+          return Promise.resolve({
+            status: "failed" as const,
+            message: "Task creation is still in progress."
+          });
+        }
+        return controller.queueReviewedPrForMerge(durableTaskId, decision, summary);
+      }}
       onAdvanceTaskStage={() => {
         const durableTaskId = resolveDurableTaskId(state, routeTaskId);
         if (durableTaskId) {

@@ -4,6 +4,11 @@ import type {
   TaskCreationPhase,
   TaskTerminalStatus
 } from "../state/sessionStore";
+import type {
+  HumanReviewDecision,
+  HumanReviewDecisionRequest,
+  TaskReviewContext
+} from "../lib/api/types";
 import {
   DEFAULT_TASK_QUICK_REPLIES,
   type TaskQuickReply
@@ -37,7 +42,8 @@ const componentMocks = vi.hoisted(() => ({
   onAdvanceTaskStage: vi.fn(),
   onCloseTask: vi.fn(),
   onSendInput: vi.fn(),
-  showTaskActionMenu: vi.fn()
+  showTaskActionMenu: vi.fn(),
+  alert: vi.fn()
 }));
 
 vi.mock("react", async (importActual) => {
@@ -107,6 +113,8 @@ vi.mock("react", async (importActual) => {
 
 vi.mock("react-native", () => ({
   ActivityIndicator: "ActivityIndicator",
+  Alert: { alert: componentMocks.alert },
+  Image: "Image",
   Keyboard: {
     addListener: componentMocks.keyboardAddListener,
     dismiss: componentMocks.keyboardDismiss
@@ -191,6 +199,7 @@ beforeEach(() => {
   componentMocks.onCloseTask.mockReset();
   componentMocks.onSendInput.mockReset();
   componentMocks.showTaskActionMenu.mockReset();
+  componentMocks.alert.mockReset();
 });
 interface ElementNode {
   type: unknown;
@@ -284,6 +293,15 @@ interface RenderTaskScreenOptions {
     | "advance-stage"
     | "close-task"
     | null;
+  reviewState?: {
+    taskId: string;
+    reviewContext: TaskReviewContext | null;
+    humanReviewDecision: HumanReviewDecision | null;
+  } | null;
+  onQueueReviewedPrForMerge?: (
+    decision: HumanReviewDecisionRequest,
+    summary: string
+  ) => Promise<{ status: "delivered" } | { status: "failed"; message: string }>;
 }
 
 function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
@@ -345,7 +363,9 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     companionEventStatus = "idle",
     onCompanionOpenChange = vi.fn(),
     onSendCompanionEvent = vi.fn(),
-    pendingTaskAction = null
+    pendingTaskAction = null,
+    reviewState = null,
+    onQueueReviewedPrForMerge
   } = options;
 
   hookHarness.callbackIndex = 0;
@@ -389,6 +409,8 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     quickReplies,
     quickRepliesHydrated,
     pendingTaskAction,
+    reviewState,
+    onQueueReviewedPrForMerge,
     e2eTaskSnapshotMarker,
     onBack,
     onAdvanceTaskStage: componentMocks.onAdvanceTaskStage,
@@ -580,6 +602,118 @@ describe("TaskScreen", () => {
 
     pressByTestId(tree, "mobile.task-creation.recover");
     expect(onRecoverTaskCreation).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * The operator's own route to the merge queue. It is a separate entry from
+   * Advance Stage on purpose: advancing means "done looking", which on these
+   * workflows closes the task, and must never also mean "ship it".
+   */
+  it("offers Queue for Merge and confirms the exact reviewed commit", () => {
+    const reviewedHead = "a".repeat(40);
+    const onQueueReviewedPrForMerge = vi
+      .fn()
+      .mockResolvedValue({ status: "delivered" as const });
+    const tree = renderTaskScreen({
+      reviewState: {
+        taskId: "task-1",
+        reviewContext: {
+          version: 4,
+          prUrl: "https://github.com/acme/repo/pull/12",
+          headRef: "feature/x",
+          headSha: reviewedHead,
+          baseRef: "main",
+          relatedPrUrls: ["https://github.com/acme/repo/pull/13"],
+          updatedAt: "2026-09-08T00:00:00Z"
+        },
+        humanReviewDecision: null
+      },
+      onQueueReviewedPrForMerge
+    });
+
+    pressByTestId(tree, "mobile.task-more-button");
+    expect(componentMocks.showTaskActionMenu).toHaveBeenCalledWith(
+      { mentionedFilesLabel: "Mentioned Files (0)", queueForMergeAvailable: true },
+      expect.any(Function)
+    );
+
+    const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![1] as (
+      selectedAction: "queue-for-merge"
+    ) => void;
+    onSelect("queue-for-merge");
+
+    // Confirmation first: selecting the action authorizes nothing.
+    expect(onQueueReviewedPrForMerge).not.toHaveBeenCalled();
+    const [title, body, buttons] = componentMocks.alert.mock.calls[0]!;
+    expect(title).toBe("Authorize merge");
+    expect(body).toContain("https://github.com/acme/repo/pull/12");
+    expect(body).toContain(reviewedHead);
+    expect(body).toContain("does not submit a GitHub review");
+    expect(body).toContain("https://github.com/acme/repo/pull/13");
+
+    const authorize = (buttons as Array<{ text: string; onPress?: () => void }>)
+      .find((button) => button.text === "Authorize");
+    authorize?.onPress?.();
+    expect(onQueueReviewedPrForMerge).toHaveBeenCalledWith(
+      {
+        reviewContextVersion: 4,
+        headSha: reviewedHead,
+        actionText: expect.stringContaining(reviewedHead)
+      },
+      "Human-reviewed https://github.com/acme/repo/pull/12"
+    );
+  });
+
+  /**
+   * A decision the merge master already holds is done; one whose delivery
+   * stopped part-way needs a person to reconcile that session rather than a
+   * second copy of the request. Neither re-offers the control.
+   */
+  it("stops offering the merge control once this head has been decided", () => {
+    const reviewedHead = "a".repeat(40);
+    const tree = renderTaskScreen({
+      reviewState: {
+        taskId: "task-1",
+        reviewContext: {
+          version: 4,
+          prUrl: "https://github.com/acme/repo/pull/12",
+          headRef: "feature/x",
+          headSha: reviewedHead,
+          baseRef: "main",
+          updatedAt: "2026-09-08T00:00:00Z"
+        },
+        humanReviewDecision: {
+          id: "hrd-1",
+          taskId: "task-1",
+          reviewContextVersion: 4,
+          prUrl: "https://github.com/acme/repo/pull/12",
+          headSha: reviewedHead,
+          baseRef: "main",
+          actionText: "I reviewed it and authorize the merge.",
+          origin: "operator",
+          createdAt: "2026-09-08T00:00:00Z",
+          deliveryStatus: "delivered"
+        }
+      },
+      onQueueReviewedPrForMerge: vi.fn()
+    });
+
+    pressByTestId(tree, "mobile.task-more-button");
+    expect(componentMocks.showTaskActionMenu).toHaveBeenCalledWith(
+      { mentionedFilesLabel: "Mentioned Files (0)" },
+      expect.any(Function)
+    );
+  });
+
+  /** An ordinary task has no pull-request identity, so there is no control. */
+  it("offers no merge control on a task with no published review context", () => {
+    const tree = renderTaskScreen({ onQueueReviewedPrForMerge: vi.fn() });
+
+    pressByTestId(tree, "mobile.task-more-button");
+    expect(componentMocks.showTaskActionMenu).toHaveBeenCalledWith(
+      { mentionedFilesLabel: "Mentioned Files (0)" },
+      expect.any(Function)
+    );
   });
 
   it("opens the creation-specific task actions for an uncertain workspace", () => {

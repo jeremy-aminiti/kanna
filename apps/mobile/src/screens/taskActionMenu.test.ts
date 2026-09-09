@@ -25,6 +25,46 @@ describe("showTaskActionMenu", () => {
     nativeMocks.platform.OS = "ios";
   });
 
+  /**
+   * Offered only for a review task with a published pull-request identity, and
+   * deliberately separate from Advance Stage: advancing means "done looking",
+   * which on these workflows closes the task, and must never also mean "ship
+   * it".
+   */
+  it("offers queueing for merge only when a reviewed pull request is known", () => {
+    showTaskActionMenu(
+      { mentionedFilesLabel: "Mentioned Files (3)", queueForMergeAvailable: true },
+      vi.fn()
+    );
+
+    expect(nativeMocks.actionSheet).toHaveBeenCalledWith(
+      {
+        title: "Task Actions",
+        options: [
+          "Browse Files",
+          "Mentioned Files (3)",
+          "View Diff",
+          "Queue for Merge",
+          "Advance Stage",
+          "Close Task",
+          "Cancel"
+        ],
+        cancelButtonIndex: 6,
+        destructiveButtonIndex: 5
+      },
+      expect.any(Function)
+    );
+
+    const onSelect = vi.fn();
+    nativeMocks.actionSheet.mockReset();
+    showTaskActionMenu(
+      { mentionedFilesLabel: "Mentioned Files (3)", queueForMergeAvailable: true },
+      onSelect
+    );
+    nativeMocks.actionSheet.mock.calls[0][1](3);
+    expect(onSelect).toHaveBeenCalledWith("queue-for-merge");
+  });
+
   it("shows task actions with close marked destructive", () => {
     showTaskActionMenu(
       { mentionedFilesLabel: "Mentioned Files (3)" },

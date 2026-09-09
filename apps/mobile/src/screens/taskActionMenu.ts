@@ -1,7 +1,13 @@
 import { ActionSheetIOS, Alert, Platform } from "react-native";
 import type { TaskStageAction } from "../state/sessionStore";
 
-export type TaskAction = "preview" | "browse-files" | "mentioned-files" | "view-diff" | TaskStageAction;
+export type TaskAction =
+  | "preview"
+  | "browse-files"
+  | "mentioned-files"
+  | "view-diff"
+  | "queue-for-merge"
+  | TaskStageAction;
 
 interface TaskActionDefinition {
   id: TaskAction;
@@ -13,6 +19,13 @@ export interface TaskActionMenuOptions {
   mentionedFilesLabel: string;
   taskCreation?: boolean;
   previewAvailable?: boolean;
+  /**
+   * Offered only when this task has a published pull-request review context and
+   * no decision has already been taken for the head on screen. It is a separate
+   * entry from Advance Stage on purpose: advancing means "I am done looking",
+   * which must never be readable as "ship it".
+   */
+  queueForMergeAvailable?: boolean;
 }
 
 const MENU_TITLE = "Task Actions";
@@ -30,6 +43,9 @@ export function showTaskActionMenu(
     { id: "browse-files", label: "Browse Files" },
     { id: "mentioned-files", label: options.mentionedFilesLabel },
     { id: "view-diff", label: "View Diff" },
+    ...(options.queueForMergeAvailable
+      ? [{ id: "queue-for-merge" as const, label: "Queue for Merge" }]
+      : []),
     { id: "advance-stage", label: "Advance Stage" },
     { id: "close-task", label: "Close Task", style: "destructive" }
   ];

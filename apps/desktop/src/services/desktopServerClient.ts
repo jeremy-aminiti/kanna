@@ -254,6 +254,58 @@ export interface DesktopTaskLatestRun {
   finishedAt: string | null;
 }
 
+/**
+ * What a review task is reviewing, as the forge identifies it.
+ *
+ * Published by the review or triage agent and stored on the task. It is
+ * candidate information, never an approval: it exists so this control can name
+ * the pull request, show the operator exactly which commit they are
+ * authorizing, and pin their decision to it.
+ */
+export interface DesktopTaskReviewContext {
+  /** Bumped on every refresh; a decision is pinned to the version it saw. */
+  version: number;
+  prUrl: string;
+  headRepo?: string | null;
+  headRef?: string | null;
+  headSha: string;
+  baseRef: string;
+  baseSha?: string | null;
+  producingTaskId?: string | null;
+  producingMachineId?: string | null;
+  triageParentTaskId?: string | null;
+  triageRank?: number | null;
+  /** Other open PRs touching the same files, or the PR this one stacks on. */
+  relatedPrUrls?: string[];
+  updatedAt: string;
+}
+
+/**
+ * A recorded human merge authorization for one reviewed head, with how far its
+ * delivery to the merge singleton got. `deliveryStatus` is deliberately
+ * separate from the decision: `uncertain` means the request may already be in
+ * the merge master's session and must be reconciled by a person, never resent.
+ */
+export interface DesktopHumanReviewDecision {
+  id: string;
+  taskId: string;
+  reviewContextVersion: number;
+  prUrl: string;
+  head?: string | null;
+  headSha: string;
+  baseRef: string;
+  baseSha?: string | null;
+  actionText: string;
+  origin: string;
+  sourceMachineId?: string | null;
+  createdAt: string;
+  deliveryStatus: "pending" | "delivered" | "failed" | "uncertain";
+  deliveryDetail?: string | null;
+  deliveredAt?: string | null;
+  mergeTaskId?: string | null;
+  ownerDesktopId?: string | null;
+}
+
 export interface DesktopTaskDetail {
   id: string;
   stage: string | null;
@@ -271,6 +323,10 @@ export interface DesktopTaskDetail {
     text: string | null;
     attestation: "typed" | "not-typed" | "unknown";
   } | null;
+  /** Absent when this task is not a pull-request review with a published PR identity. */
+  reviewContext?: DesktopTaskReviewContext | null;
+  /** The most recent human merge authorization recorded on this task. */
+  humanReviewDecision?: DesktopHumanReviewDecision | null;
 }
 
 export async function fetchDesktopTaskDetail(taskId: string): Promise<DesktopTaskDetail> {

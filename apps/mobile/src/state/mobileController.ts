@@ -1,6 +1,8 @@
 import type {
   CreateTaskResponse,
   DesktopSummary,
+  HumanReviewDecisionRequest,
+  MergeHandoffSignalResponse,
   RepoCommandCatalog,
   RepoSummary,
   RepoDirectoryListing,
@@ -115,6 +117,22 @@ export interface MobileController {
   abortTaskCreation(slotId: string): Promise<void>;
   runMergeAgent(taskId: string): Promise<string | null>;
   advanceDesktopTaskStage(taskId: string): Promise<string | null>;
+  /**
+   * Deliver a human's merge authorization for a reviewed pull request.
+   *
+   * Never falls back to a generic merge request when the owning desktop is too
+   * old for the route: a request without the recorded decision is an agent's
+   * policy request, and sending one would misrepresent who authorized this
+   * pull request.
+   */
+  queueReviewedPrForMerge(
+    taskId: string,
+    decision: HumanReviewDecisionRequest,
+    summary: string
+  ): Promise<
+    | { status: "delivered"; response: MergeHandoffSignalResponse }
+    | { status: "failed"; message: string }
+  >;
   readTaskFile(taskId: string, path: string): Promise<TaskFileContent>;
   listTaskDirectory(taskId: string, path: string, showAllFiles?: boolean, offset?: number, filter?: string): Promise<RepoDirectoryListing>;
   readTaskFileRange(taskId: string, path: string, startLine: number, lineCount: number, metadataOnly?: boolean, startByte?: number): Promise<RepoFileRange>;
@@ -657,6 +675,18 @@ export function createMobileController(
           return;
         }
         store.setTaskPorts(taskId, detail.ports);
+        // The review identity travels with detail, not with the task list, so
+        // this is the only place the merge control can learn which pull
+        // request — and which exact commit — it would be authorizing.
+        store.setSelectedTaskReviewState(
+          detail.reviewContext || detail.humanReviewDecision
+            ? {
+                taskId,
+                reviewContext: detail.reviewContext ?? null,
+                humanReviewDecision: detail.humanReviewDecision ?? null
+              }
+            : null
+        );
         if (typeof detail.prompt === "string") {
           loadedTaskPrompt = {
             taskId,
@@ -3609,6 +3639,39 @@ export function createMobileController(
         return null;
       } finally {
         store.finishTaskAction(taskId, "advance-stage");
+      }
+    },
+
+    /**
+     * Hand this operator's merge authorization for a reviewed pull request to
+     * the repository's merge singleton.
+     *
+     * The review session is deliberately left open and the task is not closed:
+     * finishing the read and authorizing the merge are separate acts, and
+     * collapsing them would make ordinary cleanup ship code.
+     */
+    async queueReviewedPrForMerge(taskId, decision, summary) {
+      try {
+        const response = await client.queueReviewedPrForMerge?.(
+          taskId,
+          decision,
+          summary
+        );
+        if (!response) {
+          throw new Error(
+            "This connection cannot deliver a human review merge authorization."
+          );
+        }
+        // Re-read detail so the recorded decision and its delivery outcome
+        // replace the control, rather than the screen implying nothing
+        // happened.
+        loadSelectedTaskPrompt(taskId);
+        return { status: "delivered" as const, response };
+      } catch (error) {
+        return {
+          status: "failed" as const,
+          message: error instanceof Error ? error.message : String(error)
+        };
       }
     },
 

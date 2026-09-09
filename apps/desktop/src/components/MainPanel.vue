@@ -10,7 +10,11 @@ import {
 import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import type { AgentProvider, BlockerDisplayItem } from "../types/kanna";
 import type { TaskUiSlot } from "../types/taskUi";
-import type { RequestRevisionOptions } from "../stores/workflow";
+import type {
+  QueueReviewedPrOptions,
+  QueueReviewedPrResult,
+  RequestRevisionOptions,
+} from "../stores/workflow";
 import {
   fetchDesktopTaskDetail,
   type DesktopTaskDetail,
@@ -59,6 +63,10 @@ const props = defineProps<{
    * agent session it has always been.
    */
   views?: MainTabViewsController;
+  queueReviewedPrForMerge?: (
+    taskId: string,
+    options: QueueReviewedPrOptions,
+  ) => Promise<QueueReviewedPrResult>;
 }>();
 
 const emit = defineEmits<{
@@ -318,6 +326,79 @@ const taskDetailIsLocal = computed(() => {
   return !props.cloudTask && !isRemotePresentationTaskId(taskId);
 });
 
+const mergeQueueConfirmOpen = ref(false);
+const mergeQueueSubmitting = ref(false);
+const mergeQueueOutcome = ref<QueueReviewedPrResult | null>(null);
+
+/**
+ * The pull request this task is reviewing, once an agent has published its
+ * identity. Absent means the control cannot be offered: without a durable PR,
+ * head commit and base there is nothing to name in the confirmation and
+ * nothing the server could check a decision against, and guessing the PR from
+ * the task's title or branch is exactly the inference this design refuses.
+ */
+const reviewContext = computed(() => {
+  const task = item.value;
+  const detail = taskDetail.value;
+  if (!task || !detail || detail.id !== task.id) return null;
+  return detail.reviewContext ?? null;
+});
+
+const humanReviewDecision = computed(() => {
+  const task = item.value;
+  const detail = taskDetail.value;
+  if (!task || !detail || detail.id !== task.id) return null;
+  return detail.humanReviewDecision ?? null;
+});
+
+/**
+ * A decision already taken for the exact head on screen. A decision recorded
+ * against an older head is deliberately not treated as this one: the PR moved,
+ * and what the reviewer authorized was a commit that is no longer the head.
+ */
+const decisionForCurrentHead = computed(() => {
+  const decision = humanReviewDecision.value;
+  const context = reviewContext.value;
+  if (!decision || !context) return null;
+  return decision.headSha.toLowerCase() === context.headSha.toLowerCase() ? decision : null;
+});
+
+const mergeQueueAvailable = computed(() => {
+  const task = item.value;
+  const detail = taskDetail.value;
+  if (!props.queueReviewedPrForMerge || !task || !detail) return false;
+  if (task.closed_at != null || detail.closedAt != null) return false;
+  if (!reviewContext.value) return false;
+  const decided = decisionForCurrentHead.value;
+  // A decision that reached the merge master, or whose delivery stopped
+  // part-way, is not re-offered: the first is done and the second needs a
+  // person to reconcile that session, not another copy of the request.
+  return !decided || decided.deliveryStatus === "failed";
+});
+
+const shortReviewedHead = computed(() => reviewContext.value?.headSha.slice(0, 12) ?? "");
+
+const reviewedHeadLabel = computed(() => {
+  const context = reviewContext.value;
+  if (!context) return "";
+  const branch = context.headRepo && context.headRef
+    ? `${context.headRepo}:${context.headRef}`
+    : context.headRef ?? "";
+  return branch ? `${branch} @ ${shortReviewedHead.value}` : shortReviewedHead.value;
+});
+
+/**
+ * The sentence the operator confirms, stored verbatim on the decision. It is
+ * deliberately explicit about what is and is not being claimed: the merge
+ * agent merges when it is safe to, and this authorizes that queueing — it is
+ * not a GitHub approving review and it does not itself merge anything.
+ */
+const mergeQueueActionText = computed(() => {
+  const context = reviewContext.value;
+  if (!context) return "";
+  return `I reviewed ${context.prUrl} at ${context.headSha} and authorize the merge agent to merge it into ${context.baseRef} when safe.`;
+});
+
 let taskDetailRequest = 0;
 async function loadTaskDetail(taskId: string): Promise<void> {
   const request = ++taskDetailRequest;
@@ -349,6 +430,8 @@ watch(
       revisionComposerOpen.value = false;
       revisionSummary.value = "";
       revisionPrompt.value = "";
+      mergeQueueConfirmOpen.value = false;
+      mergeQueueOutcome.value = null;
     }
     if (taskId && taskDetailIsLocal.value) {
       void loadTaskDetail(taskId);
@@ -386,6 +469,45 @@ async function submitRevision() {
     revisionPrompt.value = "";
   } finally {
     revisionStarting.value = false;
+  }
+}
+
+function openMergeQueueConfirm() {
+  if (!mergeQueueAvailable.value || mergeQueueSubmitting.value) return;
+  mergeQueueOutcome.value = null;
+  mergeQueueConfirmOpen.value = true;
+}
+
+/**
+ * Hand this operator's own decision to the repository's merge singleton.
+ *
+ * The version and head SHA sent are the ones rendered above the button, so a
+ * pull request that moved between the read and the click is refused by the
+ * server rather than merged from a stale decision. The review session stays
+ * open afterwards — authorizing the merge and being finished reading are
+ * different things, and only the operator says when the second is true.
+ */
+async function submitMergeQueueRequest() {
+  const taskId = item.value?.id;
+  const context = reviewContext.value;
+  const queue = props.queueReviewedPrForMerge;
+  if (!taskId || !context || !queue || mergeQueueSubmitting.value) return;
+
+  mergeQueueSubmitting.value = true;
+  try {
+    const result = await queue(taskId, {
+      reviewContextVersion: context.version,
+      headSha: context.headSha,
+      actionText: mergeQueueActionText.value,
+      summary: `Human-reviewed ${context.prUrl}`,
+    });
+    mergeQueueOutcome.value = result;
+    if (result.status === "delivered") {
+      mergeQueueConfirmOpen.value = false;
+    }
+    await loadTaskDetail(taskId);
+  } finally {
+    mergeQueueSubmitting.value = false;
   }
 }
 
@@ -612,6 +734,51 @@ function dismissCommandHint() {
     />
     <template v-if="uiSlot">
       <div v-show="agentTabActive" class="main-tab-panel" data-testid="main-tab-panel-agent">
+        <section
+          v-if="reviewContext"
+          class="review-merge"
+          data-testid="review-merge-control"
+        >
+          <div class="review-merge-copy">
+            <p class="review-merge-title">{{ $t('mainPanel.reviewMergeTitle') }}</p>
+            <p class="review-merge-detail" data-testid="review-merge-head">
+              {{ $t('mainPanel.reviewMergeReviewed', {
+                pr: reviewContext.prUrl,
+                head: reviewedHeadLabel,
+                base: reviewContext.baseRef,
+              }) }}
+            </p>
+            <p
+              v-if="reviewContext.relatedPrUrls && reviewContext.relatedPrUrls.length > 0"
+              class="review-merge-warning"
+              data-testid="review-merge-overlap"
+            >
+              {{ $t('mainPanel.reviewMergeOverlap', {
+                prs: reviewContext.relatedPrUrls.join(', '),
+              }) }}
+            </p>
+            <p
+              v-if="decisionForCurrentHead"
+              class="review-merge-detail"
+              data-testid="review-merge-decision"
+            >
+              {{ $t(`mainPanel.reviewMergeDelivery.${decisionForCurrentHead.deliveryStatus}`, {
+                mergeTask: decisionForCurrentHead.mergeTaskId ?? '',
+                machine: decisionForCurrentHead.ownerDesktopId ?? '',
+                detail: decisionForCurrentHead.deliveryDetail ?? '',
+              }) }}
+            </p>
+          </div>
+          <button
+            v-if="mergeQueueAvailable"
+            type="button"
+            data-testid="open-review-merge-confirm"
+            :disabled="mergeQueueSubmitting"
+            @click="openMergeQueueConfirm"
+          >
+            {{ $t('mainPanel.reviewMergeQueue') }}
+          </button>
+        </section>
         <CloudTerminalCache
           :active-terminal="activeCloudTerminal"
           :discard-key="discardedCloudTerminalKey"
@@ -816,6 +983,45 @@ function dismissCommandHint() {
         ×
       </button>
     </div>
+    <div
+      v-if="mergeQueueConfirmOpen && reviewContext"
+      class="revision-composer"
+      data-testid="review-merge-confirm"
+    >
+      <form class="revision-panel" @submit.prevent="submitMergeQueueRequest">
+        <h2>{{ $t('mainPanel.reviewMergeConfirmTitle') }}</h2>
+        <p class="review-merge-statement" data-testid="review-merge-statement">
+          {{ mergeQueueActionText }}
+        </p>
+        <p class="review-merge-hint">{{ $t('mainPanel.reviewMergeConfirmHint') }}</p>
+        <p
+          v-if="mergeQueueOutcome && mergeQueueOutcome.status === 'failed'"
+          class="review-merge-warning"
+          data-testid="review-merge-error"
+        >
+          {{ mergeQueueOutcome.message }}
+        </p>
+        <div class="revision-actions">
+          <button
+            type="button"
+            :disabled="mergeQueueSubmitting"
+            @click="mergeQueueConfirmOpen = false"
+          >
+            {{ $t('actions.cancel') }}
+          </button>
+          <button
+            type="submit"
+            class="primary"
+            data-testid="submit-review-merge"
+            :disabled="mergeQueueSubmitting"
+          >
+            {{ mergeQueueSubmitting
+              ? $t('mainPanel.reviewMergeSending')
+              : $t('mainPanel.reviewMergeConfirm') }}
+          </button>
+        </div>
+      </form>
+    </div>
     <div v-if="revisionComposerOpen" class="revision-composer" data-testid="revision-composer">
       <form class="revision-panel" @submit.prevent="submitRevision">
         <h2>{{ $t('mainPanel.requestRevision') }}</h2>
@@ -870,6 +1076,60 @@ function dismissCommandHint() {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+}
+
+.review-merge {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--kn-border);
+  background: var(--kn-bg-subtle, var(--kn-bg-app));
+}
+
+.review-merge-copy {
+  min-width: 0;
+}
+
+/* The label is a fixed two-word action; letting it wrap turns the button into
+   a two-line block beside a single-line heading. */
+.review-merge button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.review-merge-title {
+  margin: 0;
+  color: var(--kn-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.review-merge-detail {
+  margin: 2px 0 0;
+  color: var(--kn-text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.review-merge-warning {
+  margin: 2px 0 0;
+  color: var(--kn-warning);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.review-merge-statement {
+  color: var(--kn-text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.review-merge-hint {
+  color: var(--kn-text-secondary);
+  font-size: 12px;
 }
 
 .revision-recovery {
