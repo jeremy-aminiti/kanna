@@ -228,7 +228,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "070_provider_quota_rejection_log");
+    assert_eq!(latest_migration, "071_event_subscriptions");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -4084,6 +4084,7 @@ fn caller_declared_input_sources_are_a_closed_set() {
         Ok(super::TaskInputSource::Manager)
     );
     assert!(super::TaskInputSource::from_caller_declared("notify").is_err());
+    assert!(super::TaskInputSource::from_caller_declared("engine").is_err());
     assert!(super::TaskInputSource::from_caller_declared("unspecified").is_err());
     assert!(super::TaskInputSource::from_caller_declared("owner").is_err());
 }

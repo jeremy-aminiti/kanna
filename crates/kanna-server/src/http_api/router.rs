@@ -182,6 +182,18 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(find_local_singletons),
         )
         .route("/v1/task-events", get(wait_task_events))
+        .route(
+            "/v1/event-subscriptions",
+            post(super::event_subscriptions::subscribe),
+        )
+        .route(
+            "/v1/event-subscriptions/{id}/read",
+            post(super::event_subscriptions::read),
+        )
+        .route(
+            "/v1/event-subscriptions/{id}/unsubscribe",
+            post(super::event_subscriptions::unsubscribe),
+        )
         .route("/v1/tasks/recent", get(list_recent_tasks))
         .route("/v1/tasks/search", get(search_tasks))
         .route(

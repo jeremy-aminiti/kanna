@@ -342,14 +342,18 @@ directly to daemon terminal-state events and treats daemon `Exit` for a task
 session as one completion signal — updating activity/runtime state and the
 terminating `stage_run`, which appends the durable `run.finished` event.
 Managers observe completion through `kanna_wait_events` for fan-out or
-`kanna_wait_task` for one task. Completion is never injected into another
-task's PTY; manager input remains reserved for actual operator/manager speech.
+`kanna_wait_task` for one task. Task completion facts remain in the event feed. An event subscription may
+wake its manager through a harness adapter: native tool output or an explicitly
+labelled Kanna supervisory input. Supervisory input uses the shared fenced
+delivery path and the reserved `engine` source; it never claims owner speech
+or declares a worker complete. The durable mailbox, not the nudge, owns events.
 The structured completion vocabulary remains exactly `success`, `failure`, or
 `closed` on stage-run results, task detail, and events.
 
 **Task event feed.** `GET /v1/task-events` (`kanna_wait_events`) is how an agent
-watches *several* tasks — `kanna_wait_task` blocks on one id and resolves only
-on finish, so a fan-out cannot use it. Events are appended by the same DB writes
+watches *several* tasks — `kanna_wait_task` watches one id, defaulting to settled runtime
+reconciliation; explicit `until: finished` requires termination. Managers use
+a repository event subscription for continuing fan-out supervision. Events are appended by the same DB writes
 that change the state they describe, and the cursor is `task_event.seq`, whose
 ordering SQLite's single-writer rule guarantees; a caller that passes back its
 cursor never misses an event fired between two calls. Add a new event by
@@ -418,7 +422,8 @@ conclude an owner directive was never issued — which is exactly how a review
 agent once ordered an owner's mid-task design decision reverted. Every delivery
 the daemon confirms reached the PTY is therefore appended to `task_input` with
 its full text, the stage and `stage_run` live at delivery, and the caller's
-declared, unverified `operator` / `manager` source, or `unspecified`.
+declared, unverified `operator` / `manager` source, or `unspecified`. The subscription input adapter alone writes the reserved
+`engine` source for Kanna supervisory nudges; API callers cannot claim it.
 Historical rows may carry the retired `notify` source; no new rows use it.
 Read it with `kanna_task_inputs`
 (`GET /v1/tasks/{task_id}/inputs`); `kanna_get_task` reports
@@ -493,9 +498,11 @@ whose meaning is unchanged. The same split holds in the event feed:
 read/blended one. `WaitUntil::Finished` resolves only on a recorded
 termination (closed, terminal `stage_run`, or `runtimeState: "exited"`), never
 on `unread`. A PTY agent that parks without recording a verdict records none of
-the three — its session survives — so a caller waiting on an agent that may
-park must bound its own retry loop on a non-`busy` `runtimeState` with a
-`running` `latestRun` instead of re-calling on `timeout` forever. See
+the three — its session survives — so the default `WaitUntil::Reconcile` instead resolves on
+`runtimeSettled: true` (observed non-busy runtime past the existing debounce)
+or recorded termination. Explicit `Finished` retains its termination-only
+meaning. Fresh event waits include settled current state by default; passing
+the cursor acknowledges that scan once without touching human read state. See
 `docs/kanna-server-boundary.md`.
 
 **A spent allowance is a provider event, not a dead session.** A CLI that

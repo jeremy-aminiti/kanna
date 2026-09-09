@@ -9,6 +9,8 @@ mod desktop_views;
 mod e2e_mobile_controls;
 #[cfg(debug_assertions)]
 mod e2e_sql;
+pub(crate) mod event_subscriptions;
+mod harness_wake;
 mod ksp;
 mod lan_trust;
 mod machine_stats;

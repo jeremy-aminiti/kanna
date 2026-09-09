@@ -3646,16 +3646,16 @@ fn read_agent_definition_loads_builtin_task_manager_agent_with_codex_first() {
     assert!(definition
         .prompt
         .contains("Scope the watch to the whole repository"));
+    assert!(definition.prompt.contains("kanna_subscribe_events"));
     assert!(definition
         .prompt
-        .contains("kanna-cli task watch --repo-id <repo-id>"));
+        .contains("tasks already settled before you subscribed"));
     assert!(definition
         .prompt
-        .contains("starts at the live tail without replaying history"));
+        .contains("Do not depend on remembering to background or re-arm a watcher each turn"));
     assert!(definition
         .prompt
-        .contains("Do not hand-roll shell/Python wrappers around `kanna_wait_events`"));
-    assert!(definition.prompt.contains("A wake means “drain the feed,”"));
+        .contains("A wake means “read the mailbox”"));
     assert!(definition
         .prompt
         .contains("manager-facing settled activity is server-debounced for 10 seconds"));

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import WebSocket, { type RawData } from "ws";
+import { localProcessFetch } from "@kanna/local-process-fetch";
 import { createRemoteTransport } from "../../../apps/mobile/src/lib/transports/remoteTransport";
 import { startRemoteHarness, type RemoteHarness } from "./harness";
 import {
@@ -83,6 +84,68 @@ describe("remote task terminal flow E2E", () => {
   afterAll(async () => {
     await harness?.stop();
   }, 30_000);
+
+  it("services an already parked worker and wakes its subscriber without a harness watcher", async () => {
+    const worker = await createScriptedTask(harness, {
+      displayName: "Parked subscription worker", agentProvider: "claude",
+    });
+    const inputTraceFile = join(harness.paths.root, "subscription-manager-input");
+    const manager = await createScriptedTask(harness, {
+      displayName: "Subscription manager", continuousOutput: false, inputTraceFile,
+    });
+    await pinSingleStageWorkflow(harness, worker.taskId);
+    await pinSingleStageWorkflow(harness, manager.taskId);
+    type Runtime = { runtimeState: string; runtimeSettled: boolean; latestRun: { status: string } };
+    type Mailbox = { id: string; batchId: number; wakeState: string; pending: { events: unknown[] } | null };
+    const local = async <T,>(path: string, body?: unknown): Promise<T> => {
+      const response = await localProcessFetch(`${harness.lanBaseUrl}${path}`, body === undefined ? undefined : {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      expect(response.ok, text).toBe(true);
+      return (text ? JSON.parse(text) : undefined) as T;
+    };
+    await expect.poll(async () => (await local<Runtime>(`/v1/tasks/${worker.taskId}`)).runtimeSettled, {
+      timeout: 45_000,
+    }).toBe(true);
+    const before = await local<Runtime>(`/v1/tasks/${worker.taskId}`);
+    expect(before.runtimeState).toBe("idle");
+    expect(before.latestRun.status).toBe("running");
+    // Observation starts AFTER idle, not before the edge. No complete_stage.
+    const subscription = await local<Mailbox>("/v1/event-subscriptions", {
+      taskId: manager.taskId, taskIds: [worker.taskId], localOnly: true,
+    });
+    expect(subscription.pending?.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: worker.taskId, synthetic: true, seq: null,
+        payload: expect.objectContaining({ reconciliationReason: "idle_without_verdict" }) }),
+    ]));
+    const mailbox = `/v1/event-subscriptions/${subscription.id}/read`;
+    try {
+      await local(mailbox, { acknowledgeBatchId: subscription.batchId });
+      // The manager is parked, with no shell process or MCP long poll watching.
+      await local(`/v1/tasks/${worker.taskId}/input`, { input: "another worker turn", source: "manager" });
+      await expect.poll(async () => (await local<Mailbox>(mailbox, {})).wakeState, { timeout: 45_000 }).toBe("notified");
+      const next = await local<Mailbox>(mailbox, {});
+      expect(next.pending?.events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ taskId: worker.taskId, type: "task.runtime_changed",
+          payload: expect.objectContaining({ runtimeState: "idle" }) }),
+      ]));
+      const inputs = await local<{ inputs: unknown[] }>(`/v1/tasks/${manager.taskId}/inputs`);
+      expect(inputs.inputs).toEqual(expect.arrayContaining([
+        expect.objectContaining({ source: "engine", message: expect.stringContaining(subscription.id) }),
+      ]));
+      // A trace written by the real PTY fixture proves the input was consumed,
+      // independently of remote terminal streaming and relay recovery.
+      await expect.poll(async () => {
+        try { return await readFile(inputTraceFile, "utf8"); } catch { return ""; }
+      }, { timeout: 15_000 }).toContain(`[Kanna supervisor] Event subscription ${subscription.id}`);
+      await local(mailbox, { acknowledgeBatchId: next.batchId });
+      expect((await local<Mailbox>(mailbox, {})).pending).toBeNull();
+      expect((await local<Runtime>(`/v1/tasks/${worker.taskId}`)).latestRun.status).toBe("running");
+    } finally {
+      await local(`/v1/event-subscriptions/${subscription.id}/unsubscribe`, {});
+    }
+  }, 120_000);
 
   async function currentRunId(taskId: string): Promise<string> {
     const detail = await harness.client.invokeDesktop({

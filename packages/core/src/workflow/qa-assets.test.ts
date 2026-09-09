@@ -217,16 +217,17 @@ describe("QA workflow assets", () => {
     expect(agent.agent_provider?.[0]).toBe("codex");
     expect(agent.prompt).toContain("kanna_wait_events");
     expect(agent.prompt).toContain("Scope the watch to the whole repository");
-    expect(agent.prompt).toContain("kanna-cli task watch --repo-id <repo-id>");
-    expect(agent.prompt).toContain("starts at the live tail without replaying history");
+    expect(agent.prompt).toContain("kanna_subscribe_events");
+    expect(agent.prompt).toContain("tasks already settled before you subscribed");
     expect(agent.prompt).toContain(
       "reconcile every open task's current state, including blocked tasks with no session yet"
     );
     expect(agent.prompt).toContain(
-      "Do not hand-roll shell/Python wrappers around `kanna_wait_events`"
+      "Do not depend on remembering to background or re-arm a watcher each turn"
     );
-    expect(agent.prompt).toContain("A wake means “drain the feed,”");
-    expect(agent.prompt).toContain("immediately re-arm the command with `--cursor");
+    expect(agent.prompt).toContain("A wake means “read the mailbox”");
+    expect(agent.prompt).toContain("acknowledge_batch_id");
+    expect(agent.prompt).toContain("Acknowledgement resumes observation automatically");
     expect(agent.prompt).toContain("task.runtime_changed");
     expect(agent.prompt).toContain("`task.blocked` / `task.unblocked`");
     expect(agent.prompt).toContain("task.runtime_settled");
@@ -248,7 +249,7 @@ describe("QA workflow assets", () => {
     expect(agent.prompt).toContain('origin: "human"');
     expect(agent.prompt).toContain("coordinate another set of reviews");
     expect(agent.prompt).toContain("the event loop is idle by design while awaiting human action");
-    expect(agent.prompt).toContain("Observe completion only through the MCP wait surfaces");
+    expect(agent.prompt).toContain("Observe completion through structured mailbox or MCP wait results");
     expect(agent.prompt).toContain(
       "Product work, bug fixes, investigations, releases, and other durable repository tasks"
     );

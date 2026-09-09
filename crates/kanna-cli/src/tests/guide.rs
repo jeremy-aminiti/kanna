@@ -28,6 +28,7 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
         workflow_name: Some("qa".to_string()),
         stage_transition: Some("auto".to_string()),
         activity: Some("working".to_string()),
+        runtime_settled: false,
         runtime_state: Some("busy".to_string()),
         read_state: Some("read".to_string()),
         waiting_prompt_snippet: None,
@@ -69,7 +70,7 @@ fn guide_markdown_includes_live_context_and_all_catalog_tools() {
     assert!(guide.contains("`task.activity_changed` is the human read/unread display dimension"));
     assert!(guide.contains("a task's state has two dimensions"));
     assert!(guide.contains("prompt-only changes while a task remains stopped are visible only"));
-    assert!(guide.contains("kanna-cli task watch --repo-id <repo-id>"));
+    assert!(guide.contains("task subscribe-events --task-id <manager-id> --repo-id <repo-id>"));
     assert!(guide.contains("MCP clients commonly abort around 300 seconds"));
     assert!(guide.contains("no_live_agent_session"));
     assert!(guide.contains("delivery_uncertain"));
@@ -140,6 +141,7 @@ fn guide_markdown_tells_manual_stages_the_user_advances_the_workflow() {
         workflow_name: Some("default".to_string()),
         stage_transition: Some("manual".to_string()),
         activity: Some("working".to_string()),
+        runtime_settled: false,
         runtime_state: Some("busy".to_string()),
         read_state: Some("read".to_string()),
         waiting_prompt_snippet: None,

@@ -262,7 +262,7 @@ async fn catalog_cli_defaults_listing_search_and_watch_to_the_task_repository() 
         (
             "kanna_wait_events",
             serde_json::json!({ "from": "now", "timeout_secs": 0 }),
-            "/v1/task-events?repoId=repo-current&excludeTaskIds=task-current&shortCursor=true&from=now&timeoutSecs=0",
+            "/v1/task-events?repoId=repo-current&excludeTaskIds=task-current&includeCurrentActivity=true&shortCursor=true&from=now&timeoutSecs=0",
             serde_json::json!({
                 "waitOutcome": "timeout",
                 "cursor": "17",

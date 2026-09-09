@@ -181,9 +181,10 @@ pub(crate) fn task_events_path(params: &TaskEventsParams<'_>) -> String {
     if params.local_only {
         query.push("localOnly=true".to_string());
     }
-    if params.include_current_activity {
-        query.push("includeCurrentActivity=true".to_string());
-    }
+    query.push(format!(
+        "includeCurrentActivity={}",
+        params.include_current_activity
+    ));
     query.push(format!("shortCursor={}", params.short_cursor));
     if let Some(from) = params.from {
         query.push(format!("from={}", encode_path_segment(from)));
@@ -550,9 +551,12 @@ pub(crate) async fn task_logs_with_agent_view_via_api(
 
 pub(crate) fn parse_wait_until(value: &str) -> Result<WaitUntil, String> {
     match value {
+        "reconcile" => Ok(WaitUntil::Reconcile),
         "finished" => Ok(WaitUntil::Finished),
         "closed" => Ok(WaitUntil::Closed),
-        other => Err(format!("--until must be finished or closed, got {other}")),
+        other => Err(format!(
+            "--until must be reconcile, finished or closed, got {other}"
+        )),
     }
 }
 
@@ -564,12 +568,14 @@ pub(crate) fn task_matches_wait_until(task: &TaskDetail, until: WaitUntil) -> bo
         WaitTaskState {
             closed: task.closed_at.is_some(),
             runtime_state: task.runtime_state.as_deref(),
+            runtime_settled: task.runtime_settled,
             latest_run_status: task
                 .latest_run
                 .as_ref()
                 .and_then(|run| run.status.as_deref()),
         },
         match until {
+            WaitUntil::Reconcile => CatalogWaitUntil::Reconcile,
             WaitUntil::Finished => CatalogWaitUntil::Finished,
             WaitUntil::Closed => CatalogWaitUntil::Closed,
         },

@@ -42,6 +42,23 @@ pub(super) struct TaskInputRequest {
     attachment: Option<TaskInputAttachment>,
 }
 
+/// Whether a failed delivery may be attempted again on its own.
+///
+/// This is a property of the failure site, not of its reason string: the
+/// task-mutation guard and a genuinely dead session both answer
+/// `no_live_agent_session`, but only the first is a lease this server expects
+/// to lose and regain. `Park` is the safe default — a delivery whose bytes may
+/// already have reached a PTY must never be repeated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeliveryRetry {
+    /// Nothing reached the daemon and the cause is expected to clear itself
+    /// (a daemon handoff, an unreadable daemon, a held mutation lease).
+    Transient,
+    /// Terminal for this attempt: either something may have been written, or
+    /// retrying cannot succeed without the caller changing something.
+    Park,
+}
+
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TaskInputFailure {
@@ -50,6 +67,10 @@ pub(super) struct TaskInputFailure {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     latest_run: Option<TaskInputFailureRun>,
+    /// Internal classification for engine-owned delivery. Never serialized, so
+    /// the HTTP body is byte-identical to before this field existed.
+    #[serde(skip)]
+    retry: DeliveryRetry,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -75,8 +96,22 @@ fn task_input_http_error(
             reason,
             message,
             latest_run,
+            retry: DeliveryRetry::Park,
         }),
     )
+}
+
+/// A failure raised before anything could reach the daemon, whose cause is
+/// expected to clear on its own. Identical on the wire to
+/// `task_input_http_error`.
+fn transient_task_input_http_error(
+    status: axum::http::StatusCode,
+    reason: &'static str,
+    message: String,
+) -> TaskInputHttpError {
+    let (status, Json(mut failure)) = task_input_http_error(status, reason, message, None);
+    failure.retry = DeliveryRetry::Transient;
+    (status, Json(failure))
 }
 
 fn map_task_input_error((status, message): (axum::http::StatusCode, String)) -> TaskInputHttpError {
@@ -315,48 +350,121 @@ async fn send_task_input_impl(
         })?,
         None => TaskInputSource::Unspecified,
     };
+    deliver_task_input(state, task_id, payload, source, None, strict_recording).await
+}
+
+/// A wake that did not reach its session, carrying enough for the subscription
+/// worker to decide between re-attempting and parking the page.
+pub(super) struct EngineWakeFailure {
+    pub(super) retry: DeliveryRetry,
+    pub(super) message: String,
+}
+
+pub(super) async fn send_engine_wake(
+    state: Arc<AppState>,
+    subscription: &crate::db::EventSubscription,
+    input: String,
+) -> Result<bool, EngineWakeFailure> {
+    let payload = TaskInputRequest {
+        input,
+        strict_recording: false,
+        source: None,
+        attachment: None,
+    };
+    deliver_task_input(
+        state,
+        subscription.task_id.clone(),
+        payload,
+        TaskInputSource::Engine,
+        Some(subscription.run_id.clone()),
+        false,
+    )
+    .await
+    .map(|response| response.status() == axum::http::StatusCode::ACCEPTED)
+    .map_err(|(_, Json(failure))| EngineWakeFailure {
+        retry: failure.retry,
+        message: format!("{}: {}", failure.reason, failure.message),
+    })
+}
+
+async fn deliver_task_input(
+    state: Arc<AppState>,
+    task_id: String,
+    payload: TaskInputRequest,
+    source: TaskInputSource,
+    expected_run: Option<String>,
+    strict_recording: bool,
+) -> Result<Response, TaskInputHttpError> {
     let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id)
         .await
         .map_err(map_task_input_error)?;
     let Some(_task_mutation) = state.try_begin_requested_task_mutation(&task_id) else {
-        return Err(task_input_http_error(
+        // A held lease, not a dead session: nothing was written and the lease
+        // is released by whatever is changing the task.
+        return Err(transient_task_input_http_error(
             axum::http::StatusCode::CONFLICT,
             "no_live_agent_session",
             format!(
                 "task {task_id} is changing stage or agent session; input was not delivered; inspect the current run before retrying"
             ),
-            None,
         ));
     };
+    if let Some(expected) = expected_run {
+        let db = Db::open(&state.config.db_path).map_err(|error| {
+            task_input_http_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                error.to_string(),
+                None,
+            )
+        })?;
+        if db
+            .latest_stage_run(&task_id)
+            .map_err(|error| {
+                task_input_http_error(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    error.to_string(),
+                    None,
+                )
+            })?
+            .is_none_or(|run| run.id != expected)
+        {
+            return Err(task_input_http_error(
+                axum::http::StatusCode::CONFLICT,
+                "stale_subscription",
+                "subscription belongs to an earlier run".into(),
+                None,
+            ));
+        }
+    }
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await
         .map_err(|error| {
-            task_input_http_error(
+            // The daemon is absent or mid-handoff; no byte was written.
+            transient_task_input_http_error(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 "daemon_unavailable",
                 format!("could not verify a live agent session for task {task_id}: {error}"),
-                None,
             )
         })?;
 
     let sessions = match daemon.send_command(&DaemonCommand::List).await {
         Ok(DaemonEvent::SessionList { sessions }) => sessions,
         Ok(other) => {
-            return Err(task_input_http_error(
+            return Err(transient_task_input_http_error(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 "daemon_state_unknown",
                 format!(
                     "could not verify a live agent session for task {task_id}: unexpected daemon response: {other:?}"
                 ),
-                None,
             ));
         }
         Err(error) => {
-            return Err(task_input_http_error(
+            return Err(transient_task_input_http_error(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 "daemon_state_unknown",
                 format!("could not verify a live agent session for task {task_id}: {error}"),
-                None,
             ));
         }
     };

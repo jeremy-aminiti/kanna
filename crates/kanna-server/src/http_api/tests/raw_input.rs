@@ -870,3 +870,325 @@ async fn an_unknown_key_is_rejected_before_the_daemon_is_contacted() {
     );
     cleanup(&config, &daemon.socket_path, &daemon.daemon_dir);
 }
+
+/// Server-owned subscription -> durable mailbox -> shared logical-input
+/// adapter -> daemon socket -> reserved engine provenance. No model is
+/// running a background watcher, and the worker never records completion.
+#[tokio::test]
+async fn subscription_wakes_manager_through_fenced_input_once_per_pending_batch() {
+    use super::task_events::{await_subscription, subscription_request};
+    use serde_json::json;
+    let unique = format!("subscription-input-{}", unique_test_suffix());
+    let daemon = scripted_daemon(&unique);
+    let listener = daemon.listener;
+    let (delivered, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
+    let daemon_server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut read = BufReader::new(read);
+            while let Some(command) = read_test_daemon_command_optional(&mut read, &mut write).await
+            {
+                let response = match command {
+                    DaemonCommand::List => DaemonEvent::SessionList {
+                        sessions: vec![live_session("manager", 42133)],
+                    },
+                    DaemonCommand::SubmitInputIfSession {
+                        session_id,
+                        expected_pid,
+                        data,
+                    } => {
+                        assert_eq!(session_id, "manager");
+                        assert_eq!(expected_pid, 42133);
+                        delivered.send(String::from_utf8(data).unwrap()).unwrap();
+                        DaemonEvent::Ok
+                    }
+                    other => panic!("unexpected subscription delivery: {other:?}"),
+                };
+                write
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    let config = raw_input_test_config(&unique, &daemon.daemon_dir);
+    seed_live_task(&config, "manager");
+    let db = Db::open(&config.db_path).unwrap();
+    db.insert_test_pipeline_item(
+        "worker",
+        "repo-1",
+        "work",
+        Some("Worker"),
+        "in progress",
+        "2026-09-08 00:00:00",
+    )
+    .unwrap();
+    db.update_pipeline_item_runtime_status("worker", "busy", None)
+        .unwrap();
+    let state = Arc::new(AppState::new(config.clone()));
+    let app = router(state.clone());
+    let (status, subscription) = subscription_request(
+        &app,
+        "POST",
+        "/v1/event-subscriptions",
+        json!({"taskId":"manager", "localOnly":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{subscription}");
+    assert!(subscription["pending"].is_null());
+    let id = subscription["id"].as_str().unwrap();
+    db.update_pipeline_item_runtime_status("worker", "idle", None)
+        .unwrap();
+    db.connection_for_e2e_tests().execute("UPDATE pipeline_item SET runtime_event_pending_at = datetime('now', '-11 seconds') WHERE id = 'worker'", []).unwrap();
+    db.flush_debounced_activity_events(300).unwrap();
+    let service = tokio::spawn(super::super::event_subscriptions::run(state.clone()));
+    let message = tokio::time::timeout(std::time::Duration::from_secs(15), deliveries.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(message.starts_with("[Kanna supervisor]"));
+    assert!(message.contains(id));
+    await_subscription(&state, id, |row| row.wake_state == "notified").await;
+    let inputs = db.list_task_inputs("manager", 20).unwrap();
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0].source, "engine");
+    assert_eq!(inputs[0].message, message);
+    // New work stays behind the pending batch rather than injecting another
+    // message. Human read state does not acknowledge it.
+    db.update_pipeline_item_activity("worker", "idle").unwrap();
+    db.update_pipeline_item_stage("worker", "review").unwrap();
+    let (_, read) = subscription_request(
+        &app,
+        "POST",
+        &format!("/v1/event-subscriptions/{id}/read"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(read["wakeState"], "notified");
+    assert_eq!(db.count_task_inputs("manager").unwrap(), 1);
+    let (status, _) = subscription_request(
+        &app,
+        "POST",
+        &format!("/v1/event-subscriptions/{id}/unsubscribe"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(deliveries.try_recv().is_err());
+    service.abort();
+    let _ = service.await;
+    daemon_server.abort();
+    let _ = daemon_server.await;
+    drop(db);
+    cleanup(&config, &daemon.socket_path, &daemon.daemon_dir);
+}
+
+/// A daemon that is absent when the wake fires — every app upgrade hands the
+/// socket over, and a nudge that lands in that window used to be dropped for
+/// good. Nothing reached the daemon, so the batch stays `pending` and goes out
+/// once on the next notification, not twice and not never.
+#[tokio::test]
+async fn subscription_wake_that_never_reached_the_daemon_is_retried_once_when_it_returns() {
+    use super::task_events::{await_subscription, subscription_request};
+    use serde_json::json;
+    let unique = format!("subscription-daemon-gone-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let config = raw_input_test_config(&unique, &daemon_dir);
+    seed_live_task(&config, "manager");
+    let db = Db::open(&config.db_path).unwrap();
+    db.insert_test_pipeline_item(
+        "worker",
+        "repo-1",
+        "work",
+        Some("Worker"),
+        "in progress",
+        "2026-09-08 00:00:00",
+    )
+    .unwrap();
+    db.update_pipeline_item_runtime_status("worker", "busy", None)
+        .unwrap();
+    let state = Arc::new(AppState::new(config.clone()));
+    let app = router(state.clone());
+    let (status, subscription) = subscription_request(
+        &app,
+        "POST",
+        "/v1/event-subscriptions",
+        json!({"taskId":"manager", "localOnly":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{subscription}");
+    let id = subscription["id"].as_str().unwrap().to_string();
+    db.update_pipeline_item_runtime_status("worker", "idle", None)
+        .unwrap();
+    db.connection_for_e2e_tests().execute("UPDATE pipeline_item SET runtime_event_pending_at = datetime('now', '-11 seconds') WHERE id = 'worker'", []).unwrap();
+    db.flush_debounced_activity_events(300).unwrap();
+    let service = tokio::spawn(super::super::event_subscriptions::run(state.clone()));
+
+    // No socket exists yet: the attempt fails before a byte is written.
+    let row = await_subscription(&state, &id, |row| {
+        row.pending.is_some() && row.error.is_some()
+    })
+    .await;
+    assert_eq!(row.wake_state, "pending", "{:?}", row.error);
+    assert!(
+        row.error.as_deref().unwrap().contains("daemon_unavailable"),
+        "{:?}",
+        row.error
+    );
+    assert!(row.active);
+    assert_eq!(db.count_task_inputs("manager").unwrap(), 0);
+
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let (delivered, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
+    let daemon_server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut read = BufReader::new(read);
+            while let Some(command) = read_test_daemon_command_optional(&mut read, &mut write).await
+            {
+                let response = match command {
+                    DaemonCommand::List => DaemonEvent::SessionList {
+                        sessions: vec![live_session("manager", 42133)],
+                    },
+                    DaemonCommand::SubmitInputIfSession { data, .. } => {
+                        delivered.send(String::from_utf8(data).unwrap()).unwrap();
+                        DaemonEvent::Ok
+                    }
+                    other => panic!("unexpected subscription delivery: {other:?}"),
+                };
+                write
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    // The existing wake signal, not a new timer: the worker re-attempts the
+    // page it never delivered.
+    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    let message = tokio::time::timeout(std::time::Duration::from_secs(15), deliveries.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(message.contains(&id));
+    let row = await_subscription(&state, &id, |row| row.wake_state == "notified").await;
+    assert!(row.error.is_none());
+    let inputs = db.list_task_inputs("manager", 20).unwrap();
+    assert_eq!(inputs.len(), 1, "exactly one delivery for one batch");
+    assert_eq!(inputs[0].source, "engine");
+    assert!(deliveries.try_recv().is_err());
+    service.abort();
+    let _ = service.await;
+    daemon_server.abort();
+    let _ = daemon_server.await;
+    drop(db);
+    cleanup(&config, &socket_path, &daemon_dir);
+}
+
+/// A loaded machine holding SQLite past its busy timeout is not a decision to
+/// stop watching. The worker must survive the fault with the row still active.
+#[tokio::test]
+async fn subscription_storage_fault_defers_the_worker_instead_of_deactivating_it() {
+    use super::task_events::{await_subscription, subscription_request};
+    use serde_json::json;
+    let unique = format!("subscription-db-fault-{}", unique_test_suffix());
+    let daemon = scripted_daemon(&unique);
+    let listener = daemon.listener;
+    let (delivered, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
+    let daemon_server = tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut read = BufReader::new(read);
+            while let Some(command) = read_test_daemon_command_optional(&mut read, &mut write).await
+            {
+                let response = match command {
+                    DaemonCommand::List => DaemonEvent::SessionList {
+                        sessions: vec![live_session("manager", 42133)],
+                    },
+                    DaemonCommand::SubmitInputIfSession { data, .. } => {
+                        delivered.send(String::from_utf8(data).unwrap()).unwrap();
+                        DaemonEvent::Ok
+                    }
+                    other => panic!("unexpected subscription delivery: {other:?}"),
+                };
+                write
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+    let config = raw_input_test_config(&unique, &daemon.daemon_dir);
+    seed_live_task(&config, "manager");
+    let db = Db::open(&config.db_path).unwrap();
+    db.insert_test_pipeline_item(
+        "worker",
+        "repo-1",
+        "work",
+        Some("Worker"),
+        "in progress",
+        "2026-09-08 00:00:00",
+    )
+    .unwrap();
+    db.update_pipeline_item_runtime_status("worker", "busy", None)
+        .unwrap();
+    let state = Arc::new(AppState::new(config.clone()));
+    let app = router(state.clone());
+    let (status, subscription) = subscription_request(
+        &app,
+        "POST",
+        "/v1/event-subscriptions",
+        json!({"taskId":"manager", "localOnly":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{subscription}");
+    let id = subscription["id"].as_str().unwrap().to_string();
+    // A page is waiting before the worker starts, so its first iteration must
+    // write — and that write is what the exclusive lock fails.
+    db.update_pipeline_item_runtime_status("worker", "idle", None)
+        .unwrap();
+    db.connection_for_e2e_tests().execute("UPDATE pipeline_item SET runtime_event_pending_at = datetime('now', '-11 seconds') WHERE id = 'worker'", []).unwrap();
+    db.flush_debounced_activity_events(300).unwrap();
+
+    let blocker = rusqlite::Connection::open(&config.db_path).unwrap();
+    blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let service = tokio::spawn(super::super::event_subscriptions::run(state.clone()));
+    // Past the 10s SQLITE_BUSY timeout, so the worker's write genuinely fails.
+    tokio::time::sleep(std::time::Duration::from_secs(13)).await;
+    let row = Db::open(&config.db_path)
+        .unwrap()
+        .event_subscription(&id)
+        .unwrap()
+        .unwrap();
+    assert!(row.active, "a storage fault must not deactivate the row");
+    assert_eq!(db.count_task_inputs("manager").unwrap(), 0);
+    blocker.execute_batch("ROLLBACK").unwrap();
+    drop(blocker);
+
+    state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    let message = tokio::time::timeout(std::time::Duration::from_secs(20), deliveries.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(message.contains(&id));
+    let row = await_subscription(&state, &id, |row| row.wake_state == "notified").await;
+    assert!(row.active);
+    assert_eq!(db.count_task_inputs("manager").unwrap(), 1);
+    service.abort();
+    let _ = service.await;
+    daemon_server.abort();
+    let _ = daemon_server.await;
+    drop(db);
+    cleanup(&config, &daemon.socket_path, &daemon.daemon_dir);
+}

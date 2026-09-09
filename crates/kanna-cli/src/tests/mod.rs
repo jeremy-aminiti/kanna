@@ -187,6 +187,38 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_subscribe_events",
+            TypedToolSurface {
+                command_path: &["task", "subscribe-events"],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("repo_id", "repo_id"),
+                    ("parent_task_id", "parent_task_id"),
+                    ("task_ids", "task_ids"),
+                    ("exclude_task_ids", "exclude_task_ids"),
+                    ("local_only", "local_only"),
+                    ("delivery", "delivery"),
+                ],
+            },
+        ),
+        (
+            "kanna_read_event_subscription",
+            TypedToolSurface {
+                command_path: &["task", "read-event-subscription"],
+                param_args: &[
+                    ("subscription_id", "subscription_id"),
+                    ("acknowledge_batch_id", "acknowledge_batch_id"),
+                ],
+            },
+        ),
+        (
+            "kanna_unsubscribe_events",
+            TypedToolSurface {
+                command_path: &["task", "unsubscribe-events"],
+                param_args: &[("subscription_id", "subscription_id")],
+            },
+        ),
+        (
             "kanna_wait_events",
             TypedToolSurface {
                 command_path: &["task", "wait-events"],

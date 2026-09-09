@@ -1,6 +1,116 @@
 {
   "tools": [
     {
+      "name": "kanna_subscribe_events",
+      "description": "Subscribe once to task events. Returns promptly with a durable subscription and a pending page containing already-settled tasks. Kanna owns the watcher; the agent need not run or background a process. Read pending events with kanna_read_event_subscription and acknowledge the batch id after reconciling it. Wake delivery is a separate harness adapter. Only one active subscription per subscriber run; repeated calls return it. Subscriptions stop on run replacement or close. Local-process access only.",
+      "method": "POST",
+      "path": "/v1/event-subscriptions",
+      "response": "json",
+      "params": [
+        {
+          "name": "task_id",
+          "description": "The subscribing manager task; use KANNA_TASK_ID. Its current run owns the subscription.",
+          "type": "string",
+          "required": true,
+          "location": "body",
+          "key": "taskId"
+        },
+        {
+          "name": "repo_id",
+          "description": "Watch this repository. Defaults to the subscriber task repository.",
+          "type": "string",
+          "required": false,
+          "location": "body",
+          "key": "repoId"
+        },
+        {
+          "name": "parent_task_id",
+          "description": "Watch this task’s direct children.",
+          "type": "string",
+          "required": false,
+          "location": "body",
+          "key": "parentTaskId"
+        },
+        {
+          "name": "task_ids",
+          "description": "Watch these tasks instead of a repository.",
+          "type": "string_array",
+          "required": false,
+          "location": "body",
+          "key": "taskIds"
+        },
+        {
+          "name": "exclude_task_ids",
+          "description": "Tasks deliberately deferred; subscriber itself is always excluded.",
+          "type": "string_array",
+          "required": false,
+          "location": "body",
+          "key": "excludeTaskIds"
+        },
+        {
+          "name": "local_only",
+          "description": "Restrict observation to this machine.",
+          "type": "boolean",
+          "required": false,
+          "location": "body",
+          "key": "localOnly"
+        },
+        {
+          "name": "delivery",
+          "description": "Harness wake adapter: input sends an engine-labelled supervisory nudge; codex_app_server uses native standalone tool output (explicit opt-in, needs a recorded or uniquely loaded root thread for the stage worktree); poll keeps a mailbox without automatic wake.",
+          "type": "string",
+          "required": false,
+          "location": "body",
+          "enum": [
+            "input",
+            "codex_app_server",
+            "poll"
+          ],
+          "default": "input"
+        }
+      ]
+    },
+    {
+      "name": "kanna_read_event_subscription",
+      "description": "Read the durable mailbox without acknowledging it. Pass acknowledge_batch_id only after servicing that exact batch to advance the observation cursor and release the next page. Reading and acknowledging never affect human read/unread state or task completion. The error and wakeState fields expose failed or uncertain native/input delivery; do not blindly retry uncertain input. Kanna continues observing independently of the harness.",
+      "method": "POST",
+      "path": "/v1/event-subscriptions/{subscription_id}/read",
+      "response": "json",
+      "params": [
+        {
+          "name": "subscription_id",
+          "description": "Subscription id returned by kanna_subscribe_events.",
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        {
+          "name": "acknowledge_batch_id",
+          "description": "Acknowledge ONLY the batch you have reconciled. Omit for a non-destructive read. A stale id is rejected.",
+          "type": "integer",
+          "required": false,
+          "location": "body",
+          "key": "acknowledgeBatchId"
+        }
+      ]
+    },
+    {
+      "name": "kanna_unsubscribe_events",
+      "description": "Stop an event subscription and its background observer. Pending events remain readable for audit; stopping does not close or advance the manager task.",
+      "method": "POST",
+      "path": "/v1/event-subscriptions/{subscription_id}/unsubscribe",
+      "response": "json",
+      "params": [
+        {
+          "name": "subscription_id",
+          "description": "Subscription id returned by kanna_subscribe_events.",
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      ]
+    },
+    {
       "name": "kanna_info",
       "description": "Report which Kanna runtime this client is actually connected to. Returns the exact effective HTTP base URL and parsed host/port, client adapter identity, an allow-listed identity snapshot from the authoritative server /v1/status response, the separately advertised LAN endpoint, capability/write-path health, and an explicit serverStatus error when status cannot be fetched. The connected instance cannot be inferred from a default port, app path, display name, or process name.",
       "method": "GET",
@@ -120,40 +230,189 @@
     },
     {
       "name": "kanna_wait_task",
-      "description": "Block until a Kanna task finishes or closes, polling its detail. A task counts as finished once a termination is recorded: the task closed, its latest stage run reached a terminal status (succeeded or failed), or its agent session ended without a replacement (runtimeState 'exited'). It never resolves on read state, so a task whose agent is busy inside a long call and whose output nobody has read (activity 'unread') keeps the wait running, and a task whose agent stopped resolves whether activity settled to 'idle' or 'unread'. Returns the task detail plus waitOutcome 'resolved'; read the verdict from latestRun. If the wait window elapses first it returns the latest detail with waitOutcome 'timeout' instead of failing — that is a normal result, so call it again in a loop to keep waiting.",
+      "description": "Wait for one task to need reconciliation. The default until=reconcile resolves immediately for observed non-busy runtime that survived the server debounce, including an agent parked without recording a verdict, or for recorded termination. Explicit until=finished requires a closed task, terminal latest run, or exited session; until=closed requires closure. Resolving reconcile does not declare success or advance a manual gate. For continuous management use kanna_subscribe_events so observation does not depend on a harness background wait. Bounded waits return the latest detail with waitOutcome=timeout when their window expires.",
       "method": "GET",
       "path": "/v1/tasks/{task_id}",
       "response": "wait",
       "params": [
-        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
-        { "name": "task_id", "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).", "type": "string", "required": true, "location": "path" },
-        { "name": "timeout_secs", "description": "Seconds to wait before returning the latest detail with waitOutcome 'timeout' (clamped to at most 240, so the call returns inside the 300s tools/call timeout MCP clients enforce).", "type": "integer", "required": false, "location": "body", "default": 240, "max": 240 },
-        { "name": "poll_secs", "description": "Seconds between polls (minimum 1).", "type": "integer", "required": false, "location": "body", "default": 3, "min": 1 },
-        { "name": "until", "description": "'finished' resolves when a termination is recorded — the task closes, its latest stage run reaches a terminal status, or its agent session exits; 'closed' resolves only when the task closes.", "type": "string", "required": false, "location": "body", "enum": ["finished", "closed"], "default": "finished" }
+        {
+          "name": "machine_id",
+          "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.",
+          "type": "string",
+          "required": false,
+          "location": "routing"
+        },
+        {
+          "name": "task_id",
+          "description": "Task id (stable across stages) or one of the task's branch names (task-{id} or task-{id}-{n}).",
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        {
+          "name": "timeout_secs",
+          "description": "Seconds to wait before returning the latest detail with waitOutcome 'timeout' (clamped to at most 240, so the call returns inside the 300s tools/call timeout MCP clients enforce).",
+          "type": "integer",
+          "required": false,
+          "location": "body",
+          "default": 240,
+          "max": 240
+        },
+        {
+          "name": "poll_secs",
+          "description": "Seconds between polls (minimum 1).",
+          "type": "integer",
+          "required": false,
+          "location": "body",
+          "default": 3,
+          "min": 1
+        },
+        {
+          "name": "until",
+          "description": "reconcile (default) returns settled non-busy runtime or recorded termination; finished requires termination; closed requires task closure.",
+          "type": "string",
+          "required": false,
+          "location": "body",
+          "enum": [
+            "reconcile",
+            "finished",
+            "closed"
+          ],
+          "default": "reconcile"
+        }
       ]
     },
     {
       "name": "kanna_wait_events",
-      "description": "Watch several Kanna tasks at once: blocks until any of them emits an event, then returns every event since your cursor plus a new cursor. This is the lossless fan-out primitive — kanna_wait_task blocks on one id and cannot supervise several tasks. Set include_current_activity for a level-triggered manager wait: after the fixed 10-second server debounce, a task already idle, waiting, or exited returns immediately as synthetic task.runtime_changed state, while short idle blips emit nothing. Scope it by task_ids, by parent_task_id (your own id, to watch everything you fanned out without naming it), by repo_id, or by the machine-independent repo_remote_url_hash. A repository-scoped wait issued from inside a task session excludes the calling task's own events by default \u2014 its KANNA_TASK_ID is added to exclude_task_ids \u2014 so a manager's own settled-runtime and activity edges never wake it; pass include_self true to receive them, or exclude_task_ids to drop other tasks from any scope. Event types: 'task.created', 'run.started', 'run.finished' (payload.status succeeded/failed/cancelled, payload.result), 'stage.changed', 'task.workflow_changed', 'task.pr_created', 'task.revision_requested' (payload.exhausted true means the task is parked for its human — stop waiting), 'task.closed', 'task.runtime_changed' (the manager signal: the daemon's own runtime verdict on the agent session moved between busy, waiting, idle and exited. payload carries previousRuntimeState, runtimeState and latestRunFinishedWithoutCompletion, whose true value identifies a parked task awaiting advance. Entering busy is published at once; every non-busy value must hold for a fixed 10-second server debounce, so busy/idle flicker emits nothing. This never encodes human read/unread state \u2014 watch it, not task.activity_changed, and drop the display event with exclude_event_types), 'task.runtime_settled' (deprecated: the busy-to-non-busy subset of task.runtime_changed, appended in the same transaction for watchers that already key on it), 'task.blocked' / 'task.unblocked' (the task acquired its first unresolved blocker, or lost its last one; payload.blockerTaskIds lists the unresolved blockers. Blocked is derived, so these also fire when a blocker task closes or reaches pr with a PR underneath a dependent), 'task.awaiting_advance' (a manual-stage main session exited without recording completion), 'task.provider_quota_rejected' (a provider positively refused this task's turn because the allowance for the scope it named is spent \u2014 matched on the CLI's own rejection output or the headless SDK's rate-limit status, never inferred from a quiet session. payload carries provider, model, scope (the model or window the provider itself named; null means it did not say, which is never 'this provider is unavailable'), stage, stageRunId, source (pty|sdk), ruleId and matchedText so the claim can be checked, and recovery \u2014 'fallback-started' when Kanna started the stage's next ordered candidate once in the same workspace, or a 'parked-*' verdict. It never finishes a run, advances a stage, or turns a failure into a success), 'task.provider_quota_parked' (the actionable state: nothing is left to try, so the task is waiting for a person. payload.reason is the recovery verdict, payload.rejectedProviders lists what has refused at this stage, and payload.action says what a human can do. Emitted once per refusal that parks \u2014 there is no retry loop behind it), 'task.awaiting_input' (the daemon positively identified an interactive prompt and the agent needs an answer, e.g. via kanna_send_task_input), 'task.activity_changed' (the human read/unread display dimension, not the manager one \u2014 a person reading a task moves it, so a manager should exclude it; provider-neutral and server-debounced on every activity direction for every provider; payload includes previousActivity, activity, runtimeState, and latestRunFinishedWithoutCompletion, whose true value identifies a parked task awaiting advance; no waiting-prompt placeholder or follow-up polling is required), 'task.merge_signaled' (the task's PR reached the repo's merge agent; payload.source is 'agent' or 'engine'), and 'task.merge_handoff_missing' (the workflow finished a stage that promised the merge handoff with no PR to hand off, so the task was NOT closed — treat it as a failed approval), 'task.raw_input_delivered' (discrete terminal keys or explicit bytes were written into the task's live PTY through kanna_send_task_raw_input; payload.writes lists each write's key name (null for explicit bytes), its exact bytes as hex, the declared composer class, and whether it was written, and payload.status is the call's verdict. These are actions, not speech: no task_input row exists for them and kanna_task_inputs will never show them), 'task.input_delivered' (a message was delivered into the task's agent session from outside it; payload.source is 'operator', 'manager', or 'unspecified' (historical retained events may carry 'notify'), payload.preview is a bounded prefix with payload.truncated saying whether it was cut, and the full text is readable with kanna_task_inputs), 'task.teardown_failed' (detached workspace teardown failed to start or exceeded its deadline; payload.sessionId and payload.error identify the failure), 'task.lifecycle_operation_retired' (a durable post or stage-spawn intent was dropped without being applied because no server restart could ever reconcile it \u2014 an undecodable payload, an unknown kind, a payload naming another task, or a task closed underneath it; that intent is also the task's pre-operation guard, so this says the task was unblocked at the cost of the projection, with payload.reason, payload.operationId, payload.kind and payload.phase. An uncertain in-flight operation is never retired, and a retirement never destroys committed work: a stage spawn whose Spawn already crossed the daemon socket keeps the workspace it forked, because an agent may have run and committed there and the dropped stage move is what would otherwise have named it \u2014 payload.retainedBranch and payload.retainedWorktreePath are that branch and worktree, null when nothing was kept), and 'task.transfer_finalizing' (a cross-machine transfer is shutting the task's agent down so its conversation can be shipped; payload.phase is one of 'wrap-up-sent', 'idle', 'quit-sent', 'exited', 'already-exited', 'degraded'). Prompt text changing while a task remains idle or unread does not produce another event; read waitingPromptSnippet from kanna_get_task when reconciling a stopped task. Event payload fields describe the event-time fact: payload.stage is the stage then, and run events keep their own runId/status/result. Delivery-time state is separate under payload.currentTask (title, stage, activity, stageTransition, and latestRun for finished/awaiting events), so retained history cannot masquerade as today's failure. machineId identifies the source in the payload and aggregate row. Call it in a loop, passing back the short cursor handle you were given unchanged: events that fire between two calls are delivered on the next one, each exactly once. Omit the cursor on the first call to receive the retained history. A handle expires after 10 minutes without use or when its issuing process restarts; the returned error tells you to omit it and safely replay retained history. Legacy full cursor formats remain accepted and upgrade on resume. An elapsed window returns waitOutcome 'timeout' with no events — a normal result, not an error. Native fixed task/repo scopes use one sequence watermark. Native parent_task_id cursors bind that same global watermark to the parent id in a constant-size cursor; membership is evaluated at each read checkpoint, so reparenting never rewinds acknowledged events and newly eligible events after the checkpoint are delivered without cursor growth. hasMore true means another batch is already waiting, so call again immediately. Without machine_id, the connected kanna-server aggregates task, parent, and repository scopes across every sibling machine currently reachable through the account relay, tags every event with machineId, and returns machineErrors for stale or unreachable peers without advancing their native cursors; reconnecting peers catch up from retained history. Repository scope is matched by remote URL hash, not installation-local repo id. Per-machine checkpoints inside server ks1 and MCP km1 aggregates are emitted in one canonical ke1 envelope; deployed bare numeric, p3, kc1, and short-handle values remain accepted and normalize on resume. In kanna-mcp, the existing task_ids fan-in still covers tasks on different currently reachable machines and returns a short client-held aggregate cursor; legacy km1 aggregate cursors remain accepted. A machine_id pins the entire wait to one machine. Each MCP call remains clamped to 240 seconds so clients that abort tools/call around 300 seconds do not discard its result. For an arbitrarily long push-equivalent manager wake, run `kanna-cli task watch` as a background process; it loops this same feed, owns cursor hygiene, and exits when actionable work arrives.",
+      "description": "Watch several Kanna tasks at once: blocks until any of them emits an event, then returns every event since your cursor plus a new cursor. This is the lossless fan-out primitive — kanna_wait_task blocks on one id and cannot supervise several tasks. Set include_current_activity for a level-triggered manager wait: after the fixed 10-second server debounce, a task already idle, waiting, or exited returns immediately as synthetic task.runtime_changed state, while short idle blips emit nothing. Scope it by task_ids, by parent_task_id (your own id, to watch everything you fanned out without naming it), by repo_id, or by the machine-independent repo_remote_url_hash. A repository-scoped wait issued from inside a task session excludes the calling task's own events by default — its KANNA_TASK_ID is added to exclude_task_ids — so a manager's own settled-runtime and activity edges never wake it; pass include_self true to receive them, or exclude_task_ids to drop other tasks from any scope. Event types: 'task.created', 'run.started', 'run.finished' (payload.status succeeded/failed/cancelled, payload.result), 'stage.changed', 'task.workflow_changed', 'task.pr_created', 'task.revision_requested' (payload.exhausted true means the task is parked for its human — stop waiting), 'task.closed', 'task.runtime_changed' (the manager signal: the daemon's own runtime verdict on the agent session moved between busy, waiting, idle and exited. payload carries previousRuntimeState, runtimeState and latestRunFinishedWithoutCompletion, whose true value identifies a parked task awaiting advance. Entering busy is published at once; every non-busy value must hold for a fixed 10-second server debounce, so busy/idle flicker emits nothing. This never encodes human read/unread state — watch it, not task.activity_changed, and drop the display event with exclude_event_types), 'task.runtime_settled' (deprecated: the busy-to-non-busy subset of task.runtime_changed, appended in the same transaction for watchers that already key on it), 'task.blocked' / 'task.unblocked' (the task acquired its first unresolved blocker, or lost its last one; payload.blockerTaskIds lists the unresolved blockers. Blocked is derived, so these also fire when a blocker task closes or reaches pr with a PR underneath a dependent), 'task.awaiting_advance' (a manual-stage main session exited without recording completion), 'task.provider_quota_rejected' (a provider positively refused this task's turn because the allowance for the scope it named is spent — matched on the CLI's own rejection output or the headless SDK's rate-limit status, never inferred from a quiet session. payload carries provider, model, scope (the model or window the provider itself named; null means it did not say, which is never 'this provider is unavailable'), stage, stageRunId, source (pty|sdk), ruleId and matchedText so the claim can be checked, and recovery — 'fallback-started' when Kanna started the stage's next ordered candidate once in the same workspace, or a 'parked-*' verdict. It never finishes a run, advances a stage, or turns a failure into a success), 'task.provider_quota_parked' (the actionable state: nothing is left to try, so the task is waiting for a person. payload.reason is the recovery verdict, payload.rejectedProviders lists what has refused at this stage, and payload.action says what a human can do. Emitted once per refusal that parks — there is no retry loop behind it), 'task.awaiting_input' (the daemon positively identified an interactive prompt and the agent needs an answer, e.g. via kanna_send_task_input), 'task.activity_changed' (the human read/unread display dimension, not the manager one — a person reading a task moves it, so a manager should exclude it; provider-neutral and server-debounced on every activity direction for every provider; payload includes previousActivity, activity, runtimeState, and latestRunFinishedWithoutCompletion, whose true value identifies a parked task awaiting advance; no waiting-prompt placeholder or follow-up polling is required), 'task.merge_signaled' (the task's PR reached the repo's merge agent; payload.source is 'agent' or 'engine'), and 'task.merge_handoff_missing' (the workflow finished a stage that promised the merge handoff with no PR to hand off, so the task was NOT closed — treat it as a failed approval), 'task.raw_input_delivered' (discrete terminal keys or explicit bytes were written into the task's live PTY through kanna_send_task_raw_input; payload.writes lists each write's key name (null for explicit bytes), its exact bytes as hex, the declared composer class, and whether it was written, and payload.status is the call's verdict. These are actions, not speech: no task_input row exists for them and kanna_task_inputs will never show them), 'task.input_delivered' (a message was delivered into the task's agent session from outside it; payload.source is 'operator', 'manager', or 'unspecified' (historical retained events may carry 'notify'), payload.preview is a bounded prefix with payload.truncated saying whether it was cut, and the full text is readable with kanna_task_inputs), 'task.teardown_failed' (detached workspace teardown failed to start or exceeded its deadline; payload.sessionId and payload.error identify the failure), 'task.lifecycle_operation_retired' (a durable post or stage-spawn intent was dropped without being applied because no server restart could ever reconcile it — an undecodable payload, an unknown kind, a payload naming another task, or a task closed underneath it; that intent is also the task's pre-operation guard, so this says the task was unblocked at the cost of the projection, with payload.reason, payload.operationId, payload.kind and payload.phase. An uncertain in-flight operation is never retired, and a retirement never destroys committed work: a stage spawn whose Spawn already crossed the daemon socket keeps the workspace it forked, because an agent may have run and committed there and the dropped stage move is what would otherwise have named it — payload.retainedBranch and payload.retainedWorktreePath are that branch and worktree, null when nothing was kept), and 'task.transfer_finalizing' (a cross-machine transfer is shutting the task's agent down so its conversation can be shipped; payload.phase is one of 'wrap-up-sent', 'idle', 'quit-sent', 'exited', 'already-exited', 'degraded'). Prompt text changing while a task remains idle or unread does not produce another event; read waitingPromptSnippet from kanna_get_task when reconciling a stopped task. Event payload fields describe the event-time fact: payload.stage is the stage then, and run events keep their own runId/status/result. Delivery-time state is separate under payload.currentTask (title, stage, activity, stageTransition, and latestRun for finished/awaiting/runtime events), so retained history cannot masquerade as today's failure. machineId identifies the source in the payload and aggregate row. Call it in a loop, passing back the short cursor handle you were given unchanged: events that fire between two calls are delivered on the next one, each exactly once. Omit the cursor on the first call to receive retained history plus already-settled current tasks by default. from=now skips history but still returns already-settled current state. Passing back the returned cursor acknowledges that initial scan once; it does not mark human output read. Explicit include_current_activity=false requests only edges. A handle expires after 10 minutes without use or when its issuing process restarts; the returned error tells you to omit it and safely replay retained history. Legacy full cursor formats remain accepted and upgrade on resume. An elapsed window returns waitOutcome 'timeout' with no events — a normal result, not an error. Native fixed task/repo scopes use one sequence watermark. Native parent_task_id cursors bind that same global watermark to the parent id in a constant-size cursor; membership is evaluated at each read checkpoint, so reparenting never rewinds acknowledged events and newly eligible events after the checkpoint are delivered without cursor growth. hasMore true means another batch is already waiting, so call again immediately. Without machine_id, the connected kanna-server aggregates task, parent, and repository scopes across every sibling machine currently reachable through the account relay, tags every event with machineId, and returns machineErrors for stale or unreachable peers without advancing their native cursors; reconnecting peers catch up from retained history. Repository scope is matched by remote URL hash, not installation-local repo id. Per-machine checkpoints inside server ks1 and MCP km1 aggregates are emitted in one canonical ke1 envelope; deployed bare numeric, p3, kc1, and short-handle values remain accepted and normalize on resume. In kanna-mcp, the existing task_ids fan-in still covers tasks on different currently reachable machines and returns a short client-held aggregate cursor; legacy km1 aggregate cursors remain accepted. A machine_id pins the entire wait to one machine. Each MCP call remains clamped to 240 seconds so clients that abort tools/call around 300 seconds do not discard its result. For continuous management use kanna_subscribe_events: the server owns observation and a durable mailbox, while a selectable harness adapter delivers coalesced wakeups. A harness with reliable background-process completion may still use kanna-cli task watch.",
       "method": "GET",
       "path": "/v1/task-events",
       "response": "json",
       "params": [
-        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.", "type": "string", "required": false, "location": "routing" },
-        { "name": "task_ids", "description": "Task ids (or branch names) to watch, e.g. the child tasks you created. Required unless parent_task_id or repo_id is given.", "type": "string_array", "required": false, "location": "query", "key": "taskIds" },
-        { "name": "parent_task_id", "description": "Watch every task fanned out under this parent instead of naming ids: pass your own task id and you get your children's events without remembering what you created. Re-resolved on every call, so a child created after you started watching is in scope on the next one. Direct children only, and the parent's own events are excluded — the same set kanna_get_task reports as childTaskIds. Ignored when task_ids is given; takes precedence over repo_id.", "type": "string", "required": false, "location": "query", "key": "parentTaskId" },
-        { "name": "repo_id", "description": "Watch every task in this local repository and matching copies on sibling machines. Inside a task session an otherwise unscoped wait defaults to the caller task's repository. The server resolves this installation-local id to the repository's remote URL hash. Ignored when task_ids or parent_task_id is given.", "type": "string", "required": false, "location": "query", "key": "repoId" },
-        { "name": "repo_remote_url_hash", "description": "Watch matching repository copies on every machine by the remoteUrlHash returned from kanna_list_repos. Use this when no local repo id is available. Ignored when task_ids, parent_task_id, or repo_id is given.", "type": "string", "required": false, "location": "query", "key": "repoRemoteUrlHash" },
-        { "name": "exclude_task_ids", "description": "Task ids (or branch names) whose events are dropped from whichever scope was chosen. A filter, not a scope: it is not part of the cursor, so adding or removing an exclusion never invalidates a checkpoint, and an id that matches no task excludes nothing. Inside a task session a repository-scoped wait adds the calling task's own id here automatically unless include_self is true.", "type": "string_array", "required": false, "location": "query", "key": "excludeTaskIds" },
-        { "name": "exclude_event_types", "description": "Event type names dropped from whichever scope was chosen \u2014 the way a manager opts out of noise it will only discard. A filter, not a scope: it is not part of the cursor, so changing it never invalidates a checkpoint, and an unknown name drops nothing. Filtering happens in the server, so the wait does not return at all for a dropped event. A manager watching runtime state passes 'task.activity_changed' (and 'task.runtime_settled' if it keys on the superseding 'task.runtime_changed'), so a human merely reading a task's output never wakes it.", "type": "string_array", "required": false, "location": "query", "key": "excludeEventTypes" },
-        { "name": "include_self", "description": "Set true to keep the calling task's own events in a repository-scoped wait issued from inside a task session (for example to observe your own run.finished). Consumed by the client; it only disables the automatic self-exclusion and never touches explicit exclude_task_ids entries.", "type": "boolean", "required": false, "location": "client" },
-        { "name": "local_only", "description": "Keep this request on the selected machine and return its native cursor. Used by compatibility adapters that already aggregate per-machine waits; ordinary callers should omit it.", "type": "boolean", "required": false, "location": "query", "key": "localOnly" },
-        { "name": "include_current_activity", "description": "Make the wait level-triggered for manager activity. In addition to durable events, return an immediate synthetic task.runtime_changed row for every scoped task already idle, waiting, or exited for the fixed 10-second server debounce. Short idle blips emit nothing. This uses daemon runtime state only, never human read/unread activity, so a restarted manager cannot miss parked work. Synthetic rows share the response limit with durable events; pass the opaque cursor back and drain while hasMore is true to page every settled task exactly once for that cursor. Keep this true while shepherding tasks; after servicing or deliberately ignoring a still-idle task, remove that task from an explicit task_ids scope.", "type": "boolean", "required": false, "location": "query", "key": "includeCurrentActivity" },
-        { "name": "short_cursor", "description": "Return a short durable cursor handle instead of the legacy encoded checkpoint. Keep this enabled for agent use. Active watchers reuse one handle, and the handle survives server and relay reconnects for the task-event retention window.", "type": "boolean", "required": false, "location": "query", "key": "shortCursor", "default": true },
-        { "name": "from", "description": "On a cursorless first call, set this to 'now' to establish the durable event checkpoint at the current tail. With include_current_activity true, already-settled scoped tasks are still returned as synthetic current-state rows. Omit it to preserve the retained-history replay contract. Once a cursor exists, the cursor is authoritative.", "type": "string", "required": false, "location": "query", "enum": ["now"] },
-        { "name": "cursor", "description": "Short cursor handle returned by the previous call; pass it back unchanged. It independently checkpoints durable sequence progress and include_current_activity settled-row paging on every machine, so durable events arriving between pages are not lost. Omit on the first call to receive retained history and current settled state for the scope. Legacy full cursors remain accepted.", "type": "string", "required": false, "location": "query" },
-        { "name": "timeout_secs", "description": "Seconds to block before returning waitOutcome 'timeout' with no events (clamped to at most 240, so the call returns inside the 300s tools/call timeout MCP clients enforce).", "type": "integer", "required": false, "location": "query", "key": "timeoutSecs", "default": 240, "max": 240 },
-        { "name": "limit", "description": "Maximum durable plus synthetic rows in one response (1-500, default 100). hasMore true means at least one native or aggregate-machine continuation remains; call again immediately with the returned cursor until hasMore is false.", "type": "integer", "required": false, "location": "query", "min": 1, "max": 500 }
+        {
+          "name": "machine_id",
+          "description": "Machine id from kanna_list_machines. Omit it, or pass the current machine id, to use the local machine connected to this client.",
+          "type": "string",
+          "required": false,
+          "location": "routing"
+        },
+        {
+          "name": "task_ids",
+          "description": "Task ids (or branch names) to watch, e.g. the child tasks you created. Required unless parent_task_id or repo_id is given.",
+          "type": "string_array",
+          "required": false,
+          "location": "query",
+          "key": "taskIds"
+        },
+        {
+          "name": "parent_task_id",
+          "description": "Watch every task fanned out under this parent instead of naming ids: pass your own task id and you get your children's events without remembering what you created. Re-resolved on every call, so a child created after you started watching is in scope on the next one. Direct children only, and the parent's own events are excluded — the same set kanna_get_task reports as childTaskIds. Ignored when task_ids is given; takes precedence over repo_id.",
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "key": "parentTaskId"
+        },
+        {
+          "name": "repo_id",
+          "description": "Watch every task in this local repository and matching copies on sibling machines. Inside a task session an otherwise unscoped wait defaults to the caller task's repository. The server resolves this installation-local id to the repository's remote URL hash. Ignored when task_ids or parent_task_id is given.",
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "key": "repoId"
+        },
+        {
+          "name": "repo_remote_url_hash",
+          "description": "Watch matching repository copies on every machine by the remoteUrlHash returned from kanna_list_repos. Use this when no local repo id is available. Ignored when task_ids, parent_task_id, or repo_id is given.",
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "key": "repoRemoteUrlHash"
+        },
+        {
+          "name": "exclude_task_ids",
+          "description": "Task ids (or branch names) whose events are dropped from whichever scope was chosen. A filter, not a scope: it is not part of the cursor, so adding or removing an exclusion never invalidates a checkpoint, and an id that matches no task excludes nothing. Inside a task session a repository-scoped wait adds the calling task's own id here automatically unless include_self is true.",
+          "type": "string_array",
+          "required": false,
+          "location": "query",
+          "key": "excludeTaskIds"
+        },
+        {
+          "name": "exclude_event_types",
+          "description": "Event type names dropped from whichever scope was chosen — the way a manager opts out of noise it will only discard. A filter, not a scope: it is not part of the cursor, so changing it never invalidates a checkpoint, and an unknown name drops nothing. Filtering happens in the server, so the wait does not return at all for a dropped event. A manager watching runtime state passes 'task.activity_changed' (and 'task.runtime_settled' if it keys on the superseding 'task.runtime_changed'), so a human merely reading a task's output never wakes it.",
+          "type": "string_array",
+          "required": false,
+          "location": "query",
+          "key": "excludeEventTypes"
+        },
+        {
+          "name": "include_self",
+          "description": "Set true to keep the calling task's own events in a repository-scoped wait issued from inside a task session (for example to observe your own run.finished). Consumed by the client; it only disables the automatic self-exclusion and never touches explicit exclude_task_ids entries.",
+          "type": "boolean",
+          "required": false,
+          "location": "client"
+        },
+        {
+          "name": "local_only",
+          "description": "Keep this request on the selected machine and return its native cursor. Used by compatibility adapters that already aggregate per-machine waits; ordinary callers should omit it.",
+          "type": "boolean",
+          "required": false,
+          "location": "query",
+          "key": "localOnly"
+        },
+        {
+          "name": "include_current_activity",
+          "description": "Make the wait level-triggered for manager activity. In addition to durable events, return an immediate synthetic task.runtime_changed row for every scoped task already idle, waiting, or exited for the fixed 10-second server debounce. Short idle blips emit nothing. This uses daemon runtime state only, never human read/unread activity, so a restarted manager cannot miss parked work. Synthetic rows share the response limit with durable events; pass the opaque cursor back and drain while hasMore is true to page every settled task exactly once for that cursor. Enabled by default. Pass the returned cursor to acknowledge observation and avoid repeating unchanged settled tasks. Explicit false selects event-log-only behavior. Use exclude_task_ids for deliberately deferred tasks, never human read state.",
+          "type": "boolean",
+          "required": false,
+          "location": "query",
+          "key": "includeCurrentActivity",
+          "default": true
+        },
+        {
+          "name": "short_cursor",
+          "description": "Return a short durable cursor handle instead of the legacy encoded checkpoint. Keep this enabled for agent use. Active watchers reuse one handle, and the handle survives server and relay reconnects for the task-event retention window.",
+          "type": "boolean",
+          "required": false,
+          "location": "query",
+          "key": "shortCursor",
+          "default": true
+        },
+        {
+          "name": "from",
+          "description": "On a cursorless first call, set this to 'now' to establish the durable event checkpoint at the current tail. With include_current_activity true, already-settled scoped tasks are still returned as synthetic current-state rows. Omit it to preserve the retained-history replay contract. Once a cursor exists, the cursor is authoritative.",
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "enum": [
+            "now"
+          ]
+        },
+        {
+          "name": "cursor",
+          "description": "Short cursor handle returned by the previous call; pass it back unchanged. It independently checkpoints durable sequence progress and include_current_activity settled-row paging on every machine, so durable events arriving between pages are not lost. Omit on the first call to receive retained history and current settled state for the scope. Legacy full cursors remain accepted.",
+          "type": "string",
+          "required": false,
+          "location": "query"
+        },
+        {
+          "name": "timeout_secs",
+          "description": "Seconds to block before returning waitOutcome 'timeout' with no events (clamped to at most 240, so the call returns inside the 300s tools/call timeout MCP clients enforce).",
+          "type": "integer",
+          "required": false,
+          "location": "query",
+          "key": "timeoutSecs",
+          "default": 240,
+          "max": 240
+        },
+        {
+          "name": "limit",
+          "description": "Maximum durable plus synthetic rows in one response (1-500, default 100). hasMore true means at least one native or aggregate-machine continuation remains; call again immediately with the returned cursor until hasMore is false.",
+          "type": "integer",
+          "required": false,
+          "location": "query",
+          "min": 1,
+          "max": 500
+        }
       ]
     },
     {
