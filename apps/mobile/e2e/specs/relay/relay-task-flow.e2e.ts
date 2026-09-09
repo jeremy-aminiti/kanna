@@ -76,6 +76,7 @@ interface RelayTaskFlowOptions {
   setTaskBusyRead(): Promise<void>;
   restoreTallTerminalGeometry(): Promise<void>;
   restoreDesktopTerminalControl(): Promise<void>;
+  dropRelayTunnels(whileDown: () => Promise<void>): Promise<void>;
   resyncTerminalConnection(): Promise<void>;
   setTaskBusyUnread(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
@@ -208,7 +209,9 @@ interface RelayUi {
   getTasksTab(): Promise<RelayElement>;
   getTaskSendButton(): Promise<RelayElement>;
   getTerminalOverlay(): Promise<RelayElement>;
+  getTerminalReconnectBadge(): Promise<RelayElement>;
   inspectTerminalWebView(): ReturnType<typeof inspectTerminalWebView>;
+  readTerminalLoadingIndications(): Promise<number>;
   isKeyboardShown(): Promise<boolean>;
   pause(ms: number): Promise<unknown>;
   waitUntil(
@@ -302,6 +305,72 @@ async function verifyRelayPtyStableResync(
       );
     }
     await ui.pause(500);
+  }
+}
+
+async function verifyRelayPtyTunnelDropIsInvisible(
+  ui: Pick<
+    RelayUi,
+    | "getAgentMessageView"
+    | "getTaskDetailScreen"
+    | "getTerminalOverlay"
+    | "getTerminalReconnectBadge"
+    | "inspectTerminalWebView"
+    | "pause"
+    | "readTerminalLoadingIndications"
+    | "waitUntil"
+  >,
+  fixture: PtyTerminalFixture,
+  dropTunnels: (whileDown: () => Promise<void>) => Promise<void>,
+): Promise<void> {
+  const before = await ui.inspectTerminalWebView();
+  if (before.kind !== "rendered" || !before.documentInstanceId) {
+    throw new Error(
+      `Expected a rendered terminal document before the tunnel drop: ${JSON.stringify(before)}`,
+    );
+  }
+  const loadingIndicationsBefore = await ui.readTerminalLoadingIndications();
+
+  await dropTunnels(async () => {
+    // Sampled in the first moments of the outage, inside the client's
+    // reconnect grace: a gap this short is not news, so the reader must be
+    // told nothing at all about it.
+    if (await (await ui.getTerminalReconnectBadge()).isExisting()) {
+      throw new Error(
+        "The connecting badge was shown for a sub-threshold transport gap",
+      );
+    }
+  });
+
+  // The grid is never taken away. Sampling right through the outage and the
+  // redial is the whole point: a single blank frame here is the regression.
+  for (let sample = 0; sample < 12; sample += 1) {
+    const overlay = await ui.getTerminalOverlay();
+    const inspection = await ui.inspectTerminalWebView();
+    if (
+      await overlay.isExisting() ||
+      inspection.kind !== "rendered" ||
+      inspection.documentInstanceId !== before.documentInstanceId ||
+      inspection.cols !== fixture.expectedCols
+    ) {
+      throw new Error(
+        `Terminal blanked or churned across the tunnel drop at sample ${sample}: ` +
+        `${JSON.stringify(inspection)}`,
+      );
+    }
+    await ui.pause(500);
+  }
+
+  await waitForRenderedPtyTerminal(ui, fixture);
+  const loadingIndications = await ui.readTerminalLoadingIndications();
+  if (loadingIndications > loadingIndicationsBefore + 1) {
+    throw new Error(
+      `One reconnect raised ${loadingIndications - loadingIndicationsBefore} ` +
+      "loading indications; at most one is allowed",
+    );
+  }
+  if (await (await ui.getTerminalReconnectBadge()).isExisting()) {
+    throw new Error("The connecting badge outlived the reconnect");
   }
 }
 
@@ -761,8 +830,23 @@ function createRelayUi(driver: Browser): RelayUi {
     async getTerminalOverlay() {
       return driver.$(selectors.terminalOverlay);
     },
+    async getTerminalReconnectBadge() {
+      return driver.$(selectors.terminalReconnectBadge);
+    },
     async inspectTerminalWebView() {
       return inspectTerminalWebView(createWebViewContextDriver(driver));
+    },
+    async readTerminalLoadingIndications() {
+      const marker = await driver.$(selectors.terminalLoadingIndications);
+      const label = await marker.getAttribute("label").catch(() => null);
+      const parts = String(label ?? "").split(":");
+      const count = Number(parts[parts.length - 1]);
+      if (!Number.isInteger(count)) {
+        throw new Error(
+          `Terminal loading-indication counter was unreadable: ${String(label)}`,
+        );
+      }
+      return count;
     },
     async isKeyboardShown() {
       return driver.isKeyboardShown();
@@ -2316,6 +2400,14 @@ export async function runRelayTaskFlow(
             options.resyncTerminalConnection,
           );
           process.stdout.write("[mobile-e2e] terminal resync stability passed\n");
+          await verifyRelayPtyTunnelDropIsInvisible(
+            ui,
+            options.fixture,
+            options.dropRelayTunnels,
+          );
+          process.stdout.write(
+            "[mobile-e2e] terminal tunnel-drop invisibility passed\n",
+          );
         }
       },
       closeTask: closeTaskForJourney,

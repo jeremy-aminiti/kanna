@@ -49,11 +49,32 @@ const tunnelServices = new WeakMap<WebSocket, TunnelService>();
 const tunnelSockets = new WeakSet<WebSocket>();
 const pausedTunnelSources = new WeakSet<WebSocket>();
 const tunnelPeakBufferedBytes = new WeakMap<WebSocket, number>();
+const tunnelKeepalives = new WeakMap<WebSocket, ReturnType<typeof setInterval>>();
 
 export const TASK_TRANSFER_TUNNEL_HIGH_WATER_BYTES = 512 * 1024;
 export const TASK_TRANSFER_TUNNEL_LOW_WATER_BYTES = 256 * 1024;
 export const TASK_TRANSFER_TUNNEL_MAX_BUFFERED_BYTES = 1024 * 1024;
 export const TASK_TRANSFER_PENDING_TUNNEL_TIMEOUT_MS = 10_000;
+/**
+ * How often an established tunnel is pinged on both legs.
+ *
+ * A tunnel is the only connection carrying a terminal stream, and a terminal
+ * whose agent is thinking sends nothing for minutes. Neither end can keep it
+ * warm on its own: the desktop's 30s keepalive belongs to its *control*
+ * socket, a different connection, and a phone's WebSocket API cannot originate
+ * a ping at all. So an idle terminal stream crossed a hotel NAT with zero
+ * bytes in either direction until the mapping was evicted, and the phone
+ * redialled — a fresh tunnel, a fresh attach and a fresh "Connecting" every
+ * time the reader stopped to read.
+ *
+ * 20s sits under the eviction window a consumer AP typically applies (30-60s)
+ * and costs two control frames per tunnel per minute. Deliberately no pong
+ * deadline: the desktop half is a split tokio-tungstenite stream that flushes
+ * its queued pong on its next write, so an idle desktop legitimately answers
+ * late, and reaping a healthy tunnel for that would be the bug this prevents.
+ * The traffic is the point, not the proof of life.
+ */
+export const TUNNEL_KEEPALIVE_INTERVAL_MS = 20_000;
 
 export function pendingTunnelCountForTests(userId: string): number {
   return connections.get(userId)?.pendingTunnels.size ?? 0;
@@ -307,8 +328,34 @@ function storePendingTunnel(
   pair.pendingTunnels.set(tunnelId, { client, desktopId, service, expiry });
 }
 
+function startTunnelKeepalive(client: WebSocket, desktop: WebSocket): void {
+  const timer = setInterval(() => {
+    for (const socket of [client, desktop]) {
+      if (socket.readyState !== 1) continue;
+      try {
+        socket.ping();
+      } catch {
+        // The socket is already unusable; its close handler tears the pair
+        // down and stops this timer.
+      }
+    }
+  }, TUNNEL_KEEPALIVE_INTERVAL_MS);
+  timer.unref?.();
+  tunnelKeepalives.set(client, timer);
+  tunnelKeepalives.set(desktop, timer);
+}
+
+function stopTunnelKeepalive(ws: WebSocket): void {
+  const timer = tunnelKeepalives.get(ws);
+  if (!timer) return;
+  clearInterval(timer);
+  tunnelKeepalives.delete(ws);
+}
+
 function closeTunnelPeer(ws: WebSocket): void {
   const peer = tunnelPeers.get(ws);
+  stopTunnelKeepalive(ws);
+  if (peer) stopTunnelKeepalive(peer);
   if (pausedTunnelSources.has(ws)) {
     pausedTunnelSources.delete(ws);
     ws.resume();
@@ -338,6 +385,8 @@ function closeTunnelPeer(ws: WebSocket): void {
 
 function failTunnelPair(source: WebSocket, code: number, reason: string): void {
   const peer = tunnelPeers.get(source);
+  stopTunnelKeepalive(source);
+  if (peer) stopTunnelKeepalive(peer);
   tunnelPeers.delete(source);
   tunnelLabels.delete(source);
   tunnelSockets.delete(source);
@@ -613,6 +662,7 @@ export function attachDesktopTunnel(
   tunnelPeakBufferedBytes.set(ws, 0);
   ws.on("close", () => closeTunnelPeer(ws));
   tunnel.client.on("close", () => closeTunnelPeer(tunnel.client));
+  startTunnelKeepalive(tunnel.client, ws);
 
   identifyByteAccount(ws, {
     uid: userId,

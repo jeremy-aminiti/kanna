@@ -1620,6 +1620,32 @@ export function createSessionStore(): SessionStore {
       publish();
     },
     beginTaskTerminal(taskId, initialOutput) {
+      // Re-attaching the same task is a new *attachment*, not a new terminal.
+      // Clearing the grid here is what put "Connecting" over an empty screen
+      // on a link that re-attaches every few seconds: the reader loses content
+      // that is still correct, and gets it back only when the fresh snapshot
+      // lands. Keep what is rendered — the snapshot that follows replaces it
+      // atomically, and the epoch stays put so nothing is re-seeded meanwhile.
+      //
+      // A compacted buffer (`taskTerminalOutputStart > 0`) is the exception and
+      // keeps being discarded: its indices address a history this attachment
+      // will not own, which is the whole reason the foreground reconcile drops
+      // it and asks for a bounded fresh snapshot instead.
+      const reattachesSameTask =
+        state.taskTerminalTaskId === taskId &&
+        initialOutput.length === 0 &&
+        state.taskTerminalOutputStart === 0;
+      if (reattachesSameTask) {
+        state = {
+          ...state,
+          taskTerminalStatus: "connecting",
+          taskTerminalErrorMessage: null
+        };
+        publishTerminalOutput();
+        publish();
+        return;
+      }
+
       const terminalOutput = createTerminalOutput(initialOutput);
       state = {
         ...state,

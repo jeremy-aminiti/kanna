@@ -93,6 +93,47 @@ describe("buildTaskWorkspaceModel", () => {
     });
   });
 
+  it("presents a graced reconnect as live while delivery still answers to the transport", () => {
+    // The reader sees the grid they were already reading; the composer knows
+    // the stream is gone, so nothing is typed into a transport that is not
+    // there.
+    expect(
+      buildTaskWorkspaceModel({
+        task: {
+          id: "task-reconnecting",
+          repoId: "repo-1",
+          title: "Reconnecting under a rendered grid",
+          stage: "in progress"
+        },
+        terminalStatus: "restarting",
+        terminalPresentationStatus: "live"
+      })
+    ).toMatchObject({
+      isTerminalHealthy: true,
+      overlayLabel: null,
+      isComposerDisabled: true
+    });
+  });
+
+  it("tells the reader once the gap outlasts the grace window", () => {
+    expect(
+      buildTaskWorkspaceModel({
+        task: {
+          id: "task-reconnecting",
+          repoId: "repo-1",
+          title: "Reconnecting under a rendered grid",
+          stage: "in progress"
+        },
+        terminalStatus: "connecting",
+        terminalPresentationStatus: "connecting"
+      })
+    ).toMatchObject({
+      isTerminalHealthy: false,
+      overlayLabel: "Connecting",
+      isComposerDisabled: true
+    });
+  });
+
   it.each([
     ["pending", "Creating task", false],
     ["recovering", "Recovering task", false],

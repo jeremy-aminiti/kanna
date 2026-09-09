@@ -93,6 +93,7 @@ import {
   type TaskQuickReply
 } from "./taskQuickReplies";
 import { buildTaskWorkspaceModel } from "./taskWorkspace";
+import { useTerminalReconnectPresentation } from "./terminalReconnectPresentation";
 import { resolveMobileTerminalGeometry } from "../mobileTerminalGeometry";
 import {
   TASK_STAGE_STRIPE_WIDTH,
@@ -254,16 +255,30 @@ export function TaskScreen({
   onCompanionOpenChange,
   onSendCompanionEvent
 }: TaskScreenProps) {
-  const model = buildTaskWorkspaceModel({
-    task,
-    terminalStatus,
-    terminalErrorMessage,
-    taskCreationPhase
-  });
   // The list colours rows by stage; the detail header wears the same colour so
   // opening a task does not drop the signal that led the eye to it.
   const stageTheme = resolveTaskStageTheme(task.stage);
   const [draftInput, setDraftInput] = useState("");
+  // A transient transport reconnect does not invalidate the authoritative
+  // snapshot already on screen. Keep the same xterm document mounted so the
+  // resumed generation replaces its buffer atomically instead of briefly
+  // rebuilding a phone-width terminal and presenting that as a reconnect.
+  const hasAuthoritativeTerminalSnapshot =
+    terminalOutput.length > 0 && terminalCols !== null && terminalRows !== null;
+  // A redial the eye cannot follow is not news. Present the grid as live
+  // across it and only tell the reader once the gap outlasts the grace window.
+  const { presentationStatus: terminalPresentationStatus, isReconnectVisible } =
+    useTerminalReconnectPresentation(
+      terminalStatus,
+      hasAuthoritativeTerminalSnapshot
+    );
+  const model = buildTaskWorkspaceModel({
+    task,
+    terminalStatus,
+    terminalPresentationStatus,
+    terminalErrorMessage,
+    taskCreationPhase
+  });
   const [attachment, setAttachment] = useState<PreparedImageAttachment | null>(
     null
   );
@@ -443,9 +458,9 @@ export function TaskScreen({
   const isAnimatedTerminalConnection =
     taskCreationPhase === "idle" &&
     !isAgentTask &&
-    (terminalStatus === "idle" ||
-      terminalStatus === "connecting" ||
-      terminalStatus === "restarting");
+    (terminalPresentationStatus === "idle" ||
+      terminalPresentationStatus === "connecting" ||
+      terminalPresentationStatus === "restarting");
   const terminalViewport =
     screenViewport ?? { width: windowWidth, height: windowHeight };
   // The page measures what this phone can actually show at its current font
@@ -478,17 +493,11 @@ export function TaskScreen({
     Math.max(0, terminalBottomInset - keyboardHeight);
   const terminalSelectionToolbarTop =
     getTerminalSelectionToolbarTop(topChromeBottom);
-  // A transient transport reconnect does not invalidate the authoritative
-  // snapshot already on screen. Keep the same xterm document mounted so the
-  // resumed generation replaces its buffer atomically instead of briefly
-  // rebuilding a phone-width terminal and presenting that as a reconnect.
-  const hasAuthoritativeTerminalSnapshot =
-    terminalOutput.length > 0 && terminalCols !== null && terminalRows !== null;
   const preservesAuthoritativeTerminalSnapshot =
     hasAuthoritativeTerminalSnapshot &&
-    (terminalStatus === "idle" ||
-      terminalStatus === "connecting" ||
-      terminalStatus === "restarting");
+    (terminalPresentationStatus === "idle" ||
+      terminalPresentationStatus === "connecting" ||
+      terminalPresentationStatus === "restarting");
   // An attachment is a file the desktop writes and names in the injected
   // message, which only the HTTP input path does. SDK-mode tasks answer over
   // the agent stream instead, so they get no attach control rather than an
@@ -975,7 +984,7 @@ export function TaskScreen({
               outputEpoch={terminalOutputEpoch}
               outputStart={terminalOutputStart}
               terminalOutputSource={terminalOutputSource}
-              status={terminalStatus}
+              status={terminalPresentationStatus}
               cols={terminalCols}
               rows={terminalRows}
               taskId={task.id}
@@ -995,6 +1004,24 @@ export function TaskScreen({
               onCapacityChange={handleTerminalCapacityChange}
               onRequestScrollback={onRequestTerminalScrollback}
             />
+            {isReconnectVisible ? (
+              // The grid stays readable underneath: a reconnect that has gone
+              // on long enough to mention is still not a reason to take the
+              // reader's content away.
+              <View
+                pointerEvents="none"
+                style={[
+                  styles.terminalReconnectBadge,
+                  { top: terminalSelectionToolbarTop }
+                ]}
+                testID={MOBILE_E2E_IDS.terminalReconnectBadge}
+              >
+                <LoadingText
+                  label={model.overlayLabel ?? "Connecting"}
+                  style={styles.terminalReconnectBadgeLabel}
+                />
+              </View>
+            ) : null}
             {onTakeTerminalControl && onReleaseTerminalControl ? (
               <Pressable
                 accessibilityRole="button"
@@ -1655,6 +1682,24 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     height: 10,
     width: "46%"
+  },
+  terminalReconnectBadge: {
+    alignItems: "center",
+    alignSelf: "center",
+    position: "absolute",
+    zIndex: 11
+  },
+  terminalReconnectBadgeLabel: {
+    backgroundColor: "rgba(8, 17, 30, 0.92)",
+    borderColor: "#2A4267",
+    borderRadius: 999,
+    borderWidth: 1,
+    color: "#E6EDF8",
+    fontSize: 12,
+    fontWeight: "700",
+    overflow: "hidden",
+    paddingHorizontal: 12,
+    paddingVertical: 6
   },
   terminalOverlay: {
     alignItems: "center",

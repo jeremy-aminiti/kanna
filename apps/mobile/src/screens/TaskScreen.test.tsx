@@ -10,6 +10,7 @@ import {
 } from "./taskQuickReplies";
 import { getTerminalSelectionToolbarTop } from "./terminalSafeArea";
 import { TASK_COMPOSER_MIN_HEIGHT } from "./taskComposerInput";
+import { TERMINAL_RECONNECT_GRACE_MS } from "./terminalReconnectPresentation";
 
 vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
   callback(0);
@@ -766,6 +767,54 @@ describe("TaskScreen", () => {
       });
     }
   );
+
+  it.each(["connecting", "restarting"] as const)(
+    "says nothing about a %s gap the reader cannot follow",
+    (terminalStatus) => {
+      const snapshot = {
+        terminalCols: 132,
+        terminalRows: 43,
+        terminalOutput: "authoritative snapshot"
+      };
+      renderTaskScreen({ ...snapshot, terminalStatus: "live" });
+      const tree = renderTaskScreen({ ...snapshot, terminalStatus });
+
+      expect(findByType(tree, "TerminalWebView")?.props.status).toBe("live");
+      expect(findByTestId(tree, MOBILE_E2E_IDS.terminalOverlay)).toBeNull();
+      expect(
+        findByTestId(tree, MOBILE_E2E_IDS.terminalReconnectBadge)
+      ).toBeNull();
+    }
+  );
+
+  it("tells the reader over a retained grid once the gap outlasts the grace", () => {
+    vi.useFakeTimers();
+    try {
+      const snapshot = {
+        terminalCols: 132,
+        terminalRows: 43,
+        terminalOutput: "authoritative snapshot"
+      };
+      renderTaskScreen({ ...snapshot, terminalStatus: "live" });
+      renderTaskScreen({ ...snapshot, terminalStatus: "restarting" });
+      vi.advanceTimersByTime(TERMINAL_RECONNECT_GRACE_MS + 1);
+      const tree = renderTaskScreen({
+        ...snapshot,
+        terminalStatus: "restarting"
+      });
+
+      // The grid is never taken away: the connecting state arrives as a badge
+      // over content that stayed readable, not as a skeleton in place of it.
+      expect(findByType(tree, "TerminalWebView")).not.toBeNull();
+      const badge = findByTestId(tree, MOBILE_E2E_IDS.terminalReconnectBadge);
+      expect(badge?.props.pointerEvents).toBe("none");
+      expect(findByType(tree, "LoadingText")?.props.label).toBe(
+        "Restarting session"
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it.each([
     ["closed", "Offline", null],

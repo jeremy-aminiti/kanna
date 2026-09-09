@@ -19,6 +19,14 @@ export interface TaskWorkspaceModel {
 interface BuildTaskWorkspaceModelOptions {
   task: TaskSummary;
   terminalStatus: TaskTerminalStatus;
+  /**
+   * What the reader should be shown, which trails {@link terminalStatus}
+   * across a short transport gap so a reconnect the eye cannot follow never
+   * repaints the screen. Delivery still answers to the raw status: the
+   * composer is disabled the moment the transport actually leaves live, so a
+   * message is never typed into a stream that is not there.
+   */
+  terminalPresentationStatus?: TaskTerminalStatus;
   terminalErrorMessage?: string | null;
   taskCreationPhase?: TaskCreationPhase;
 }
@@ -26,6 +34,7 @@ interface BuildTaskWorkspaceModelOptions {
 export function buildTaskWorkspaceModel({
   task,
   terminalStatus,
+  terminalPresentationStatus = terminalStatus,
   terminalErrorMessage = null,
   taskCreationPhase = "idle"
 }: BuildTaskWorkspaceModelOptions): TaskWorkspaceModel {
@@ -35,10 +44,10 @@ export function buildTaskWorkspaceModel({
     stageLabel: task.stage ?? "unknown",
     title: task.title,
     isTerminalHealthy:
-      taskCreationPhase === "idle" && terminalStatus === "live",
+      taskCreationPhase === "idle" && terminalPresentationStatus === "live",
     overlayLabel:
       creationOverlayLabel ??
-      getOverlayLabel(terminalStatus, terminalErrorMessage),
+      getOverlayLabel(terminalPresentationStatus, terminalErrorMessage),
     isComposerDisabled:
       taskCreationPhase !== "idle" || terminalStatus !== "live",
     canRecoverTaskCreation: taskCreationPhase === "uncertain",

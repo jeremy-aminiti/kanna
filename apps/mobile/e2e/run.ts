@@ -392,6 +392,7 @@ async function main(): Promise<void> {
         setTaskBusyRead: relayHarness.setTaskBusyRead,
         restoreTallTerminalGeometry: relayHarness.restoreTallTerminalGeometry,
         restoreDesktopTerminalControl: relayHarness.restoreDesktopTerminalControl,
+        dropRelayTunnels: relayHarness.dropRelayTunnels,
         resyncTerminalConnection: relayHarness.resyncTerminalConnection,
         setTaskBusyUnread: relayHarness.setTaskBusyUnread,
         setTaskActivity: relayHarness.setTaskActivity,
