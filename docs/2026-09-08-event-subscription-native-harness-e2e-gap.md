@@ -51,15 +51,16 @@ model versus prompting. Neither is a dependency of the server-owned watch.
 Cursor retention and cross-machine recovery remain task f63b3698's coverage
 and deployment prerequisite for unattended continuity.
 
-
 ## Timing follow-up, 2026-09-09
 
 Work item `6b153714` adds a shared subscription policy (manager-adopted 1s trailing
 quiet, 5s max collection, 5s admission floor). New paused-clock worker fixtures use
 an isolated scripted executable for the actual Codex proxy path and scripted
 daemon I/O for input. They measure admissions, native toolOutput/thread identity,
-engine provenance and mailbox continuity. The fixtures are unrun while that task's
-heavy hold remains. They do not establish live Codex TUI timing: authenticated
+engine provenance and mailbox continuity. All twelve timing fixtures passed in
+the authorized focused Rust slot; see the exact commands and remaining holds in
+[the actionable-events verification note](2026-09-09-actionable-events-e2e-gap.md).
+They do not establish live Codex TUI timing: authenticated
 shared app-server root-thread compatibility, busy-harness consumption and actual
 operator-visible wake behavior remain operator E2E gaps. Do not infer a universal
 event-creation latency from the conditional scheduler bounds.

@@ -56,7 +56,10 @@ impl Watch {
         let mut state =
             test_state_with_seed(&format!("timed-{delivery}"), "Timing", seed_orchestration);
         let (tx, events) = tokio::sync::mpsc::unbounded_channel();
-        let proxy = crate::test_paths::unique_test_file("subscription-proxy", "py");
+        let proxy = std::path::PathBuf::from(crate::test_paths::unique_test_file(
+            "subscription-proxy",
+            "py",
+        ));
         let trace = proxy.with_extension("jsonl");
         // No global PATH/env override: this one AppState owns its executable.
         std::fs::write(&proxy, format!(r#"#!/usr/bin/python3
@@ -112,7 +115,7 @@ for line in sys.stdin:
                                     }] },
                                     DaemonCommand::SubmitInputIfSession { session_id, expected_pid, data } => {
                                         assert_eq!(session_id, "child-c"); assert_eq!(expected_pid, 42);
-                                        recorded.lock().unwrap().push(data);
+                                        recorded.lock().unwrap().push(String::from_utf8(data).unwrap());
                                         if uncertain.load(Ordering::SeqCst) { return; }
                                         DaemonEvent::Ok
                                     }

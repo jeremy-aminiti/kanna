@@ -425,9 +425,17 @@ async fn subscription_busy_peer_pause_and_same_id_recovery_preserve_checkpoint()
         .unwrap()
         .get("watchError")
         .is_none());
-    assert_eq!(watch.relay.counts.attempts.load(Ordering::SeqCst), 2);
-    assert_eq!(watch.relay.counts.admitted.load(Ordering::SeqCst), 1);
+    // Recovery consumes the PR leg, then rearms it during the ordinary quiet
+    // window. That new silent leg survives the normal batch return and ack.
+    assert_eq!(watch.relay.counts.attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(watch.relay.counts.admitted.load(Ordering::SeqCst), 2);
+    assert_eq!(watch.relay.counts.released.load(Ordering::SeqCst), 1);
+    assert_eq!(watch.relay.budget.available_permits(), 0);
     assert_eq!(watch.relay.counts.busy.load(Ordering::SeqCst), 1);
+    assert_eq!(watch.relay.counts.abandoned.load(Ordering::SeqCst), 0);
+    watch.ack(&recovered).await;
+    notifications(&watch.source).await;
+    assert_eq!(watch.relay.counts.attempts.load(Ordering::SeqCst), 3);
     assert_eq!(watch.relay.counts.abandoned.load(Ordering::SeqCst), 0);
 }
 
