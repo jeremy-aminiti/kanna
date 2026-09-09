@@ -342,7 +342,7 @@ mod tests {
             .success());
     }
 
-    fn test_config(unique: &str, db_path: String, daemon_dir: String) -> Config {
+    fn test_config(db_path: String, daemon_dir: String) -> Config {
         Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
@@ -361,20 +361,16 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: format!("/tmp/kanna-pairings-command-close-{unique}.json"),
+            pairing_store_path: crate::test_paths::unique_test_file(
+                "kanna-pairings-command-close",
+                "json",
+            ),
         }
     }
 
     #[tokio::test]
     async fn close_task_invoke_resolves_branch_style_task_id_and_kills_canonical_sessions() {
-        let unique = format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        let unique = crate::test_paths::unique_test_name("test");
         let daemon_dir = std::env::temp_dir().join(format!("kanna-command-close-daemon-{unique}"));
         std::fs::create_dir_all(&daemon_dir).unwrap();
         let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
@@ -447,11 +443,7 @@ mod tests {
         let mut daemon = DaemonClient::connect(&daemon_dir.to_string_lossy())
             .await
             .expect("connect fake daemon");
-        let config = test_config(
-            &unique,
-            db_path.clone(),
-            daemon_dir.to_string_lossy().to_string(),
-        );
+        let config = test_config(db_path.clone(), daemon_dir.to_string_lossy().to_string());
 
         let result = handle_invoke(
             "close_task",
@@ -482,14 +474,7 @@ mod tests {
 
     #[tokio::test]
     async fn advance_stage_invoke_final_close_without_teardown_cleans_worktree() {
-        let unique = format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
+        let unique = crate::test_paths::unique_test_name("test");
         let repo_root = std::env::temp_dir().join(format!("kanna-command-final-close-{unique}"));
         init_test_git_repo(&repo_root);
         assert!(Command::new("git")
@@ -575,11 +560,7 @@ mod tests {
         let mut daemon = DaemonClient::connect(&daemon_dir.to_string_lossy())
             .await
             .expect("connect fake daemon");
-        let config = test_config(
-            &unique,
-            db_path.clone(),
-            daemon_dir.to_string_lossy().to_string(),
-        );
+        let config = test_config(db_path.clone(), daemon_dir.to_string_lossy().to_string());
 
         let result = handle_invoke(
             "advance_stage",

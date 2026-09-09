@@ -349,15 +349,7 @@ mod tests {
     use std::process::Command;
 
     fn unique_label(label: &str) -> String {
-        format!(
-            "{}-{}-{}",
-            label,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )
+        crate::test_paths::unique_test_name(label)
     }
 
     fn run_git(repo: &Path, args: &[&str]) {

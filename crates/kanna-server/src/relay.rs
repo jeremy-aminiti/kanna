@@ -2336,14 +2336,7 @@ mod tests {
     }
 
     fn probe_test_unique(label: &str) -> String {
-        format!(
-            "relay-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        )
+        crate::test_paths::unique_test_name(&format!("relay-{label}"))
     }
 
     #[tokio::test]

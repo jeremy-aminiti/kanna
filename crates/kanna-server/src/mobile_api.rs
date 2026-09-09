@@ -1676,7 +1676,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("desktop-list"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -1688,7 +1688,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
 
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1709,7 +1709,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("repo-summaries"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -1721,7 +1721,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
 
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1766,7 +1766,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("recent-tasks"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -1778,7 +1778,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
 
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1858,7 +1858,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("repo-tasks"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -1870,7 +1870,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
 
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1912,7 +1912,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("recent-task-snippet"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -1924,7 +1924,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
 
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1991,7 +1991,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("task-summary-singleton"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -2003,7 +2003,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
 
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2055,7 +2055,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("task-summary-blockers"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -2067,7 +2067,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
 
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2113,7 +2113,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("task-summary-parent"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -2125,7 +2125,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
 
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2178,7 +2178,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("task-detail-stored-transition"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -2190,7 +2190,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
         let db = Db::open_for_tests(&config.db_path).unwrap();
         // This path intentionally has no Git repository or origin definition.
@@ -2232,7 +2232,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("task-detail-latest-run"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -2244,7 +2244,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
         let db = Db::open_for_tests(&config.db_path).unwrap();
         db.insert_test_repo("repo-1", "Repo One").unwrap();
@@ -2326,7 +2326,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("search-tasks"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -2338,7 +2338,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
 
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -2396,7 +2396,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: Db::test_db_path("status"),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -2408,7 +2408,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
 
         let _db = Db::open_for_tests(&config.db_path).unwrap();

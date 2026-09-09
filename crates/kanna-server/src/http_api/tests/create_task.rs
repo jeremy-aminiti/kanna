@@ -137,7 +137,10 @@ async fn assert_created_task_overrides_reach_daemon_spawn(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-overrides-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-create-overrides",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -543,14 +546,7 @@ async fn create_task_route_round_trips_and_replays_eight_hex_requested_id() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let task_id = "a1b2c3d4";
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-replay-{unique}"));
     init_test_git_repo(&repo_root);
@@ -627,7 +623,10 @@ async fn create_task_route_round_trips_and_replays_eight_hex_requested_id() {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-replay-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-create-replay",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -712,14 +711,7 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let task_id = "d1e2f3a4b5c60718";
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-repair-{unique}"));
     init_test_git_repo(&repo_root);
@@ -746,7 +738,10 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-repair-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-create-repair",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1134,14 +1129,7 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root =
         std::env::temp_dir().join(format!("kanna-http-create-default-provider-{unique}"));
     init_test_git_repo(&repo_root);
@@ -1201,7 +1189,10 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-default-provider-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-default-provider",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1320,7 +1311,10 @@ async fn create_task_route_runs_a_non_review_builtin_agent_in_the_first_stage() 
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-commit-agent-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-create-commit-agent",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1372,14 +1366,7 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-title-{unique}"));
     init_test_git_repo(&repo_root);
 
@@ -1436,7 +1423,10 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-title-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-create-title",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1525,14 +1515,7 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-stage-override-{unique}"));
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
@@ -1622,7 +1605,10 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-stage-override-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-stage-override",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1675,14 +1661,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
 
     let _sidecar_guard = crate::test_sidecar_guard().await;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-env-{unique}"));
     init_test_git_repo(&repo_root);
 
@@ -1777,7 +1756,10 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-env-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-create-env",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1835,14 +1817,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
 
 #[tokio::test]
 async fn create_task_route_rejects_invalid_blocker_before_creating_task_or_spawning() {
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root =
         std::env::temp_dir().join(format!("kanna-http-create-invalid-blocker-{unique}"));
     init_test_git_repo(&repo_root);
@@ -1871,7 +1846,10 @@ async fn create_task_route_rejects_invalid_blocker_before_creating_task_or_spawn
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-invalid-blocker-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-invalid-blocker",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1927,14 +1905,7 @@ async fn create_task_route_rejects_invalid_blocker_before_creating_task_or_spawn
 
 #[tokio::test]
 async fn create_task_route_preserves_failed_prepare_diagnostics() {
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-bad-base-{unique}"));
     init_test_git_repo(&repo_root);
 
@@ -1959,7 +1930,10 @@ async fn create_task_route_preserves_failed_prepare_diagnostics() {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-bad-base-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-create-bad-base",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -2088,14 +2062,7 @@ async fn create_task_route_refuses_an_unresolvable_recorded_default_branch() {
 
 #[tokio::test]
 async fn create_task_route_with_blocker_creates_dormant_task_without_spawning() {
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-dormant-{unique}"));
     init_test_git_repo(&repo_root);
 
@@ -2123,7 +2090,10 @@ async fn create_task_route_with_blocker_creates_dormant_task_without_spawning() 
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-dormant-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-create-dormant",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -2220,14 +2190,7 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-closed-blocker-{unique}"));
     init_test_git_repo(&repo_root);
 
@@ -2285,7 +2248,10 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-closed-blocker-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-create-closed-blocker",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -2356,14 +2322,7 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-spawn-fail-{unique}"));
     init_test_git_repo(&repo_root);
 
@@ -2429,7 +2388,10 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-spawn-fail-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-create-spawn-fail",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -2531,14 +2493,7 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
 
 #[tokio::test]
 async fn create_task_route_persists_blocker_without_daemon_spawn() {
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-http-create-blocker-{unique}"));
     init_test_git_repo(&repo_root);
 
@@ -2568,7 +2523,10 @@ async fn create_task_route_persists_blocker_without_daemon_spawn() {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-create-blocker-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-create-blocker",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")

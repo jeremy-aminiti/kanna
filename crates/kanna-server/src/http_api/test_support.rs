@@ -26,18 +26,14 @@ fn seed_test_mutation_tasks(config: &Config, task_ids: &[&str]) {
 }
 
 pub(crate) fn test_router(desktop_id: &str, desktop_name: &str) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(1);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -48,7 +44,7 @@ pub(crate) fn test_router(desktop_id: &str, desktop_name: &str) -> Router {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
     router(Arc::new(AppState::new(config)))
@@ -59,18 +55,14 @@ pub(super) fn test_router_with_repo_checkout_root(
     desktop_name: &str,
     repo_checkout_root: std::path::PathBuf,
 ) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(4_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -81,7 +73,7 @@ pub(super) fn test_router_with_repo_checkout_root(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
     let mut state = AppState::new(config);
@@ -94,18 +86,14 @@ pub(super) fn test_router_with_seed(
     desktop_name: &str,
     seed: impl FnOnce(&Db),
 ) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(5_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -116,7 +104,7 @@ pub(super) fn test_router_with_seed(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
     seed(&db);
@@ -128,18 +116,14 @@ pub(crate) fn test_state_with_seed(
     desktop_name: &str,
     seed: impl FnOnce(&Db),
 ) -> Arc<AppState> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(6_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-invoke-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-invoke-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -150,7 +134,7 @@ pub(crate) fn test_state_with_seed(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-invoke-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings-invoke", "json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
     seed(&db);
@@ -175,10 +159,6 @@ pub(crate) fn test_state_with_daemon_dir_and_debounce(
     activity_event_debounce_seconds: u64,
     seed: impl FnOnce(&Db),
 ) -> Arc<AppState> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(9_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
@@ -186,7 +166,7 @@ pub(crate) fn test_state_with_daemon_dir_and_debounce(
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
         daemon_dir: daemon_dir.to_string(),
-        db_path: Db::test_db_path(&format!("daemon-dir-{desktop_id}-{test_db_id}")),
+        db_path: Db::test_db_path(&format!("daemon-dir-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -197,7 +177,7 @@ pub(crate) fn test_state_with_daemon_dir_and_debounce(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds,
-        pairing_store_path: format!("/tmp/kanna-pairings-daemon-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings-daemon", "json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
     seed(&db);
@@ -209,18 +189,14 @@ pub(super) fn test_state_with_task_input_sender(
     desktop_name: &str,
     task_input_sender: TestTaskInputSender,
 ) -> Arc<AppState> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(7_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-invoke-input-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-invoke-input-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -231,8 +207,9 @@ pub(super) fn test_state_with_task_input_sender(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!(
-            "/tmp/kanna-pairings-invoke-input-{desktop_id}-{test_db_id}.json"
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-invoke-input",
+            "json",
         ),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -245,20 +222,14 @@ pub(super) fn test_state_with_seed_and_task_input_sender(
     seed: impl FnOnce(&Db),
     task_input_sender: TestTaskInputSender,
 ) -> Arc<AppState> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(7_500);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!(
-            "http-invoke-input-seeded-{desktop_id}-{test_db_id}"
-        )),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-invoke-input-seeded-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -269,8 +240,9 @@ pub(super) fn test_state_with_seed_and_task_input_sender(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!(
-            "/tmp/kanna-pairings-invoke-input-seeded-{desktop_id}-{test_db_id}.json"
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-invoke-input-seeded",
+            "json",
         ),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
@@ -283,18 +255,14 @@ pub(super) fn test_router_with_task_creator(
     desktop_name: &str,
     task_creator: TestTaskCreator,
 ) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(10_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -305,7 +273,7 @@ pub(super) fn test_router_with_task_creator(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
     router(Arc::new(AppState::with_task_creator(config, task_creator)))
@@ -317,18 +285,14 @@ pub(super) fn test_router_with_seed_and_task_creator(
     seed: impl FnOnce(&Db),
     task_creator: TestTaskCreator,
 ) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(15_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -339,7 +303,7 @@ pub(super) fn test_router_with_seed_and_task_creator(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
     seed(&db);
@@ -351,18 +315,14 @@ pub(super) fn test_router_with_merge_agent_runner(
     desktop_name: &str,
     merge_agent_runner: TestMergeAgentRunner,
 ) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(20_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -373,7 +333,7 @@ pub(super) fn test_router_with_merge_agent_runner(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
     router(Arc::new(AppState::with_merge_agent_runner(
@@ -387,18 +347,14 @@ pub(super) fn test_router_with_task_input_sender(
     desktop_name: &str,
     task_input_sender: TestTaskInputSender,
 ) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(25_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -409,7 +365,7 @@ pub(super) fn test_router_with_task_input_sender(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let _ = Db::open_for_tests(&config.db_path).expect("open test db");
     router(Arc::new(AppState::with_task_input_sender(
@@ -423,18 +379,14 @@ pub(super) fn test_router_with_task_closer(
     desktop_name: &str,
     task_closer: TestTaskCloser,
 ) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(27_500);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -445,7 +397,7 @@ pub(super) fn test_router_with_task_closer(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     seed_test_mutation_tasks(&config, &["task-1", "a1b2c3d4"]);
     router(Arc::new(AppState::with_task_closer(config, task_closer)))
@@ -456,18 +408,14 @@ pub(super) fn test_router_with_stage_advancer(
     desktop_name: &str,
     stage_advancer: TestStageAdvancer,
 ) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(28_500);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -478,7 +426,7 @@ pub(super) fn test_router_with_stage_advancer(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     seed_test_mutation_tasks(&config, &["task-1"]);
     router(Arc::new(AppState::with_stage_advancer(
@@ -492,18 +440,14 @@ pub(super) fn test_router_with_stage_rerunner(
     desktop_name: &str,
     stage_rerunner: TestStageRerunner,
 ) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(41_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-rerun-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-rerun-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -514,7 +458,7 @@ pub(super) fn test_router_with_stage_rerunner(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-rerun-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings-rerun", "json"),
     };
     seed_test_mutation_tasks(&config, &["task-1"]);
     router(Arc::new(AppState::with_stage_rerunner(
@@ -528,18 +472,14 @@ pub(super) fn test_router_with_stage_completer(
     desktop_name: &str,
     stage_completer: TestStageCompleter,
 ) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(29_000);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -550,7 +490,7 @@ pub(super) fn test_router_with_stage_completer(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     seed_test_mutation_tasks(&config, &["task-1"]);
     router(Arc::new(AppState::with_stage_completer(
@@ -564,18 +504,14 @@ pub(super) fn test_router_with_revision_requester(
     desktop_name: &str,
     revision_requester: TestRevisionRequester,
 ) -> Router {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NEXT_TEST_DB_ID: AtomicUsize = AtomicUsize::new(29_500);
-    let test_db_id = NEXT_TEST_DB_ID.fetch_add(1, Ordering::Relaxed);
     let config = Config {
         relay_url: "wss://relay.example".to_string(),
         device_token: "device-token".to_string(),
         firebase_project_id: "kanna-local".to_string(),
         firebase_auth_emulator_url: None,
         firebase_firestore_emulator_host: None,
-        daemon_dir: "/tmp/kanna-daemon".to_string(),
-        db_path: Db::test_db_path(&format!("http-api-{desktop_id}-{test_db_id}")),
+        daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
+        db_path: Db::test_db_path(&format!("http-api-{desktop_id}")),
         kanna_cli_path: None,
         desktop_id: desktop_id.to_string(),
         desktop_secret: Some("desktop-secret".to_string()),
@@ -586,7 +522,7 @@ pub(super) fn test_router_with_revision_requester(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{desktop_id}-{test_db_id}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     seed_test_mutation_tasks(&config, &["review-task"]);
     router(Arc::new(AppState::with_revision_requester(

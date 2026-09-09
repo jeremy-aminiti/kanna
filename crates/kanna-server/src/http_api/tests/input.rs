@@ -113,7 +113,7 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, 
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo("repo-1", "Repo One").unwrap();
@@ -955,7 +955,7 @@ fn merge_test_config(unique: &str, daemon_dir: &Path) -> Config {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     }
 }
 
@@ -1419,7 +1419,7 @@ async fn assert_merge_signal_creates_singleton(close_previous: bool, stale_reser
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1687,7 +1687,7 @@ async fn signal_agent_route_creates_agent_task_with_requested_provider_and_effor
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1785,7 +1785,7 @@ async fn assert_signal_agent_route_rejects_override(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -1916,7 +1916,7 @@ async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -2970,7 +2970,7 @@ async fn terminal_exit_with_legacy_notify_registration_uses_events_not_task_inpu
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo("repo-1", "Repo One").unwrap();

@@ -610,15 +610,7 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     fn unique_name(prefix: &str) -> String {
-        format!(
-            "{}-{}-{}",
-            prefix,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )
+        crate::test_paths::unique_test_name(prefix)
     }
 
     fn daemon_socket_path_for_dir(daemon_dir: &Path) -> PathBuf {
@@ -644,7 +636,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         }
     }
 

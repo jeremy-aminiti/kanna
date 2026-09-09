@@ -5,18 +5,9 @@ use super::{
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-static TEMP_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn temp_db_path() -> std::path::PathBuf {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time went backwards")
-        .as_nanos();
-    let counter = TEMP_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("kanna-server-db-{suffix}-{counter}.sqlite"))
+    std::path::PathBuf::from(Db::test_db_path("unit"))
 }
 
 fn index_columns(conn: &Connection, index_name: &str) -> Vec<String> {

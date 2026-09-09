@@ -215,7 +215,10 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-revision-branch-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-revision-branch",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -487,7 +490,10 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-revision-loop-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-revision-loop",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -790,7 +796,10 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-revision-title-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-revision-title",
+            "json",
+        ),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
@@ -985,7 +994,10 @@ fn setup_revision_budget_fixture_with_spent_rounds(
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-revision-budget-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-revision-budget",
+            "json",
+        ),
     };
 
     let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -1837,7 +1849,7 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-prev-main-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings-prev-main", "json"),
     };
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")

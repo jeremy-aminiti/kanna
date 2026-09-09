@@ -33,7 +33,7 @@ fn raw_input_test_config(unique: &str, daemon_dir: &Path) -> Config {
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: format!("/tmp/kanna-pairings-{unique}.json"),
+        pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     }
 }
 

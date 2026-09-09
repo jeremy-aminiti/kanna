@@ -2736,9 +2736,13 @@ mod tests {
         }
     }
 
+    /// The pid is what keeps this root out of a concurrently running gate's
+    /// way: several worktrees test on one machine, and a wall clock two of them
+    /// read in the same tick names one directory for both.
     pub(super) fn unique_test_root(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "kanna-mobile-{prefix}-{}",
+            "kanna-mobile-{prefix}-{}-{}",
+            std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("system clock should be after epoch")

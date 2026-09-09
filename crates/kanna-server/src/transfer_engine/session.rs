@@ -624,7 +624,7 @@ mod tests {
     /// have. Serialized on the crate's env guard, because the lookup path is
     /// process-global.
     struct StubOpencode {
-        _guard: tokio::sync::MutexGuard<'static, ()>,
+        _guard: crate::TestSidecarGuard,
         _dir: tempfile::TempDir,
     }
 

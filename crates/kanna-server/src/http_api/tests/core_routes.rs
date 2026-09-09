@@ -773,14 +773,7 @@ async fn list_repos_omits_credential_bearing_remote_url() {
 async fn repo_agent_provider_route_stays_responsive_and_uses_workspace_local_executables() {
     use std::os::unix::fs::PermissionsExt;
 
-    let unique = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
+    let unique = super::unique_test_suffix();
     let repo_root = std::env::temp_dir().join(format!("kanna-provider-availability-{unique}"));
     init_test_git_repo(&repo_root);
     let provider_dir = repo_root.join(".kanna/provider-bin");
@@ -5730,7 +5723,11 @@ async fn task_logs_route_renders_agent_journal_tail() {
             .expect("time")
             .as_nanos()
     );
-    let journal_dir = PathBuf::from("/tmp/kanna-daemon").join("agent-journals");
+    // The route reads the journal out of the state's own daemon directory, so
+    // the fixture has to write into that one rather than into a shared name a
+    // concurrently running gate also owns.
+    let daemon_dir = crate::test_paths::unique_test_dir("kanna-daemon");
+    let journal_dir = daemon_dir.join("agent-journals");
     std::fs::create_dir_all(&journal_dir).unwrap();
     let journal_path = journal_dir.join(format!("{task_id}.ndjson"));
     let lines = [
@@ -5765,20 +5762,25 @@ async fn task_logs_route_renders_agent_journal_tail() {
     std::fs::write(&journal_path, lines).unwrap();
 
     let seeded_task_id = task_id.clone();
-    let app = super::test_router_with_seed("desktop-1", "Studio Mac", move |db| {
-        db.insert_test_repo("repo-1", "Repo One").unwrap();
-        db.insert_test_pipeline_item(
-            &seeded_task_id,
-            "repo-1",
-            "Read logs",
-            Some("Read logs"),
-            "in progress",
-            "2026-04-18 10:00:00",
-        )
-        .unwrap();
-        db.update_test_pipeline_item_agent_type(&seeded_task_id, "agent")
+    let app = super::router(super::test_state_with_daemon_dir(
+        "desktop-1",
+        "Studio Mac",
+        &daemon_dir.to_string_lossy(),
+        move |db| {
+            db.insert_test_repo("repo-1", "Repo One").unwrap();
+            db.insert_test_pipeline_item(
+                &seeded_task_id,
+                "repo-1",
+                "Read logs",
+                Some("Read logs"),
+                "in progress",
+                "2026-04-18 10:00:00",
+            )
             .unwrap();
-    });
+            db.update_test_pipeline_item_agent_type(&seeded_task_id, "agent")
+                .unwrap();
+        },
+    ));
 
     let response = app
         .oneshot(
@@ -5798,7 +5800,7 @@ async fn task_logs_route_renders_agent_journal_tail() {
         "tool result: tool output\nsecond assistant"
     );
 
-    let _ = std::fs::remove_file(journal_path);
+    let _ = std::fs::remove_dir_all(&daemon_dir);
 }
 
 #[tokio::test]
@@ -6251,9 +6253,10 @@ async fn create_pairing_session_route_uses_local_identity_without_desktop_secret
         lan_port: 48120,
         transfer_port: 4455,
         activity_event_debounce_seconds: 300,
-        pairing_store_path: PathBuf::from("/tmp/kanna-pairings-http-local.json")
-            .to_string_lossy()
-            .to_string(),
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-http-local",
+            "json",
+        ),
     };
     let _ = crate::db::Db::open_for_tests(&config.db_path).unwrap();
     let app = super::router(Arc::new(super::AppState::new(config)));

@@ -923,7 +923,7 @@ mod opencode_tests {
     /// Points the provider-executable lookup at a stub `opencode`. The lookup
     /// path is process-global, so this holds the crate's env guard.
     struct StubOpencode {
-        _guard: tokio::sync::MutexGuard<'static, ()>,
+        _guard: crate::TestSidecarGuard,
         dir: tempfile::TempDir,
     }
 

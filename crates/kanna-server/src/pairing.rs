@@ -789,7 +789,7 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     fn test_config(label: &str) -> Config {
         let unique = std::time::SystemTime::now()
@@ -802,7 +802,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: "/tmp/kanna.db".to_string(),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -863,8 +863,7 @@ mod tests {
 
     #[test]
     fn pairing_store_persists_trusted_devices() {
-        let path = std::env::temp_dir().join("kanna-pairing-store-test.json");
-        let _ = std::fs::remove_file(&path);
+        let path = crate::test_paths::unique_test_path("kanna-pairing-store-test");
 
         let mut store = super::PairingStore::default();
         store.add_trusted_device(
@@ -890,7 +889,7 @@ mod tests {
             firebase_project_id: "kanna-local".to_string(),
             firebase_auth_emulator_url: None,
             firebase_firestore_emulator_host: None,
-            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            daemon_dir: crate::test_paths::unique_test_path_string("kanna-daemon"),
             db_path: "/tmp/kanna.db".to_string(),
             kanna_cli_path: None,
             desktop_id: "desktop-1".to_string(),
@@ -902,9 +901,7 @@ mod tests {
             lan_port: 48120,
             transfer_port: 4455,
             activity_event_debounce_seconds: 300,
-            pairing_store_path: PathBuf::from("/tmp/kanna-pairings.json")
-                .to_string_lossy()
-                .to_string(),
+            pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         };
 
         let session = super::create_pairing_session(&config).unwrap();
@@ -1127,8 +1124,7 @@ mod tests {
 
     #[test]
     fn devices_paired_before_secrets_existed_never_verify() {
-        let path = std::env::temp_dir().join("kanna-pairing-legacy-secret-test.json");
-        let _ = std::fs::remove_file(&path);
+        let path = crate::test_paths::unique_test_path("kanna-pairing-legacy-secret-test");
         std::fs::write(
             &path,
             r#"{"trusted_devices":{"desktop-1":[{"device_id":"old-phone","device_name":"Old"}]}}"#,

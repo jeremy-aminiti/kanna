@@ -298,7 +298,6 @@ mod tests {
             Arc,
         },
         thread,
-        time::{SystemTime, UNIX_EPOCH},
     };
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt},
@@ -313,18 +312,7 @@ mod tests {
     }
 
     fn unique_path(label: &str, extension: &str) -> String {
-        std::env::temp_dir()
-            .join(format!(
-                "kanna-server-{label}-{}-{}.{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos(),
-                extension,
-            ))
-            .to_string_lossy()
-            .to_string()
+        crate::test_paths::unique_test_file(&format!("kanna-server-{label}"), extension)
     }
 
     fn listed_session(

@@ -266,9 +266,15 @@ pub(super) async fn ensure_merge_handoff_before_close(
         super::blocking::run_handler_blocking("merge handoff gap record", move || {
             let db = Db::open(&record_state.config.db_path)
                 .map_err(|error| db_write_error("db error", error))?;
-            db.record_task_merge_handoff_missing(&record_task_id, &record_reason)
-                .map_err(|error| db_write_error("db error", error))?;
+            // Unread first, then the event. The event says a task is parked
+            // for its human, so it must not be readable before the task is
+            // actually parked: a watcher that waits for it and then reads
+            // `activity` used to land in the gap between the two writes. The
+            // reverse order is also the safer half-completed state — the
+            // human still meets the task, with only the feed entry missing.
             db.update_pipeline_item_activity(&record_task_id, "unread")
+                .map_err(|error| db_write_error("db error", error))?;
+            db.record_task_merge_handoff_missing(&record_task_id, &record_reason)
                 .map_err(|error| db_write_error("db error", error))
         })
         .await?;
