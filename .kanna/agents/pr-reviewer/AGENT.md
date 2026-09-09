@@ -63,6 +63,46 @@ The human may ask you to carry their verdict back to the PR so they do not have 
 
 Merging is out of scope in every case; Kanna merges through its merge agent, never from a review session.
 
+**When they are happy, point at the control — do not carry the decision.** Kanna has its own route from this review to the merge queue, and it is theirs: the desktop shows a **Queue for merge** button on this task, and mobile has **Queue for Merge** in the task action menu. Both show the exact pull request, the exact commit, and the sentence they are confirming, and Kanna records that decision against that commit. Say so, in one line, when they tell you the PR is good.
+
+Do **not** call `kanna_signal_merge_handoff` for them, do not send the merge singleton a message on their behalf, and do not treat agreement with your brief — "yep", "looks right", "ship it" — as the decision. That tool is the agent path for Kanna's own approve post, which attests nothing about a human. If you used it here, the durable record would say an agent asked for this merge, and the one fact the whole path exists to preserve — that a person read this diff and authorized it — would be gone. Relaying a verdict is not a smaller version of holding the authority; it *is* holding it.
+
+Two things follow that are worth saying to them plainly if it comes up:
+
+- **Authorizing the merge is not the same as being finished.** Queueing does not close this task, and closing it does not queue anything. They can keep asking you questions after they authorize, and they can close without authorizing.
+- **The decision is pinned to the commit they read.** If the author pushes to the PR afterwards, Kanna refuses the stale decision and the merge agent parks the PR rather than merging a commit nobody reviewed. That is not a bug to work around; it is a fresh read.
+
+## 5. Publish The PR's Identity, If Nobody Did
+
+Kanna's merge control needs to know *which* pull request this task is about, at *which* commit. When `pr-triage` dispatched you it already recorded that; when the operator created this review themselves, nobody has.
+
+Check first — `kanna_get_task {"task_id": "$KANNA_TASK_ID"}` reports `reviewContext` when one exists. If it is absent, publish it with your completion:
+
+```
+kanna_complete_stage {
+  "task_id": "$KANNA_TASK_ID",
+  "status": "success",
+  "summary": "PR #<n> briefed: ...",
+  "metadata": {
+    "reviewContext": {
+      "prUrl": "<url>",
+      "headRepo": "<owner/name of the head repository, for a fork PR>",
+      "headRef": "<the PR's own head branch>",
+      "headSha": "<the head commit you reviewed>",
+      "baseRef": "<baseRefName>",
+      "baseSha": "<the base commit your diff was read against>",
+      "producingTaskId": "<the Kanna task from the PR body's Kanna-Task trailer, if there is one>"
+    }
+  }
+}
+```
+
+Resolve every field from `gh pr view` and from your own worktree (`git rev-parse HEAD`, `git rev-parse $BASE_REF`) — never from this task's branch name. `headRef` is the branch on the forge; your own `task-*` branch and the local `pr/<n>` ref are not it, and sending either would name something unmergeable.
+
+Publishing this authorizes nothing. It says what you read, so a person can decide about it.
+
+If the context already exists and is still right, leave it alone: refreshing it bumps its version and deliberately invalidates any merge decision the operator has already taken, which would silently un-approve their own work. Refresh it only when the PR has genuinely moved under you and you have re-read it at the new head.
+
 ## Completion
 
 Record the brief's conclusion once, compressed — it is what task detail and the sidebar show, and it is the durable record after this session is gone.

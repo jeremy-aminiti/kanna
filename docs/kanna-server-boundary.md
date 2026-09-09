@@ -2339,6 +2339,68 @@ must read that as a failed approval, never as a finished workflow.
 A workflow whose final stage declares no `approve` post promised no merge side
 effect, and nothing is enforced on its behalf.
 
+### Human-reviewed merge authorization
+
+The route above has a second caller with a different contract. On the
+human-assisted PR review path a *person* is the reviewer, and the two agents
+there are deliberately denied merge authority: `pr-reviewer` may not approve or
+merge, `pr-triage` may not join or aggregate. Relaying an inferred verdict
+through either would hand it back, so the gesture lives in the desktop and
+mobile "Queue for merge" controls and reaches this route as a
+`humanReviewDecision` body field. That field is absent from the agent tool
+catalog and from `kanna-cli`, exactly as `RequestRevisionRequest.origin` is.
+
+Two durable records back it, and they are separate because they are different
+kinds of claim:
+
+- **`task_review_context`** — which pull request a review task is about: URL,
+  head repo/ref, head SHA, base ref and SHA, the producing task when one is
+  known, and triage's rank and overlap set. Supplied by an agent, at
+  `kanna_create_task` or in `kanna_complete_stage` metadata, so it is candidate
+  information about the forge and authorizes nothing. It exists because nothing
+  about a review child names its PR: the child forks from `pull/<n>/head` into
+  a local `pr/<n>` ref, so its branch and fork point are unmergeable local
+  names and a fork PR has no `origin/<headRefName>` at all. A refresh bumps
+  `version`. Announced as `task.review_context_changed`.
+- **`human_review_decision`** — the authority. Created only by that control,
+  immutable, unique per `(task_id, head_sha)` so a double click or retried
+  request resolves to the same decision rather than a second authorization. It
+  records the PR, head and base it was taken against, the exact confirmed
+  sentence, the machine, and the time; delivery outcome is stored beside it,
+  never inside it, so a redelivery never rewrites what was decided. Announced
+  as `task.human_review_decision` and `task.human_review_decision_delivery`.
+
+Unlike the agent path, the server binds this request. The head and base come
+from the stored context, not from the caller, so a request cannot name one PR
+in the confirmation and another on the wire; the context version and head SHA
+the operator saw must still be current, and where the review worktree exists
+its checked-out commit must be that head. A pull request that moved under its
+reviewer is refused — it needs a fresh read, not a decision inherited onto a
+commit nobody saw. A decision already `delivered` is not re-sent, and an
+`uncertain` delivery is refused rather than retried: the merge master may
+already hold the request, and a duplicate reads as a second authorization.
+
+The wire line keeps the compact `MERGE` form and adds `HUMAN-REVIEW-DECISION`,
+`HUMAN-AUTHORIZATION`, and optional `PRODUCING-TASK`, `TRIAGE-RANK` and
+`RELATED-PR` lines, so a merge master on another machine — the singleton is
+account-wide — resolves everything without a living review or triage session.
+`pipeline_item.merge_signaled_at` is deliberately untouched: that stamp answers
+the approve post's "does this task still owe one handoff?", which is a
+different question on a different workflow, and reusing it as per-head decision
+history would answer neither.
+
+**The authority boundary, stated.** Only the explicit operator action creates a
+decision — a stage completion, a Close, a label, a generic `MERGE` message, or
+an agent reporting that its human seemed happy is not one, and the merge agent
+reads the durable record rather than inferring one. The `operator` origin is
+declared and unverified, the same model `task_input`'s source uses: keeping the
+field out of the tool catalog is a product and audit boundary, **not** isolation
+from a hostile local process, which runs as the same user and can reach this
+API. What the row proves is that this decision, with this text, was recorded at
+this time against this exact head. The decision authorizes *queueing only*: it
+submits no GitHub review, changes no labels, and does not close the review task.
+See [pr-review-dispatch.md](./specs/pr-review-dispatch.md#the-humans-route-to-the-merge-queue).
+
 New merge sessions accept ordinary terminal input. On startup and after daemon
 replacement, kanna-server clears the retired native-terminal-only
 classification from inherited PTYs so older merge singletons also use the

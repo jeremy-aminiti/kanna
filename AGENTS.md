@@ -433,6 +433,29 @@ recorded, and recording never fails a delivery that already reached the PTY.
 Add a new injected-message kind to this record where it is delivered, not by
 diffing terminals. See `docs/kanna-server-boundary.md`.
 
+**A human's PR approval is a person's act, not an agent's report.** Kanna has
+two review paths and only the product one — `single-reviewer`,
+`plan-build-review` — ends at a `pr` stage whose `approve` post signals the
+merge singleton. On the human-assisted path (`pr-review` dispatching
+`pr-review-single`) the *person* is the reviewer, and both agents are
+deliberately denied merge authority: `pr-reviewer` may not approve or merge,
+`pr-triage` may not join or aggregate. So the route to the merge queue is
+neither of them relaying a verdict — it is the operator's own **Queue for
+merge** control in desktop and mobile, which posts `humanReviewDecision` to
+`signal-merge-handoff`, a field absent from the tool catalog and `kanna-cli`.
+Two records back it: `task_review_context` is *candidate information about the
+forge* an agent publishes (which PR, which head commit — a review child forks
+from `pull/<n>/head` into a local `pr/<n>` ref and so names nothing mergeable),
+and `human_review_decision` is the authority — immutable, unique per
+`(task, reviewed head)`, refused when the head or context version has moved.
+Advancing the stage is not this gesture and never becomes it: advancing means
+"done looking", and these workflows gain no `approve` post because its
+close-time backstop would make ordinary cleanup ship code. The `operator`
+origin is declared and unverified, exactly like `task_input`'s source; the
+decision authorizes queueing only and produces no GitHub approval or label
+change. See `docs/kanna-server-boundary.md` and
+`docs/specs/pr-review-dispatch.md`.
+
 **Raw terminal keys are actions, not speech.**
 `POST /v1/tasks/{task_id}/raw-input` (`kanna_send_task_raw_input`,
 `kanna-cli task send-raw-input`) writes discrete keys or explicit bytes into a
