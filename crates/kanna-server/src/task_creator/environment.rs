@@ -390,11 +390,43 @@ fn which_binary_with_path(
         }
     }
 
+    if let Some(binary) = test_provider_fixture_binary(name, worktree_path) {
+        return Ok(binary);
+    }
+
     resolve_binary_from_candidates(name, sidecar_candidates(name), path)
 }
 
+/// The scripted agent CLIs a test repository carries in
+/// `.kanna/test-provider-bin`.
+///
+/// A test build must never resolve an agent CLI that merely happens to be
+/// installed on the machine running it, or the suite passes on a laptop with
+/// `claude` installed and fails on a build host without one. The fixture used
+/// to reach this resolver only as a `workspace.path.prepend` in the test
+/// repo's `.kanna/config.json` — which every test that writes a config of its
+/// own silently dropped, and which a stage prepared before its worktree exists
+/// never had at all. Reading the directory out of the workspace itself is what
+/// makes the one fixture apply to every code path that probes with a workspace
+/// root, whatever that repo's config happens to say.
+#[cfg(test)]
+fn test_provider_fixture_binary(name: &str, workspace_root: &str) -> Option<String> {
+    let workspace_root = Path::new(workspace_root);
+    if !workspace_root.is_absolute() {
+        return None;
+    }
+    let candidate = workspace_root.join(".kanna/test-provider-bin").join(name);
+    kanna_runtime_defaults::is_executable_file(&candidate)
+        .then(|| candidate.to_string_lossy().to_string())
+}
+
+#[cfg(not(test))]
+fn test_provider_fixture_binary(_name: &str, _workspace_root: &str) -> Option<String> {
+    None
+}
+
 /// The user's real PATH as an interactive login shell resolves it, captured
-/// ONCE per process. Loading zshrc costs seconds; it used to run per binary
+/// ONCE per process. Loading the shell's startup files costs seconds; it used to run per binary
 /// lookup on the stage-advance request path, which is where the multi-second
 /// ⌘S-to-prompt lag came from. `warm_login_shell_path` pays the one-time cost
 /// at server startup, off the request path. Binary resolution also checks live
@@ -404,8 +436,9 @@ fn login_shell_path() -> Option<&'static str> {
     static LOGIN_SHELL_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     LOGIN_SHELL_PATH
         .get_or_init(|| {
-            let output = Command::new("/bin/zsh")
-                .args(["--login", "-i", "-c", "printf %s \"$PATH\""])
+            let shell = crate::login_shell::login_shell();
+            let output = Command::new(shell.path())
+                .args(shell.login_interactive_args("printf %s \"$PATH\""))
                 .output()
                 .ok()?;
             if !output.status.success() {
@@ -447,12 +480,23 @@ fn resolve_binary_from_candidates(
     path: Option<&str>,
 ) -> Result<String, String> {
     resolve_binary_from_candidates_with_path_lookup(name, candidates, |name| {
+        // An agent CLI never resolves from the host in a test build. The
+        // production chain below deliberately reaches past the caller's PATH
+        // into the login shell and the user's install directories, so leaving
+        // it in place makes every provider-availability assertion a statement
+        // about which CLIs the developer happens to have installed. Providers
+        // come from the workspace fixture resolved above, or from a lookup
+        // path a test names explicitly. Sidecars are Kanna's own binaries and
+        // keep the real chain.
         #[cfg(test)]
         if !matches!(name, "kanna-cli" | "kanna-mcp") {
-            if let Ok(test_path) = std::env::var("KANNA_TEST_PROVIDER_LOOKUP_PATH") {
-                return resolve_binary_from_path(name, &test_path)
-                    .ok_or_else(|| format!("binary '{name}' not found in test provider PATH"));
-            }
+            return match std::env::var("KANNA_TEST_PROVIDER_LOOKUP_PATH") {
+                Ok(test_path) => resolve_binary_from_path(name, &test_path)
+                    .ok_or_else(|| format!("binary '{name}' not found in test provider PATH")),
+                Err(_) => Err(format!(
+                    "binary '{name}' is not supplied by any test provider fixture"
+                )),
+            };
         }
 
         if let Some(path) = path {

@@ -134,8 +134,6 @@ struct CloudTaskSnapshot {
     transition_revision: Option<String>,
     status: String,
     has_running_post: bool,
-    queued_input_count: i64,
-    queued_input_reason: Option<String>,
     repo: CloudRepoSnapshot,
     branch: Option<String>,
     base_ref: Option<String>,
@@ -335,10 +333,7 @@ fn map_task(
         .created_at
         .clone()
         .unwrap_or_else(|| updated_at.clone());
-    let singleton_agent = item
-        .pipeline
-        .strip_prefix("singleton-")
-        .filter(|agent| !agent.is_empty())
+    let singleton_agent = crate::task_creator::directory_singleton_agent(&item.pipeline)
         .map(|agent| truncate(agent, 64));
 
     CloudTaskSnapshot {
@@ -361,8 +356,6 @@ fn map_task(
         transition_revision: item.transition_revision,
         status: status.into(),
         has_running_post: item.has_running_post != 0,
-        queued_input_count: item.queued_input_count,
-        queued_input_reason: item.queued_input_reason,
         repo: CloudRepoSnapshot {
             cloud_repo_id: repo.id.clone(),
             name: truncate(&repo.name, 256),
@@ -623,6 +616,7 @@ mod tests {
 
     fn ui_snapshot(activity: &str) -> UiSnapshot {
         UiSnapshot {
+            transfer_alerts: Vec::new(),
             entries: vec![SnapshotEntry {
                 repo: SnapshotRepo {
                     id: "repo-1".into(),
@@ -690,8 +684,6 @@ mod tests {
                     created_at: Some("2026-07-14 00:00:00".into()),
                     updated_at: Some("2026-07-14 01:02:03".into()),
                     has_running_post: 0,
-                    queued_input_count: 2,
-                    queued_input_reason: Some("input_held_by_draft".into()),
                 }],
             }],
             repo_sidebar_order: HashMap::new(),
@@ -738,8 +730,6 @@ mod tests {
         assert_eq!(json["tasks"][0]["blockerRevision"], 11);
         assert_eq!(json["tasks"][0]["transitionRevision"], "run-7");
         assert_eq!(json["tasks"][0]["hasRunningPost"], false);
-        assert_eq!(json["tasks"][0]["queuedInputCount"], 2);
-        assert_eq!(json["tasks"][0]["queuedInputReason"], "input_held_by_draft");
         assert_eq!(json["tasks"][0]["waitingPromptSnippet"], "Ready for review");
         assert_eq!(json["tasks"][0]["status"], "blocked");
         assert_eq!(

@@ -54,6 +54,7 @@ fn transfer_event_type(value: &Value) -> Option<&str> {
             | "pairing_completed"
             | "incoming_transfer_request"
             | "task_pull_requested"
+            | "task_pull_refused"
             | "outgoing_transfer_committed"
             | "outgoing_transfer_finalization_requested"
             | "terminal_event"
@@ -82,7 +83,7 @@ struct TransferEventLogInner {
 /// Single-consumer log of *advisory* sidecar events, read by the desktop
 /// process over `GET /v1/transfers/sidecar/events`.
 ///
-/// The four state-mutating lifecycle events never reach this log: they go
+/// The state-mutating lifecycle events never reach this log: they go
 /// straight into the engine's durable work queue, in this process. What is left
 /// here is what a window is genuinely for — pairing prompts and remote terminal
 /// frames — so an absent or slow reader can no longer cost a transfer step.
@@ -136,11 +137,17 @@ impl TransferEventLog {
 
     /// Append one advisory event, evicting the oldest when the log is full.
     ///
-    /// Eviction is unconditional now. It could not be while the four lifecycle
+    /// Eviction is unconditional now. It could not be while the lifecycle
     /// events shared this log — dropping one lost a transfer step — but those
     /// go to the durable work queue instead, so an absent window costs at most
     /// a pairing prompt it was never there to answer.
-    fn append(&self, event: Value) {
+    ///
+    /// Public because this bounded log is the shape of every advisory lane the
+    /// desktop long-polls, not only the sidecar's: `desktop_view_commands` is
+    /// a third instance, filled by an HTTP route rather than by sidecar
+    /// stdout. Anything appended here is advisory — a window that is not
+    /// listening loses it.
+    pub fn append(&self, event: Value) {
         let bytes = serde_json::to_vec(&event).map(|raw| raw.len()).unwrap_or(0);
         let mut inner = self.lock();
         while inner.entries.len() >= MAX_TRANSFER_EVENT_ENTRIES
@@ -717,7 +724,7 @@ impl Drop for PendingRequestRegistration {
 
 /// Reads the sidecar's stdout and routes each line to its one owner.
 ///
-/// The split is the whole point of the move: the four state-mutating lifecycle
+/// The split is the whole point of the move: the state-mutating lifecycle
 /// events go into the engine's durable work queue in this process, and only the
 /// advisory ones — pairing progress, remote terminal frames — go to the log the
 /// desktop long-polls. Nothing a transfer depends on is routed to a window any
@@ -1002,7 +1009,7 @@ mod tests {
         json!({ "type": kind, "payload": "x" })
     }
 
-    /// The split the move introduced: the four state-mutating kinds leave this
+    /// The split the move introduced: the state-mutating kinds leave this
     /// log entirely for the engine's durable queue, and only what a window is
     /// genuinely for stays behind.
     #[test]
@@ -1011,6 +1018,7 @@ mod tests {
         for kind in [
             "incoming_transfer_request",
             "task_pull_requested",
+            "task_pull_refused",
             "outgoing_transfer_committed",
             "outgoing_transfer_finalization_requested",
         ] {

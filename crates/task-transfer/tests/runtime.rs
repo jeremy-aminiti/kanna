@@ -1367,6 +1367,66 @@ async fn task_pull_is_sealed_idempotent_and_emitted_once_for_paired_peers() {
     );
 }
 
+/// The other half of a pull: the answer the requester never used to get.
+///
+/// A pull is answered synchronously with a request id and fulfilled minutes
+/// later by the source's engine, so a source that refuses has no reply left to
+/// travel back on. On 2026-09-08 that left the machine that asked with no
+/// transfer record, no notification, and a task that simply never arrived.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_pull_is_reported_back_to_the_machine_that_asked() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-source",
+        "Source",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let destination = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-destination",
+        "Destination",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&destination, &source, "peer-source").await;
+    consume_pairing_completed(&source).await;
+
+    let pull_request_id = destination
+        .request_task_pull("peer-source", "task-source", TransferTransport::Lan)
+        .await
+        .unwrap();
+    let RuntimeEvent::TaskPullRequested(_) = source.next_event().await.unwrap() else {
+        panic!("expected task pull request");
+    };
+
+    source
+        .report_task_pull_refusal(
+            "peer-destination",
+            "task-source",
+            &pull_request_id,
+            "task task-source resumes codex session 5a2eb492 but its rollout could not be found",
+            TransferTransport::Lan,
+        )
+        .await
+        .unwrap();
+
+    let RuntimeEvent::TaskPullRefused(event) = destination.next_event().await.unwrap() else {
+        panic!("expected task pull refusal");
+    };
+    assert_eq!(event.request_id, pull_request_id);
+    assert_eq!(event.source_peer_id, "peer-source");
+    assert_eq!(event.source_task_id, "task-source");
+    assert!(
+        event.reason.contains("rollout could not be found"),
+        "{}",
+        event.reason
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_pull_rejects_stale_and_captured_requests_before_renderer_work() {
     let temp = tempfile::tempdir().unwrap();
@@ -10960,6 +11020,7 @@ async fn next_companion_frame(runtime: &TransferRuntime) -> ServerFrame {
             | RuntimeEvent::OutgoingTransferCommitted(_)
             | RuntimeEvent::OutgoingTransferFinalizationRequested(_)
             | RuntimeEvent::TaskPullRequested(_)
+            | RuntimeEvent::TaskPullRefused(_)
             | RuntimeEvent::TerminalEvent { .. } => {
                 panic!("expected visual companion event")
             }
@@ -11054,7 +11115,7 @@ async fn next_incoming_transfer_request(
             RuntimeEvent::PairingStarted(_) => {}
             RuntimeEvent::PairingRequested(_) => {}
             RuntimeEvent::PairingCompleted(_) => {}
-            RuntimeEvent::TaskPullRequested(_) => {
+            RuntimeEvent::TaskPullRequested(_) | RuntimeEvent::TaskPullRefused(_) => {
                 panic!("expected incoming transfer event");
             }
             RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
@@ -11078,7 +11139,7 @@ async fn next_outgoing_transfer_committed(
             RuntimeEvent::PairingStarted(_) => {}
             RuntimeEvent::PairingRequested(_) => {}
             RuntimeEvent::PairingCompleted(_) => {}
-            RuntimeEvent::TaskPullRequested(_) => {
+            RuntimeEvent::TaskPullRequested(_) | RuntimeEvent::TaskPullRefused(_) => {
                 panic!("expected outgoing transfer committed event");
             }
             RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
@@ -11250,7 +11311,9 @@ async fn consume_pairing_completed(runtime: &TransferRuntime) {
         RuntimeEvent::PairingCompleted(_) => {}
         RuntimeEvent::PairingStarted(_) => panic!("expected pairing completed event"),
         RuntimeEvent::PairingRequested(_) => panic!("expected pairing completed event"),
-        RuntimeEvent::TaskPullRequested(_) => panic!("expected pairing completed event"),
+        RuntimeEvent::TaskPullRequested(_) | RuntimeEvent::TaskPullRefused(_) => {
+            panic!("expected pairing completed event")
+        }
         RuntimeEvent::IncomingTransferRequest(_) => panic!("expected pairing completed event"),
         RuntimeEvent::OutgoingTransferCommitted(_) => panic!("expected pairing completed event"),
         RuntimeEvent::OutgoingTransferFinalizationRequested(_) => {
@@ -11286,7 +11349,7 @@ async fn pair_peers(
                         panic!("source should not receive its own pairing request event");
                     }
                     RuntimeEvent::PairingCompleted(_) => {}
-                    RuntimeEvent::TaskPullRequested(_) => {
+                    RuntimeEvent::TaskPullRequested(_) | RuntimeEvent::TaskPullRefused(_) => {
                         panic!("expected pairing started event");
                     }
                     RuntimeEvent::IncomingTransferRequest(_) => {
@@ -11313,7 +11376,7 @@ async fn pair_peers(
                         panic!("target should not receive pairing started event");
                     }
                     RuntimeEvent::PairingCompleted(_) => {}
-                    RuntimeEvent::TaskPullRequested(_) => {
+                    RuntimeEvent::TaskPullRequested(_) | RuntimeEvent::TaskPullRefused(_) => {
                         panic!("expected pairing request event");
                     }
                     RuntimeEvent::IncomingTransferRequest(_) => {

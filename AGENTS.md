@@ -9,6 +9,9 @@ independently:
 - a **PTY daemon** that outlives the app, so agent sessions survive restarts
   and upgrades
 - **`kanna-server`**, which owns SQLite and serves the local and LAN APIs
+- **`kanna-worker`**, the per-user supervisor that runs the daemon and the
+  server with no GUI — the Linux launcher, because the daemon's trust root is
+  its live direct parent and `systemd --user` cannot be one
 - **agent CLIs** (`claude`, `codex`, `copilot`, `opencode`, `agy`) spawned per
   task, each in its own worktree
 - a **mobile app** plus the **cloud services** (relay + Firebase) that let it
@@ -40,6 +43,7 @@ a reference below.
 | Versioning, staging/production ships, promotion, mobile OTA | `docs/dev/release.md` |
 | UI flows, close semantics, shortcuts, preferences | `docs/dev/product-behavior.md` |
 | PTY daemon contract — invariants, handoff, lifecycle | `crates/daemon/SPEC.md` |
+| Linux: what runs, what differs, how to drive it | `docs/2026-09-08-linux-phase1-headless-worker.md`, `docs/specs/linux-desktop-support.md` |
 | Server boundary and v1 LAN API surface | `docs/kanna-server-boundary.md` |
 | Mobile app, OTA operations | `apps/mobile/`, `docs/specs/mobile-ota-updates.md` |
 | Feature specs (merge master, task graph, QA dispatch, RCs) | `docs/specs/` |
@@ -310,7 +314,13 @@ database name and provides the disabled/DEV-E2E `DbHandle` facade.
 `kd` resolves the DB name from context: main instances use `kanna-v2.db`;
 worktrees auto-name theirs `kanna-wt-{worktree-dir}.db`. The dev build's Tauri
 identifier is `build.kanna`, so the default directory is
-`~/Library/Application Support/build.kanna/`.
+`~/Library/Application Support/build.kanna/` on macOS and
+`$XDG_DATA_HOME/build.kanna/` (else `~/.local/share/build.kanna/`) on Linux.
+That split lives in one place — `app_support_dir_for_home` in
+`crates/runtime-defaults`, mirrored by `kd` and matching `dirs::data_dir()`,
+which is how `kanna-server` reaches the same directory. Resolve paths through
+it rather than writing either literal: a disagreement here is a split brain,
+not a cosmetic difference.
 
 ## Working on the codebase
 
@@ -390,23 +400,33 @@ rebound same-origin one. The desktop webview is the one legitimate browser here
 and carries the credential on every `fetch` and on its stream. See
 `docs/kanna-server-boundary.md`.
 
-**Delivered task inputs are durable.** `POST /v1/tasks/{task_id}/input`
-(`kanna_send_task_input`) writes
-to a PTY, and terminal bytes are not a record: a later stage forks a fresh
-worktree and session, so without a row it can read the whole durable record and
-honestly conclude an owner directive was never issued — which is exactly how a
-review agent once ordered an owner's mid-task design decision reverted. Every
-delivery the daemon *accepts* is therefore appended to `task_input` with its
-full text, the stage and `stage_run` live at delivery, and the caller's
+**Delivered task inputs always submit, and are durable.**
+`POST /v1/tasks/{task_id}/input` (`kanna_send_task_input`) hands one logical
+message to the daemon, which types the text and writes its submission boundary
+immediately — without waiting for the terminal to settle and without inspecting
+the composer. A live session always takes the message. If a human has an unsent
+draft there, the message lands after it and both go in: that collision is the
+accepted outcome, chosen by the owner on 2026-09-08 over a delivery path that
+could strand a message at a prompt nobody pressed Enter at and then lock the
+session against every later one. Nothing is queued, parked, or refused because
+of what is on a composer; what remains is the PTY-pid fence and the record
+below.
+
+Terminal bytes are not a record: a later stage forks a fresh worktree and
+session, so without a row it can read the whole durable record and honestly
+conclude an owner directive was never issued — which is exactly how a review
+agent once ordered an owner's mid-task design decision reverted. Every delivery
+the daemon confirms reached the PTY is therefore appended to `task_input` with
+its full text, the stage and `stage_run` live at delivery, and the caller's
 declared, unverified `operator` / `manager` source, or `unspecified`.
 Historical rows may carry the retired `notify` source; no new rows use it.
 Read it with `kanna_task_inputs`
 (`GET /v1/tasks/{task_id}/inputs`); `kanna_get_task` reports
-`deliveredInputCount` so detail alone cannot read as "nothing was sent". An
-uncertain delivery is deliberately not recorded, and recording never fails a
-delivery that already reached the PTY. Add a new injected-message kind to this
-record where it is delivered, not by diffing terminals. See
-`docs/kanna-server-boundary.md`.
+`deliveredInputCount` so detail alone cannot read as "nothing was sent". A
+delivery whose daemon round trip was lost is uncertain and deliberately not
+recorded, and recording never fails a delivery that already reached the PTY.
+Add a new injected-message kind to this record where it is delivered, not by
+diffing terminals. See `docs/kanna-server-boundary.md`.
 
 **Raw terminal keys are actions, not speech.**
 `POST /v1/tasks/{task_id}/raw-input` (`kanna_send_task_raw_input`,
@@ -417,8 +437,8 @@ appends its own Enter. The vocabulary is
 `kanna_runtime_defaults::terminal_keys` — one table, advertised by the MCP
 schema and used by the server, held in step by a contract test — and only the
 named `enter` key declares a submission boundary, so a carriage return inside
-explicit bytes is refused rather than left to corrupt the daemon's draft
-ledger. Every write is fenced to the PTY pid discovery observed and is
+explicit bytes is refused rather than left to corrupt the daemon's composer
+attestation ledger. Every write is fenced to the PTY pid discovery observed and is
 acknowledged only once its bytes reached the terminal, so order holds and a
 part-way stop answers `delivery_uncertain` — never retry that; only a daemon mid-handoff (`daemon_handing_off`) answers `retryable: true`. **No
 `task_input` row is written**: an arrow key answering a prompt is not owner or
@@ -453,13 +473,11 @@ in one direction only: a composer painted entirely faint with the cursor still
 at its start is the CLI's own suggestion and resolves to `not-typed`, which is
 what stops a ledger armed once from holding a session forever behind Claude's
 grey tab-to-accept ghost. No frame may ever assert that somebody *did* type.
-The hold follows: zero typed bytes delivers immediately; a typed draft on a
-composer the daemon can read is copied off, delivered over, and written back
-byte-exact with mid-swap keystrokes replayed after it; `input_held_by_draft`
-now means only a composer that could not be read or the swap could not be
-verified. Raw PTY transcripts are unchanged — this is a rule about
-derived surfaces. See `docs/kanna-server-boundary.md` and
-`crates/daemon/SPEC.md`.
+The verdict decides what may be *read*, never whether a message is delivered: a
+logical message goes out over any composer, attested or not, and `unknown`
+costs only that nothing on that line may be acted on. Raw PTY transcripts are
+unchanged — this is a rule about derived surfaces. See
+`docs/kanna-server-boundary.md` and `crates/daemon/SPEC.md`.
 
 **Runtime and read state are two dimensions.** `activity` (`working` | `idle` |
 `unread`) is a *derived display value* that blends them, and it cannot answer

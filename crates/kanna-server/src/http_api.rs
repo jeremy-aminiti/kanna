@@ -4,6 +4,7 @@ mod blocking;
 mod cloud_desktops;
 mod cloud_relay;
 mod desktop;
+mod desktop_views;
 #[cfg(debug_assertions)]
 mod e2e_mobile_controls;
 #[cfg(debug_assertions)]
@@ -103,7 +104,7 @@ pub(crate) use tasks::create_task_in_process;
 pub(crate) use task_input::{
     handle_task_terminal_state, mark_task_session_interrupted,
     mark_task_session_interrupted_for_recovery, restore_task_run_for_live_session,
-    try_submit_task_input, TaskInputError, INPUT_BLOCKED_INHERITED_DRAFT,
+    try_submit_task_input, TaskInputError,
 };
 
 #[cfg(test)]

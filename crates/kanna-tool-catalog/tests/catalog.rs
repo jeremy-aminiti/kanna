@@ -36,6 +36,8 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_wait_events",
             "kanna_notify_mobile",
             "kanna_set_task_workflow",
+            "kanna_replace_task_workflow",
+            "kanna_open_file",
             "kanna_task_logs",
             "kanna_task_inputs",
             "kanna_task_transfers",
@@ -249,34 +251,20 @@ fn task_input_and_resume_descriptions_document_delivery_and_recovery_contracts()
     for required in [
         "live daemon PTY session",
         "PTY process ID",
-        "queues the logical message FIFO",
-        "daemon handoff",
-        "never carried into a later run or stage",
         "no_live_agent_session",
         "kanna_resume_task",
         "kanna_rerun_stage",
-        // A refusal a caller cannot tell from a transient fault is a caller
-        // that retries forever against a session only a human can unblock.
-        "input_blocked",
-        "retrying changes nothing",
-        // A held message was accepted but not delivered. A caller that cannot
-        // name this outcome resends and queues a second copy of a message the
-        // daemon already holds.
-        "input_held_by_draft",
-        "do not send it again",
+        // The owner's 2026-09-08 decision, stated where a caller reads it: a
+        // live session always takes the message, and a human's unsent draft is
+        // a collision rather than a reason to withhold it. A caller told
+        // otherwise waits for a delivery that already happened.
+        "always takes the message",
+        "without waiting for the terminal to settle",
+        "Nothing is ever queued, parked, or refused",
     ] {
         assert!(
             send_input.contains(required),
             "send-task-input must document `{required}`"
-        );
-    }
-
-    // Both signal tools reach the same daemon refusal through
-    // signal_agent.rs, so both have to name it where they name their others.
-    for name in ["kanna_signal_agent", "kanna_signal_merge_handoff"] {
-        assert!(
-            description(name).contains("input_held_by_draft"),
-            "{name} must document `input_held_by_draft`"
         );
     }
 
@@ -1259,7 +1247,6 @@ fn wait_events_documents_every_event_type_the_server_emits() {
         "task.merge_handoff_missing",
         "task.input_delivered",
         "task.raw_input_delivered",
-        "task.input_blocked",
         "task.transfer_finalizing",
     ] {
         assert!(

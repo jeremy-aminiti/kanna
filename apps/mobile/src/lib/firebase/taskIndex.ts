@@ -25,13 +25,15 @@ export interface CloudTaskSnapshot {
   stage: string;
   activity?: string | null;
   activityRevision?: number;
-  queuedInputCount?: number;
-  queuedInputReason?: "input_held_by_draft" | "delivery_uncertain" | "sending" | null;
   status?: string;
   repo: { cloudRepoId: string; name: string; remoteUrlHash?: string | null };
   agent?: { provider?: string | null; type?: string | null } | null;
   parentTaskId?: string | null;
   blockedByTaskIds?: string[];
+  /** The agent this task is the account-wide singleton for, when it is one.
+   * Published by the owner's desktop; it is what lets a phone reading the
+   * cloud index pin the singleton by default, exactly as it does on the LAN. */
+  singletonAgent?: string | null;
   pinned?: boolean;
   pinOrder?: number | null;
   createdAt: string;
@@ -257,8 +259,6 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
     stage: requiredString(value.stage, "stage"),
     activity: optionalNullableString(value.activity),
     activityRevision: optionalNonNegativeInteger(value.activityRevision),
-    queuedInputCount: optionalNonNegativeInteger(value.queuedInputCount),
-    queuedInputReason: parseQueuedInputReason(value.queuedInputReason),
     status: optionalString(value.status),
     repo: {
       cloudRepoId: requiredString(value.repo.cloudRepoId, "repo.cloudRepoId"),
@@ -268,6 +268,7 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
     agent: parseCloudTaskAgent(value.agent),
     parentTaskId: optionalNullableString(value.parentTaskId),
     blockedByTaskIds: parseCloudTaskBlockerIds(value.blockedByTaskIds),
+    singletonAgent: optionalNullableString(value.singletonAgent),
     pinned: optionalBoolean(value.pinned),
     pinOrder: optionalNullableNumber(value.pinOrder),
     createdAt,
@@ -329,17 +330,6 @@ function optionalNonNegativeInteger(value: unknown): number | undefined {
     : undefined;
 }
 
-function parseQueuedInputReason(
-  value: unknown,
-): CloudTaskSnapshot["queuedInputReason"] {
-  if (value === null) return null;
-  return value === "input_held_by_draft"
-      || value === "delivery_uncertain"
-      || value === "sending"
-    ? value
-    : undefined;
-}
-
 function optionalNullableNumber(value: unknown): number | null | undefined {
   if (value === null) return null;
   return typeof value === "number" && Number.isSafeInteger(value)
@@ -372,10 +362,13 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     ...(snapshot.activityRevision === undefined
       ? {}
       : { activityRevision: snapshot.activityRevision }),
-    queuedInputCount: snapshot.queuedInputCount ?? 0,
-    queuedInputReason: snapshot.queuedInputReason ?? null,
     parentTaskId: snapshot.parentTaskId ?? null,
     blockedByTaskIds: snapshot.blockedByTaskIds ?? [],
+    // A document that never carried the field says nothing rather than saying
+    // "not a singleton": absent stays absent so a later LAN read can fill it.
+    ...(snapshot.singletonAgent === undefined
+      ? {}
+      : { singletonAgent: snapshot.singletonAgent }),
     pinned: snapshot.pinned ?? false,
     pinOrder: snapshot.pinOrder ?? null,
     ownerDesktopId: snapshot.ownerDesktopId,

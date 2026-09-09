@@ -26,9 +26,18 @@ run simultaneously without conflicts:
   `KANNA_DEV_PORT: 1420`); each worktree gets the next free offset and the
   resolved values are passed to its processes as env vars.
 - **Database** — main uses `kanna-v2.db`; worktrees use
-  `kanna-wt-{worktree-dir}.db` (same Application Support dir).
-- **Daemon** — worktrees use `{worktree}/.kanna-daemon/` instead of
-  `~/Library/Application Support/Kanna/`.
+  `kanna-wt-{worktree-dir}.db` (same application-data dir).
+- **Daemon** — worktrees use `{worktree}/.kanna-daemon/` instead of the
+  machine's application-data directory.
+
+Where "application data" is depends on the platform, resolved once in
+`crates/runtime-defaults` and mirrored by `kd`: `~/Library/Application Support`
+on macOS, and `$XDG_DATA_HOME` (else `~/.local/share`) on Linux — the same
+resolution `dirs::data_dir()` performs, which is how `kanna-server` reaches the
+same directory. The daemon's control sockets live in `/tmp` on macOS and in
+`$XDG_RUNTIME_DIR` on Linux when the session manager provides one, because that
+directory is per-user and `0700` while a shared `/tmp` socket path can be
+pre-created by any local user.
 - **tmux** — worktrees get their own tmux *server* named
   `kanna-{worktree-dir}`.
 - **Tauri config** — `kd dev up` writes `tauri.conf.local.json` with the port
@@ -36,6 +45,66 @@ run simultaneously without conflicts:
   modified.
 
 `./kd env print` shows everything resolved for the current context.
+
+## Database access protection
+
+The database selection crosses several independently launched processes:
+
+| Caller | Selection and context available at access |
+| --- | --- |
+| `kd` | Knows the worktree and explicit `--db` override; exports `KANNA_DB_NAME` and `KANNA_DB_PATH`. Its reset/delete/seed helpers also touch SQLite directly. Dev startup already refuses the production name. |
+| Desktop | Reads `KANNA_DB_PATH`, then `KANNA_DB_NAME`, then its Tauri app-data directory and the default name; writes the selection into server configuration. It knows it is launching the desktop's server. |
+| `kanna-server` | Reads `server.toml`; an omitted `db_path` resolves through the platform data directory. Normalizes legacy selection, relocates legacy state, then calls `Db::open_migrated`; later connections use `Db::open`. A path or the build's `environment` label does not identify the caller's intent. |
+| Task-transfer | Reads `KANNA_DB_PATH` / `KANNA_CLI_DB_PATH`, otherwise prefers the canonical or legacy desktop path. The server supplies its selected path to the sidecar; companion workspace lookup independently opens SQLite. |
+| CLI / MCP | Call the server API; they do not need authorization to open SQLite themselves. |
+| Headless worker | The Phase 1 launcher selects a DB and supplies server configuration. A lost `--db-path`, including in an installed service unit, leaves the downstream server with a production fallback but no desktop authorization. The worker is developed separately from this checkout. |
+| Tests | Unit fixtures open temporary paths directly; relocation integration tests use canonical/legacy resolvers with temporary roots; process gates launch ordinary binaries. A dependency's `cfg(test)` does not identify an integration-test child, so launch context must travel to that child. |
+
+Close-time worktree cleanup is a server-owned command appended after repository
+teardown. The teardown retains task isolation. Only the cleanup command restores
+`KANNA_TASK_ID` / `KANNA_WORKTREE` to the parent server's values and forwards its
+explicit desktop authorization, after checking database access in that parent.
+Other isolation signals remain intact, and the cleanup opener checks again.
+
+Database naming is not permission to open the production database. The Rust
+SQLite opening and legacy-relocation boundaries enforce
+`kanna_runtime_defaults::database_access`: accessing the account's real
+`build.kanna/kanna-v2.db` or legacy `com.kanna.app/kanna-v2.db` requires
+`KANNA_DESKTOP_DB_ACCESS=desktop`. The desktop supplies this explicitly when
+spawning its server; CLI and MCP continue using that server over the API.
+A standalone server must deliberately supply that authorization to run the real
+desktop instance. An explicit production `db_path` alone does not authorize it.
+The path and database name are unchanged, including on a fresh install.
+
+This also covers an installed worker whose generated service unit drops
+`--db-path`: its canonical fallback is refused by the server unless the process
+explicitly declares desktop access. No test, worktree or XDG marker is needed
+for that refusal. Passing a fallback path in server configuration grants no
+authority either.
+
+Every `kd` context exports `KANNA_DB_ISOLATED=1`. This veto takes precedence
+over desktop authorization, as do test binaries, task/worktree context and
+WebDriver/E2E context. On macOS, setting `XDG_DATA_HOME` also vetoes production
+access: macOS ignores that variable for Application Support, so treating it as
+isolation must produce an error instead of opening production. Use an explicit
+isolated database path (`./kd dev up --db ...`, or `KANNA_DB_PATH` for launchers
+that consume it). An isolated process can still open a temporary fixture with
+the production basename outside the account's production directories.
+
+The guard obtains the account home from the operating system, independently of
+`HOME` and `XDG_DATA_HOME`, and protects its macOS Application Support and
+Linux `.local/share` production locations. It checks symlinks, existing file
+identity (including hard links), and existing ancestors of fresh paths before
+opening SQLite. Pure path resolvers remain usable by relocation fixtures;
+returning a path grants no access. `kd` additionally refuses production names
+at its direct SQLite reset, delete and seed boundaries.
+
+This is an accidental-access guard for Kanna's openers, not an OS sandbox for
+arbitrary programs running as the same user. New SQLite openers must call the
+shared check before touching files. A resolver-only guard was rejected because
+it misses explicit paths and relocation; worktree detection alone was rejected
+because it misses standalone launchers; an authorization flag alone was
+rejected because inherited authorization must never override a test lane.
 
 ## kd command reference
 
@@ -458,6 +527,48 @@ Consequences worth knowing:
   (it declares `workflow_dispatch`).
 - `./kd pages build-schema --out-dir <dir>` still runs locally, and is the way
   to inspect exactly what CI would upload.
+
+## Linux development (headless)
+
+Linux has no GUI lane yet: `kd dev up` is macOS-only, and the Linux surface is
+the **headless worker** — the daemon, the server, the CLI and the sidecars
+under `kanna-worker`. Everything below is verified on the Ubuntu 26.04 aarch64
+VM described in
+[`docs/2026-09-08-linux-phase1-headless-worker.md`](../2026-09-08-linux-phase1-headless-worker.md).
+
+Prerequisites beyond the macOS list: the apt packages in the Phase 0 baseline
+(including `libssl-dev`, still a build prerequisite because two crates route
+TLS through `native-tls`), and `sqlite3` for `./kd doctor`.
+
+```bash
+# One shared Ghostty checkout. Unset, libghostty-vt-sys clones the whole
+# repository into every new OUT_DIR, so a `cargo test` after a `cargo build`
+# re-fetches it.
+git clone --filter=blob:none https://github.com/jemdiggity/ghostty.git ~/.cache/ghostty-src
+git -C ~/.cache/ghostty-src checkout 665a03f380204ce1976941d36649963b4da80880
+export GHOSTTY_SOURCE_DIR=$HOME/.cache/ghostty-src
+
+./kd test rust                 # skips the desktop crate and its frontend off macOS
+./kd test headless-worker      # the exit gate: a real worker, daemon, server and task
+
+cargo build -p kanna-worker -p kanna-daemon -p kanna-server -p kanna-cli
+# --lan-port because 48120 is the desktop app's: a worker refuses a port
+# another Kanna instance already serves rather than stopping it.
+.build/debug/kanna-worker run --data-dir ~/.local/share/Kanna \
+  --db-path ~/.local/share/build.kanna/kanna-v2.db --lan-port 48140
+.build/debug/kanna-worker print-unit     # inspect the systemd --user unit
+.build/debug/kanna-worker install-unit   # write it, then follow the printed steps
+```
+
+Two things to know when driving a worker:
+
+- `systemctl --user` over SSH needs `XDG_RUNTIME_DIR=/run/user/$(id -u)` and
+  `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus`, and surviving
+  logout needs `loginctl enable-linger $USER`.
+- **`SIGTERM` stops only the server.** The daemon and every agent session it
+  owns keep running, exactly as they do when the desktop app is closed. The
+  unit sets `KillMode=process` so a `systemctl --user restart` behaves the same
+  way. `kanna-worker stop-daemon` is the full teardown.
 
 ## Debugging map
 

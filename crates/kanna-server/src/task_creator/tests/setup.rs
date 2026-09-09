@@ -1,6 +1,13 @@
 use super::*;
 use std::io::Read;
 
+// These tests prove that workspace setup itself supplies the provider, so
+// their repos are built with `init_git_repo_without_provider_fixtures` and
+// carry no `.kanna/test-provider-bin`. Nothing else is needed to keep a Codex
+// installed on the developer's machine out of the result: a test build never
+// resolves an agent CLI from the host at all (see
+// `environment::test_provider_fixture_binary`).
+
 const INSTALL_CODEX: &str = "mkdir -p .kanna/setup-bin && printf '#!/bin/sh\\ntouch .kanna/setup-bin/codex-ran\\nexit 0\\n' > .kanna/setup-bin/codex && chmod +x .kanna/setup-bin/codex";
 const INSTALL_STREAMING_CODEX: &str = "printf 'SETUP_OUTPUT_SENTINEL\\n' && mkdir -p .kanna/setup-bin && printf '#!/bin/sh\\nprintf \\\"PROVIDER_OUTPUT_SENTINEL\\\\n\\\"\\ntouch .kanna/setup-bin/codex-ran\\nexit 0\\n' > .kanna/setup-bin/codex && chmod +x .kanna/setup-bin/codex";
 
@@ -16,29 +23,6 @@ const EVENTUAL_PROGRESS_GUARD: std::time::Duration = std::time::Duration::from_s
 fn read_live_pid(path: &std::path::Path) -> Option<i32> {
     let pid: i32 = std::fs::read_to_string(path).ok()?.trim().parse().ok()?;
     (unsafe { libc::kill(pid, 0) } == 0).then_some(pid)
-}
-
-struct ProviderLookupPathGuard;
-
-impl ProviderLookupPathGuard {
-    fn without_host_providers() -> Self {
-        // The executable resolver intentionally falls back to the user's login
-        // shell in production. Setup-only tests must prove the workspace setup
-        // itself supplies the provider rather than accidentally using Codex
-        // installed on the test host.
-        unsafe {
-            std::env::set_var("KANNA_TEST_PROVIDER_LOOKUP_PATH", "/usr/bin:/bin");
-        }
-        Self
-    }
-}
-
-impl Drop for ProviderLookupPathGuard {
-    fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("KANNA_TEST_PROVIDER_LOOKUP_PATH");
-        }
-    }
 }
 
 fn write_setup_repo(
@@ -198,7 +182,6 @@ fn seed_source_task(
 #[tokio::test]
 async fn initial_pty_task_streams_setup_before_starting_setup_created_provider() {
     let _sidecar_guard = crate::test_sidecar_guard().await;
-    let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
     let repo_root = write_setup_repo("setup-provider-initial-pty", INSTALL_STREAMING_CODEX, false);
@@ -292,9 +275,12 @@ async fn initial_pty_task_streams_setup_before_starting_setup_created_provider()
         let mut buffer = [0_u8; 4096];
         loop {
             match output_reader.read(&mut buffer) {
+                // A PTY master whose last slave has closed is a hangup, not
+                // an error: macOS spells it EOF and Linux spells it EIO.
                 Ok(0) => break,
                 Ok(count) => output.extend_from_slice(&buffer[..count]),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
                 Err(error) => panic!("failed to read PTY output: {error}"),
             }
         }
@@ -350,8 +336,9 @@ fn pty_setup_failure_keeps_output_and_prevents_provider_launch() {
         Some("/usr/bin:/bin"),
     );
 
-    let output = Command::new("/bin/zsh")
-        .args(["--login", "-c", &command])
+    let shell = crate::login_shell::login_shell();
+    let output = Command::new(shell.path())
+        .args(shell.login_args(&command))
         .current_dir(&workspace)
         .output()
         .unwrap();
@@ -371,7 +358,6 @@ fn pty_setup_failure_keeps_output_and_prevents_provider_launch() {
 #[test]
 fn initial_pty_task_binds_first_provider_before_setup() {
     let _sidecar_guard = crate::test_sidecar_guard_blocking();
-    let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
     let repo_root = write_setup_repo("setup-provider-precedence", INSTALL_CODEX, false);
@@ -441,7 +427,6 @@ fn initial_pty_task_binds_first_provider_before_setup() {
 #[tokio::test]
 async fn initial_headless_task_runs_setup_before_resolving_workspace_provider() {
     let _sidecar_guard = crate::test_sidecar_guard().await;
-    let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
     let repo_root = write_setup_repo("setup-provider-initial", INSTALL_CODEX, false);
@@ -522,7 +507,6 @@ async fn initial_headless_task_runs_setup_before_resolving_workspace_provider() 
 #[tokio::test]
 async fn stage_fork_runs_repo_setup_before_resolving_pty_provider() {
     let _sidecar_guard = crate::test_sidecar_guard().await;
-    let _provider_path_guard = ProviderLookupPathGuard::without_host_providers();
     let kanna_cli = ensure_test_sidecar("kanna-cli");
     let _kanna_mcp = ensure_test_sidecar("kanna-mcp");
     let repo_root = write_setup_repo("setup-provider-stage-fork", INSTALL_CODEX, true);
@@ -595,9 +579,12 @@ async fn stage_fork_runs_repo_setup_before_resolving_pty_provider() {
         let mut buffer = [0_u8; 4096];
         loop {
             match output_reader.read(&mut buffer) {
+                // A PTY master whose last slave has closed is a hangup, not
+                // an error: macOS spells it EOF and Linux spells it EIO.
                 Ok(0) => break,
                 Ok(count) => output.extend_from_slice(&buffer[..count]),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
                 Err(error) => panic!("failed to read PTY output: {error}"),
             }
         }
@@ -739,7 +726,7 @@ async fn timed_out_stage_fork_setup_kills_group_records_failure_and_removes_fork
     // budget is. The assertions below all depend on setup having reached its
     // `printf` and having spawned the signal-proof grandchild first, and a
     // fixed budget cannot express that ordering: the setup shell is
-    // `/bin/zsh --login`, so under load the profile it sources can outlast any
+    // a login shell, so under load the profile it sources can outlast any
     // budget short enough to keep the test quick. The timeout is therefore
     // armed by an observer that has seen the grandchild running.
     let timeout_signal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

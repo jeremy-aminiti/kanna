@@ -49,6 +49,7 @@ interface RelayTaskFlowOptions {
   customizedReply: string;
   fixture: PtyTerminalFixture;
   prepareTaskUnreadForMarkRead(): Promise<void>;
+  restoreTallTerminalGeometry(): Promise<void>;
   resyncTerminalConnection(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: RelayTaskRowExpectation;
@@ -342,9 +343,7 @@ function createRelayQuickReplyPersistenceJourney(
 ): RelayQuickReplyPersistenceJourney {
   const openEditor = async () => {
     await openRelayProfileSheet(ui);
-    const quickRepliesButton = await driver.$(
-      selectors.accountQuickRepliesButton,
-    );
+    const quickRepliesButton = await driver.$("~Open Quick Replies");
     await quickRepliesButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
     await ui.waitUntil(
       async () => await quickRepliesButton.isEnabled().catch(() => false),
@@ -437,6 +436,12 @@ export async function verifyRelayPtyRenderedGridAndCursor(
       const cursorRow = lastInspection.cursorRow;
       const expectedCell = fixture.expectedCell;
       const expectedCursor = fixture.expectedCursor;
+      const bottomLayoutMatches = !fixture.expectBottomAnchored || (
+        typeof lastInspection.gridTopGap === "number" &&
+        lastInspection.gridTopGap > 0 &&
+        typeof lastInspection.gridBottomGap === "number" &&
+        lastInspection.gridBottomGap <= 1
+      );
       const renderedCell = expectedCell && lastInspection.visibleRows
         ? lastInspection.visibleRows[expectedCell.row]?.slice(
             expectedCell.column,
@@ -457,7 +462,8 @@ export async function verifyRelayPtyRenderedGridAndCursor(
         cursorRow < fixture.expectedRows &&
         (!expectedCell || renderedCell === expectedCell.text) &&
         (!expectedCursor ||
-          (cursorColumn === expectedCursor.column && cursorRow === expectedCursor.row))
+          (cursorColumn === expectedCursor.column && cursorRow === expectedCursor.row)) &&
+        bottomLayoutMatches
       );
     },
     {
@@ -466,7 +472,8 @@ export async function verifyRelayPtyRenderedGridAndCursor(
       timeoutMsg:
         `Expected the mobile WebView to render ${fixture.expectedCols}x${fixture.expectedRows} ` +
         `with cursor ${JSON.stringify(fixture.expectedCursor)} and cell ` +
-        `${JSON.stringify(fixture.expectedCell)}; last inspection ${JSON.stringify(lastInspection)}`,
+        `${JSON.stringify(fixture.expectedCell)}, excess space above the grid, and ` +
+        `its last row adjacent to the input chrome; last inspection ${JSON.stringify(lastInspection)}`,
     },
   );
 }
@@ -478,7 +485,26 @@ export async function verifyRelayPtyAuthoritativeScrollback(
 ): Promise<void> {
   const scrollTop = await driver.$(selectors.terminalScrollTop);
   await scrollTop.waitForExist({ timeout: SCREEN_TIMEOUT_MS });
+  const inspectionBeforeScroll = await (await driver.$(selectors.terminalInspection))
+    .getAttribute("value")
+    .catch(() => null);
   await scrollTop.click();
+
+  // Activating the native scroll affordance can briefly detach the WebView
+  // accessibility bridge. Wait for that exact inspection surface to return
+  // before asking the context inspector for the xterm grid.
+  await driver.waitUntil(
+    async () => {
+      const inspection = await driver.$(selectors.terminalInspection);
+      const value = await inspection.getAttribute("value").catch(() => null);
+      return value !== null && value !== inspectionBeforeScroll;
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected fresh terminal inspection after scroll-to-top",
+    },
+  );
 
   const expectedHistoryRow = /^MOBILE_PTY_HISTORY_\d{5}_X{100}$/;
   let lastInspection: Awaited<ReturnType<RelayUi["inspectTerminalWebView"]>> | null = null;
@@ -1371,17 +1397,38 @@ async function verifyMentionedFileMenuFlow(
     }
   }
   await closeTaskFilePreview(driver);
+  // The native preview closes before React has completed the modal unmount.
+  // Let that transition settle before opening another action sheet; otherwise
+  // its stale close callback can clear the second mentioned-files request.
+  await driver.pause(350);
 
   const taskMore = await driver.$(selectors.taskMoreButton);
+  await taskMore.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   await taskMore.click();
+  const taskActionMenu = await driver.$(`~${TASK_ACTION_MENU_TITLE}`);
+  await taskActionMenu.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   const mentionedFilesAction = await driver.$(
-    `~Mentioned Files (${fixture.mentionedCount})`
+    '-ios predicate string:label BEGINSWITH "Mentioned Files ("'
   );
+  await mentionedFilesAction.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const mentionedFilesLabel = await mentionedFilesAction.getAttribute("label");
+  const expectedMentionedFilesLabel = `Mentioned Files (${fixture.mentionedCount})`;
+  if (mentionedFilesLabel !== expectedMentionedFilesLabel) {
+    throw new Error(
+      `Expected ${expectedMentionedFilesLabel} before reopening mentioned files, got ${JSON.stringify(mentionedFilesLabel)}`
+    );
+  }
   await mentionedFilesAction.click();
-  const markdownRow = await driver.$(
-    taskMentionedFilesRowSelector(fixture.path)
-  );
+  const markdownRow = await driver.$(`~Open file ${fixture.path}`);
   await markdownRow.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  const markdownRowEnabled = await markdownRow.getAttribute("enabled");
+  const markdownRowLabel = await markdownRow.getAttribute("label");
+  if (markdownRowEnabled !== "true") {
+    throw new Error(
+      `Expected resolved mentioned file ${fixture.path} to be selectable; ` +
+        `native enabled=${JSON.stringify(markdownRowEnabled)}, label=${JSON.stringify(markdownRowLabel)}`
+    );
+  }
   await markdownRow.click();
   await expectNativeText(driver, selectors.taskFilePreviewPath, fixture.path);
   await expectNativeText(driver, selectors.taskFilePreviewMode, "Rendered Markdown");
@@ -1765,7 +1812,19 @@ async function signInToRelay(
   const signOutButton = await ui.getAccountSignOutButton();
   if (await signOutButton.isExisting().catch(() => false)) {
     await signOutButton.click();
-    await ui.pause(1_000);
+    // Auth persistence updates asynchronously. Do not let the old Sign Out
+    // control satisfy the subsequent sign-in readiness check.
+    await ui.waitUntil(
+      async () =>
+        !(await ui.getAccountSignOutButton())
+          .isExisting()
+          .catch(() => false),
+      {
+        interval: POLL_INTERVAL_MS,
+        timeout: SCREEN_TIMEOUT_MS,
+        timeoutMsg: "Expected the prior relay account to finish signing out"
+      }
+    );
   }
 
   const emailInput = await ui.getAccountEmailInput();
@@ -1911,7 +1970,16 @@ export async function runRelayTaskFlow(
         await waitForTaskTerminalLive(ui);
         await waitForRenderedPtyTerminal(ui, options.fixture);
         await verifyRelayPtyRenderedGridAndCursor(ui, options.fixture);
-        await verifyRelayPtyAuthoritativeScrollback(driver, ui, options.fixture);
+        const terminalScreenshotPath =
+          process.env.KANNA_E2E_TERMINAL_SCREENSHOT_PATH?.trim();
+        if (terminalScreenshotPath && renderedTerminalVisits === 0) {
+          await driver.saveScreenshot(terminalScreenshotPath);
+        }
+        if (renderedTerminalVisits === 0) {
+          await options.restoreTallTerminalGeometry();
+        } else {
+          await verifyRelayPtyAuthoritativeScrollback(driver, ui, options.fixture);
+        }
         process.stdout.write(
           `[mobile-e2e] authoritative terminal render visit ${renderedTerminalVisits + 1} passed\n`,
         );

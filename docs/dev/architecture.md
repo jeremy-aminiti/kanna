@@ -82,6 +82,32 @@ The full contract — invariants, startup/handoff sequence, session lifecycle �
 is specified in [`crates/daemon/SPEC.md`](../../crates/daemon/SPEC.md). Read it
 before touching daemon code.
 
+### Headless worker — `crates/kanna-worker/`
+
+The per-user supervisor that runs Kanna without a GUI. It launches the daemon
+and the server as its own direct children, authorizes the server on every
+daemon generation, and restarts the server when it dies. It owns startup,
+authorization and lifetime — nothing else. Orchestration stays in
+`kanna-server`; terminal authority stays in the daemon.
+
+It exists because the daemon's trust roots are its **live direct parent**, and
+on Linux the obvious arrangement — daemon and server as two `systemd --user`
+units — cannot supply one: the user manager holds capabilities, so the kernel
+marks it non-dumpable and `/proc/<pid>/exe` is unreadable even to the same uid.
+An ordinary user binary in between is the only shape that keeps both the trust
+root and the service manager's lifetime. On macOS the desktop app plays this
+role; the worker is portable and runs there too, which is what lets one
+exit-gate lane cover both platforms.
+
+Its signals mirror the desktop's semantics deliberately: `SIGHUP`
+(`systemctl --user reload`) spawns a replacement daemon and live sessions hand
+off to it; `SIGTERM` stops the server and leaves the daemon and its sessions
+running, exactly as closing the app does. Its unit sets `KillMode=process` for
+the same reason. `kanna-worker stop-daemon` is the explicit full teardown.
+
+Evidence and the platform measurements behind it:
+[`docs/2026-09-08-linux-phase1-headless-worker.md`](../2026-09-08-linux-phase1-headless-worker.md).
+
 ### Local API server — `crates/kanna-server/`
 
 The desktop-side service boundary for every non-desktop consumer (mobile app,
@@ -227,6 +253,7 @@ never the Firebase CLI directly; function deploys additionally require
 | Path | Purpose |
 |---|---|
 | `crates/runtime-defaults/` | Shared constants: bundle ids, DB name, relay URLs, Firebase project ids, ports |
+| `crates/server-process/` | Who is listening on `kanna-server`'s port, and how to stop them — shared by both launchers (the desktop app and `kanna-worker`), because a launcher must attribute a port to a real pid before it authorizes one, and two copies would drift |
 | `crates/task-transfer/` | Peer-to-peer desktop protocol (mDNS discovery via `_kanna-xfer._tcp`, crypto, peer registry): task transfer plus peer task snapshots and observing/sending input to peer sessions |
 | `crates/tauri-plugin-delta-updater/` | Self-updater plugin (stub) |
 | `packages/core/` | Shared TS business logic: workflow types/tags, repo config, custom tasks, GitHub/Slack/Discord clients |
@@ -333,29 +360,24 @@ The contracts below are specified in
   this feed — its cross-machine view is the Firestore task index plus KSP
   task-summary streams.
 - **Task input pipeline.** `POST /v1/tasks/{id}/input` writes into the live PTY
-  through the daemon. A
-  success now means *submitted* — the daemon acknowledges only after the
-  message bytes and the delayed Enter both landed. Deliveries the daemon
-  accepts are appended to the durable `task_input` ledger with source
-  (`operator`/`manager`/`unspecified`), stage, and run. Historical rows may use
-  the retired `notify` source. Whether a
-  composer draft holds delivery follows the daemon's **composer attestation**
-  ledger, a three-way evidence state
-  (`crates/daemon/SPEC.md`, protected-input and composer-attestation):
-  - `not-typed` (zero bytes counted since the last submission boundary) is
-    *proven empty* — the message delivers immediately, even while provider
-    chrome renders a tab-to-accept suggestion on the composer line;
-  - `typed` holds the queued message and answers 409 `input_held_by_draft`
-    until the human's next submission boundary;
-  - `unknown` is **not** zero: it conservatively stays held or blocked until
-    a submission boundary or a valid empty-composer attestation resolves it,
-    and a session inherited with unknown draft state answers 409
-    `input_blocked` (`inputBlocked: "inherited-draft-unknown"`) until then.
-
-  Composer text is never session output: task detail reports it separately as
-  `composer: { text, attestation }`, the task-logs tail labels the composer
-  line, and text whose attestation is not `typed` must never be read as an
-  instruction.
+  through the daemon, which types the text and writes its submission boundary
+  as one write. A success means *written*, boundary included. A live session
+  always takes the message: the daemon does not wait for the terminal to settle
+  and does not inspect the composer, so a human's unsent draft is a collision
+  the message lands after rather than a reason to hold it (owner decision,
+  2026-09-08). Deliveries the daemon confirms are appended to the durable
+  `task_input` ledger with source (`operator`/`manager`/`unspecified`), stage,
+  and run. Historical rows may use the retired `notify` source.
+- **Composer attestation.** The daemon's typed-byte ledger
+  (`crates/daemon/SPEC.md`, protected-input and composer-attestation) answers a
+  separate question: whether text on a composer line was typed by somebody
+  (`typed`), is provably the provider's own chrome (`not-typed`), or cannot be
+  proven either way (`unknown` — an inherited session, or one adopted from a
+  daemon that handed over no ledger). It governs what may be *read*, never
+  whether a message is delivered. Composer text is never session output: task
+  detail reports it separately as `composer: { text, attestation }`, the
+  task-logs tail labels the composer line, and text whose attestation is not
+  `typed` must never be read as an instruction.
 - **Completion observation.** `kanna-server` subscribes to daemon
   terminal-state events directly (never through the desktop frontend) and
   records the terminating run/runtime state and durable events. Managers use

@@ -168,9 +168,10 @@ fn cloud_route_problem(name: &str, cloud_route: Option<&CloudTransferRoute>) -> 
         .and_then(|route| route.detail.clone())
         .unwrap_or_else(|| "no cloud route is provisioned for it".to_string());
     format!(
-        "machine {name} can only be reached through the cloud right now, and that route is not \
-         usable: {detail}. Open the signed-in Kanna desktop app on this machine so it refreshes \
-         the route, or move the task while both machines are on the same network."
+        "machine {name} can only be reached through the cloud right now, and this machine's \
+         outbound route to it is not usable: {detail}. Start a transfer from the signed-in Kanna \
+         desktop app on this machine, which refreshes the route as it goes, or move the task \
+         while both machines are on the same network."
     )
 }
 

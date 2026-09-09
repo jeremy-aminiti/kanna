@@ -78,6 +78,58 @@ pub async fn record_incoming(state: &Arc<AppState>, event: &Value) -> Result<(),
     Ok(())
 }
 
+/// Records a pull this machine asked for that the source will not ship.
+///
+/// The machine that starts a pull is the one watching for the task to arrive,
+/// and until this existed it was the only party told nothing: the refusal was
+/// recorded on the source, and here `GET /v1/tasks/{id}/transfers` answered
+/// 404 — "no such task" — which is exactly what the operator already knew.
+///
+/// The row is `incoming` and `failed` with no `local_task_id`, because nothing
+/// arrived and nothing ever will. It carries the source's task id, so
+/// `kanna_task_transfers` (which matches either id) answers with it, and the
+/// snapshot's transfer alerts turn it into a toast for the operator who
+/// started the move.
+pub async fn record_pull_refusal(state: &Arc<AppState>, event: &Value) -> Result<(), String> {
+    let request_id = string_field(event, "request_id")
+        .ok_or_else(|| "task pull refusal is missing a request id".to_string())?;
+    let source_peer_id = string_field(event, "source_peer_id")
+        .ok_or_else(|| "task pull refusal is missing a source peer id".to_string())?;
+    let source_task_id = string_field(event, "source_task_id")
+        .ok_or_else(|| "task pull refusal is missing a source task id".to_string())?;
+    let reason = string_field(event, "reason")
+        .unwrap_or_else(|| "the source machine reported no reason".to_string());
+
+    let db = state.transfer_work().open_db()?;
+    // Derived from the pull rather than random: a redelivered refusal has to
+    // land on the row the first delivery wrote, not pile a second one up.
+    let transfer_id = format!("refused-pull-{source_peer_id}-{request_id}");
+    // Inserted `pending` and failed in the next statement rather than written
+    // `failed` outright: only the fail route stamps `completed_at`, and a row
+    // that never gets one reads as a transfer still in progress.
+    db.insert_task_transfer(&crate::db::NewTaskTransfer {
+        id: transfer_id.clone(),
+        direction: "incoming".into(),
+        status: "pending".into(),
+        source_peer_id: Some(source_peer_id),
+        target_peer_id: None,
+        source_desktop_id: None,
+        target_desktop_id: None,
+        source_task_id: Some(source_task_id.clone()),
+        local_task_id: None,
+        error: None,
+        payload_json: None,
+    })
+    .map_err(|error| format!("db error: {error}"))?;
+    // Both statements are no-ops once the row is terminal, so a redelivered
+    // refusal collapses onto the record the first one wrote instead of piling
+    // a second row up or reopening this one.
+    db.fail_incoming_task_transfer(&transfer_id, &reason)
+        .map_err(|error| format!("db error: {error}"))?;
+    log::warn!("the source machine refused to send task {source_task_id}: {reason}");
+    Ok(())
+}
+
 /// Rejects an incoming transfer on the operator's behalf.
 pub async fn reject_transfer(state: &Arc<AppState>, work: &Value) -> Result<(), String> {
     let transfer_id = string_field(work, "transferId")
@@ -789,6 +841,67 @@ mod tests {
             payload_json: "{}".to_string(),
             attempts: 2,
         }
+    }
+
+    /// The whole server-side chain of a refused pull, from the JSON the
+    /// requester's sidecar emits to what the operator can finally see.
+    ///
+    /// `kanna-server` does not depend on the task-transfer crate, so this event
+    /// shape is a contract pinned on both sides — the sender's half is
+    /// `crates/task-transfer/tests/protocol.rs`. What is proved here is the
+    /// half the 2026-09-08 report was missing: the machine that asked for the
+    /// task ends up with a durable record and something to show for it, rather
+    /// than a 404 and an empty window.
+    #[tokio::test]
+    async fn a_refused_pull_becomes_a_durable_record_and_a_snapshot_alert() {
+        let state = crate::http_api::test_state_with_seed(
+            "desktop-refused-pull-chain",
+            "Studio Mac",
+            |_| {},
+        );
+        let event = serde_json::json!({
+            "type": "task_pull_refused",
+            "request_id": "pull-peer-mbp-3",
+            "source_peer_id": "peer-mbp",
+            "source_task_id": "afed27d1",
+            "reason": "task afed27d1 resumes codex session 5a2eb492 but its rollout could not \
+                       be found under ~/.codex/sessions",
+        });
+
+        // The sidecar reader routes it to durable work rather than to the
+        // window's advisory log, because it changes state here.
+        assert!(super::super::queue::is_durable_transfer_event(
+            "task_pull_refused"
+        ));
+        let work = super::super::queue::durable_event_work(&event, "sidecar-a")
+            .expect("a refusal schedules work");
+        assert_eq!(work.kind, super::super::queue::KIND_PULL_REFUSED);
+
+        record_pull_refusal(&state, &event).await.expect("record");
+        // A redelivery of the same event lands on the same row.
+        record_pull_refusal(&state, &event)
+            .await
+            .expect("redeliver");
+
+        let db = state.transfer_work().open_db().expect("db");
+        let recorded = db.list_task_transfers("afed27d1").expect("list");
+        assert_eq!(recorded.len(), 1, "a redelivery must not pile up rows");
+        assert_eq!(recorded[0].direction, "incoming");
+        assert_eq!(recorded[0].status, "failed");
+        assert_eq!(recorded[0].local_task_id, None);
+        assert!(recorded[0]
+            .error
+            .as_deref()
+            .is_some_and(|reason| reason.contains("rollout could not be found")));
+        // Terminal, not merely recorded: a row with no `completed_at` reads as
+        // a transfer still in progress.
+        assert!(recorded[0].completed_at.is_some());
+
+        // …and it reaches the window, which has no task here to hang it on.
+        let alerts = db.ui_snapshot().expect("snapshot").transfer_alerts;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].source_task_id.as_deref(), Some("afed27d1"));
+        assert_eq!(alerts[0].source_peer_id.as_deref(), Some("peer-mbp"));
     }
 
     /// A payload whose recompute path would answer `None`, so the only way a

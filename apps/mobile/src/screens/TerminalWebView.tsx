@@ -95,6 +95,8 @@ interface PendingTerminalState {
 
 interface TerminalInspection {
   byteCount: number;
+  gridBottomGap?: number;
+  gridTopGap?: number;
   cols: number | null;
   cursorColumn?: number | null;
   cursorRow?: number | null;

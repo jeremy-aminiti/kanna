@@ -50,6 +50,12 @@ pub struct AppState {
     pub(super) session_replacements: crate::session_replacements::SessionReplacements,
     pub(super) terminal_attachments: crate::terminal_attachments::TerminalAttachments,
     transfer_sidecar: Arc<crate::transfer_sidecar::TransferSidecarSupervisor>,
+    /// Advisory lane for "show this in the desktop" commands. It is a third
+    /// instance of the sidecar's bounded log rather than a durable table
+    /// because a view request is only meaningful while a window is there to
+    /// honour it: nothing about the task changes, and a request nobody saw is
+    /// correctly forgotten.
+    desktop_view_commands: Arc<crate::transfer_sidecar::TransferEventLog>,
     transfer_work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
     cloud_transfer_proxies: crate::cloud_transfer_proxy::CloudTransferProxyState,
     pub(super) preview_sessions: super::preview::PreviewSessions,
@@ -74,6 +80,7 @@ pub struct AppState {
     anonymous_push_revocations_changed: Arc<Notify>,
     relay_desktop_routing_available: Arc<AtomicBool>,
     relay_desktop_routing_unavailable_reason: Arc<StdMutex<Option<String>>>,
+    relay_desktop_routing_unreachable_since: Arc<StdMutex<Option<String>>>,
     relay_desktop_routing_generation: Arc<AtomicU64>,
     desktop_relay_tx: mpsc::Sender<DesktopRelayRequest>,
     desktop_relay_rx: Arc<StdMutex<Option<mpsc::Receiver<DesktopRelayRequest>>>>,
@@ -330,6 +337,12 @@ impl AppState {
         Arc::clone(&self.transfer_sidecar)
     }
 
+    /// The lane the desktop drains for view commands. One process owns one
+    /// server, so this is single-consumer like the sidecar's own lanes.
+    pub(crate) fn desktop_view_commands(&self) -> Arc<crate::transfer_sidecar::TransferEventLog> {
+        Arc::clone(&self.desktop_view_commands)
+    }
+
     /// The transfer engine's durable work queue. Held here so an HTTP intent
     /// (push a task, approve or reject an incoming transfer) and the sidecar's
     /// own event reader append to the same queue the drain loop consumes.
@@ -382,6 +395,7 @@ impl AppState {
             config,
             local_task_events_token,
             transfer_sidecar,
+            desktop_view_commands: Arc::new(crate::transfer_sidecar::TransferEventLog::default()),
             transfer_work,
             cloud_transfer_proxies: Arc::new(Mutex::new(HashMap::new())),
             preview_sessions: super::preview::PreviewSessions::default(),
@@ -414,6 +428,9 @@ impl AppState {
             relay_desktop_routing_available: Arc::new(AtomicBool::new(false)),
             relay_desktop_routing_unavailable_reason: Arc::new(StdMutex::new(Some(
                 "desktop relay has not connected".to_string(),
+            ))),
+            relay_desktop_routing_unreachable_since: Arc::new(StdMutex::new(Some(
+                relay_outage_timestamp(),
             ))),
             relay_desktop_routing_generation: Arc::new(AtomicU64::new(0)),
             desktop_relay_tx,
@@ -605,17 +622,42 @@ impl AppState {
                 .relay_desktop_routing_unavailable_reason
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            *self
+                .relay_desktop_routing_unreachable_since
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         }
         generation
     }
 
     pub(crate) fn set_desktop_routing_unavailable(&self, reason: impl Into<String>) {
+        let was_available = self
+            .relay_desktop_routing_available
+            .swap(false, Ordering::AcqRel);
+        let mut since = self
+            .relay_desktop_routing_unreachable_since
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if was_available || since.is_none() {
+            *since = Some(relay_outage_timestamp());
+        }
         *self
             .relay_desktop_routing_unavailable_reason
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason.into());
-        self.relay_desktop_routing_available
-            .store(false, Ordering::Release);
+    }
+
+    /// Stable public outage state. Transport failures remain in server logs;
+    /// consumers should not see ping, listing and socket symptoms as separate
+    /// faults for one continuous loss of reachability.
+    pub(crate) fn desktop_routing_unreachable_error(&self) -> String {
+        let since = self
+            .relay_desktop_routing_unreachable_since
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or_else(relay_outage_timestamp);
+        format!("machine unreachable since {since}")
     }
 
     pub(crate) fn desktop_routing_unavailable_reason(&self) -> String {
@@ -1104,4 +1146,11 @@ impl AppState {
         state.revision_requester = Some(revision_requester);
         state
     }
+}
+fn relay_outage_timestamp() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    format!("unix:{seconds}")
 }

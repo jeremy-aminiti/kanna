@@ -39,6 +39,7 @@ const OPERATIONS: &[&str] = &[
     "prepare-outgoing-transfer",
     "abandon-outgoing-transfer",
     "request-task-pull",
+    "report-task-pull-refusal",
     "stage-artifact",
     "fetch-artifact",
     "acknowledge-import-committed",
@@ -360,6 +361,26 @@ pub async fn dispatch(
             Ok(json!({
                 "requestId": required_string(&response, &["pull_request_id", "pullRequestId"])?,
             }))
+        }
+        // Told to the machine that *asked* for the pull. A refusal is already
+        // recorded here; this is the only way it reaches the operator who
+        // started the move, whose machine otherwise has no record that
+        // anything was attempted.
+        "report-task-pull-refusal" => {
+            let transport = transfer_transport(&params)?;
+            client
+                .request(
+                    "report_task_pull_refusal",
+                    json!({
+                        "requester_peer_id": required_string(&params, &["requesterPeerId"])?,
+                        "source_task_id": required_string(&params, &["sourceTaskId"])?,
+                        "pull_request_id": required_string(&params, &["pullRequestId"])?,
+                        "reason": required_string(&params, &["reason"])?,
+                        "transport": transport,
+                    }),
+                )
+                .await?;
+            Ok(json!({}))
         }
         "stage-artifact" => {
             let response = client

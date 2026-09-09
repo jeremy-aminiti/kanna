@@ -976,6 +976,114 @@ async function mountApp(sidebarStub: typeof SidebarWithRepoStub | typeof Sidebar
   return wrapper;
 }
 
+/**
+ * Stands in for the real main panel as a tab host: it renders whichever view
+ * a tab asks for, wired the way `MainPanel` wires it. The views themselves are
+ * stubbed per test, so a test can drive the view it cares about through the
+ * shortcut that opens its tab.
+ */
+const TabHostMainPanelStub = defineComponent({
+  name: "MainPanel",
+  props: {
+    views: { type: Object, required: false, default: undefined },
+    maximized: { type: Boolean, default: false },
+  },
+  setup(props, { expose }) {
+    const viewRefs = new Map<string, { dismiss?: () => boolean; cycleTab?: (d: -1 | 1) => void }>();
+    function setViewRef(id: string, component: unknown) {
+      if (component) {
+        viewRefs.set(id, component as { dismiss?: () => boolean });
+      } else {
+        viewRefs.delete(id);
+      }
+    }
+    function dismissActiveTab(): boolean {
+      const controller = props.views?.tabs;
+      const tab = controller?.activeTab.value;
+      if (!controller || !tab || tab.kind === "agent" || tab.kind === "shell") return false;
+      if (viewRefs.get(tab.id)?.dismiss?.() === false) return true;
+      controller.closeTab(tab.id);
+      return true;
+    }
+    function cyclePreferencesSection(direction: -1 | 1) {
+      const tab = props.views?.tabs.activeTab.value;
+      if (tab?.kind === "preferences") viewRefs.get(tab.id)?.cycleTab?.(direction);
+    }
+    expose({ recheckClis: vi.fn(), dismissActiveTab, cyclePreferencesSection });
+    return { setViewRef };
+  },
+  template: `
+    <div data-testid="main-panel">
+      <span
+        v-for="tab in (views ? views.tabs.tabs.value : [])"
+        :key="tab.id"
+        :data-testid="'main-tab-' + tab.id"
+        :data-active="views.tabs.activeTabId.value === tab.id ? 'true' : 'false'"
+      >{{ tab.id }}</span>
+      <template v-for="tab in (views ? views.tabs.tabs.value : [])" :key="'view-' + tab.id">
+        <DiffModal
+          v-if="tab.kind === 'diff'"
+          v-show="views.tabs.activeTabId.value === tab.id"
+          :repo-path="views.modals.activeRepoPath.value || ''"
+          :initial-scope="views.modals.currentDiffViewState.value?.scope"
+          :initial-scroll-positions="views.modals.currentDiffViewState.value?.scrollPositions"
+          :initial-branch-include="views.modals.currentDiffViewState.value?.branchInclude"
+          :view-key="views.modals.currentDiffViewKey.value"
+          :maximized="maximized"
+          embedded
+          @scope-change="(scope) => views.modals.updateCurrentDiffViewState({ scope })"
+          @scroll-state-change="(p) => views.modals.updateCurrentDiffViewState({ scrollPositions: p })"
+          @branch-include-change="(i) => views.modals.updateCurrentDiffViewState({ branchInclude: i })"
+          @close="views.tabs.closeTab(tab.id)"
+        />
+        <FilePreviewModal
+          v-else-if="tab.kind === 'file'"
+          :ref="(c) => setViewRef(tab.id, c)"
+          v-show="views.tabs.activeTabId.value === tab.id"
+          :file-path="tab.filePath"
+          :worktree-path="views.modals.activeWorktreePath.value"
+          :initial-markdown-mode="views.modals.currentPreviewMarkdownMode.value"
+          embedded
+          :active="views.tabs.activeTabId.value === tab.id"
+          @update-markdown-mode="views.modals.updateCurrentPreviewMarkdownMode"
+          @close="views.tabs.closeTab(tab.id)"
+        />
+        <TreeExplorerModal
+          v-else-if="tab.kind === 'tree'"
+          :ref="(c) => setViewRef(tab.id, c)"
+          v-show="views.tabs.activeTabId.value === tab.id"
+          :worktree-path="views.modals.treeExplorerRoot.value"
+          :repo-root="views.modals.activeRepoPath.value || ''"
+          :maximized="maximized"
+          embedded
+          :active="views.tabs.activeTabId.value === tab.id"
+          @open-file="(f) => views.modals.openFilePreview(f)"
+          @close="views.tabs.closeTab(tab.id)"
+        />
+        <CommitGraphModal
+          v-else-if="tab.kind === 'graph'"
+          :ref="(c) => setViewRef(tab.id, c)"
+          v-show="views.tabs.activeTabId.value === tab.id"
+          :repo-path="views.modals.activeRepoPath.value || ''"
+          embedded
+          :active="views.tabs.activeTabId.value === tab.id"
+          @close="views.tabs.closeTab(tab.id)"
+        />
+        <PreferencesPanel
+          v-else-if="tab.kind === 'preferences'"
+          :ref="(c) => setViewRef(tab.id, c)"
+          v-show="views.tabs.activeTabId.value === tab.id"
+          :preferences="views.preferences.preferences"
+          embedded
+          :active="views.tabs.activeTabId.value === tab.id"
+          @update="views.preferences.handlePreferenceUpdate"
+          @close="views.tabs.closeTab(tab.id)"
+        />
+      </template>
+    </div>
+  `,
+});
+
 async function mountAppWithOverrides(
   sidebarStub: typeof SidebarWithRepoStub | typeof SidebarWithoutRepoStub,
   stubs: Record<string, unknown>,
@@ -1025,6 +1133,10 @@ describe("App", () => {
   });
 
   beforeEach(() => {
+    // Each mount is a fresh window launch. The main area restores its tabs
+    // from window storage, so leaving a previous test's tabs there would open
+    // this one on views it never asked for.
+    window.localStorage.clear();
     sidebarSearchQuery.value = "";
     store.init.mockClear();
     store.createItem.mockClear();
@@ -1273,7 +1385,7 @@ describe("App", () => {
       repoRoot: "/tmp/repo",
     };
 
-    const wrapper = await mountApp(SidebarWithRepoStub);
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, { MainPanel: TabHostMainPanelStub });
 
     expect(wrapper.find("tree-explorer-modal-stub").exists()).toBe(true);
     expect(wrapper.find("keyboard-shortcuts-modal-stub").exists()).toBe(false);
@@ -1592,6 +1704,7 @@ describe("App", () => {
 
   it("syncs app theme preference changes to the native title bar", async () => {
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: TabHostMainPanelStub,
       PreferencesPanel: PreferencesPanelThemeUpdateStub,
     });
     nativeSetThemeMock.mockClear();
@@ -1632,6 +1745,7 @@ describe("App", () => {
     });
 
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: TabHostMainPanelStub,
       PreferencesPanel: PreferencesPanelSystemThemeUpdateStub,
     });
     nativeSetThemeMock.mockClear();
@@ -1686,8 +1800,10 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("toggles preferences with the preferences shortcut action", async () => {
-    const wrapper = await mountApp(SidebarWithRepoStub);
+  it("opens preferences as a tab and closes it with the close-tab shortcut", async () => {
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: TabHostMainPanelStub,
+    });
 
     expect(capturedKeyboardActions).not.toBeNull();
     expect(wrapper.findComponent({ name: "PreferencesPanel" }).exists()).toBe(false);
@@ -1697,9 +1813,14 @@ describe("App", () => {
 
     expect(wrapper.findComponent({ name: "PreferencesPanel" }).exists()).toBe(true);
 
+    // The shortcut that opened it raises it rather than toggling it shut...
     capturedKeyboardActions?.openPreferences();
     await flushPromises();
+    expect(wrapper.findComponent({ name: "PreferencesPanel" }).exists()).toBe(true);
 
+    // ...⌘W is what closes a tab.
+    await capturedKeyboardActions?.closeTabOrWindow();
+    await flushPromises();
     expect(wrapper.findComponent({ name: "PreferencesPanel" }).exists()).toBe(false);
 
     wrapper.unmount();
@@ -2020,6 +2141,131 @@ describe("App", () => {
 
       expect(store.unpinItem).not.toHaveBeenCalled();
       expect(settings.has("remoteTaskPins")).toBe(false);
+    } finally {
+      // Restore the global test-setup defaults clobbered by this test's
+      // settings-backed handlers.
+      updateDesktopServerClientHandlersForTests({
+        getSetting: async () => null,
+        putSetting: async (key, value) => ({ key, value }),
+        deleteSetting: async () => {},
+      });
+      wrapper.unmount();
+    }
+  });
+
+  it("pins a cross-machine directory singleton by default and keeps an explicit unpin", async () => {
+    cloudTasksMock.mockResolvedValue({
+      repos: [{
+        id: "cloud:repo-remote",
+        path: "cloud",
+        name: "Remote Repo",
+        default_branch: "main",
+        hidden: 0,
+        sort_order: 0,
+        created_at: "2026-05-18T00:00:00.000Z",
+        last_opened_at: "2026-05-18T00:00:00.000Z",
+      }],
+      items: [{
+        id: "cloud:repo-remote:task-merge",
+        repo_id: "cloud:repo-remote",
+        prompt: "Merge Master",
+        workflow: "cloud",
+        singleton_agent: "merge",
+        stage: "in progress",
+        tags: "[]",
+        pr_number: null,
+        pr_url: null,
+        branch: "task-merge",
+        activity: "idle",
+        activity_changed_at: "2026-05-18T00:00:00.000Z",
+        unread_at: null,
+        port_offset: null,
+        port_env: null,
+        pinned: 0,
+        pin_order: null,
+        display_name: "Merge Master",
+        issue_number: null,
+        issue_title: null,
+        closed_at: null,
+        agent_session_id: null,
+        base_ref: "origin/main",
+        agent_provider: "codex",
+        agent_type: "pty",
+        previous_stage: null,
+        stage_result: null,
+        teardown_started_at: null,
+        last_output_preview: null,
+        active_post_action: null,
+        created_at: "2026-05-18T00:00:00.000Z",
+        updated_at: "2026-05-18T00:00:00.000Z",
+      }],
+    });
+
+    const settings = new Map<string, string>();
+    updateDesktopServerClientHandlersForTests({
+      getSetting: (key) => settings.get(key) ?? null,
+      putSetting: (key, value) => {
+        settings.set(key, value);
+      },
+      deleteSetting: (key) => {
+        settings.delete(key);
+      },
+    });
+
+    const SidebarPinStub = defineComponent({
+      name: "Sidebar",
+      props: {
+        repos: { type: Array, default: () => [] },
+        taskSlots: { type: Array, default: () => [] },
+      },
+      emits: ["pin-item", "unpin-item", "reorder-pinned"],
+      template: `
+        <div data-testid="sidebar">
+          <span data-testid="pinned-state">{{ taskSlots.some((slot) => slot.pinned) ? 'pinned' : 'unpinned' }}</span>
+          <button
+            v-for="item in taskSlots"
+            :key="item.slot_id"
+            data-testid="pin-remote-task"
+            type="button"
+            @click="$emit('pin-item', item.task_id, 0); $emit('reorder-pinned', item.repo_id, [item.task_id])"
+          >
+            {{ item.display_name }}
+          </button>
+          <button
+            v-for="item in taskSlots"
+            :key="'unpin-' + item.slot_id"
+            data-testid="unpin-remote-task"
+            type="button"
+            @click="$emit('unpin-item', item.task_id)"
+          >
+            unpin
+          </button>
+        </div>
+      `,
+    });
+
+    const wrapper = await mountAppWithOverrides(SidebarPinStub, {});
+    await flushPromises();
+    await flushPromises();
+
+    try {
+      // Nothing pinned it here: the row arrives pinned because it is the
+      // account-wide singleton, and the overlay is still empty.
+      expect(wrapper.get('[data-testid="pinned-state"]').text()).toBe("pinned");
+      expect(settings.has("remoteTaskPins")).toBe(false);
+      store.reloadSnapshot.mockClear();
+
+      await wrapper.get('[data-testid="unpin-remote-task"]').trigger("click");
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await flushPromises();
+      }
+
+      // The unpin is recorded rather than forgotten, so the default does not
+      // put the row straight back on the next snapshot.
+      expect(store.unpinItem).not.toHaveBeenCalled();
+      expect(JSON.parse(settings.get("remoteTaskPins") ?? "{}")).toEqual({ "task-merge": null });
+      expect(store.reloadSnapshot).toHaveBeenCalled();
+      expect(toastErrorMock).not.toHaveBeenCalled();
     } finally {
       // Restore the global test-setup defaults clobbered by this test's
       // settings-backed handlers.
@@ -5560,7 +5806,7 @@ describe("App", () => {
         },
         stubs: {
           Sidebar: SidebarWithRepoStub,
-          MainPanel: true,
+          MainPanel: TabHostMainPanelStub,
           AddRepoModal: true,
           KeyboardShortcutsModal: true,
           FilePickerModal: true,
@@ -5590,7 +5836,9 @@ describe("App", () => {
     await wrapper.get('[data-testid="remember-diff-state"]').trigger("click");
     await flushPromises();
 
-    capturedKeyboardActions?.showDiff();
+    // Close the tab so reopening has to restore the state rather than simply
+    // keep the mounted view.
+    await capturedKeyboardActions?.closeTabOrWindow();
     await flushPromises();
     expect(wrapper.find('[data-testid="diff-modal"]').exists()).toBe(false);
 
@@ -6402,59 +6650,49 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("dismiss closes the entire file flow after preview-local dismiss is exhausted", async () => {
-    vi.stubGlobal("__KANNA_MOBILE__", false);
-    const { default: App } = await import("./App.vue");
-    const wrapper = mount(App, {
-      global: {
-        provide: {
-          db: dbMock,
-          dbName: "test.db",
-          windowWorkspace: mockWindowWorkspace,
-        },
-        mocks: {
-          $t: (key: string) => key,
-        },
-        stubs: {
-          Sidebar: SidebarWithRepoStub,
-          MainPanel: true,
-          AddRepoModal: true,
-          KeyboardShortcutsModal: true,
-          FilePickerModal: FilePickerModalTestStub,
-          FilePreviewModal: FilePreviewModalTestStub,
-          TreeExplorerModal: true,
-          DiffModal: true,
-          CommitGraphModal: true,
-          ShellModal: true,
-          CommandPaletteModal: true,
-          AnalyticsModal: true,
-          BlockerSelectModal: true,
-          PreferencesPanel: true,
-          ToastContainer: true,
-          KeepAlive: false,
-        },
+  it("dismiss closes a file view's own search before closing its tab", async () => {
+    const SearchingFilePreviewStub = defineComponent({
+      name: "FilePreviewModal",
+      emits: ["close"],
+      setup(_props, { expose }) {
+        const searching = ref(true);
+        function dismiss() {
+          if (searching.value) {
+            searching.value = false;
+            return false;
+          }
+          return true;
+        }
+        expose({ dismiss });
+        return { searching };
       },
+      template: `<div data-testid="file-preview-modal" :data-searching="String(searching)"></div>`,
     });
 
-    await flushPromises();
-    expect(capturedKeyboardActions).not.toBeNull();
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: TabHostMainPanelStub,
+      FilePickerModal: FilePickerModalTestStub,
+      FilePreviewModal: SearchingFilePreviewStub,
+    });
 
+    expect(capturedKeyboardActions).not.toBeNull();
     capturedKeyboardActions?.openFile();
     await flushPromises();
-    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(true);
-
     await wrapper.get('[data-testid="file-picker-select"]').trigger("click");
     await flushPromises();
+    expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-searching")).toBe("true");
 
-    expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(true);
-
-    const handled = capturedKeyboardActions?.dismiss();
+    // First Escape closes the view's search and keeps the tab...
+    capturedKeyboardActions?.dismiss();
     await flushPromises();
+    expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-searching")).toBe("false");
 
-    expect(handled).toBe(true);
+    // ...the second closes the tab.
+    capturedKeyboardActions?.dismiss();
+    await flushPromises();
     expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(false);
+
+    wrapper.unmount();
   });
 
   it("recalls the last previewed file with the file preview shortcut after dismissal", async () => {
@@ -6472,7 +6710,7 @@ describe("App", () => {
         },
         stubs: {
           Sidebar: SidebarWithRepoStub,
-          MainPanel: true,
+          MainPanel: TabHostMainPanelStub,
           AddRepoModal: true,
           KeyboardShortcutsModal: true,
           FilePickerModal: FilePickerModalTestStub,
@@ -6514,15 +6752,20 @@ describe("App", () => {
     expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(false);
   });
 
-  it("keeps recalled file previews scoped to the selected task", async () => {
-    store.currentItem = {
+  it("opens a picked file as a main-area tab while a task is selected", async () => {
+    const taskA = {
       id: "task-a",
+      repo_id: "repo-1",
       stage: "in progress",
       branch: "task-a",
       prompt: "Task A",
       tags: "[]",
     };
+    store.currentItem = taskA;
     store.selectedItemId = "task-a";
+    // Tabs belong to the task the main panel is showing, so the panel needs a
+    // ready slot for one to exist at all.
+    store.currentTaskSlot = readyTaskSlot("task-a", taskA);
 
     const TaskAwareFilePickerModalTestStub = defineComponent({
       name: "FilePickerModal",
@@ -6530,40 +6773,32 @@ describe("App", () => {
       template: `
         <div data-testid="file-picker-modal">
           <button data-testid="file-picker-select-a" @click="$emit('select', 'src/task-a.ts')">task a</button>
-          <button data-testid="file-picker-select-b" @click="$emit('select', 'src/task-b.ts')">task b</button>
         </div>
       `,
     });
 
-    const FilePathPreviewModalTestStub = defineComponent({
-      name: "FilePreviewModal",
+    // The real panel renders each tab's view; this stub only reports the tab
+    // set it was handed, which is what this test is about.
+    const TabListMainPanelTestStub = defineComponent({
+      name: "MainPanel",
       props: {
-        filePath: {
-          type: String,
-          required: true,
-        },
-      },
-      emits: ["close"],
-      setup(_props, { emit, expose }) {
-        function dismiss() {
-          emit("close");
-          return true;
-        }
-
-        expose({ dismiss, zIndex: 1000, bringToFront: vi.fn() });
-
-        return {};
+        views: { type: Object, required: false, default: undefined },
       },
       template: `
-        <div data-testid="file-preview-modal" :data-file-path="filePath">
-          <button data-testid="file-preview-close" @click="$emit('close')">close</button>
+        <div data-testid="main-panel">
+          <span
+            v-for="tab in (views ? views.tabs.tabs.value : [])"
+            :key="tab.id"
+            :data-testid="'main-tab-' + tab.id"
+            :data-active="views.tabs.activeTabId.value === tab.id ? 'true' : 'false'"
+          >{{ tab.id }}</span>
         </div>
       `,
     });
 
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
       FilePickerModal: TaskAwareFilePickerModalTestStub,
-      FilePreviewModal: FilePathPreviewModalTestStub,
+      MainPanel: TabListMainPanelTestStub,
     });
 
     expect(capturedKeyboardActions).not.toBeNull();
@@ -6572,49 +6807,21 @@ describe("App", () => {
     await flushPromises();
     await wrapper.get('[data-testid="file-picker-select-a"]').trigger("click");
     await flushPromises();
-    expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-file-path")).toBe("src/task-a.ts");
 
-    capturedKeyboardActions?.dismiss();
-    await flushPromises();
-
-    store.currentItem = {
-      id: "task-b",
-      stage: "in progress",
-      branch: "task-b",
-      prompt: "Task B",
-      tags: "[]",
-    };
-    store.selectedItemId = "task-b";
-
-    capturedKeyboardActions?.toggleFilePreview();
-    await flushPromises();
-
+    // The file lands in the task's own tab set, not in an overlay above it,
+    // and the picker that launched it is gone.
+    expect(wrapper.get('[data-testid="main-tab-file:src/task-a.ts"]').attributes("data-active"))
+      .toBe("true");
+    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(true);
 
-    await wrapper.get('[data-testid="file-picker-select-b"]').trigger("click");
-    await flushPromises();
-    expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-file-path")).toBe("src/task-b.ts");
-
-    capturedKeyboardActions?.dismiss();
+    await capturedKeyboardActions?.closeTabOrWindow();
     await flushPromises();
 
-    store.currentItem = {
-      id: "task-a",
-      stage: "in progress",
-      branch: "task-a",
-      prompt: "Task A",
-      tags: "[]",
-    };
-    store.selectedItemId = "task-a";
-
-    capturedKeyboardActions?.toggleFilePreview();
-    await flushPromises();
-
-    expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-file-path")).toBe("src/task-a.ts");
+    expect(wrapper.find('[data-testid="main-tab-file:src/task-a.ts"]').exists()).toBe(false);
   });
 
-  it("preserves file preview component state when hiding and showing the last preview", async () => {
+  it("keeps a file view's own state while another tab is in front", async () => {
     const MarkdownFilePickerModalTestStub = defineComponent({
       name: "FilePickerModal",
       emits: ["select"],
@@ -6628,17 +6835,8 @@ describe("App", () => {
     const StatefulFilePreviewModalTestStub = defineComponent({
       name: "FilePreviewModal",
       emits: ["close"],
-      setup(_props, { emit, expose }) {
-        const mode = ref("raw");
-
-        function dismiss() {
-          emit("close");
-          return true;
-        }
-
-        expose({ dismiss, zIndex: 1000, bringToFront: vi.fn() });
-
-        return { mode };
+      setup() {
+        return { mode: ref("raw") };
       },
       template: `
         <div data-testid="file-preview-modal" :data-mode="mode">
@@ -6648,6 +6846,7 @@ describe("App", () => {
     });
 
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: TabHostMainPanelStub,
       FilePickerModal: MarkdownFilePickerModalTestStub,
       FilePreviewModal: StatefulFilePreviewModalTestStub,
     });
@@ -6663,12 +6862,16 @@ describe("App", () => {
     await flushPromises();
     expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-mode")).toBe("rendered");
 
-    capturedKeyboardActions?.toggleFilePreview();
+    // Another tab comes to the front and the file goes behind it — hidden,
+    // never unmounted, which is the whole point of tabs over the modal.
+    capturedKeyboardActions?.showDiff();
     await flushPromises();
     capturedKeyboardActions?.toggleFilePreview();
     await flushPromises();
 
     expect(wrapper.get('[data-testid="file-preview-modal"]').attributes("data-mode")).toBe("rendered");
+
+    wrapper.unmount();
   });
 
   it("opens Markdown rendered and persists a raw-mode choice", async () => {
@@ -6709,6 +6912,7 @@ describe("App", () => {
     });
 
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: TabHostMainPanelStub,
       FilePickerModal: MarkdownFilePickerModalTestStub,
       FilePreviewModal: MarkdownModeFilePreviewModalTestStub,
     });
@@ -6731,109 +6935,8 @@ describe("App", () => {
     wrapper.unmount();
   });
 
-  it("preserves file picker scroll state when preview hides and resumes the picker", async () => {
-    const StatefulFilePickerModalTestStub = defineComponent({
-      name: "FilePickerModal",
-      emits: ["select"],
-      setup(_props, { emit }) {
-        const scrollTop = ref(0);
-
-        return { emit, scrollTop };
-      },
-      template: `
-        <div data-testid="file-picker-modal" :data-scroll-top="String(scrollTop)">
-          <button data-testid="file-picker-scroll" @click="scrollTop = 320">scroll</button>
-          <button data-testid="file-picker-select" @click="emit('select', 'docs/example.md')">select</button>
-        </div>
-      `,
-    });
-
-    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
-      FilePickerModal: StatefulFilePickerModalTestStub,
-      FilePreviewModal: FilePreviewModalTestStub,
-    });
-
-    expect(capturedKeyboardActions).not.toBeNull();
-
-    capturedKeyboardActions?.openFile();
-    await flushPromises();
-    await wrapper.get('[data-testid="file-picker-scroll"]').trigger("click");
-    await flushPromises();
-    expect(wrapper.get('[data-testid="file-picker-modal"]').attributes("data-scroll-top")).toBe("320");
-
-    await wrapper.get('[data-testid="file-picker-select"]').trigger("click");
-    await flushPromises();
-
-    expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(true);
-
-    await wrapper.get('[data-testid="file-preview-close"]').trigger("click");
-    await flushPromises();
-
-    expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(false);
-    expect(wrapper.get('[data-testid="file-picker-modal"]').isVisible()).toBe(true);
-    expect(wrapper.get('[data-testid="file-picker-modal"]').attributes("data-scroll-top")).toBe("320");
-  });
-
-  it("opens the file picker over the file preview and dismisses the picker first", async () => {
-    vi.stubGlobal("__KANNA_MOBILE__", false);
-    const { default: App } = await import("./App.vue");
-    const wrapper = mount(App, {
-      global: {
-        provide: {
-          db: dbMock,
-          dbName: "test.db",
-          windowWorkspace: mockWindowWorkspace,
-        },
-        mocks: {
-          $t: (key: string) => key,
-        },
-        stubs: {
-          Sidebar: SidebarWithRepoStub,
-          MainPanel: true,
-          AddRepoModal: true,
-          KeyboardShortcutsModal: true,
-          FilePickerModal: FilePickerModalTestStub,
-          FilePreviewModal: FilePreviewModalTestStub,
-          TreeExplorerModal: true,
-          DiffModal: true,
-          CommitGraphModal: true,
-          ShellModal: true,
-          CommandPaletteModal: true,
-          AnalyticsModal: true,
-          BlockerSelectModal: true,
-          PreferencesPanel: true,
-          ToastContainer: true,
-          KeepAlive: false,
-        },
-      },
-    });
-
-    await flushPromises();
-    expect(capturedKeyboardActions).not.toBeNull();
-
-    capturedKeyboardActions?.openFile();
-    await flushPromises();
-    await wrapper.get('[data-testid="file-picker-select"]').trigger("click");
-    await flushPromises();
-
-    expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(true);
-
-    capturedKeyboardActions?.openFile();
-    await flushPromises();
-
-    expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(true);
-
-    const handled = capturedKeyboardActions?.dismiss();
-    await flushPromises();
-
-    expect(handled).toBe(true);
-    expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(false);
-  });
-
+  
+  
   it("dismiss closes commit graph search before closing the commit graph modal", async () => {
     const dismissMock = vi.fn(() => false);
     const CommitGraphModalTestStub = defineComponent({
@@ -6848,6 +6951,7 @@ describe("App", () => {
     });
 
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: TabHostMainPanelStub,
       CommitGraphModal: CommitGraphModalTestStub,
     });
     await flushPromises();
@@ -6868,6 +6972,7 @@ describe("App", () => {
 
   it("passes maximize state through to the tree explorer modal", async () => {
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: TabHostMainPanelStub,
       TreeExplorerModal: TreeExplorerModalTestStub,
     });
 
@@ -6885,35 +6990,10 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="tree-explorer-modal"]').attributes("data-maximized")).toBe("true");
   });
 
-  it("suspends and resumes the tree explorer while a file preview opened from it is active", async () => {
+  
+  it("keeps the tree explorer open when a file it launched becomes a tab", async () => {
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
-      TreeExplorerModal: TreeExplorerModalTestStub,
-      FilePreviewModal: FilePreviewModalTestStub,
-    });
-
-    await flushPromises();
-    expect(capturedKeyboardActions).not.toBeNull();
-
-    capturedKeyboardActions?.toggleTreeExplorer();
-    await flushPromises();
-
-    expect(wrapper.get('[data-testid="tree-explorer-modal"]').attributes("data-suspended")).toBe("false");
-
-    await wrapper.get('[data-testid="tree-open-file"]').trigger("click");
-    await flushPromises();
-
-    expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="tree-explorer-modal"]').attributes("data-suspended")).toBe("true");
-
-    await wrapper.get('[data-testid="file-preview-close"]').trigger("click");
-    await flushPromises();
-
-    expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(false);
-    expect(wrapper.get('[data-testid="tree-explorer-modal"]').attributes("data-suspended")).toBe("false");
-  });
-
-  it("keeps the tree explorer available while a file preview opened from the picker is active", async () => {
-    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: TabHostMainPanelStub,
       TreeExplorerModal: TreeExplorerModalTestStub,
       FilePickerModal: FilePickerModalTestStub,
       FilePreviewModal: FilePreviewModalTestStub,
@@ -6930,25 +7010,27 @@ describe("App", () => {
     await wrapper.get('[data-testid="file-picker-select"]').trigger("click");
     await flushPromises();
 
+    // The tree is a browser, not a launcher that gets consumed: it keeps its
+    // tab so the next file can go to a tab too.
     expect(wrapper.find('[data-testid="file-preview-modal"]').exists()).toBe(true);
-    expect(wrapper.get('[data-testid="tree-explorer-modal"]').attributes("data-suspended")).toBe("false");
+    expect(wrapper.find('[data-testid="main-tab-tree"]').exists()).toBe(true);
+
+    wrapper.unmount();
   });
 
-  it("clears tree explorer maximize state when the modal closes", async () => {
+  it("clears main-area maximize when the tab that was maximized closes", async () => {
     const TreeExplorerClosableStub = defineComponent({
       name: "TreeExplorerModal",
-      props: {
-        maximized: Boolean,
-      },
       emits: ["close"],
       template: `
-        <div data-testid="tree-explorer-modal" :data-maximized="String(maximized)">
+        <div data-testid="tree-explorer-modal">
           <button data-testid="close-tree-explorer" @click="$emit('close')">close</button>
         </div>
       `,
     });
 
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: TabHostMainPanelStub,
       TreeExplorerModal: TreeExplorerClosableStub,
     });
 
@@ -6960,14 +7042,17 @@ describe("App", () => {
     capturedKeyboardActions?.toggleMaximize();
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="tree-explorer-modal"]').attributes("data-maximized")).toBe("true");
+    // Maximizing hides the sidebar; it is the main area that is maximized,
+    // not the individual view.
+    expect(wrapper.find('[data-testid="sidebar-shell"]').exists()).toBe(false);
 
     await wrapper.get('[data-testid="close-tree-explorer"]').trigger("click");
     await flushPromises();
-    capturedKeyboardActions?.toggleTreeExplorer();
-    await flushPromises();
 
-    expect(wrapper.get('[data-testid="tree-explorer-modal"]').attributes("data-maximized")).toBe("false");
+    // With nothing left in the main area, maximize has nothing to mean.
+    expect(wrapper.find('[data-testid="sidebar-shell"]').exists()).toBe(true);
+
+    wrapper.unmount();
   });
 
   it("lets the tree explorer consume dismiss before closing it", async () => {
@@ -6985,6 +7070,7 @@ describe("App", () => {
     });
 
     const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      MainPanel: TabHostMainPanelStub,
       TreeExplorerModal: TreeExplorerDismissStub,
     });
 

@@ -6487,6 +6487,126 @@ async fn paired_lan_client_pages_a_real_task_worktree_fixture() {
     let _ = std::fs::remove_file(pairing_path);
 }
 
+#[tokio::test]
+async fn opening_a_desktop_view_queues_the_resolved_path_for_the_windows() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn main() {}\n");
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/v1/desktop/views/open")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "taskId": "task-file",
+                        "path": "./src/main.rs",
+                        "line": 12,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    // Requested, never shown: no window is known to have honoured it.
+    assert_eq!(body["requested"], serde_json::json!(true));
+    assert_eq!(body["path"], serde_json::json!("src/main.rs"));
+
+    let batch = fixture.state.desktop_view_commands().read(None, None, 10);
+    assert_eq!(batch.events.len(), 1);
+    let command = &batch.events[0]["event"];
+    assert_eq!(command["type"], serde_json::json!("desktop_view_open"));
+    assert_eq!(command["view"], serde_json::json!("file"));
+    assert_eq!(command["taskId"], serde_json::json!("task-file"));
+    // The path the desktop opens is the resolved one, not what was typed.
+    assert_eq!(command["path"], serde_json::json!("src/main.rs"));
+    assert_eq!(command["line"], serde_json::json!(12));
+}
+
+#[tokio::test]
+async fn a_desktop_view_for_an_unreachable_file_queues_nothing() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn main() {}\n");
+
+    for (path, expected) in [
+        ("../outside.rs", StatusCode::BAD_REQUEST),
+        ("src/missing.rs", StatusCode::NOT_FOUND),
+    ] {
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::post("/v1/desktop/views/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "taskId": "task-file", "path": path }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "path {path}");
+    }
+
+    let batch = fixture.state.desktop_view_commands().read(None, None, 10);
+    assert!(
+        batch.events.is_empty(),
+        "a refused open must not reach a window: {:?}",
+        batch.events
+    );
+}
+
+#[tokio::test]
+async fn the_desktop_drains_view_commands_through_its_loopback_lane() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn main() {}\n");
+    fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/v1/desktop/views/open")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "taskId": "task-file", "path": "src/main.rs" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut request = Request::get("/v1/desktop/view-commands?timeoutSecs=1")
+        .body(Body::empty())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let response = fixture.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["waitOutcome"], serde_json::json!("events"));
+    assert_eq!(
+        body["events"][0]["event"]["path"],
+        serde_json::json!("src/main.rs")
+    );
+}
+
 const LAN_AUTH_REFUSAL: &str =
     "privileged control requires desktop loopback, a paired LAN device, or an authenticated relay";
 
@@ -7037,4 +7157,146 @@ async fn lan_repository_filesystem_and_definition_routes_require_pairing() {
     )
     .await;
     std::fs::remove_file(&state.config().pairing_store_path).unwrap();
+}
+
+#[tokio::test]
+async fn mobile_build_report_over_http_is_authenticated_persisted_and_redacted() {
+    let state = super::test_state_with_seed("desktop-build-report", "Build Mac", |_| {});
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = crate::http_api::router(Arc::clone(&state));
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let base = format!("http://{address}");
+    let session: serde_json::Value = client
+        .post(format!("{base}/v1/pairing/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let claim: serde_json::Value = client.post(format!("{base}/v1/pairing/sessions/claim"))
+        .json(&serde_json::json!({"code": session["code"], "deviceId": "phone", "deviceName": "Owner iPhone"}))
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let secret = claim["deviceSecret"].as_str().unwrap();
+    let inventory: serde_json::Value = client
+        .get(format!("{base}/v1/mobile/builds"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        inventory["devices"][0]["build"].is_null(),
+        "legacy clients remain unknown"
+    );
+    let build = serde_json::json!({
+        "environment": "staging", "channel": "staging", "runtimeVersion": "2.2.2",
+        "nativeVersion": "2.2.2", "nativeBuild": "42", "updateId": "old-update", "source": "ota"
+    });
+    for wrong_secret in [None, Some("wrong")] {
+        let mut request = client.post(format!("{base}/v1/mobile/build")).json(&build);
+        if let Some(secret) = wrong_secret {
+            request = request
+                .header("x-kanna-device-id", "phone")
+                .header("x-kanna-device-secret", secret);
+        }
+        assert_eq!(request.send().await.unwrap().status(), 401);
+    }
+    let response = client
+        .post(format!("{base}/v1/mobile/build"))
+        .header("x-kanna-device-id", "phone")
+        .header("x-kanna-device-secret", secret)
+        .json(&build)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 204);
+    let persisted = crate::pairing::PairingStore::load(std::path::Path::new(
+        &state.config().pairing_store_path,
+    ))
+    .unwrap();
+    assert_eq!(
+        persisted.trusted_devices["desktop-build-report"][0]
+            .mobile_build
+            .as_ref()
+            .unwrap()
+            .build
+            .runtime_version
+            .as_deref(),
+        Some("2.2.2")
+    );
+    let inventory = client
+        .get(format!("{base}/v1/mobile/builds"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!inventory.contains(secret));
+    assert!(!inventory.contains("secret_hash"));
+    assert!(!inventory.contains("push_identity"));
+    let inventory: serde_json::Value = serde_json::from_str(&inventory).unwrap();
+    assert_eq!(inventory["devices"][0]["build"]["updateId"], "old-update");
+    assert!(inventory["devices"][0]["build"]["reportedAtUnixMs"].is_u64());
+    for (method, path) in [("GET", "/v1/mobile/builds"), ("POST", "/v1/mobile/build")] {
+        let response = crate::http_api::dispatch_authenticated_http_invoke(
+            Arc::clone(&state),
+            method,
+            path,
+            build.clone(),
+        )
+        .await;
+        assert_eq!(response.status, 401, "relay account authority cannot impersonate a paired installation or enumerate local inventory");
+    }
+    let mut invalid = build.clone();
+    invalid["runtimeVersion"] = serde_json::json!("x".repeat(129));
+    assert_eq!(
+        client
+            .post(format!("{base}/v1/mobile/build"))
+            .header("x-kanna-device-id", "phone")
+            .header("x-kanna-device-secret", secret)
+            .json(&invalid)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    client
+        .delete(format!("{base}/v1/pairing/trusted-devices/phone"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let inventory: serde_json::Value = client
+        .get(format!("{base}/v1/mobile/builds"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(inventory["devices"], serde_json::json!([]));
+    server.abort();
+    let _ = server.await;
 }

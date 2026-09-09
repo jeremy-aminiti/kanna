@@ -237,7 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "065_stage_run_provider_override");
+    assert_eq!(latest_migration, "069_retire_pre_existing_transfer_alerts");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -798,15 +798,9 @@ fn snapshot_reports_a_failed_transfer_but_prefers_one_still_in_flight() {
         "2026-08-06 00:00:00",
     )
     .expect("insert task");
-    db.insert_test_task_transfer_with_desktops(
-        "transfer-failed-outgoing",
-        "outgoing",
-        "failed",
-        Some("task-stranded"),
-        Some("desktop-a"),
-        Some("desktop-b"),
-    )
-    .expect("insert failed outgoing transfer");
+    // The completed move is recorded first: an *earlier* success says nothing
+    // about a failure that came after it, so this still pins "completed is
+    // never reported" without colliding with the retirement rule below.
     db.insert_test_task_transfer_with_desktops(
         "transfer-completed-outgoing",
         "outgoing",
@@ -816,14 +810,23 @@ fn snapshot_reports_a_failed_transfer_but_prefers_one_still_in_flight() {
         Some("desktop-b"),
     )
     .expect("insert completed outgoing transfer");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-failed-outgoing",
+        "outgoing",
+        "failed",
+        Some("task-stranded"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert failed outgoing transfer");
     for (id, started_at, completed_at) in [
         (
-            "transfer-failed-outgoing",
+            "transfer-completed-outgoing",
             "2026-08-06 00:01:00",
             Some("2026-08-06 00:02:00"),
         ),
         (
-            "transfer-completed-outgoing",
+            "transfer-failed-outgoing",
             "2026-08-06 00:03:00",
             Some("2026-08-06 00:04:00"),
         ),
@@ -867,6 +870,261 @@ fn snapshot_reports_a_failed_transfer_but_prefers_one_still_in_flight() {
     let item = &snapshot.entries[0].items[0];
     assert_eq!(item.transfer_id.as_deref(), Some("transfer-retry-outgoing"));
     assert_eq!(item.transfer_status.as_deref(), Some("streaming"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The owner-reported stuck marker.
+///
+/// Nothing ever retired a transfer failure: the move that would have replaced
+/// it is the one that did not happen, so the task carried the red marker for
+/// the rest of its life with no way to see why or clear it. Two things retire
+/// one now — the operator reading it, and a later move of the same task
+/// succeeding.
+#[test]
+fn a_failed_transfer_stops_marking_its_task_once_dismissed_or_superseded() {
+    let path = Db::test_db_path("snapshot-dismissed-task-transfer");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Kanna").expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-stranded",
+        "repo-1",
+        "Transfer that broke",
+        None,
+        "in progress",
+        "2026-09-08 00:00:00",
+    )
+    .expect("insert task");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-failed",
+        "outgoing",
+        "failed",
+        Some("task-stranded"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert failed transfer");
+
+    let reported = |db: &Db| {
+        db.ui_snapshot().expect("snapshot").entries[0].items[0]
+            .transfer_status
+            .clone()
+    };
+    assert_eq!(reported(&db).as_deref(), Some("failed"));
+
+    // Dismissal only ever applies to a failure; an in-flight move is the
+    // current truth about the task and hiding it would lose the move.
+    assert!(db
+        .dismiss_failed_task_transfer("transfer-failed")
+        .expect("dismiss"));
+    assert!(
+        !db.dismiss_failed_task_transfer("transfer-failed")
+            .expect("repeat dismiss"),
+        "a repeat dismissal reports that it changed nothing"
+    );
+    assert_eq!(reported(&db), None);
+
+    // …and a later move that succeeded answers the failure on its own.
+    db.insert_test_pipeline_item(
+        "task-retried",
+        "repo-1",
+        "Transfer that broke, then worked",
+        None,
+        "in progress",
+        "2026-09-08 00:00:00",
+    )
+    .expect("insert retried task");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-failed-import",
+        "incoming",
+        "failed",
+        Some("task-retried"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert failed import");
+    let failed_now = db.ui_snapshot().expect("snapshot").entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task-retried")
+        .and_then(|item| item.transfer_status.clone());
+    assert_eq!(failed_now.as_deref(), Some("failed"));
+
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-completed-import",
+        "incoming",
+        "completed",
+        Some("task-retried"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert completed import");
+    let after_success = db.ui_snapshot().expect("snapshot").entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task-retried")
+        .and_then(|item| item.transfer_status.clone());
+    assert_eq!(after_success, None);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A pull the source refuses belongs to no task on the machine that asked for
+/// it — nothing arrived and nothing will — so it rides the snapshot on its
+/// own. Without this the requester's window had nothing at all to show.
+#[test]
+fn a_failed_transfer_with_no_local_task_is_reported_as_a_snapshot_alert() {
+    let path = Db::test_db_path("snapshot-transfer-alerts");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Kanna").expect("insert repo");
+    db.insert_task_transfer(&crate::db::NewTaskTransfer {
+        id: "refused-pull-peer-a-pull-1".into(),
+        direction: "incoming".into(),
+        status: "failed".into(),
+        source_peer_id: Some("peer-a".into()),
+        target_peer_id: None,
+        source_desktop_id: None,
+        target_desktop_id: None,
+        source_task_id: Some("afed27d1".into()),
+        local_task_id: None,
+        error: Some("its rollout could not be found under ~/.codex/sessions".into()),
+        payload_json: None,
+    })
+    .expect("insert refusal");
+
+    let alerts = db.ui_snapshot().expect("snapshot").transfer_alerts;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].source_task_id.as_deref(), Some("afed27d1"));
+    assert!(alerts[0]
+        .error
+        .as_deref()
+        .is_some_and(|reason| reason.contains("rollout could not be found")));
+
+    // The record survives dismissal — `list_task_transfers` still answers
+    // "where has this been?" — but it stops being news.
+    assert!(db
+        .dismiss_failed_task_transfer("refused-pull-peer-a-pull-1")
+        .expect("dismiss"));
+    assert!(db
+        .ui_snapshot()
+        .expect("snapshot")
+        .transfer_alerts
+        .is_empty());
+    assert_eq!(
+        db.list_task_transfers("afed27d1").expect("list").len(),
+        1,
+        "a dismissed refusal is still on the record"
+    );
+
+    // The alert is deliberately *not* narrowed to refusals. An import that
+    // died before it created anything is the same class of news — a move onto
+    // this machine that did not arrive — and it has no task to be reported on
+    // either, so it alerts and retires by the same path.
+    db.insert_task_transfer(&crate::db::NewTaskTransfer {
+        id: "incoming-that-never-landed".into(),
+        direction: "incoming".into(),
+        status: "pending".into(),
+        source_peer_id: Some("peer-a".into()),
+        target_peer_id: None,
+        source_desktop_id: None,
+        target_desktop_id: None,
+        source_task_id: Some("b0b0b0b0".into()),
+        local_task_id: None,
+        error: None,
+        payload_json: Some("{}".into()),
+    })
+    .expect("insert incoming");
+    assert!(
+        db.ui_snapshot()
+            .expect("snapshot")
+            .transfer_alerts
+            .is_empty(),
+        "an import still in flight is not a failure to announce"
+    );
+    assert!(db
+        .fail_incoming_task_transfer(
+            "incoming-that-never-landed",
+            "the repo could not be acquired"
+        )
+        .expect("fail the import"));
+    let alerts = db.ui_snapshot().expect("snapshot").transfer_alerts;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].transfer_id, "incoming-that-never-landed");
+    assert!(db
+        .dismiss_failed_task_transfer("incoming-that-never-landed")
+        .expect("dismiss"));
+    assert!(db
+        .ui_snapshot()
+        .expect("snapshot")
+        .transfer_alerts
+        .is_empty());
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// Every task-less failure is news, so the first launch after upgrading would
+/// have announced every one this database had ever accumulated — for moves the
+/// operator can no longer do anything about. Migration 067 retires them, and
+/// only them: a failure that has a task keeps its `⇄✗` marker, which is a
+/// standing surface the operator retires deliberately.
+#[test]
+fn the_alert_migration_retires_history_without_touching_a_task_s_own_marker() {
+    let path = Db::test_db_path("snapshot-transfer-alert-backfill");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Kanna").expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-marked",
+        "repo-1",
+        "a task whose move broke",
+        None,
+        "in progress",
+        "2026-09-08 00:00:00",
+    )
+    .expect("insert task");
+    for (id, local_task_id) in [
+        ("historical-alert", None),
+        ("historical-marker", Some("task-marked")),
+    ] {
+        db.insert_task_transfer(&crate::db::NewTaskTransfer {
+            id: id.into(),
+            direction: "incoming".into(),
+            status: "failed".into(),
+            source_peer_id: Some("peer-a".into()),
+            target_peer_id: None,
+            source_desktop_id: None,
+            target_desktop_id: None,
+            source_task_id: Some("older".into()),
+            local_task_id: local_task_id.map(str::to_string),
+            error: Some("from before this shipped".into()),
+            payload_json: None,
+        })
+        .expect("insert historical failure");
+    }
+
+    // The migration ran when the schema was created, so replay it against rows
+    // that predate it — which is exactly what an upgrade does.
+    crate::db::retire_pre_existing_transfer_alerts(&db.conn).expect("replay the backfill");
+
+    assert!(
+        db.ui_snapshot()
+            .expect("snapshot")
+            .transfer_alerts
+            .is_empty(),
+        "history must not announce itself at the next launch"
+    );
+    let marked = db
+        .ui_snapshot()
+        .expect("snapshot")
+        .entries
+        .into_iter()
+        .flat_map(|entry| entry.items)
+        .find(|item| item.id == "task-marked")
+        .expect("the task");
+    assert_eq!(
+        marked.transfer_status.as_deref(),
+        Some("failed"),
+        "a failure with a task keeps the marker the operator retires by hand"
+    );
 
     let _ = std::fs::remove_file(path);
 }
@@ -3269,9 +3527,7 @@ fn task_event_type_names_are_stable() {
             "task.merge_signaled",
             "task.merge_handoff_missing",
             "task.input_delivered",
-            "task.input_delivery_expired",
             "task.raw_input_delivered",
-            "task.input_blocked",
             "task.teardown_failed",
             "task.lifecycle_operation_retired",
             "task.transfer_finalizing",
@@ -3837,4 +4093,101 @@ fn caller_declared_input_sources_are_a_closed_set() {
     assert!(super::TaskInputSource::from_caller_declared("notify").is_err());
     assert!(super::TaskInputSource::from_caller_declared("unspecified").is_err());
     assert!(super::TaskInputSource::from_caller_declared("owner").is_err());
+}
+
+#[test]
+fn workflow_edit_audit_and_execution_supersession_survive_feed_pruning() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().unwrap()).unwrap();
+    db.conn
+        .execute_batch(
+            "INSERT INTO repo (id, path, name) VALUES ('repo-1', '/fixture', 'Repo');
+         INSERT INTO pipeline_item (id, repo_id, stage) VALUES ('task-1', 'repo-1', 'review');",
+        )
+        .unwrap();
+    db.append_task_event(
+        "task-1",
+        super::TaskEventKind::WorkflowChanged,
+        serde_json::json!({
+            "supersededRunIds": ["run-old"], "changedExecutionStages": ["review"]
+        }),
+    )
+    .unwrap();
+    db.append_task_event(
+        "task-1",
+        super::TaskEventKind::RunStarted,
+        serde_json::json!({}),
+    )
+    .unwrap();
+    db.conn
+        .execute(
+            "UPDATE task_event SET created_at = '2000-01-01 00:00:00'",
+            [],
+        )
+        .unwrap();
+    drop(db);
+    let db = Db::open_migrated(path.to_str().unwrap()).unwrap();
+    assert!(db
+        .stage_run_workflow_superseded("task-1", "run-old")
+        .unwrap());
+    assert!(db
+        .workflow_stage_execution_edited("task-1", "review")
+        .unwrap());
+    assert!(!db.workflow_stage_execution_edited("task-1", "pr").unwrap());
+    let events = db
+        .list_task_events(
+            &super::TaskEventScope::Tasks(vec!["task-1".into()]),
+            0,
+            i64::MAX,
+            10,
+        )
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, "task.workflow_changed");
+}
+
+/// Exercise the opening layer without going through Config::load. The OS
+/// sandbox makes this regression safe even if one of these checks is removed:
+/// unguarded SQLite access/deletion is denied independently of product code.
+#[cfg(target_os = "macos")]
+#[test]
+fn production_access_is_refused_at_every_database_entry_point() {
+    const PROBE: &str = "KANNA_DB_GUARD_SANDBOX_PROBE";
+    if std::env::var_os(PROBE).is_some() {
+        let paths = kanna_runtime_defaults::database_access::production_database_paths().unwrap();
+        let production = paths[0].to_str().unwrap();
+        for error in [
+            Db::open(production).unwrap_err(),
+            Db::open_migrated(production).unwrap_err(),
+            Db::open_for_tests(production).unwrap_err(),
+        ] {
+            assert!(error.to_string().contains("REFUSED:"), "{error}");
+        }
+        let error = super::relocate_legacy_database_if_needed(&paths[1], &paths[0]).unwrap_err();
+        assert!(error.contains("REFUSED:"), "{error}");
+        return;
+    }
+
+    let profile = r#"(version 1)
+        (allow default)
+        (deny file-read-data file-write* (regex #".*\.(db|sqlite)(-wal|-shm|-journal)?$"))"#;
+    let output = std::process::Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", profile])
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "db::tests::production_access_is_refused_at_every_database_entry_point",
+            "--nocapture",
+        ])
+        .env(PROBE, "1")
+        .env("KANNA_DESKTOP_DB_ACCESS", "desktop")
+        .output()
+        .expect("macOS sandbox must launch the database probe");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
 }

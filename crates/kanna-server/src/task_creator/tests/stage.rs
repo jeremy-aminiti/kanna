@@ -3207,8 +3207,7 @@ async fn dispatch_post_injects_message_into_live_session_and_records_post_run() 
     .unwrap();
     let commands = fake_daemon.await.unwrap();
 
-    assert_eq!(response.response.task_id, "task-1");
-    assert!(!response.held_by_raw_draft);
+    assert_eq!(response.task_id, "task-1");
     match &commands[0] {
         kanna_daemon::protocol::Command::SubmitInput { session_id, data } => {
             assert_eq!(session_id, "task-1");
@@ -3424,8 +3423,8 @@ async fn dispatch_post_known_refusal_clears_live_intent() {
             kanna_daemon::protocol::Command::SubmitInput { .. }
         ));
         let response = kanna_daemon::protocol::Event::Error {
-            code: Some(kanna_daemon::protocol::ErrorCode::InheritedDraftStateUnknown),
-            message: "inherited draft is unknown".to_string(),
+            code: Some(kanna_daemon::protocol::ErrorCode::InputUnauthorized),
+            message: "session requires authenticated operator input".to_string(),
         };
         write_half
             .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
@@ -3444,7 +3443,7 @@ async fn dispatch_post_known_refusal_clears_live_intent() {
         Err(error) => error,
         Ok(_) => panic!("known refusal must be returned"),
     };
-    assert!(error.contains("inherited draft is unknown"));
+    assert!(error.contains("session requires authenticated operator input"));
     daemon_server.await.unwrap();
     assert!(db.list_lifecycle_operation_intents().unwrap().is_empty());
     assert_eq!(db.stage_run("run-main").unwrap().unwrap().status, "running");
@@ -3823,99 +3822,6 @@ async fn stage_spawn_opens_its_submitted_phase_at_the_daemon_boundary() {
 }
 
 #[tokio::test]
-async fn dispatch_post_records_a_running_post_when_the_daemon_holds_it_behind_a_draft() {
-    let repo_root = init_git_repo("dispatch-post-held-draft");
-    write_post_workflow_fixtures(&repo_root);
-
-    let config = test_config("dispatch-post-held-draft");
-    let db = Db::open_for_tests(&config.db_path).unwrap();
-    seed_post_workflow_task(&config, &db, &repo_root);
-    db.insert_stage_run(NewStageRun {
-        id: "run-main",
-        task_id: "task-1",
-        stage: "in progress",
-        kind: "main",
-        agent: Some("implement"),
-        agent_provider: Some("claude"),
-        model: Some("sonnet"),
-        effort: None,
-        status: "running",
-        result: None,
-        feedback: None,
-        session_id: Some("task-1"),
-        provider_session_id: None,
-        cwd: None,
-        resumed_from_run_id: None,
-    })
-    .unwrap();
-    let completion_path =
-        std::path::Path::new(&config.daemon_dir).join("runtime/completion/run-main.json");
-    kanna_tool_catalog::write_completion_context(
-        &completion_path,
-        &kanna_tool_catalog::CompletionContext::new("run-main"),
-    )
-    .unwrap();
-    let post = match prepare_advance_stage_for_api(&db, &config, "task-1").unwrap() {
-        PreparedStageTransition::Post(post) => post,
-        _ => panic!("expected post dispatch"),
-    };
-
-    let socket_path = test_daemon_socket_path(&config.daemon_dir);
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path).unwrap();
-    let fake_daemon = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (read_half, mut write_half) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
-        loop {
-            let command = read_fake_daemon_command(&mut reader, &mut write_half).await;
-            if super::answer_terminal_carryover_probe(&command, &mut write_half).await {
-                continue;
-            }
-            assert!(matches!(
-                command,
-                kanna_daemon::protocol::Command::SubmitInput { .. }
-            ));
-            let response = kanna_daemon::protocol::Event::Error {
-                code: Some(kanna_daemon::protocol::ErrorCode::LogicalInputHeldByDraft),
-                message: "queued behind typed draft".to_string(),
-            };
-            write_half
-                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
-                .await
-                .unwrap();
-            break;
-        }
-    });
-    let mut daemon = DaemonClient::connect(&config.daemon_dir).await.unwrap();
-    let outcome = crate::task_creator::dispatch_prepared_post_for_api(
-        &config.db_path,
-        &mut daemon,
-        &crate::session_replacements::SessionReplacements::default(),
-        *post,
-    )
-    .await
-    .unwrap();
-    fake_daemon.await.unwrap();
-
-    assert!(outcome.held_by_raw_draft);
-    assert_eq!(outcome.response.task_id, "task-1");
-    let runs = db.list_stage_runs_for_task("task-1").unwrap();
-    assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0].status, "succeeded");
-    assert_eq!(runs[1].kind, "post");
-    assert_eq!(runs[1].status, "running");
-    assert_eq!(
-        kanna_tool_catalog::read_completion_context(&completion_path)
-            .unwrap()
-            .run_id,
-        runs[1].id,
-    );
-
-    let _ = std::fs::remove_dir_all(&repo_root);
-}
-
-#[tokio::test]
 async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
     let repo_root = init_git_repo("dispatch-post-dead-session");
     write_post_workflow_fixtures(&repo_root);
@@ -3983,7 +3889,7 @@ async fn dispatch_post_falls_back_to_fresh_session_when_session_is_dead() {
     .unwrap();
     let commands = fake_daemon.await.unwrap();
 
-    assert_eq!(response.response.task_id, "task-1");
+    assert_eq!(response.task_id, "task-1");
     let spawn = commands
         .iter()
         .find(|command| matches!(command, kanna_daemon::protocol::Command::Spawn { .. }))
@@ -4123,5 +4029,123 @@ async fn prompt_only_post_provider_overrides_source_task_provider_in_fallback_da
         _ => unreachable!(),
     }
 
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+#[test]
+fn edited_execution_governs_rerun_recovery_and_revision_without_rewriting_the_old_stamp() {
+    edited_workflow_spawn_case(true);
+}
+
+#[test]
+fn edited_execution_releases_creation_override_when_stage_never_spawned() {
+    edited_workflow_spawn_case(false);
+}
+
+fn edited_workflow_spawn_case(seed_run: bool) {
+    let label = if seed_run {
+        "workflow-edit-spawns"
+    } else {
+        "workflow-edit-unstarted"
+    };
+    let (repo_root, config, _) = rerun_of_task_pinned_to_claude(label, seed_run);
+    let db = Db::open(&config.db_path).unwrap();
+    let before = serde_json::json!({"name": "default", "stages": [
+        {"name": "in progress", "agent": "implement", "agent_provider": "opencode-recorded-model",
+         "prompt": "$TASK_PROMPT", "policy": {"transition": "manual"}}
+    ]});
+    db.update_test_pipeline_item_pipeline_def("task-1", &before.to_string())
+        .unwrap();
+    let mut after = before.clone();
+    after["stages"][0]["agent_provider"] = serde_json::json!(["codex-astra-lo"]);
+    let repo = db.get_repo("repo-1").unwrap().unwrap();
+    let runs = db.list_stage_runs_for_task("task-1").unwrap();
+    let validated = super::super::validate_task_workflow_replacement(
+        &repo,
+        &after,
+        &before.to_string(),
+        "in progress",
+        &runs,
+    )
+    .unwrap();
+    let snapshot = validated.snapshot;
+    db.replace_task_workflow(
+        "task-1",
+        "in progress",
+        "default",
+        &snapshot.definition_json,
+        0,
+        5,
+        Some(crate::db::WorkflowReplacement {
+            expected_definition: &before.to_string(),
+            source: "operator",
+            superseded_run_ids: &validated.superseded_run_ids,
+            changed_execution_stages: &validated.changed_execution_stages,
+        }),
+    )
+    .unwrap();
+    let rerun = prepare_rerun_stage_for_api(&db, &config, "task-1").unwrap();
+    assert_eq!(rerun.agent_provider, "codex");
+    assert_eq!(rerun.model.as_deref(), Some("astra"));
+    assert_eq!(rerun.effort.as_deref(), Some("low"));
+    assert!(rerun.provider_override.is_none());
+    if !seed_run {
+        let _ = std::fs::remove_dir_all(&repo_root);
+        return;
+    }
+    let recovery = prepare_resume_task_for_api(&db, &config, "task-1").unwrap();
+    assert_eq!(recovery.agent_provider, "codex");
+    assert_eq!(recovery.model.as_deref(), Some("astra"));
+    assert_eq!(
+        recovery.resume_fallback_reason.as_deref(),
+        Some("pinned workflow execution binding changed")
+    );
+    assert!(recovery.resumed_from_run_id.is_none());
+    let revision = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "task-1",
+        "in progress",
+        "Fix the requested issue",
+        None,
+    )
+    .unwrap();
+    assert_eq!(revision.agent_provider, "codex");
+    assert_eq!(revision.model.as_deref(), Some("astra"));
+    let old = db.latest_stage_run("task-1").unwrap().unwrap();
+    assert_eq!(old.agent_provider.as_deref(), Some("opencode"));
+    assert_eq!(old.model.as_deref(), Some("recorded-model"));
+    db.insert_stage_run(NewStageRun {
+        id: "run-after-edit",
+        task_id: "task-1",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("implement"),
+        agent_provider: Some("codex"),
+        model: Some("astra"),
+        effort: Some("low"),
+        status: "failed",
+        result: None,
+        feedback: None,
+        session_id: None,
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    let later_revision = prepare_revision_task_for_api(
+        &db,
+        &config,
+        "task-1",
+        "in progress",
+        "Finish the remaining change",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        later_revision.agent_provider, "codex",
+        "a later fresh revision must retain the new run's provider"
+    );
+    assert_eq!(later_revision.model.as_deref(), Some("astra"));
     let _ = std::fs::remove_dir_all(&repo_root);
 }

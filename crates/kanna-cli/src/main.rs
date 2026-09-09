@@ -302,6 +302,34 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Ask the Kanna desktop to open one of a task's files as a tab beside
+    /// that task's agent session
+    ///
+    /// Delivery is advisory: the answer says the file was requested, never
+    /// that it was shown. A window that is closed or not running loses the
+    /// request rather than queuing it, and the operator's own selection is
+    /// never changed — the tab is simply there when they look at that task.
+    OpenFile {
+        /// The task ID, or one of the task's branch names
+        #[arg(long)]
+        task_id: String,
+
+        /// Path of the file to open, relative to the task's workspace root
+        #[arg(long)]
+        path: String,
+
+        /// 1-based line to scroll to when the file opens
+        #[arg(long)]
+        line: Option<i64>,
+
+        /// Machine whose desktop should open the file. Omit for this machine.
+        #[arg(long)]
+        machine_id: Option<String>,
+
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Print recent task logs
     Logs {
         /// The task ID
@@ -721,6 +749,23 @@ pub(crate) enum TaskCommands {
         workflow_name: String,
 
         /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Replace one task's pinned workflow using a complete validated JSON definition
+    ReplaceWorkflow {
+        #[arg(long)]
+        task_id: String,
+        /// Complete replacement JSON object
+        #[arg(long)]
+        workflow_definition: String,
+        /// Unchanged workflowDefinition JSON object from task detail
+        #[arg(long)]
+        expected_definition: String,
+        #[arg(long, value_parser = ["operator", "manager", "agent", "unspecified"])]
+        source: Option<String>,
+        #[arg(long)]
+        machine_id: Option<String>,
         #[arg(long)]
         server_url: Option<String>,
     },

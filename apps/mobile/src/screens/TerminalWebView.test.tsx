@@ -474,6 +474,52 @@ function burstTerminalText(terminal: BurstTerminal): string {
     .join("");
 }
 
+describe("authoritative terminal grid layout", () => {
+  it("bottom-anchors a grid shorter than the viewport", () => {
+    const { window } = createBurstTerminalDocument();
+    const root = window.document.getElementById("terminal-root");
+
+    (window as unknown as { __setTerminalDims(dims: { cols: number; rows: number }): void })
+      .__setTerminalDims({ cols: 132, rows: 20 });
+
+    expect(root?.style.height).toBe("360px");
+    expect(root?.style.marginTop).toBe("460px");
+  });
+
+  it("leaves a taller grid at the top so viewport panning still owns overflow", () => {
+    const { window } = createBurstTerminalDocument();
+    const root = window.document.getElementById("terminal-root");
+
+    (window as unknown as { __setTerminalDims(dims: { cols: number; rows: number }): void })
+      .__setTerminalDims({ cols: 132, rows: 60 });
+
+    expect(root?.style.height).toBe("1080px");
+    expect(root?.style.marginTop).toBe("0px");
+  });
+
+  it("re-anchors a short grid when input chrome and viewport dimensions change", () => {
+    const { window } = createBurstTerminalDocument();
+    const viewport = window.document.getElementById("viewport");
+    const root = window.document.getElementById("terminal-root");
+    if (!viewport) throw new Error("terminal viewport was not rendered");
+    const bridge = window as unknown as {
+      __setTerminalBottomInset(state: { bottomInset: number }): void;
+      __setTerminalDims(dims: { cols: number; rows: number }): void;
+    };
+    bridge.__setTerminalDims({ cols: 132, rows: 20 });
+
+    bridge.__setTerminalBottomInset({ bottomInset: 200 });
+    expect(root?.style.marginTop).toBe("284px");
+
+    Object.defineProperty(viewport, "clientHeight", {
+      configurable: true,
+      value: 500
+    });
+    window.dispatchEvent(new window.Event("resize"));
+    expect(root?.style.marginTop).toBe("0px");
+  });
+});
+
 function resolvedSelectionToolbarTop(tree: ElementNode | null): number | null {
   const toolbar = findByAccessibilityLabel(
     tree,

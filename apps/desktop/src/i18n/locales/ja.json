@@ -101,7 +101,7 @@
     "createRepo": "リポジトリ作成",
     "importClone": "インポート / クローン",
     "newWindow": "新しいウィンドウ",
-    "closeWindow": "ウィンドウを閉じる",
+    "closeWindow": "ウインドウを閉じる",
     "goBack": "戻る",
     "goForward": "進む",
     "allShortcuts": "すべてのショートカット",
@@ -113,7 +113,8 @@
     "oldestUnreadAllRepos": "全リポジトリで最も古い未読タスク",
     "oldestRead": "最も古い既読タスク",
     "oldestReadAllRepos": "全リポジトリで最も古い既読タスク",
-    "focusSearch": "検索"
+    "focusSearch": "検索",
+    "closeTab": "タブを閉じる"
   },
   "shortcutContexts": {
     "main": "メインショートカット",
@@ -137,6 +138,7 @@
     "remoteTaskTooltip": "リモートタスク",
     "transferringTaskTooltip": "マシン間で転送中",
     "transferFailedTaskTooltip": "転送に失敗しました",
+    "dismissTransferFailure": "クリックで消去",
     "detachSubtask": "親を解除",
     "sectionMergeQueue": "マージキュー",
     "sectionPullRequests": "プルリクエスト",
@@ -171,7 +173,6 @@
     "closeSourceTaskFailed": "元タスクのクローズに失敗しました",
     "mergeAgentFailed": "マージエージェントの開始に失敗しました",
     "stagePostRunning": "ステージのポスト処理が実行中です。完了までお待ちください",
-    "advanceHeldByDraft": "このタスクのターミナルに未送信の下書きがあるため、進行は待機中です。下書きを消去または送信すると続行します",
     "revisionAlreadyStarting": "このタスクのリビジョンはすでに開始中です",
     "blockedWorktreeFailed": "ブロックタスクのワークツリー作成に失敗しました",
     "blockTaskFailed": "タスクのブロックに失敗しました",
@@ -191,6 +192,7 @@
     "latestAgentFileHint": "ヒント: ⌘Lでエージェントが言及した最新のファイルを開けます。",
     "noTerminalFileLink": "このターミナルにファイルリンクが見つかりません。",
     "transferFinalizationFailed": "タスク転送に失敗しました",
+    "transferPullRefused": "相手のマシンはタスク {taskId} を送信できません",
     "transferFinalizationDegraded": "転送元を正常に終了できないまま引き継ぎました",
     "transferFinalizationUnclean": "転送元のエージェントセッションが正常に終了しませんでした",
     "transferReservationOrphaned": "重複した転送予約を解放できず、ディスクに残っている可能性があります",
@@ -337,10 +339,6 @@
     "agentCopied": "コピーしました！",
     "commandHintPrefix": "",
     "commandHintSuffix": "で利用可能なコマンドを表示できます。",
-    "inputBlockedTitle": "送信されたメッセージが拒否されています",
-    "inputBlockedHint": "このエージェントのセッションは現在のデーモンが引き継いだもので、コンポーザーに Kanna が入力を確認していないテキストが残っているため、何も送信できません。このターミナルを開き、その行を送信するか消去してください。",
-    "advanceHeldTitle": "未送信の下書きの後ろで進行を待機しています",
-    "advanceHeldHint": "このタスクのターミナルで下書きを消去または送信してください。キュー内のステージポストは自動的に開始されるため、もう一度進行する必要はありません。",
     "revisionExhaustedTitle": "自動リビジョンの上限に達しました",
     "revisionExhaustedHint": "このタスクは自動リビジョン {limit} 回中 {rounds} 回を使用し、保留されています。",
     "revise": "修正する",
@@ -375,6 +373,17 @@
     "setupRepoDesc": ".kanna のワークフローとエージェントフレーバーを構成",
     "createConfig": "設定を作成",
     "createConfigDesc": ".kanna/config.json を作成または更新"
+  },
+  "mainTabs": {
+    "agent": "エージェント",
+    "diff": "差分",
+    "shell": "シェル",
+    "repoShell": "リポジトリシェル",
+    "files": "ファイル",
+    "graph": "コミット",
+    "analytics": "分析",
+    "preferences": "設定",
+    "image": "画像"
   },
   "terminalTabs": {
     "noSession": "アクティブなエージェントセッションがありません"

@@ -17,7 +17,8 @@ use config::{
     server_config_matches_runtime, server_config_path_for_app_data_dir,
     server_lock_path_for_config, try_claim_server_lock, write_server_config,
 };
-use process::{find_sidecar, server_pids_on_port, stop_server_on_port};
+use kanna_server_process::stop_server_on_port;
+use process::find_sidecar;
 
 const LOCAL_SERVER_HOST: &str = "127.0.0.1";
 const DEFAULT_LOCAL_SERVER_PORT: u16 = kanna_runtime_defaults::PRODUCTION_MOBILE_SERVER_PORT;
@@ -277,9 +278,11 @@ impl MobileServerManager {
             }
         };
         let mut child = match Command::new(server_bin)
-            .env("KANNA_SERVER_CONFIG", &config_path)
-            .env("KANNA_DESKTOP_EXECUTABLE", desktop_executable)
-            .envs(transfer_identity_env)
+            .envs(server_spawn_env(
+                &config_path,
+                &desktop_executable,
+                transfer_identity_env,
+            ))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(server_stderr_log(&config_path))
@@ -469,14 +472,7 @@ impl MobileServerManager {
 }
 
 async fn listening_server_pid(cloud_env: Option<DesktopCloudEnvironment>) -> Result<u32, String> {
-    let pids = server_pids_on_port(local_server_port_for_cloud_env(cloud_env)).await?;
-    let [pid] = pids.as_slice() else {
-        return Err(format!(
-            "expected exactly one kanna-server listener, found {}",
-            pids.len()
-        ));
-    };
-    u32::try_from(*pid).map_err(|_| format!("invalid kanna-server pid: {pid}"))
+    kanna_server_process::listening_server_pid(local_server_port_for_cloud_env(cloud_env)).await
 }
 
 #[tauri::command]
@@ -655,6 +651,30 @@ fn resolved_db_path(state: &MobileServerState) -> Result<PathBuf, String> {
     }
 
     Ok(app_data_dir.join("kanna-v2.db"))
+}
+
+/// Environment contract for the desktop-owned server process.
+fn server_spawn_env(
+    config_path: &Path,
+    desktop_executable: &Path,
+    mut transfer_identity_env: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    transfer_identity_env.extend([
+        // Explicit authorization never overrides an isolated test/dev context.
+        (
+            kanna_runtime_defaults::database_access::DESKTOP_ACCESS_ENV.into(),
+            "desktop".into(),
+        ),
+        (
+            "KANNA_SERVER_CONFIG".into(),
+            config_path.to_string_lossy().into_owned(),
+        ),
+        (
+            "KANNA_DESKTOP_EXECUTABLE".into(),
+            desktop_executable.to_string_lossy().into_owned(),
+        ),
+    ]);
+    transfer_identity_env
 }
 
 /// Peer identity for the transfer sidecar, resolved once here and handed to
@@ -1174,6 +1194,27 @@ fn escape_toml_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mobile_server_spawn_authorizes_the_desktop_database() {
+        let env: std::collections::HashMap<_, _> = super::server_spawn_env(
+            std::path::Path::new("/desktop/server.toml"),
+            std::path::Path::new("/Applications/Kanna.app/Contents/MacOS/Kanna"),
+            vec![("KANNA_TRANSFER_PEER_ID".into(), "peer".into())],
+        )
+        .into_iter()
+        .collect();
+        assert_eq!(
+            env[kanna_runtime_defaults::database_access::DESKTOP_ACCESS_ENV],
+            "desktop"
+        );
+        assert_eq!(env["KANNA_SERVER_CONFIG"], "/desktop/server.toml");
+        assert_eq!(
+            env["KANNA_DESKTOP_EXECUTABLE"],
+            "/Applications/Kanna.app/Contents/MacOS/Kanna"
+        );
+        assert_eq!(env["KANNA_TRANSFER_PEER_ID"], "peer");
+    }
+
     use super::cloud_env::relay_url;
     use super::config::{build_server_config, sidecar_sha256_config_line};
     use super::{

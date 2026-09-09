@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -181,10 +182,6 @@ enum Evt {
         session_id: String,
         status: SessionStatus,
     },
-    LogicalInputReleased {
-        session_id: String,
-        session_pid: u32,
-    },
     RawInputReady {
         version: u32,
     },
@@ -204,9 +201,6 @@ enum ErrorCode {
     SessionIncarnationMismatch,
     InputUnauthorized,
     ProtectedInputProtocolRequired,
-    LogicalInputHeldByDraft,
-    InheritedDraftStateUnknown,
-    LogicalInputSubmissionUnproven,
     #[serde(other)]
     Other,
 }
@@ -279,27 +273,23 @@ fn input_if_session_rejects_a_different_observed_pid() {
     }
 }
 
+/// The owner directive of 2026-09-08, over the real wire.
+///
+/// A human with an unsent line at that terminal used to park every delivered
+/// message behind it — refused `409 input_held_by_draft`, released only when
+/// somebody pressed Enter there. Messages now go out immediately, each as its
+/// own submission, and land after whatever the human had typed. That is the
+/// accepted collision.
 #[test]
-fn queued_logical_inputs_release_as_separate_real_pty_submissions() {
+fn logical_inputs_are_submitted_over_a_human_draft_in_order() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
-    let session_id = "draft-isolation";
+    let session_id = "draft-collision";
     spawn_shell_session(
         &mut conn,
         session_id,
         "stty -echo; while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
     );
-
-    conn.send(&Cmd::List);
-    let session_pid = match conn.recv() {
-        Evt::SessionList { sessions } => sessions
-            .iter()
-            .find(|session| session["session_id"] == session_id)
-            .and_then(|session| session["pid"].as_u64())
-            .and_then(|pid| u32::try_from(pid).ok())
-            .expect("spawned session should have a pid"),
-        other => panic!("expected SessionList, got: {other:?}"),
-    };
 
     conn.send(&Cmd::InputNoReply {
         session_id: session_id.to_string(),
@@ -313,92 +303,41 @@ fn queued_logical_inputs_release_as_separate_real_pty_submissions() {
             session_id: session_id.to_string(),
             data: message.to_vec(),
         });
-        // Accepted into the queue, but not submitted — and the daemon says which.
         match conn.recv() {
-            Evt::Error { code, .. } => assert_eq!(code, Some(ErrorCode::LogicalInputHeldByDraft)),
-            other => panic!("a message held behind a draft must not answer Ok, got: {other:?}"),
+            Evt::Ok => {}
+            Evt::Error { code, message } => {
+                panic!("a delivery over a human draft must not be refused: {code:?} {message}")
+            }
+            other => panic!("expected Ok, got: {other:?}"),
         }
     }
 
-    thread::sleep(Duration::from_millis(300));
-    conn.send(&Cmd::Snapshot {
-        session_id: session_id.to_string(),
-    });
-    match recv_snapshot(&mut conn, session_id) {
-        snapshot if !snapshot.vt.contains("LINE:<") => {}
-        snapshot => panic!(
-            "logical input submitted into the partial raw draft: {:?}",
-            snapshot.vt
-        ),
-    }
-
-    let mut subscriber = daemon.connect();
-    subscriber.send(&Cmd::Subscribe);
-    assert!(matches!(subscriber.recv(), Evt::Ok));
-
-    conn.send(&Cmd::InputBoundary {
-        session_id: session_id.to_string(),
-        data: b"\r".to_vec(),
-    });
-    expect_ok(&mut conn);
-
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        conn.send(&Cmd::Snapshot {
-            session_id: session_id.to_string(),
-        });
-        let snapshot = recv_snapshot(&mut conn, session_id);
-        let human = snapshot.vt.find("LINE:<human draft>");
-        let first = snapshot.vt.find("LINE:<first manager message>");
+        let snapshot = recv_snapshot_for(&mut conn, session_id);
+        let collided = snapshot.vt.find("LINE:<human draftfirst manager message>");
         let second = snapshot.vt.find("LINE:<second manager message>");
-        if let (Some(human), Some(first), Some(second)) = (human, first, second) {
+        if let (Some(collided), Some(second)) = (collided, second) {
             assert!(
-                human < first && first < second,
-                "the draft and queued messages must be submitted in FIFO order"
+                collided < second,
+                "the deliveries must reach the terminal in order: {:?}",
+                snapshot.vt
             );
-            assert!(!snapshot
-                .vt
-                .contains("first manager messagesecond manager message"));
+            assert!(
+                !snapshot
+                    .vt
+                    .contains("first manager messagesecond manager message"),
+                "each delivery carries its own submission boundary: {:?}",
+                snapshot.vt
+            );
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "separate submissions did not reach the PTY: {:?}",
+            "both messages should have been submitted: {:?}",
             snapshot.vt
         );
         thread::sleep(Duration::from_millis(20));
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut released = 0;
-    while released < 2 {
-        match subscriber.recv_with_timeout(Duration::from_millis(100)) {
-            Ok(Evt::LogicalInputReleased {
-                session_id: released_session,
-                session_pid: released_pid,
-            }) => {
-                assert_eq!(released_session, session_id);
-                assert_eq!(released_pid, session_pid);
-                released += 1;
-            }
-            Ok(_) | Err(_) if Instant::now() < deadline => {}
-            Ok(other) => panic!("timed out after unexpected subscriber event: {other:?}"),
-            Err(error) => panic!("timed out waiting for logical release events: {error}"),
-        }
-    }
-
-    let no_extra_release_deadline = Instant::now() + Duration::from_millis(200);
-    while Instant::now() < no_extra_release_deadline {
-        if let Ok(Evt::LogicalInputReleased {
-            session_id: released_session,
-            ..
-        }) = subscriber.recv_with_timeout(Duration::from_millis(25))
-        {
-            assert_ne!(
-                released_session, session_id,
-                "each queued message must emit exactly one release event"
-            );
-        }
     }
 }
 
@@ -481,18 +420,17 @@ fn keystrokes_that_cannot_type_do_not_hold_a_logical_message() {
     }
 }
 
-/// The other half, and the reason this is a classification rather than a list
-/// of "navigation keys": cursor up recalls a previous line *into* the
-/// composer, so it is typing by another name and still holds.
+/// The other half, and the reason the ledger is a classification rather than a
+/// list of "navigation keys": cursor up recalls a previous line *into* the
+/// composer, so it is typing by another name and the composer attests `typed`.
 ///
-/// This also pins the original owner regression it was written for — a reply
-/// sent from the phone must never be appended to an unsent line, and a parked
-/// message still goes out untouched at the producer's own boundary.
+/// What it no longer does is hold anything back. The message is submitted over
+/// the recalled line, which is the collision the owner asked for.
 #[test]
-fn a_history_recall_key_holds_a_logical_message_and_the_daemon_says_so() {
+fn a_history_recall_key_attests_typed_and_still_takes_the_message() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
-    let session_id = "held-by-draft";
+    let session_id = "recalled-draft";
     spawn_shell_session(
         &mut conn,
         session_id,
@@ -507,59 +445,57 @@ fn a_history_recall_key_holds_a_logical_message_and_the_daemon_says_so() {
     });
     expect_ok(&mut conn);
 
+    conn.send(&Cmd::List);
+    match conn.recv() {
+        Evt::SessionList { sessions } => {
+            let session = sessions
+                .iter()
+                .find(|session| session["session_id"] == session_id)
+                .expect("the session is listed");
+            assert_eq!(session["composer_attestation"], "typed");
+        }
+        other => panic!("expected SessionList, got: {other:?}"),
+    }
+
     conn.send(&Cmd::SubmitInput {
         session_id: session_id.to_string(),
         data: b"owner reply".to_vec(),
     });
     match conn.recv() {
+        Evt::Ok => {}
         Evt::Error { code, message } => {
-            assert_eq!(code, Some(ErrorCode::LogicalInputHeldByDraft));
-            assert!(
-                message.contains("was not submitted"),
-                "the refusal must say the message was not submitted: {message:?}"
-            );
+            panic!("a declared draft must not hold a delivery: {code:?} {message}")
         }
-        other => panic!("a held message must not be reported as submitted, got: {other:?}"),
+        other => panic!("expected Ok, got: {other:?}"),
     }
 
-    thread::sleep(Duration::from_millis(400));
-    let snapshot = recv_snapshot_for(&mut conn, session_id);
-    assert!(
-        !snapshot.vt.contains("LINE:<"),
-        "nothing may reach the PTY while a draft is open: {:?}",
-        snapshot.vt
-    );
-
-    conn.send(&Cmd::InputBoundary {
-        session_id: session_id.to_string(),
-        data: b"\r".to_vec(),
-    });
-    expect_ok(&mut conn);
-
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // The recalled-line escape bytes are still in the line discipline's buffer
+    // ahead of the text, and how they render is the terminal's business. What
+    // this asserts is the daemon's: the message went out with its own Enter.
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let snapshot = recv_snapshot_for(&mut conn, session_id);
-        if snapshot.vt.contains("LINE:<owner reply>") {
+        if snapshot.vt.contains("owner reply>") {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the held message never reached the PTY after its boundary: {:?}",
+            "the message never reached the PTY: {:?}",
             snapshot.vt
         );
         thread::sleep(Duration::from_millis(20));
     }
 }
 
-/// The refusal this change exists to end, end to end.
+/// The ledger beats the frame, end to end.
 ///
 /// The Claude CLI paints a tab-to-accept suggestion on its own `❯` line, so no
-/// frame will ever read that composer empty and attestation can never clear a
-/// declared draft again. A message delivered into such a session was answered
-/// `409 input_held_by_draft` — "a human has an unsent line at that terminal" —
-/// when nobody had typed a byte into it. What the daemon can prove is its own
-/// ledger: zero typed bytes means there is no line to append to, whatever the
-/// screen says.
+/// frame will ever read that composer empty and no frame can clear a declared
+/// draft there. Such a session used to claim "a human has an unsent line at
+/// that terminal" when nobody had typed a byte into it. What the daemon can
+/// prove is its own ledger: zero typed bytes means the rendered line is the
+/// provider's own, whatever the screen looks like — and the delivery goes out
+/// either way.
 #[test]
 fn a_declared_draft_that_typed_nothing_delivers_through_a_rendered_suggestion() {
     let daemon = DaemonHandle::start();
@@ -623,10 +559,10 @@ fn a_declared_draft_that_typed_nothing_delivers_through_a_rendered_suggestion() 
 }
 
 /// The other half of the same rule, over the same wire: once a human really
-/// has typed, the identical frame proves nothing and the message stays queued
-/// for their boundary.
+/// has typed, the identical frame proves nothing and the composer keeps
+/// attesting `typed` — while the delivery still goes out.
 #[test]
-fn a_typed_draft_still_holds_a_message_behind_a_rendered_suggestion() {
+fn a_typed_draft_keeps_attesting_typed_behind_a_rendered_suggestion() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "typed-composer";
@@ -648,8 +584,11 @@ fn a_typed_draft_still_holds_a_message_behind_a_rendered_suggestion() {
         data: b"owner reply".to_vec(),
     });
     match conn.recv() {
-        Evt::Error { code, .. } => assert_eq!(code, Some(ErrorCode::LogicalInputHeldByDraft)),
-        other => panic!("a typed draft must still hold the message, got: {other:?}"),
+        Evt::Ok => {}
+        Evt::Error { code, message } => {
+            panic!("a typed draft must not hold the message: {code:?} {message}")
+        }
+        other => panic!("expected Ok, got: {other:?}"),
     }
 
     conn.send(&Cmd::List);
@@ -817,82 +756,16 @@ fn wait_for_submitted_line(log_path: &Path, expected: &str, timeout: Duration) -
     }
 }
 
-/// The owner's ask, over the real wire: a message delivered while a human has
-/// a genuinely typed line at the composer no longer waits for them. The draft
-/// is copied off, the message is submitted on its own, and the draft goes back
-/// — and keystrokes typed while it was off are replayed after it, in order,
-/// rather than landing in the middle of the delivery.
-#[test]
-fn a_delivery_over_a_typed_draft_restores_the_draft_and_replays_mid_swap_typing() {
-    let daemon = DaemonHandle::start();
-    let mut conn = daemon.connect();
-    let mut typist = daemon.connect();
-    let session_id = "draft-swap";
-    let submitted_lines = spawn_fake_composer(&daemon, &mut conn, session_id, 0.4);
-
-    // A human types at the composer, and the frame shows their line.
-    conn.send(&Cmd::Input {
-        session_id: session_id.to_string(),
-        data: b"half typed".to_vec(),
-    });
-    expect_ok(&mut conn);
-    let session = wait_for_composer(&mut conn, session_id, "half typed", Duration::from_secs(10));
-    assert_eq!(
-        session["composer_attestation"], "typed",
-        "the daemon watched this line being typed"
-    );
-
-    // The delivery goes out while that line is still on the composer. This is
-    // the call that used to be refused `input_held_by_draft`.
-    conn.send(&Cmd::SubmitInput {
-        session_id: session_id.to_string(),
-        data: b"manager message".to_vec(),
-    });
-
-    // Meanwhile the human keeps typing, on their own connection, while the
-    // composer belongs to the delivery.
-    thread::sleep(Duration::from_millis(120));
-    typist.send(&Cmd::Input {
-        session_id: session_id.to_string(),
-        data: b" more".to_vec(),
-    });
-    expect_ok(&mut typist);
-
-    expect_ok(&mut conn);
-
-    let recorded = wait_for_submitted_line(
-        &submitted_lines,
-        "LINE:<manager message>",
-        Duration::from_secs(20),
-    );
-    assert_eq!(
-        recorded.lines().count(),
-        1,
-        "exactly one line was submitted, and it was the agent's: {recorded:?}"
-    );
-
-    let session = wait_for_composer(
-        &mut conn,
-        session_id,
-        "half typed more",
-        Duration::from_secs(20),
-    );
-    assert_eq!(
-        session["composer_attestation"], "typed",
-        "the restored draft is the human's line again, and is attested as one"
-    );
-}
-
 /// The bytes that poisoned the ledger, replayed against a real PTY.
 ///
 /// A terminal emulator answers the application's own questions up the same
 /// input path a human's keystrokes use, and the plain `Input` command declares
 /// every byte it carries a draft. Counting a colour report or an XTVERSION
-/// reply as typed characters left the session attesting `typed` with nothing
-/// on its composer, and every later delivery answered "a human has an unsent
-/// line at that terminal".
+/// reply as typed characters left the session attesting `typed` with nothing on
+/// its composer — and a composer attested `typed` is one whose text a reader is
+/// allowed to act on.
 #[test]
-fn terminal_replies_declared_as_draft_never_hold_a_delivery() {
+fn terminal_replies_declared_as_draft_never_attest_typed() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "reply-poisoned-composer";
@@ -939,9 +812,9 @@ fn terminal_replies_declared_as_draft_never_hold_a_delivery() {
     });
     match conn.recv() {
         Evt::Ok => {}
-        Evt::Error { code, message } => panic!(
-            "a delivery was held behind a draft made of terminal replies: {code:?} {message}"
-        ),
+        Evt::Error { code, message } => {
+            panic!("a delivery must never be refused: {code:?} {message}")
+        }
         other => panic!("expected Ok, got: {other:?}"),
     }
     wait_for_submitted_line(
@@ -991,13 +864,13 @@ while (1) {
 ///
 /// A ledger armed once could never be cleared again: Claude Code paints the
 /// last submitted line back as a faint tab-to-accept ghost, so no frame ever
-/// read that composer textually empty and every delivery was answered "a human
-/// has an unsent line at that terminal". The owner could see the difference the
-/// daemon could not — the ghost is grey, and typed text is not — and the cells
-/// carry it: faint text with the cursor still at the start of the composer is
-/// the provider's own suggestion.
+/// read that composer textually empty and the session attested `typed`
+/// forever — which is what lets provider chrome be read as somebody's words.
+/// The owner could see the difference the daemon could not — the ghost is
+/// grey, and typed text is not — and the cells carry it: faint text with the
+/// cursor still at the start of the composer is the provider's own suggestion.
 #[test]
-fn a_faint_suggestion_with_the_cursor_at_the_start_releases_a_held_delivery() {
+fn a_faint_suggestion_with_the_cursor_at_the_start_clears_the_ledger() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "faint-suggestion-composer";
@@ -1035,51 +908,49 @@ fn a_faint_suggestion_with_the_cursor_at_the_start_releases_a_held_delivery() {
     });
     expect_ok(&mut conn);
     // A frame is evidence only about the moment it was rendered, so the
-    // delivery below has to be made against one that post-dates the keystroke.
+    // attestation below has to be read from one that post-dates the keystroke.
     // Waiting for the provider's repaint is what makes that ordering real
     // instead of assumed.
     wait_for_output(&mut observer, Duration::from_secs(10));
 
-    // The frame says otherwise, and the frame is right: that line is grey and
-    // the cursor never left the start of the composer.
     conn.send(&Cmd::SubmitInput {
         session_id: session_id.to_string(),
         data: b"owner reply".to_vec(),
     });
-    match conn.recv() {
-        Evt::Ok => {}
-        Evt::Error { code, message } => panic!(
-            "the composer renders the CLI's own faint suggestion, so nothing could be \
-             corrupted: {code:?} {message}"
-        ),
-        other => panic!("expected Ok, got: {other:?}"),
-    }
+    expect_ok(&mut conn);
 
     let recorded =
         wait_for_submitted_line(&submitted_lines, "owner reply", Duration::from_secs(20));
     assert!(recorded.contains("LINE:<"), "{recorded:?}");
 
-    conn.send(&Cmd::List);
-    match conn.recv() {
-        Evt::SessionList { sessions } => {
-            let session = sessions
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        conn.send(&Cmd::List);
+        let session = match conn.recv() {
+            Evt::SessionList { sessions } => sessions
                 .iter()
                 .find(|session| session["session_id"] == session_id)
-                .expect("the session is listed");
-            assert_eq!(
-                session["composer_attestation"], "not-typed",
-                "a frame that proves the line is the CLI's own resets the ledger: {session:?}"
-            );
+                .cloned()
+                .expect("the session is listed"),
+            Evt::Output { .. } | Evt::StatusChanged { .. } => continue,
+            other => panic!("expected SessionList, got: {other:?}"),
+        };
+        if session["composer_attestation"] == "not-typed" {
+            break;
         }
-        other => panic!("expected SessionList, got: {other:?}"),
+        assert!(
+            Instant::now() < deadline,
+            "a frame that proves the line is the CLI's own must reset the ledger: {session:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
-/// `Ok` means submitted, not queued. The message and its terminating Enter
-/// are one delivery in two writes separated by the submit delay, so an answer
-/// that arrives before that delay elapsed cannot have seen the Enter written.
+/// `Ok` means written, submission boundary included. The message and its Enter
+/// are one write, so an acknowledgement that arrives at all means the whole
+/// thing reached the PTY.
 #[test]
-fn submit_input_is_acknowledged_only_after_its_terminating_enter_is_written() {
+fn submit_input_is_acknowledged_only_after_its_whole_write_is_on_the_pty() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "acknowledged-submit";
@@ -1089,19 +960,11 @@ fn submit_input_is_acknowledged_only_after_its_terminating_enter_is_written() {
         "stty -echo; while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
     );
 
-    let started = Instant::now();
     conn.send(&Cmd::SubmitInput {
         session_id: session_id.to_string(),
         data: b"owner reply".to_vec(),
     });
     expect_ok(&mut conn);
-    let acknowledged_after = started.elapsed();
-
-    assert!(
-        acknowledged_after
-            >= Duration::from_millis(kanna_daemon::session::LOGICAL_INPUT_SUBMIT_DELAY_MS),
-        "the answer arrived in {acknowledged_after:?}, before the Enter could have been written"
-    );
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -1118,32 +981,19 @@ fn submit_input_is_acknowledged_only_after_its_terminating_enter_is_written() {
     }
 }
 
-/// A child that repaints for a couple of seconds after it is given input,
-/// the way an agent TUI does while it consumes a pasted burst, and reports
-/// whether the terminating Enter reached it during that repaint or after it.
+/// A child that keeps its screen busy from the moment it starts, the way an
+/// agent TUI does mid-turn, and reports whether the submission boundary
+/// arrived in the same read as the message it belongs to.
 ///
 /// It reads its own tty non-canonically so it can see the message before any
-/// line terminator, and polls for input while a background emitter keeps the
-/// screen busy, which is exactly the state that used to swallow the Enter.
+/// line terminator. The background emitter runs the whole time, so the
+/// terminal is never quiet when the delivery is made — which is the state that
+/// used to withhold the Enter indefinitely.
 const SLOW_DRAINING_CHILD: &str = "\
 stty -echo -icanon -icrnl min 1 time 0; \
-dd bs=4096 count=1 >/dev/null 2>&1; \
-printf 'GOT_MESSAGE\\r\\n'; \
-( i=0; while [ $i -lt 120 ]; do printf 'R\\r\\n'; sleep 0.02; i=$((i+1)); done ) & \
-stty min 0 time 0; \
-during=''; \
-i=0; \
-while [ $i -lt 30 ]; do \
-during=\"$during$(dd bs=256 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n')\"; \
-sleep 0.03; \
-i=$((i+1)); \
-done; \
-case \"$during\" in *0d*) printf 'ENTER_DURING_REPAINT\\r\\n';; *) printf 'ENTER_NOT_SEEN_YET\\r\\n';; esac; \
-wait; \
-printf 'REPAINT_DONE\\r\\n'; \
-stty min 1 time 0; \
-after=$(dd bs=256 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); \
-case \"$after\" in *0d*) printf 'ENTER_AFTER_REPAINT\\r\\n';; *) printf 'NO_ENTER\\r\\n';; esac; \
+( i=0; while [ $i -lt 300 ]; do printf 'R\\r\\n'; sleep 0.02; i=$((i+1)); done ) & \
+first=$(dd bs=4096 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); \
+case \"$first\" in *0d*) printf 'ENTER_WITH_MESSAGE\\r\\n';; *) printf 'ENTER_NOT_WITH_MESSAGE\\r\\n';; esac; \
 sleep 60";
 
 /// A child whose screen never settles, and which echoes what it is given so
@@ -1152,24 +1002,24 @@ const NEVER_SETTLING_CHILD: &str = "\
 stty -icanon min 0 time 0; \
 while :; do printf 'T\\r\\n'; sleep 0.02; done";
 
-/// The fault the owner's 2026-09-05 dictated message hit, at the boundary that
-/// caused it: the Enter used to be written a fixed 150 ms after the message,
-/// which lands inside the burst a CLI is still consuming and is taken as part
-/// of it rather than as a submission. The message then sits unsent at the
-/// composer while the delivery reports success.
+/// The owner directive of 2026-09-08, at the boundary the removed protection
+/// guarded.
 ///
-/// The submission boundary now waits for the terminal to stop drawing, which
-/// is the daemon's only provider-neutral evidence that the CLI is finished
-/// with what it was handed.
+/// The Enter used to wait for the terminal to stop drawing before it was
+/// written, and an agent mid-turn never stops drawing: the delivery was
+/// answered `delivery_uncertain`, the text sat unsent at the composer, and ten
+/// seconds later the session started refusing every later message. A message
+/// delivered into a session that is actively streaming must now be
+/// acknowledged promptly and reach the child with its submission boundary.
 #[test]
-fn a_terminating_enter_waits_for_a_repainting_terminal_to_settle() {
+fn a_submission_boundary_is_written_even_while_the_terminal_repaints() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "slow-draining-consumer";
     spawn_shell_session(&mut conn, session_id, SLOW_DRAINING_CHILD);
 
-    // The child arms its reader before anything is delivered, so the message
-    // cannot be consumed by the shell's own startup.
+    // The child arms its reader — and its emitter — before anything is
+    // delivered, so the terminal really is busy when the message goes out.
     thread::sleep(Duration::from_millis(700));
 
     let started = Instant::now();
@@ -1179,11 +1029,18 @@ fn a_terminating_enter_waits_for_a_repainting_terminal_to_settle() {
     });
     expect_ok(&mut conn);
     let acknowledged_after = started.elapsed();
+    assert!(
+        acknowledged_after < Duration::from_secs(2),
+        "a delivery into a repainting terminal must not wait for it to settle; \
+         this one took {acknowledged_after:?}"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let vt = loop {
         let snapshot = recv_snapshot_for(&mut conn, session_id);
-        if snapshot.vt.contains("ENTER_AFTER_REPAINT") || snapshot.vt.contains("NO_ENTER") {
+        if snapshot.vt.contains("ENTER_WITH_MESSAGE")
+            || snapshot.vt.contains("ENTER_NOT_WITH_MESSAGE")
+        {
             break snapshot.vt;
         }
         assert!(
@@ -1195,32 +1052,20 @@ fn a_terminating_enter_waits_for_a_repainting_terminal_to_settle() {
     };
 
     assert!(
-        !vt.contains("ENTER_DURING_REPAINT"),
-        "the Enter reached the child while it was still repainting: {vt:?}"
-    );
-    assert!(
-        vt.contains("ENTER_NOT_SEEN_YET") && vt.contains("ENTER_AFTER_REPAINT"),
-        "the Enter did not arrive after the repaint settled: {vt:?}"
-    );
-    assert!(
-        acknowledged_after >= Duration::from_secs(1),
-        "the delivery was acknowledged in {acknowledged_after:?}, before the child could \
-         have stopped repainting"
+        vt.contains("ENTER_WITH_MESSAGE"),
+        "the submission boundary was withheld from a repainting terminal: {vt:?}"
     );
 }
 
-/// The other side of the same rule. A terminal that never stops drawing never
-/// proves it took the message, so the Enter is withheld instead of being
-/// written into a repaint that would swallow it.
+/// The reproduction from the owner's report, inverted.
 ///
-/// The text is then parked at that composer, which is a thing the daemon put
-/// there and cannot prove left, so the daemon stops claiming to know what is on
-/// that composer and a second delivery is refused rather than written behind
-/// the first and submitted as one sentence nobody wrote.
+/// A terminal that never stops drawing never proved it took a message, so the
+/// first delivery was answered `delivery_uncertain` and every later one was
+/// refused `409` until a human pressed Enter at that terminal. Both messages
+/// now reach it, each with its own submission boundary.
 #[test]
-fn an_unconsumable_delivery_is_reported_uncertain_and_cannot_be_concatenated_onto() {
-    let daemon =
-        DaemonHandle::start_with_env([("KANNA_DAEMON_TEST_LOGICAL_CONSUMPTION_TIMEOUT_MS", "800")]);
+fn a_never_settling_terminal_takes_every_delivery() {
+    let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "never-settling-consumer";
     spawn_shell_session(&mut conn, session_id, NEVER_SETTLING_CHILD);
@@ -1233,17 +1078,18 @@ fn an_unconsumable_delivery_is_reported_uncertain_and_cannot_be_concatenated_ont
         thread::sleep(Duration::from_millis(50));
     }
 
-    conn.send(&Cmd::SubmitInput {
-        session_id: session_id.to_string(),
-        data: b"FIRSTMESSAGE".to_vec(),
-    });
-    match conn.recv() {
-        Evt::Error { code, .. } => assert_eq!(
-            code,
-            Some(ErrorCode::LogicalInputSubmissionUnproven),
-            "an unconsumable delivery must be reported, not answered Ok"
-        ),
-        other => panic!("expected an unproven-submission error, got: {other:?}"),
+    for message in [b"FIRSTMESSAGE".as_slice(), b"SECONDMESSAGE"] {
+        conn.send(&Cmd::SubmitInput {
+            session_id: session_id.to_string(),
+            data: message.to_vec(),
+        });
+        match conn.recv() {
+            Evt::Ok => {}
+            Evt::Error { code, message } => {
+                panic!("a never-settling terminal must still take the message: {code:?} {message}")
+            }
+            other => panic!("expected Ok, got: {other:?}"),
+        }
     }
 
     conn.send(&Cmd::List);
@@ -1254,39 +1100,31 @@ fn an_unconsumable_delivery_is_reported_uncertain_and_cannot_be_concatenated_ont
                 .find(|session| session["session_id"] == session_id)
                 .expect("the session is listed");
             assert_eq!(
-                session["composer_attestation"], "unknown",
-                "the daemon put a line at that composer and cannot prove it left"
+                session["composer_attestation"], "not-typed",
+                "a delivery says nothing about what anybody typed: {session:?}"
             );
-            assert_eq!(session["logical_input_blocked"], true);
         }
         other => panic!("expected SessionList, got: {other:?}"),
     }
 
-    conn.send(&Cmd::SubmitInput {
-        session_id: session_id.to_string(),
-        data: b"SECONDMESSAGE".to_vec(),
-    });
-    match conn.recv() {
-        Evt::Error { code, .. } => assert_eq!(
-            code,
-            Some(ErrorCode::InheritedDraftStateUnknown),
-            "a later message must be refused, not written behind the parked one"
-        ),
-        other => panic!("expected a blocked-input error, got: {other:?}"),
-    }
-
     // The child echoes what reaches it, so the frame is the record of what was
     // actually written to that terminal.
-    thread::sleep(Duration::from_millis(500));
-    let vt = recv_snapshot_for(&mut conn, session_id).vt;
-    assert!(
-        vt.contains("FIRSTMESSAGE"),
-        "the first message's text should have reached the terminal: {vt:?}"
-    );
-    assert!(
-        !vt.contains("SECONDMESSAGE"),
-        "the second message was concatenated onto the parked one: {vt:?}"
-    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let vt = recv_snapshot_for(&mut conn, session_id).vt;
+        if vt.contains("FIRSTMESSAGE") && vt.contains("SECONDMESSAGE") {
+            assert!(
+                !vt.contains("FIRSTMESSAGESECONDMESSAGE"),
+                "each delivery carries its own submission boundary: {vt:?}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "both messages should have reached the terminal: {vt:?}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn recv_snapshot_for(conn: &mut ClientConn, session_id: &str) -> SnapshotPayload {
@@ -1395,6 +1233,50 @@ impl DaemonHandle {
         }
     }
 
+    /// Best-effort teardown of every session this daemon still owns. Failure
+    /// is silent on purpose: the daemon may already be gone, which is exactly
+    /// what several of these fixtures arrange.
+    fn kill_live_sessions(&self) {
+        let Ok(stream) = UnixStream::connect(&self.socket_path) else {
+            return;
+        };
+        // Only if this handle's own daemon is still the one serving: a
+        // superseded handle is dropped while its successor holds the socket,
+        // and killing that successor's sessions would destroy the thing under
+        // test.
+        if kanna_daemon::proc_info::socket_peer_pid(stream.as_raw_fd())
+            != Some(self.child.id() as libc::pid_t)
+        {
+            return;
+        }
+        if stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .is_err()
+        {
+            return;
+        }
+        let Ok(clone) = stream.try_clone() else {
+            return;
+        };
+        let mut conn = ClientConn {
+            reader: BufReader::new(clone),
+            writer: stream,
+        };
+        conn.send(&Cmd::List);
+        let Ok(Evt::SessionList { sessions }) = conn.recv_with_timeout(Duration::from_secs(5))
+        else {
+            return;
+        };
+        for session_id in sessions
+            .iter()
+            .filter_map(|session| session["session_id"].as_str())
+            .map(str::to_string)
+        {
+            conn.send(&Cmd::Kill { session_id });
+            let _ = conn.recv_with_timeout(Duration::from_secs(5));
+        }
+    }
+
     fn connect(&self) -> ClientConn {
         let stream = UnixStream::connect(&self.socket_path).expect("failed to connect to daemon");
         stream
@@ -1432,9 +1314,9 @@ fn daemon_fd_count(pid: u32) -> usize {
 
     #[cfg(target_os = "linux")]
     {
-        return std::fs::read_dir(format!("/proc/{pid}/fd"))
+        std::fs::read_dir(format!("/proc/{pid}/fd"))
             .expect("should read daemon fd directory")
-            .count();
+            .count()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1531,6 +1413,18 @@ fn recovery_output_contains(command: &Value, marker: &[u8]) -> bool {
 
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
+        // Ask the daemon to tear its sessions down before killing it.
+        //
+        // SIGKILL is what these fixtures want for the *daemon* -- several of
+        // them are about a daemon that died -- but a SIGKILLed daemon never
+        // runs its teardown sweep, so every session process it owned is
+        // orphaned to init. Some of this file's fixtures deliberately produce
+        // output as fast as a shell can, so an orphan is a spinning process
+        // holding a whole core; enough of them accumulate to starve the
+        // machine and make unrelated suites fail on timeouts. Going through
+        // `Kill` uses the daemon's own sweep, which is the only thing that
+        // reaches a descendant that left the process group.
+        self.kill_live_sessions();
         let _ = self.child.kill();
         let _ = self.child.wait();
         // Clean up temp dir
@@ -2739,8 +2633,7 @@ fn test_kill_then_respawn_broadcasts_exit_before_session_created() {
                 .iter()
                 .find(|session| session["session_id"] == "sess-swap")
                 .expect("replacement session");
-            assert_eq!(replacement["logical_input_blocked"], false);
-            assert_eq!(replacement["pending_logical_input_count"], 0);
+            assert_eq!(replacement["composer_attestation"], "not-typed");
         }
         other => panic!("expected replacement SessionList, got: {other:?}"),
     }
@@ -3000,15 +2893,25 @@ fn atomic_attach_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// Wait for a fixture to touch a marker file.
+///
+/// This is an eventual event with no product latency contract -- the marker
+/// appears when a shell finishes writing however much output the test asked
+/// for -- so the budget only has to contain a wedged fixture. It used to be
+/// two seconds, which a flood sized for a kernel with large socket buffers
+/// (see [`MINIMUM_SATURATING_FLOOD`]) outgrows on an ordinary machine.
 fn wait_for_file(path: &Path) {
-    for _ in 0..100 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
         if path.exists() {
             return;
         }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for file {path:?}"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-
-    panic!("timed out waiting for file {:?}", path);
 }
 
 fn release_hidden_prefix_session(dir: &Path) {
@@ -3596,12 +3499,7 @@ fn same_id_reuse_waits_for_old_reader_exit_and_recovery_teardown() {
             }
             Ok(Evt::Exit { .. }) => panic!("old Exit escaped after replacement SessionCreated"),
             Ok(Evt::SessionCreated { .. } | Evt::Snapshot { .. } | Evt::Ok | Evt::Unknown) => {}
-            Ok(
-                Evt::SessionList { .. }
-                | Evt::LogicalInputReleased { .. }
-                | Evt::RawInputReady { .. }
-                | Evt::Error { .. },
-            ) => {}
+            Ok(Evt::SessionList { .. } | Evt::RawInputReady { .. } | Evt::Error { .. }) => {}
             Err(_) => {}
         }
     }
@@ -3719,11 +3617,24 @@ fn natural_exit_finalization_precedes_same_id_replacement_creation() {
         "stale natural-exit teardown targeted the replacement incarnation: {commands:?}",
     );
 
+    // The replacement printed its line seconds ago, before this attach, so
+    // the attach snapshot is where it lives; only what the session emits
+    // afterwards arrives live. Reading the live stream alone would be
+    // asserting a race, not a fanout.
     let mut attached = daemon.connect();
-    attach(&mut attached, session_id);
-    let output = attached.collect_output_until_contains("NEW_NATURAL_INCARNATION");
+    attached.send(&Cmd::AttachSnapshot {
+        session_id: session_id.to_string(),
+        emulate_terminal: false,
+    });
+    let snapshot = recv_snapshot(&mut attached, session_id);
+    let observed = if snapshot.vt.contains("NEW_NATURAL_INCARNATION") {
+        snapshot.vt
+    } else {
+        String::from_utf8_lossy(&attached.collect_output_until_contains("NEW_NATURAL_INCARNATION"))
+            .into_owned()
+    };
     assert!(
-        String::from_utf8_lossy(&output).contains("NEW_NATURAL_INCARNATION"),
+        observed.contains("NEW_NATURAL_INCARNATION"),
         "replacement terminal lost its fanout during stale natural-exit cleanup",
     );
 }
@@ -4161,6 +4072,71 @@ fn test_broadcast_both_clients_receive_output() {
 /// bounds on loaded machines, so they serialize among themselves.
 static FLOOD_PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// The smallest flood that actually saturates a non-reading subscriber's
+/// socket on this platform.
+///
+/// AF_UNIX flow control is not the same on the two kernels, and the
+/// difference is large enough to silently void these tests. On macOS the
+/// clamped receiver buffer is what bites: a writer into a socket clamped to
+/// `SO_RCVBUF` 4096 blocks after about 8 KiB. On Linux the *sender's*
+/// `SO_SNDBUF` dominates and the receiver's clamp barely moves it -- the same
+/// socketpair took 180 KiB before the write blocked, against a 212 992-byte
+/// default `SO_SNDBUF`. A flood sized for macOS therefore fits entirely
+/// inside kernel buffers on Linux: nothing stalls, nothing lags, and these
+/// tests would report green while exercising none of the backpressure they
+/// exist for. (Their closing "the daemon logged a stall/lag" assertions are
+/// what catches that, and are why this constant is not guesswork.)
+const MINIMUM_SATURATING_FLOOD: usize = if cfg!(target_os = "macos") {
+    0
+} else {
+    512 * 1024
+};
+
+/// Size one flood, keeping each test's own intent while guaranteeing the
+/// subscriber's socket really saturates here.
+fn flood_bytes(intended: usize) -> usize {
+    intended.max(MINIMUM_SATURATING_FLOOD)
+}
+
+/// The floor under every Linux flood-delivery ceiling, measured.
+///
+/// A Linux flood is a fixed 512 KiB ([`MINIMUM_SATURATING_FLOOD`]) whatever
+/// each test's macOS base is, so the time to deliver one does not scale with
+/// that base -- and scaling it was how the 1.5 s base became a 7.5 s ceiling
+/// that the VM could not meet.
+///
+/// Measured on the Ubuntu 26.04 aarch64 VM, idle, with
+/// `measure_flood_delivery_with_and_without_a_stalled_observer`, three runs of
+/// each condition:
+///
+/// | run | no stalled observer | stalled observer attached |
+/// | --- | --- | --- |
+/// | 1 | 7 226 ms | 7 532 ms |
+/// | 2 | 5 505 ms | 5 224 ms |
+/// | 3 | 4 457 ms | 4 960 ms |
+///
+/// So 68-115 KiB/s, and the stalled observer costs nothing the run-to-run
+/// spread does not already cover: the with/without difference (-281 ms to
+/// +503 ms) is well inside the 2.8 s spread of the *same* condition. The
+/// healthy path is not being delayed, so there is no daemon regression here --
+/// the ceiling was simply below the machine's throughput.
+///
+/// 30 s is four times the slowest delivery observed. That headroom is
+/// affordable because the regression these tests guard is *unbounded*: the
+/// observer write had no timeout at all, so a saturated observer froze PTY
+/// ingestion indefinitely. Any finite ceiling catches that; one below the
+/// machine's own throughput catches nothing but the machine.
+const LINUX_MINIMUM_FLOOD_DELIVERY_CEILING: Duration = Duration::from_secs(30);
+
+/// How long a *healthy* client may take to receive a whole flood.
+fn flood_delivery_ceiling(base: Duration) -> Duration {
+    if cfg!(target_os = "macos") {
+        base
+    } else {
+        std::cmp::max(base * 5, LINUX_MINIMUM_FLOOD_DELIVERY_CEILING)
+    }
+}
+
 #[test]
 fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
     let _flood_probe_guard = FLOOD_PROBE_LOCK
@@ -4179,8 +4155,10 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
             // Small enough that a healthy client parses the whole flood well
             // inside the strict bound even on a loaded machine, large enough
             // to saturate a non-reading subscriber's socket buffers.
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 16384 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
-                .to_string(),
+            format!(
+                "while [ ! -f go ]; do sleep 0.01; done; head -c {} /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat",
+                flood_bytes(16384)
+            ),
         ],
         cwd: dir.display().to_string(),
         env: HashMap::new(),
@@ -4211,10 +4189,11 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
     // 4096-byte receive buffer, so seconds, not milliseconds. The ceiling
     // therefore only has to be an order of magnitude under that, which keeps
     // it out of reach of scheduler noise on a box running several suites.
-    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_millis(2_000));
+    let flood_ceiling = flood_delivery_ceiling(Duration::from_millis(2_000));
+    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", flood_ceiling);
     let flood_latency = flood_started.elapsed();
     assert!(
-        flood_latency < Duration::from_millis(2_000),
+        flood_latency < flood_ceiling,
         "healthy delivery must not wait on the stalled subscriber; took {flood_latency:?}"
     );
 
@@ -4222,8 +4201,8 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
         session_id: session_id.to_string(),
         data: b"HEALTHY_MARKER\n".to_vec(),
     });
-    let output = healthy
-        .collect_output_until_contains_with_timeout("HEALTHY_MARKER", Duration::from_millis(2_000));
+    let output =
+        healthy.collect_output_until_contains_with_timeout("HEALTHY_MARKER", flood_ceiling);
     let output = String::from_utf8_lossy(&output);
     let marker = output
         .find("HEALTHY_MARKER")
@@ -4260,6 +4239,73 @@ fn non_reading_attached_client_does_not_block_healthy_terminal_output() {
     cleanup_atomic_attach_dir(&dir);
 }
 
+/// How long a healthy subscriber takes to receive the flood, with and without
+/// a saturated observer attached.
+///
+/// `#[ignore]`d: it is a measurement, not an assertion, and it is what
+/// [`flood_delivery_ceiling`]'s Linux number is derived from. Re-run it on the
+/// machine in question rather than adjusting the ceiling by feel:
+///
+/// ```text
+/// cargo test -p kanna-daemon --test reconnect -- --ignored --nocapture \
+///     measure_flood_delivery_with_and_without_a_stalled_observer
+/// ```
+#[test]
+#[ignore]
+fn measure_flood_delivery_with_and_without_a_stalled_observer() {
+    for with_stalled_observer in [false, true] {
+        let _flood_probe_guard = FLOOD_PROBE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let daemon = DaemonHandle::start();
+        let session_id = "sess-flood-measurement";
+        let dir = atomic_attach_dir("flood-measurement");
+        let bytes = flood_bytes(65536);
+
+        let mut control = daemon.connect();
+        control.send(&Cmd::Spawn {
+            session_id: session_id.to_string(),
+            executable: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "while [ ! -f go ]; do sleep 0.01; done; head -c {bytes} /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
+                ),
+            ],
+            cwd: dir.display().to_string(),
+            env: HashMap::new(),
+            cols: 80,
+            rows: 24,
+            terminal_prelude: None,
+        });
+        expect_session_created(&mut control, session_id);
+
+        let stalled_observer = with_stalled_observer.then(|| {
+            let mut observer = daemon.connect();
+            observer.clamp_recv_buffer(4096);
+            observe(&mut observer, session_id);
+            observer
+        });
+
+        let mut healthy = daemon.connect();
+        attach(&mut healthy, session_id);
+
+        std::fs::write(dir.join("go"), b"go").unwrap();
+        let started = Instant::now();
+        healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_secs(120));
+        let elapsed = started.elapsed();
+
+        eprintln!(
+            "MEASUREMENT stalled_observer={with_stalled_observer} bytes={bytes} elapsed_ms={} throughput_kib_s={:.0}",
+            elapsed.as_millis(),
+            (bytes as f64 / 1024.0) / elapsed.as_secs_f64()
+        );
+
+        drop(stalled_observer);
+        cleanup_atomic_attach_dir(&dir);
+    }
+}
+
 #[test]
 fn stalled_observer_does_not_delay_healthy_subscriber_or_pty_ingestion() {
     let _flood_probe_guard = FLOOD_PROBE_LOCK
@@ -4275,8 +4321,10 @@ fn stalled_observer_does_not_delay_healthy_subscriber_or_pty_ingestion() {
         executable: "/bin/sh".to_string(),
         args: vec![
             "-c".to_string(),
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 65536 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
-                .to_string(),
+            format!(
+                "while [ ! -f go ]; do sleep 0.01; done; head -c {} /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat",
+                flood_bytes(65536)
+            ),
         ],
         cwd: dir.display().to_string(),
         env: HashMap::new(),
@@ -4301,7 +4349,10 @@ fn stalled_observer_does_not_delay_healthy_subscriber_or_pty_ingestion() {
 
     std::fs::write(dir.join("go"), b"go").unwrap();
 
-    healthy.collect_output_until_contains_with_timeout("FLOOD_DONE", Duration::from_millis(1_500));
+    healthy.collect_output_until_contains_with_timeout(
+        "FLOOD_DONE",
+        flood_delivery_ceiling(Duration::from_millis(1_500)),
+    );
 
     // PTY ingestion itself must keep advancing while the observer is
     // saturated: new input has to reach the authoritative headless terminal.
@@ -4347,8 +4398,10 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
             "-c".to_string(),
             // Enough serialized volume to overflow the reduced byte budget on
             // top of the kernel socket buffers.
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 32768 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
-                .to_string(),
+            format!(
+                "while [ ! -f go ]; do sleep 0.01; done; head -c {} /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat",
+                flood_bytes(32768)
+            ),
         ],
         cwd: dir.display().to_string(),
         env: HashMap::new(),
@@ -4368,12 +4421,18 @@ fn overflowing_subscriber_resyncs_from_fresh_snapshot_without_delaying_healthy()
 
     // The healthy subscriber observes the end of the flood promptly while the
     // stalled subscriber's backlog overflows its byte budget.
-    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_secs(5));
+    healthy.wait_for_content_with_timeout(
+        "FLOOD_DONE",
+        flood_delivery_ceiling(Duration::from_secs(5)),
+    );
 
     // The lagging subscriber is not disconnected: once it resumes reading and
     // drains its bounded backlog, the daemon resynchronizes it in place with
     // a fresh authoritative snapshot that contains the content it missed.
-    stalled.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_secs(15));
+    stalled.wait_for_content_with_timeout(
+        "FLOOD_DONE",
+        flood_delivery_ceiling(Duration::from_secs(15)),
+    );
 
     // After the resync the recovered subscriber streams live output again,
     // and the session stayed healthy for everyone.
@@ -4417,8 +4476,10 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
         executable: "/bin/sh".to_string(),
         args: vec![
             "-c".to_string(),
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 32768 /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat"
-                .to_string(),
+            format!(
+                "while [ ! -f go ]; do sleep 0.01; done; head -c {} /dev/zero | tr '\\000' X; printf '\\r\\nFLOOD_DONE\\r\\n'; cat",
+                flood_bytes(32768)
+            ),
         ],
         cwd: dir.display().to_string(),
         env: HashMap::new(),
@@ -4436,7 +4497,10 @@ fn overflowing_observer_resyncs_with_fresh_snapshot_then_live_output() {
 
     std::fs::write(dir.join("go"), b"go").unwrap();
 
-    healthy.wait_for_content_with_timeout("FLOOD_DONE", Duration::from_secs(5));
+    healthy.wait_for_content_with_timeout(
+        "FLOOD_DONE",
+        flood_delivery_ceiling(Duration::from_secs(5)),
+    );
     wait_for_daemon_log(
         &daemon,
         "stage=observer_write event=lag",
@@ -4502,8 +4566,10 @@ fn same_connection_reattach_discards_stale_backlog_behind_fresh_snapshot() {
             // 'S' fill marks stale pre-reattach output; the flood exceeds the
             // clamped socket buffers so the subject's mailbox holds a backlog
             // when it re-attaches.
-            "while [ ! -f go ]; do sleep 0.01; done; head -c 65536 /dev/zero | tr '\\000' S; printf '\\r\\nSTALE_DONE\\r\\n'; : > flooded; cat"
-                .to_string(),
+            format!(
+                "while [ ! -f go ]; do sleep 0.01; done; head -c {} /dev/zero | tr '\\000' S; printf '\\r\\nSTALE_DONE\\r\\n'; : > flooded; cat",
+                flood_bytes(65536)
+            ),
         ],
         cwd: dir.display().to_string(),
         env: HashMap::new(),
@@ -5072,9 +5138,9 @@ fn fenced_raw_keys_refuse_a_different_observed_pid() {
     );
 }
 
-/// A raw Enter declared as a submission empties the draft ledger, so a logical
-/// message delivered afterwards goes out immediately instead of being held
-/// behind a line the raw keys appeared to be typing.
+/// A raw Enter declared as a submission empties the draft ledger, so a
+/// composer this daemon watched being typed into stops attesting `typed` at the
+/// moment the human submits it.
 ///
 /// This is the bookkeeping half of the contract: `InputIfSession` classified
 /// every fenced write as a draft, so a fenced CR armed the ledger against a
@@ -5100,23 +5166,9 @@ fn a_declared_raw_submission_clears_the_draft_it_ends() {
         class: RawInputClass::Draft,
     });
     assert!(matches!(conn.recv(), Evt::Ok));
+    assert_eq!(composer_attestation(&mut conn, session_id), "typed");
 
-    // A logical message now has to wait: appending it would concatenate onto
-    // that unsent line.
-    conn.send(&Cmd::SubmitInput {
-        session_id: session_id.to_string(),
-        data: b"held message".to_vec(),
-    });
-    assert!(matches!(
-        conn.recv(),
-        Evt::Error {
-            code: Some(ErrorCode::LogicalInputHeldByDraft),
-            ..
-        }
-    ));
-
-    // The declared submission ends that draft, and the held message goes out
-    // as its own line rather than glued to the first.
+    // The declared submission ends that draft.
     conn.send(&Cmd::RawInputIfSession {
         session_id: session_id.to_string(),
         expected_pid: pid,
@@ -5124,23 +5176,34 @@ fn a_declared_raw_submission_clears_the_draft_it_ends() {
         class: RawInputClass::Submission,
     });
     assert!(matches!(conn.recv(), Evt::Ok));
+    assert_eq!(composer_attestation(&mut conn, session_id), "not-typed");
 
-    let rendered = await_snapshot_containing(&mut conn, session_id, "LINE:<held message>");
-    assert!(
-        rendered.contains("LINE:<half typed>"),
-        "the raw draft was not submitted on its own: {rendered:?}"
-    );
+    let rendered = await_snapshot_containing(&mut conn, session_id, "LINE:<half typed>");
     assert!(
         !rendered.contains("LINE:<half typedheld message>"),
-        "the held message was concatenated onto the draft: {rendered:?}"
+        "the raw draft was not submitted on its own: {rendered:?}"
     );
 }
 
-/// Navigation keys create no composer text, so they must not park a delivered
-/// message behind a draft nobody typed — the 2026-09-05 phantom-draft report,
-/// asserted here through the fenced raw path an agent actually uses.
+/// This session's composer attestation, as the daemon reports it.
+fn composer_attestation(conn: &mut ClientConn, session_id: &str) -> String {
+    conn.send(&Cmd::List);
+    match conn.recv() {
+        Evt::SessionList { sessions } => sessions
+            .iter()
+            .find(|session| session["session_id"] == session_id)
+            .and_then(|session| session["composer_attestation"].as_str())
+            .expect("the session is listed with an attestation")
+            .to_string(),
+        other => panic!("expected SessionList, got: {other:?}"),
+    }
+}
+
+/// Navigation keys create no composer text, so they must not make a composer
+/// attest `typed` — the 2026-09-05 phantom-draft report, asserted here through
+/// the fenced raw path an agent actually uses.
 #[test]
-fn fenced_navigation_keys_do_not_hold_a_delivered_message() {
+fn fenced_navigation_keys_declare_no_draft() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "raw-key-navigation";
@@ -5161,21 +5224,18 @@ fn fenced_navigation_keys_do_not_hold_a_delivered_message() {
         });
         assert!(matches!(conn.recv(), Evt::Ok));
     }
+    assert_eq!(composer_attestation(&mut conn, session_id), "not-typed");
 
     conn.send(&Cmd::SubmitInput {
         session_id: session_id.to_string(),
         data: b"delivered anyway".to_vec(),
     });
-    assert!(
-        matches!(conn.recv(), Evt::Ok),
-        "an Escape, an arrow and a PageUp created no draft, so nothing may be held"
-    );
+    assert!(matches!(conn.recv(), Evt::Ok));
     // The line the shell reads may still carry the navigation bytes ahead of
     // the text: a canonical-mode line discipline keeps them in its buffer until
     // the Enter, and whether they land in this line or an earlier one depends
     // on when the child got scheduled. That is the terminal's business. What
-    // this asserts is the daemon's: the message went out with its own Enter
-    // rather than being parked behind a draft those keys never created.
+    // this asserts is the daemon's: the message went out with its own Enter.
     await_snapshot_containing(&mut conn, session_id, "delivered anyway>");
 }
 
@@ -5220,7 +5280,8 @@ const STDIN_RECORDER_PROGRAM: &str = r#"
 use Time::HiRes qw(time sleep);
 $| = 1;
 system('stty raw -echo');
-my ($bytes_path, $reads_path, $paste, $repaint_seconds) = @ARGV;
+my ($bytes_path, $reads_path, $paste, $repaint_seconds, $read_size) = @ARGV;
+$read_size = 65536 unless $read_size;
 open(my $bytes, '>', $bytes_path) or die "bytes: $!";
 open(my $reads, '>', $reads_path) or die "reads: $!";
 binmode($bytes);
@@ -5231,7 +5292,7 @@ print "READY\r\n";
 my $repainted = 0;
 while (1) {
     my $buf = '';
-    my $n = sysread(STDIN, $buf, 65536);
+    my $n = sysread(STDIN, $buf, $read_size);
     last unless defined($n) && $n > 0;
     print $reads "$n\n";
     print $bytes $buf;
@@ -5348,12 +5409,45 @@ impl StdinRecorder {
     }
 }
 
+/// A consumer read size small enough to guarantee that any message worth
+/// testing arrives in several reads, on any kernel.
+///
+/// The daemon does not control where a consumer's `read` boundaries fall --
+/// that is the whole lesson of the 2026-09-06 incident -- and the two kernels
+/// do not agree on where they fall by default: macOS's PTY queue split a
+/// 1,047-byte write at 1,022 bytes, while Linux delivered the same write
+/// whole (measured in Phase 0). Framing tests must therefore impose the
+/// fragmentation themselves rather than inherit a platform constant, or they
+/// assert nothing at all on the platform that does not split.
+const FRAGMENTING_READ_SIZE: usize = 128;
+
 fn spawn_stdin_recorder(
     daemon: &DaemonHandle,
     conn: &mut ClientConn,
     session_id: &str,
     bracketed_paste_mode: bool,
     repaint_seconds: f64,
+) -> StdinRecorder {
+    spawn_stdin_recorder_reading(
+        daemon,
+        conn,
+        session_id,
+        bracketed_paste_mode,
+        repaint_seconds,
+        65536,
+    )
+}
+
+/// As [`spawn_stdin_recorder`], but the recorder reads at most `read_size`
+/// bytes per `read`, so the consumer's own boundaries -- not the kernel's --
+/// decide how the message is fragmented.
+fn spawn_stdin_recorder_reading(
+    daemon: &DaemonHandle,
+    conn: &mut ClientConn,
+    session_id: &str,
+    bracketed_paste_mode: bool,
+    repaint_seconds: f64,
+    read_size: usize,
 ) -> StdinRecorder {
     let bytes_path = daemon._dir.join(format!("{session_id}-stdin.bin"));
     let reads_path = daemon._dir.join(format!("{session_id}-reads.txt"));
@@ -5370,6 +5464,7 @@ fn spawn_stdin_recorder(
             reads_path.to_string_lossy().into_owned(),
             if bracketed_paste_mode { "1" } else { "" }.to_string(),
             format!("{repaint_seconds}"),
+            format!("{read_size}"),
         ],
         cwd: "/tmp".to_string(),
         env: HashMap::new(),
@@ -5428,6 +5523,15 @@ fn session_pid(conn: &mut ClientConn, session_id: &str) -> u32 {
 /// arrives — the daemon's partial-write loop is correct — but they arrive as two
 /// separate reads, and the second one is a 25-byte fragment that reads as a
 /// complete sentence.
+// macOS only, deliberately: this fixture asserts that the *kernel* split the
+// write, which is the 2026-09-06 incident's own premise. Phase 0 measured the
+// identical 1,047-byte write arriving whole on Linux (kernel 7.0, both
+// canonical and raw), so the split cannot be required there -- and must never
+// be replaced by a "Linux queue size", which would only re-encode a second
+// platform constant the daemon does not control. The framing guarantee that
+// this behaviour is the reason for is asserted portably by the two tests
+// below, which fragment the consumer instead.
+#[cfg(target_os = "macos")]
 #[test]
 fn raw_input_at_the_incident_length_is_split_by_the_pty_queue() {
     let daemon = DaemonHandle::start();
@@ -5478,7 +5582,17 @@ fn a_long_single_line_logical_message_survives_the_pty_queue_split() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "long-logical-message";
-    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.0);
+    // The consumer, not the kernel, is what fragments this message -- so the
+    // guarantee is asserted on every platform rather than only where the PTY
+    // queue happens to split.
+    let recorder = spawn_stdin_recorder_reading(
+        &daemon,
+        &mut conn,
+        session_id,
+        true,
+        0.0,
+        FRAGMENTING_READ_SIZE,
+    );
     let message = incident_shaped_message();
 
     conn.send(&Cmd::SubmitInput {
@@ -5508,17 +5622,21 @@ fn a_long_single_line_logical_message_survives_the_pty_queue_split() {
     let reads = recorder.reads();
     assert!(
         reads.len() >= 2,
-        "the kernel queue must still have split this message — the fix is in-band framing, \
-         not a single write; it arrived as {reads:?}"
+        "a reader taking {FRAGMENTING_READ_SIZE} bytes at a time must have split this \
+         message — the fix is in-band framing, not a single write; it arrived as {reads:?}"
     );
     assert!(
         recorder.first_read() < expected.len() - 1,
         "the split must fall inside the paste region, not at its Enter: {reads:?}"
     );
-    assert_eq!(
-        reads.last().copied(),
-        Some(1),
-        "the Enter must arrive as its own input event, after the paste closed: {reads:?}"
+    // The Enter travels in the same buffer as the message, immediately after
+    // the closing paste marker. Wherever the kernel queue divides that buffer,
+    // the marker still closes the editor operation in-band, so the CR after it
+    // is a submission rather than pasted text.
+    assert!(
+        received.ends_with(b"\x1b[201~\r"),
+        "the submission boundary must follow the closing paste marker: {:?}",
+        String::from_utf8_lossy(&received[received.len().saturating_sub(16)..])
     );
 }
 
@@ -5531,11 +5649,21 @@ fn a_logical_message_split_inside_a_character_is_not_corrupted() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "multibyte-logical-message";
-    let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 0.0);
+    let recorder = spawn_stdin_recorder_reading(
+        &daemon,
+        &mut conn,
+        session_id,
+        true,
+        0.0,
+        FRAGMENTING_READ_SIZE,
+    );
 
     let text = "日本語のメッセージ、".repeat(45);
     let message = text.as_bytes().to_vec();
-    assert!(message.len() > 1_100, "the payload must outgrow the queue");
+    assert!(
+        message.len() > 1_100,
+        "the payload must outgrow any single consumer read"
+    );
 
     conn.send(&Cmd::SubmitInput {
         session_id: session_id.to_string(),
@@ -5548,12 +5676,26 @@ fn a_logical_message_split_inside_a_character_is_not_corrupted() {
     assert_eq!(received, expected);
     recorder.assert_settled_at(&expected, Duration::from_millis(400));
 
-    let split = recorder.first_read();
-    assert_eq!(
-        expected[split] & 0b1100_0000,
-        0b1000_0000,
-        "this test only proves reassembly if the read boundary cut a character; the split \
-         landed at {split}, on a character boundary"
+    // This test only proves reassembly if a read boundary actually cut a
+    // character. Every boundary is checked rather than just the first: the
+    // consumer asks for a fixed number of bytes but may be handed fewer, so
+    // no single boundary's offset is guaranteed. With three-byte characters
+    // and a reader that is not itself character-aware, two boundaries in
+    // three land mid-character, so a run with none is a broken premise.
+    let boundaries: Vec<usize> = recorder
+        .reads()
+        .iter()
+        .scan(0usize, |offset, read| {
+            *offset += read;
+            Some(*offset)
+        })
+        .take_while(|offset| *offset < expected.len())
+        .collect();
+    assert!(
+        boundaries
+            .iter()
+            .any(|offset| expected[*offset] & 0b1100_0000 == 0b1000_0000),
+        "no read boundary cut a character, so nothing was reassembled: {boundaries:?}"
     );
 
     let inner = &received[PASTE_BEGIN.len()..received.len() - PASTE_END.len() - 1];
@@ -5659,10 +5801,10 @@ fn without_bracketed_paste_mode_a_long_message_is_whole_but_the_split_remains() 
     );
 }
 
-/// A CLI repainting while it consumes the message is not evidence that it did
-/// not, so the Enter waits for quiet rather than for a clock.
+/// A CLI repainting while it consumes the message no longer delays anything:
+/// the message and its submission boundary are one write.
 #[test]
-fn a_logical_message_is_submitted_once_after_the_terminal_stops_repainting() {
+fn a_logical_message_is_submitted_once_into_a_repainting_terminal() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "repainting-logical-message";
@@ -5681,47 +5823,36 @@ fn a_logical_message_is_submitted_once_after_the_terminal_stops_repainting() {
     recorder.assert_settled_at(&expected, Duration::from_millis(400));
 }
 
-/// A terminal that never settles is never proven to have consumed anything, so
-/// its Enter is withheld and the caller is told — and the next message meets
-/// the parked composer instead of being concatenated onto it.
+/// A terminal that never goes quiet used to have its Enter withheld and every
+/// later message refused. Both messages now arrive whole, each with its own
+/// submission boundary, at the byte level.
 #[test]
-fn a_terminal_that_never_settles_withholds_the_enter_and_refuses_what_follows() {
-    let daemon = DaemonHandle::start_with_env([(
-        "KANNA_DAEMON_TEST_LOGICAL_CONSUMPTION_TIMEOUT_MS",
-        "1200",
-    )]);
+fn a_terminal_that_never_settles_still_receives_every_submission() {
+    let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "never-settling-terminal";
     let recorder = spawn_stdin_recorder(&daemon, &mut conn, session_id, true, 8.0);
-    let message = b"manager message into a terminal that never goes quiet".to_vec();
+    let first = b"manager message into a terminal that never goes quiet".to_vec();
+    let second = b"a second message".to_vec();
 
-    conn.send(&Cmd::SubmitInput {
-        session_id: session_id.to_string(),
-        data: message.clone(),
-    });
-    match conn.recv() {
-        Evt::Error { code, .. } => {
-            assert_eq!(code, Some(ErrorCode::LogicalInputSubmissionUnproven))
-        }
-        other => panic!("an unproven submission must not answer Ok, got: {other:?}"),
+    for message in [&first, &second] {
+        conn.send(&Cmd::SubmitInput {
+            session_id: session_id.to_string(),
+            data: message.clone(),
+        });
+        expect_ok(&mut conn);
     }
 
-    let received = recorder.wait_for_bytes(message.len(), Duration::from_secs(10));
-    assert_eq!(received, message, "the text reached the composer");
-    assert!(
-        !received.contains(&b'\r'),
-        "no Enter may be written into a repaint that would swallow it"
+    let mut expected = submitted(&first);
+    expected.extend_from_slice(&submitted(&second));
+    let received = recorder.wait_for_bytes(expected.len(), Duration::from_secs(30));
+    assert_eq!(
+        received,
+        expected,
+        "both messages must arrive whole, each with its own Enter: {:?}",
+        String::from_utf8_lossy(&received)
     );
-
-    conn.send(&Cmd::SubmitInput {
-        session_id: session_id.to_string(),
-        data: b"a second message".to_vec(),
-    });
-    match conn.recv() {
-        Evt::Error { code, .. } => assert_eq!(code, Some(ErrorCode::InheritedDraftStateUnknown)),
-        other => panic!("a message behind a parked composer must be refused, got: {other:?}"),
-    }
-    recorder.assert_settled_at(&message, Duration::from_millis(400));
+    recorder.assert_settled_at(&expected, Duration::from_millis(400));
 }
 
 /// Task ids are reused across a rerun and a stage's own respawn, so a message
@@ -5756,10 +5887,12 @@ fn submit_input_if_session_rejects_a_replaced_session_and_writes_nothing() {
     assert_eq!(received, expected);
 }
 
-/// A human's half-typed line and a delivered message share one composer, and
-/// the delivered one must not be appended to it or interleaved into it.
+/// A human's half-typed line and a delivered message share one composer. The
+/// delivered one is no longer held for them — it lands after their draft and
+/// submits, which is the collision the owner asked for — but it must still
+/// arrive whole and unsplit, never interleaved into their keystrokes.
 #[test]
-fn a_logical_message_never_interleaves_with_a_concurrent_raw_draft() {
+fn a_logical_message_lands_after_a_concurrent_raw_draft_without_interleaving() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "raw-and-logical";
@@ -5777,26 +5910,15 @@ fn a_logical_message_never_interleaves_with_a_concurrent_raw_draft() {
         session_id: session_id.to_string(),
         data: message.clone(),
     });
-    match conn.recv() {
-        Evt::Error { code, .. } => assert_eq!(code, Some(ErrorCode::LogicalInputHeldByDraft)),
-        other => panic!("a message behind a typed draft must not answer Ok, got: {other:?}"),
-    }
-    recorder.assert_settled_at(b"half-typed", Duration::from_millis(400));
-
-    // The human submits their own line; the held message follows it whole.
-    conn.send(&Cmd::InputBoundary {
-        session_id: session_id.to_string(),
-        data: b"\r".to_vec(),
-    });
     expect_ok(&mut conn);
 
-    let mut expected = b"half-typed\r".to_vec();
+    let mut expected = b"half-typed".to_vec();
     expected.extend_from_slice(&submitted(&bracketed(&message)));
     let received = recorder.wait_for_bytes(expected.len(), Duration::from_secs(30));
     assert_eq!(
         received,
         expected,
-        "the draft submits first, then the whole message in its own paste: {:?}",
+        "the message follows the draft whole, in its own paste: {:?}",
         String::from_utf8_lossy(&received)
     );
     recorder.assert_settled_at(&expected, Duration::from_millis(400));

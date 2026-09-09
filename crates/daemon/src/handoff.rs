@@ -272,7 +272,25 @@ async fn request_handoff(
 
     let raw_fd = stream.as_raw_fd();
     let (read_half, write_half) = stream.into_split();
-    let mut reader = tokio::io::BufReader::new(read_half);
+    // Capacity 1 -- deliberately, and it is a correctness bound, not a
+    // tuning choice.
+    //
+    // The old daemon writes the `HandoffReady` metadata line and then, on
+    // this same stream, a one-byte message carrying the session descriptors
+    // as `SCM_RIGHTS`. A buffered read that reaches past the metadata line's
+    // newline pulls that byte in too, and on Linux the kernel then **drops
+    // the descriptors on the floor**: a plain `read()` glues the ancillary
+    // message's payload into the byte stream and discards its control data,
+    // so the `recvmsg` that follows finds nothing and the whole handoff
+    // fails as `EAGAIN` with every session's fds already consumed. (macOS
+    // instead stops a read at the ancillary boundary, which is why this
+    // protocol worked there unchanged. Both are legal; only one is
+    // forgiving.)
+    //
+    // Reading a byte at a time cannot cross that boundary. The metadata line
+    // is tens of kilobytes at worst and this runs once per handoff, so the
+    // extra syscalls are irrelevant next to losing every session.
+    let mut reader = tokio::io::BufReader::with_capacity(1, read_half);
     let mut writer = write_half;
 
     let cmd = serde_json::json!({ "type": "Handoff", "version": mode.version() });
@@ -1125,7 +1143,12 @@ pub(crate) async fn handle_handoff(
                     raw_input_draft_active: parts.raw_input_draft_active,
                     raw_input_draft_state_known: parts.raw_input_draft_state_known,
                     typed_draft_bytes: parts.typed_draft_bytes,
-                    pending_logical_inputs: parts.pending_logical_inputs,
+                    // Never sent by a current daemon: nothing is ever
+                    // retained, so there is no queue to hand over. The field
+                    // stays on the wire only so a *predecessor* that still
+                    // held messages can pass them to a successor that
+                    // submits them on adoption.
+                    pending_logical_inputs: Vec::new(),
                 });
                 fds.push(fd);
                 cloned_pty_fds.push(fd);

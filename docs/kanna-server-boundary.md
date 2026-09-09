@@ -11,6 +11,30 @@ The desktop frontend itself is planned to become a `kanna-server` client as well
 - daemon: PTY and session ownership, terminal input and output, agent process lifecycle
 - SQLite DB: repo and task persistence, task metadata, query backing for server resources
 
+## Database opening authority
+
+`kanna-server` validates database access at configuration load, before legacy
+relocation touches either file, and immediately before every `Db::open` or
+`Db::open_migrated`. Test fixture deletion is guarded too. Task-transfer's
+independent companion SQLite opener uses the same runtime-defaults check.
+Path resolution, including canonical/legacy preference, does not grant access.
+
+Close-time worktree cleanup is a server-owned command appended after repository
+teardown. The teardown retains task isolation. Only the cleanup command restores
+`KANNA_TASK_ID` / `KANNA_WORKTREE` to the parent server's values and forwards its
+explicit desktop authorization, after checking database access in that parent.
+Other isolation signals remain intact, and the cleanup opener checks again.
+
+The real desktop database requires explicit `KANNA_DESKTOP_DB_ACCESS=desktop`,
+supplied by the desktop when it launches the server. Isolated/test/worktree
+processes cannot override the veto with that authorization. `kd` supplies
+`KANNA_DB_ISOLATED=1`; macOS's ignored `XDG_DATA_HOME` also vetoes production
+access. The guard protects the OS account's production paths independently of
+caller-controlled HOME, including aliases and not-yet-created databases.
+No schema, migration, filename or storage location changes. See
+[database access protection](dev/dev-workflow.md#database-access-protection)
+for the complete caller contract and rejected alternatives.
+
 ## KSP State Invalidation
 
 `StateChanged` remains a correctness invalidation, but task activity no longer
@@ -58,78 +82,69 @@ scope still tells an older consumer exactly what to invalidate.
 ## Terminal Input Boundaries
 
 `POST /v1/tasks/{task_id}/input` carries one logical message, not raw terminal
-bytes. The daemon is the authoritative queue owner: it submits the message
-immediately when the composer is clear, lifts a readable human draft off the
-composer and puts it back around the delivery, and retains the message only for
-a composer it can neither read nor safely swap. The
-accepted queue is session-scoped, survives server/frontend reconnects and
-transactional daemon handoff, and is never redirected to a later run or stage.
+bytes. The daemon writes it immediately: the text, framed as a paste when the
+terminal supports it, followed by its submission boundary, as one write. It
+does not inspect the composer first, and there is no condition under which it
+retains, defers, or refuses the message.
 
-**A `204` means submitted, not queued.** The message and its Enter are one
-delivery in two PTY writes, and the daemon acknowledges only after the second,
-so a success answer cannot be given for text still sitting unsent at the
-composer. A message retained behind a draft answers `202` with
-`status: "queued"`, `reason: "input_held_by_draft"`, and the task's
-`queuedInputCount`: it stays queued for the producer's boundary and every task
-summary exposes that backlog and reason. **That answer is now the exception,
-not the rule** — see "A typed draft no longer waits for its human" below. It is first stored in
-`queued_task_input`, not falsely recorded as delivered. Reported by the product owner on 2026-08-20, when replies sent from
-mobile sat at the agent's prompt until someone pressed Enter at that terminal
-while the phone had been told they were delivered.
+**A live session always takes the message.** Until 2026-09-08 the daemon parked
+a delivery behind a human's unsent draft, and withheld its Enter from a
+terminal that would not stop repainting; ten seconds later the same session
+began refusing every later message until somebody typed into that terminal. It
+reproduced three times in one day on 0.3.0-staging.12 — including an owner
+answering a consultation from their phone, whose answer never arrived and whose
+machine had no way to clear it. The owner's decision is recorded verbatim: *"The
+input protection is killing me. I'd rather have collisions."* A message that
+occasionally lands after somebody's half-typed line is far cheaper than one that
+silently never arrives, so the collision is the accepted outcome and the hold is
+gone. Nothing is queued, nothing is parked, and no session refuses input because
+of what is on its composer.
 
-**A keystroke that cannot type does not hold anything.** The desktop declares
-every non-Enter keydown a draft, so opening a task's terminal and pressing an
-arrow, an Escape or a PageUp — or clicking, or scrolling — used to park every
-later phone or manager delivery behind a line nobody had typed, and the phone
-was shown a queued-input banner while that composer was visibly empty (owner
-report, 2026-09-05). The daemon now classifies the bytes of each declared draft
-write and only counts the ones that can put text at a composer: navigation,
-scrolling, deletion, mouse and focus reports, a bare Escape and the abandon
-keys create nothing, so they declare no draft. Cursor up and down are the
-exception — they recall a previous line *into* the composer, so they count like
-typing. A real draft still holds, and still releases at the producer's own
-submission boundary or when the composer is attested empty, which is what a
-cleared draft renders as. The full classification and why Escape/Ctrl-C/Ctrl-U
-are inert rather than clearing are in `crates/daemon/SPEC.md`.
+**A `204` means written, boundary included.** The message and its Enter are one
+PTY write, so the acknowledgement means what a caller assumes it means. The
+remaining failures are about the *session*, not the composer:
+`no_live_agent_session` when there is no live PTY session or it was replaced
+before acceptance, and `503 delivery_uncertain` when the round trip to the
+daemon was lost after the bytes may already have reached the PTY — which must
+not be retried blindly, and is deliberately not recorded as delivered.
 
-**A composer painted grey is not a draft.** Claude Code paints the last
-submitted line back as a faint tab-to-accept ghost, so a session whose ledger
-armed once never rendered a textually empty composer again and held every
-delivery for the rest of its life — reported by the owner on 2026-09-07, who
-could see the text was grey while typed text is not. The daemon now reads the
-composer row's styling and cursor as well as its text, and treats the line as
-the provider's own suggestion when *both* every cell after the prompt is faint
-and the cursor sits at the start of the composer rather than after the text.
-Either signal alone is not enough. The ledger stays the primary evidence: a
-frame may only ever clear it, never arm it.
+**What survives is composer attestation.** The typed-byte ledger that used to
+decide whether to hold a message still runs, because it answers a different
+question the codebase depends on: whether text on a `❯` line was typed by
+somebody or is the provider's own chrome. Nothing may be read as an instruction
+unless it is attested `typed`.
 
-**A terminal reply is not a keystroke.** An emulator answers the application's
-own questions — colour reports, device attributes, XTVERSION — up the same PTY
-input path a human types on, and the plain terminal-input frame declares every
-byte it carries a draft unless the client marks it control. Those replies'
-payloads used to be counted as typed characters, arming the ledger on a
-terminal nobody had touched. They are now classified and excluded.
-
-**A typed draft no longer waits for its human.** When the daemon can read the
-composer, and the ledger says it watched the line being typed, it copies the
-draft off the composer, submits the message on its own, and writes the draft
-back byte for byte — attested `typed` again, as it was. Keystrokes that arrive
-mid-swap are buffered and replayed onto the restored draft in order, so nothing
-a human types is lost or lands inside the delivery. Every step is verified
-against the rendered composer and an unverifiable one abandons without writing
-anything, leaving the draft untouched and the message queued. So
-`input_held_by_draft` now means a composer the daemon could not read or could
-not verify: an unmeasured provider, a draft inherited without its ledger, a
-dialog, a busy frame, a wrapped multi-line draft, a cursor left mid-line, or a
-clear that did not clear. The mechanics, the abort cases and what happens when
-a submission cannot be proven are in `crates/daemon/SPEC.md`.
-
-A held message is kept, not dropped, and mobile's banner says so: it names the
-count, the reason, and that Kanna sends it once the draft is submitted or
-cleared, so nobody resends and delivers it twice.
+- **A keystroke that cannot type declares no draft.** The desktop declares
+  every non-Enter keydown a draft, so opening a task's terminal and pressing an
+  arrow, an Escape or a PageUp — or clicking, or scrolling — used to arm the
+  ledger and make an empty composer read as a human's unsent line (owner
+  report, 2026-09-05). The daemon classifies the bytes of each declared draft
+  write and only counts the ones that can put text at a composer: navigation,
+  scrolling, deletion, mouse and focus reports, a bare Escape and the abandon
+  keys create nothing. Cursor up and down are the exception — they recall a
+  previous line *into* the composer, so they count like typing. The full
+  classification and why Escape/Ctrl-C/Ctrl-U are inert rather than clearing is
+  in `crates/daemon/SPEC.md`.
+- **A composer painted grey is not a draft.** Claude Code paints the last
+  submitted line back as a faint tab-to-accept ghost, so a session whose ledger
+  armed once never rendered a textually empty composer again and reported
+  `typed` for the rest of its life — reported by the owner on 2026-09-07, who
+  could see the text was grey while typed text is not. The daemon reads the
+  composer row's styling and cursor as well as its text, and treats the line as
+  the provider's own suggestion when *both* every cell after the prompt is
+  faint and the cursor sits at the start of the composer rather than after the
+  text. Either signal alone is not enough. The ledger stays the primary
+  evidence: a frame may only ever clear it, never arm it.
+- **A terminal reply is not a keystroke.** An emulator answers the
+  application's own questions — colour reports, device attributes, XTVERSION —
+  up the same PTY input path a human types on, and the plain terminal-input
+  frame declares every byte it carries a draft unless the client marks it
+  control. Those replies' payloads used to be counted as typed characters,
+  arming the ledger on a terminal nobody had touched. They are classified and
+  excluded.
 
 When the terminal application has enabled bracketed-paste mode, the daemon
-frames the text as one paste before the fenced Enter — for a message with an
+frames the text as one paste before the trailing Enter — for a message with an
 embedded CR or LF, and for any message of at least 256 bytes. The PTY is
 otherwise only a byte stream, and the daemon's writes are not the CLI's reads: a
 PTY master takes about a kilobyte per write, so a longer message reaches the CLI
@@ -138,23 +153,16 @@ several editor actions and submits only a trailing fragment. Measured on
 2026-09-05 against Claude Code 2.1.261: a 1,191-byte single-line message was
 written as 1022 + 169 bytes, and only the 169-byte tail was submitted.
 Unadvertised mode and input short enough to arrive in one write remain unframed,
-preserving literal-text and provider slash-command semantics.
+preserving literal-text and provider slash-command semantics. The paste markers
+travel in-band with the bytes, so however the kernel queue divides them the
+closing marker still ends the editor operation and the CR after it is a
+submission rather than pasted text.
 
-**The Enter waits for the terminal to settle.** Submission is not inferred from
-PTY bytes, and it is not inferred from elapsed time either. A CLI repaints while
-it consumes an input burst, so an Enter written into that repaint is taken as
-part of the burst and the message sits unsent at the composer while the delivery
-reports success — the owner's 1,227-byte dictated message on 2026-09-05 drained
-for about 19 seconds, its Enter went out 150 ms in, and nothing ran for six
-minutes. The daemon now holds the Enter until nothing has been drawn for a
-settle window that restarts on every output chunk, bounded at 25 seconds. When
-that bound elapses the Enter is withheld rather than written blind, and
-`POST /v1/tasks/{task_id}/input` answers `503` with
-`reason: "delivery_uncertain"`: the text is on that composer, a human at that
-terminal may still submit it, and a retry would put a second copy behind it.
-Nothing is recorded as delivered. The parked text then leaves that session's
-composer attestation `unknown` and every later delivery is refused — see below
-and `crates/daemon/SPEC.md`.
+The writer holds a fixed short pause after one delivered message's submission
+boundary before the next queued message may own the composer: a CLI needs a
+processing turn after Enter, and two deliveries written back to back without one
+arrive merged. It is write pacing, not a protection — it always elapses, it
+never inspects the terminal, and it cannot withhold a message.
 
 Raw terminal producers classify each frame as draft, submission, or control.
 Desktop keyboard events declare unmodified Enter; mobile LAN and relay clients
@@ -195,12 +203,11 @@ draft/submission/control class, and only the named `enter` key declares a
 submission. A carriage return inside `bytes` is refused rather than written:
 submission is never inferred from bytes in a stream, so an undeclared CR would
 be counted as composer content while the CLI that received it had already
-submitted the line — leaving every later delivered message held behind a draft
-that no longer existed. Everything else is declared a draft, and the daemon's
-existing content classification decides whether it can latch one, so navigation
-and control keys hold nothing. Raw input is deliberately not a way to clear
-draft state: there is no caller-chosen class, and the global draft interlock is
-unchanged.
+submitted the line — leaving the daemon's composer attestation describing a
+prompt that no longer holds what it says. Everything else is declared a draft,
+and the daemon's existing content classification decides whether it can latch
+one, so navigation and control keys arm nothing. Raw input is deliberately not
+a way to clear attestation: there is no caller-chosen class.
 
 **Fenced, ordered, and honest about what it wrote.** Discovery and delivery both
 hold the task's lifecycle lease, and every write is fenced to the PTY process ID
@@ -376,8 +383,8 @@ cutover. Repeated proposals for the applied size are no-ops; no-viewer state
 retains the last applied size. Geometry changes use an ordered snapshot and a
 new stream generation rather than byte-offset replay, while resume within
 unchanged geometry remains incremental. Snapshot application never echoes a
-resize request. Geometry does not clear draft bytes, alter composer
-attestation, or release held logical input.
+resize request. Geometry does not clear draft bytes or alter composer
+attestation.
 
 Mixed versions are deliberately conservative. New clients against an old owner
 suppress automatic remote sizing and report that takeover is unavailable. On a
@@ -547,6 +554,7 @@ in `docs/task-specs/c9f5721b.md` and enforced by the router authorization tests.
 - `GET /v1/repos/{repo_id}/agents` (resolved named agent definitions available to task creation)
 - `GET /v1/repos/{repo_id}/recent-workflows` (workflow names the repo's tasks were most recently created with, newest first)
 - `POST /v1/tasks/{task_id}/actions/set-workflow` (re-pin an open task to a compatible workflow definition)
+- `POST /v1/tasks/{task_id}/actions/replace-workflow` (validate and replace one task's complete pinned definition, fenced by its previous snapshot)
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
 - `GET /v1/tasks/{task_id}/children` (durable direct-child fan-out history; includes closed children)
@@ -788,12 +796,14 @@ new peers from retained history. A server that has no relay route keeps the
 native cursor shape and, for an account-wide-authorized caller, adds a
 relay-unavailable `machineErrors` warning.
 Agent-facing catalog calls set `shortCursor=true`. The server then retains the
-full native or `ks1.` checkpoint behind an immutable `kh1.` plus eight-hex-digit
-handle for ten minutes after its last use. A fresh handle is issued for every
-response, so concurrent resumes cannot rewind one another. Handles are
-process-local by design: an expired, evicted, corrupt, or post-restart handle
-fails with an instruction to omit the cursor and safely replay retained
-history. Callers that omit `shortCursor` keep receiving the deployed stateless
+full native or `ks1.` checkpoint behind a durable `kh1.` plus eight-hex-digit
+handle. Each successful resume advances that same handle, so a busy watcher
+does not accumulate abandoned entries or evict its live checkpoint. The
+mapping is stored in the server database and survives server and relay
+restarts; abandoned mappings are pruned with the 14-day event-retention
+window. An unknown or corrupt handle is a handle-resolution failure, distinct
+from a native cursor whose event position predates retained history. Callers
+that omit `shortCursor` keep receiving the deployed stateless
 cursor shapes, and numeric, `p1.`, `p3.`, `kc1.`, and `ks1.` inputs remain
 accepted; resuming one with short cursors enabled upgrades the response.
 `localOnly=true` is the explicit compatibility escape hatch used by adapters
@@ -978,8 +988,8 @@ reachable only by whoever held a private stdio pipe.
   control. Absence of the field is not evidence of a stale cursor.
   Single-consumer: a read prunes through the cursor it is given, so exactly one
   desktop process subscribes. This feed carries only *advisory* events —
-  pairing progress and remote terminal frames. The four state-mutating events
-  (`incoming_transfer_request`, `task_pull_requested`,
+  pairing progress and remote terminal frames. The state-mutating events
+  (`incoming_transfer_request`, `task_pull_requested`, `task_pull_refused`,
   `outgoing_transfer_committed`, `outgoing_transfer_finalization_requested`)
   never reach it: the sidecar's stdout reader appends them straight to the
   transfer engine's durable work queue in this process. A full advisory log
@@ -1053,6 +1063,8 @@ intents:
   "Agent-facing task transfer" below.
 - `POST /v1/transfers/{transfer_id}/actions/approve`
 - `POST /v1/transfers/{transfer_id}/actions/reject-incoming`
+- `POST /v1/transfers/{transfer_id}/actions/dismiss-failure` — marks a `failed`
+  transfer read so it stops marking its task; the record itself survives.
 
 Progress reaches the UI through the snapshot's `transfer_status`, which the
 sidebar already renders. There is no bespoke event protocol between the engine
@@ -1083,7 +1095,7 @@ without MCP:
 | `kanna_pull_task` | `task pull` | `POST /v1/transfers/actions/pull-task` |
 | `kanna_task_transfers` | `task transfers` | `GET /v1/tasks/{id}/transfers` |
 
-Four things are contract rather than convenience:
+These things are contract rather than convenience:
 
 - **A destination is canonical identity.** `to_machine` / `from_machine` accept
   a machine (desktop) id from `kanna_list_machines` or a transfer peer id from
@@ -1108,6 +1120,27 @@ Four things are contract rather than convenience:
   `sourceTaskId` and `localTaskId`. A pull's `requestId` is stable for repeats
   within the sidecar's five-minute window, so an unchanged id is a duplicate
   rather than a second move.
+- **A refused pull is recorded on the machine that asked.** A pull is answered
+  synchronously with a request id and fulfilled minutes later by the *source's*
+  engine, so a source that refuses has no reply left to travel back on. It
+  therefore reports the refusal as its own peer request, and the requester
+  records it as a `failed` incoming transfer with a `sourceTaskId` and no
+  `localTaskId` — nothing arrived and nothing will. `kanna_task_transfers`
+  answers for that source id even though no such task exists here, which is
+  what it used to answer 404 to, and the snapshot carries the row as a
+  `transferAlerts` entry so a window has something to show for a move it
+  started. Best effort in one direction only: the refusal is already durable on
+  the source, and a requester that cannot be reached never turns a refusal into
+  retried work.
+- **A transfer failure is reported until it is read.** Nothing else retires
+  one — the move that would have replaced it is the one that did not happen —
+  so a task wore its `⇄✗` marker for the rest of its life.
+  `POST /v1/transfers/{transfer_id}/actions/dismiss-failure` marks a `failed`
+  transfer read (`dismissedAt` on the summary), which stops the marker and the
+  alert without touching the record; a later `completed` transfer of the same
+  task retires it on its own. Only a `failed` transfer may be dismissed: an
+  in-flight one is the current truth about the task, and hiding it would lose
+  the move.
 - **A route that cannot carry the transfer is refused before anything is
   queued.** The relay authenticates every tunnel dial, and the Firebase
   credential it dials with is minted by the signed-in renderer and pushed to
@@ -1116,10 +1149,13 @@ Four things are contract rather than convenience:
   followed by `expected auth_ok text frame` on a socket nobody was watching. The
   server now reads that credential's own `exp` (`cloud_transfer_proxy.rs`), and
   a cloud route inside the expiry margin is reported unusable — with the fix,
-  which is opening the signed-in desktop app on that machine, or using the LAN
-  while both machines share a network. A stale cloud route behind a healthy LAN
-  route costs only the fallback, and the response says so rather than
-  downgrading silently. A cloud-routed *pull* additionally depends on the source
+  which is starting a transfer from the signed-in desktop app on that machine
+  (it refreshes the route as it goes), or using the LAN while both machines
+  share a network. What that check reads is strictly *this* machine's outbound
+  credential: a transfer that just arrived here was dialled with the other
+  machine's, so an incoming move proves nothing about the route reported here.
+  A stale cloud route behind a healthy LAN route costs only the fallback, and
+  the response says so rather than downgrading silently. A cloud-routed *pull* additionally depends on the source
   machine's own credential, which this machine cannot see; the tool description
   says so.
 
@@ -1410,10 +1446,6 @@ cursor-based, not snapshot-diffed:
   `task_input` row behind it, because a keystroke answering a menu is an action
   and not something somebody said. See
   [Raw terminal keys](#raw-terminal-keys).
-- `task.input_blocked` reports that a task's agent session started or stopped
-  refusing messages delivered into it. `payload.inputBlocked` names the reason
-  while it is blocked and is `null` when it clears; today the only reason is
-  `inherited-draft-unknown`. See [Refused task input](#refused-task-input).
 - `task.teardown_failed` reports that detached best-effort workspace teardown
   failed to start or exceeded its hard deadline. Its payload contains
   `sessionId` and `error`; the same failure is written to the server log.
@@ -1552,30 +1584,12 @@ answered.
   messages into another task's PTY or append completion rows to `task_input`.
   Managers observe completion through `kanna_wait_events` for fan-out or
   `kanna_wait_task` for a single task, backed by durable run and task events.
-- **Held deliveries move through a durable FIFO.** The server reserves a
-  `queued_task_input` row before daemon submission, bound to the exact child
-  PID used by `SubmitInputIfSession` as the daemon-session incarnation fence.
-  A held response keeps that row visible; each incarnation-bearing
-  `LogicalInputReleased` daemon event transactionally moves exactly the oldest
-  matching row into `task_input`, preserving boundaries, source, and order.
-  `SessionList.pending_logical_input_count` reconciles missed release events
-  only against held rows owned by that same incarnation. A row owned by a
-  replaced or exited session is retired; it is not promoted from the
-  replacement's pending count. Retirement deletes the queue row and appends
-  `task.input_delivery_expired`, carrying the old PID, queue id, prior state,
-  and reason. It deliberately creates no `task_input` row because the old
-  incarnation never proved delivery.
-- **Interrupted preparation is ambiguous, not delivery evidence.** A server
-  restart converts any leftover `preparing` reservation to
-  `delivery_uncertain`: the server cannot prove whether the daemon accepted and
-  perhaps flushed it before the interruption. A live, exact-incarnation
-  `LogicalInputReleased` edge may consume a `preparing` row when it races the
-  HTTP held-state update, because that edge itself proves acceptance. Reconnect
-  never makes that inference. An uncertain row remains a FIFO barrier for its
-  incarnation: later release evidence cannot be attributed past it, because
-  the event may describe the ambiguous slot itself. It remains sender-visible
-  while that incarnation lives; exit or replacement expires it observably as
-  described above, so it cannot wedge a later PTY incarnation's queue.
+- **A row is written after the daemon answers.** The server records the
+  delivery once the daemon has confirmed the bytes reached the PTY, and not
+  before. There is no queue table and no pending state: nothing is ever
+  retained, so there is nothing to reconcile across a restart. Rows that used
+  to sit `queued` against an empty composer for hours — bookkeeping for a hold
+  that had already resolved — no longer exist.
 - **Uncertain deliveries are not recorded.** A `delivery_uncertain` response
   means the bytes may or may not have reached the PTY; a row asserting the agent
   was told something it may never have heard is a worse record than a missing
@@ -1608,49 +1622,6 @@ from it that nothing was ever sent. The review and qa-dispatcher agent
 definitions require reading this surface before making any claim about what was
 or was not instructed.
 
-## Refused Task Input
-
-A daemon that adopted a session across a restart or handoff never watched that
-terminal being typed into, so it cannot know whether an unsubmitted line is
-sitting at the prompt. It refuses to submit a logical message into such a
-session rather than append to someone else's draft — the guard the
-draft-isolation work established, and it is not weakened here.
-
-The session is alive and idle the whole time it refuses, so `activity`,
-`runtimeState`, and `readState` all report a perfectly healthy task. That is how
-one was found: a finishing task's merge handoff failed against an idle merge
-singleton, and the only record of the wedge was inside the failing task's own
-stage result.
-
-The daemon now resolves most of these itself, by reading the composer it
-inherited rather than waiting for a keystroke (see `crates/daemon/SPEC.md`).
-What remains — a composer holding text this daemon cannot prove is gone — is a
-human's decision about that screen, and it is surfaced rather than discovered.
-Two causes reach it: a session adopted across a restart or handoff whose
-composer holds text nobody here saw typed, and a logical message the daemon
-wrote whose submission it could not prove (above), which parks its text on that
-composer. Both are reported through the one `inherited-draft-unknown` value,
-whose name still says only the first; the value is deliberately unchanged
-because it is read by mobile, desktop, the event feed and the tool catalog, and
-its operational meaning covers both — nothing was delivered, retrying changes
-nothing, and a human at that terminal has to resolve it.
-
-- `GET /v1/tasks/{task_id}` reports `inputBlocked` (`inherited-draft-unknown`,
-  or absent when the session accepts input). The value is written by the
-  terminal watcher from the daemon's own `logical_input_blocked`, reconciled
-  from `List` against every daemon generation — a session becomes blocked at
-  adoption — and updated live from the daemon's `InputBlockedChanged` event.
-- `task.input_blocked` announces each edge in the event feed.
-- `POST /v1/tasks/{task_id}/input` answers `409` with `reason: "input_blocked"`
-  and a message naming what unblocks it. Nothing was delivered, so nothing is
-  recorded as delivered, and retrying changes nothing.
-- Every server-side delivery that meets the refusal records it on the *target*
-  and marks that task `unread`, so a wedged singleton stops reading as idle in
-  the sidebar. This includes the pre-close merge-handoff backstop, which
-  additionally refuses the close so
-  the finishing task parks at its final stage instead of disappearing with an
-  un-handed-off PR.
-
 ## The Composer Is Not Session Output
 
 A CLI's composer line — the `❯` a Claude session sits at, the `›` Codex draws —
@@ -1668,24 +1639,20 @@ every surface that means "what the session said":
   reached that composer since its last producer-declared submission boundary,
   so `text` may be a human's unsent line), `not-typed` (the daemon watched the
   session and counted none, so `text` is provably the provider's own chrome or
-  suggestion), or `unknown` (nothing can be proven about that composer: a
-  session inherited from before attestation, or one where the daemon wrote a
-  message and could not prove its submission, so its text is parked there).
-  The field is **absent** until a session reports one, which is a different
-  answer from `unknown`.
+  suggestion), or `unknown` (nothing can be proven about that composer — a
+  session inherited from before attestation, or from a predecessor daemon that
+  handed over no ledger). The field is **absent** until a session reports one,
+  which is a different answer from `unknown`.
 - **`typed` is the ledger's verdict, and the rendered frame can overturn it
   towards `not-typed`.** A composer whose every cell is painted faint with the
   cursor still at its start is the provider's own suggestion, whatever the
   ledger counted earlier; that frame resolves the session to `not-typed`. It
   never goes the other way — no frame has ever been allowed to assert that
   somebody typed something.
-- **A parked Kanna-written message is `unknown`, never `not-typed`.** It was not
-  typed, but `not-typed` asserts the composer is *clear* — it is what lets the
-  next delivery go straight out — and a later message written onto parked text
-  is submitted as one sentence nobody wrote. `unknown` is the honest answer and
-  holds later messages exactly as an inherited composer does. It stays a claim
-  about proof, not about authorship: the ledger is still never told that
-  somebody typed something they did not.
+- **Attestation decides what may be *read*, never whether a message is
+  delivered.** A logical message goes out over any composer, attested or not.
+  What `unknown` costs is that nothing on that line may be treated as an
+  instruction — which is the whole point of the ledger.
 - `waitingPromptSnippet` (and the deprecated input-only `snippet` alias) never
   contains composer-line text. The
   daemon's snippet extraction cuts at the composer's *position*, not by a
@@ -1713,12 +1680,11 @@ The broader meaning and future of `waitingPromptSnippet` is deliberately out of
 scope here and tracked by issue #1213. Event delivery never gates on snippet
 presence; beyond excluding composer rows, its existing semantics are unchanged.
 
-The same ledger decides whether a delivered message is held — see
-"Refused Task Input" above and `crates/daemon/SPEC.md`. Zero typed bytes is
-positive proof that no unsent line exists, so the message is written even while
-the CLI renders suggestion text; `typed` and `unknown` still hold. The ledger
-counts only bytes that can *create* composer content, so a session someone only
-navigated, scrolled or clicked in stays `not-typed`.
+The ledger counts only bytes that can *create* composer content, so a session
+someone only navigated, scrolled or clicked in stays `not-typed`. It decides
+what may be read from a composer, and nothing else: a delivered message is
+written over any composer, whatever the ledger says. See
+`crates/daemon/SPEC.md`.
 
 ## Task Parentage
 
@@ -1884,6 +1850,31 @@ higher `revision_limit` can therefore make more rounds available, while
 switching to an equal or lower limit cannot reset spent rounds. A successful
 change emits `task.workflow_changed` with the old and new names, current stage,
 spent rounds, and new limit.
+
+The companion inline surface, `kanna_replace_task_workflow` / CLI `task
+replace-workflow`, edits the pinned definition while preserving the selected
+workflow name. It shares the atomic DB pin-write path and accepts
+`workflowDefinition`, an unchanged `expectedDefinition` from task detail, and
+caller-declared `source`. Stale edits return 409. The server validates the
+bundled workflow schema, provider selectors, agent/environment resolution, and
+retention of current/historical stage names, roles, post owners and relative
+order before writing. New submissions use current syntax; old snapshots are
+compiled through the existing legacy-post loader for compatibility checks.
+
+An execution edit (agent, provider candidates, prompt, effective environment)
+supersedes that stage's old runs as templates for its next spawn. Rerun,
+recovery and revision then resolve the new definition and start a fresh
+conversation; unchanged stages retain their provider stamps. An edited stage
+that never spawned also releases its creation-request override. Live sessions
+and their stamped completion policies remain in force. Future transitions use
+the new snapshot as usual. This edits a task definition without adding another
+provider-override layer or changing config precedence.
+
+`task.workflow_changed` carries full before/after definitions, declared source,
+operation, changed execution stages, and superseded run IDs, with task ID and
+time in the event envelope. These audit/execution records survive ordinary
+14-day feed pruning. See [Runtime workflow replacement](specs/runtime-workflow-replacement.md)
+for limits, lifecycle semantics and the incident E2E.
 
 ## Sticky Workflow Selection
 
@@ -2064,6 +2055,34 @@ and a target whose resolved path leaves the worktree root is rejected, including
 symlink escapes. The surface is read-only: there are no write, delete, download,
 git, or search-in-files operations.
 
+## Desktop View Commands
+
+`POST /v1/desktop/views/open` (`kanna_open_file`) asks whichever desktop windows
+are running to open one of a task's files in that task's main content area, as a
+tab beside its agent session. It exists because an agent could already *read* a
+task's files but had no way to put one in front of the person watching that
+task, short of pasting it into the terminal.
+
+The path is resolved through the same task-workspace resolution
+`/v1/tasks/{task_id}/files/content` uses, before anything is queued: a path
+outside the task's workspace, a missing file, one over 1 MiB, or one that is not
+UTF-8 text is refused with that reason, so a mistyped path is an error the
+caller can act on rather than a window that quietly opens nothing. The content
+read on the way is discarded — the desktop opens the file from the worktree
+itself.
+
+**A requested view is not a shown view.** The response says `requested: true`,
+never that a window displayed anything, and the command is advisory in the same
+way a pairing prompt is: it is appended to a bounded in-memory lane, not to a
+durable table, because nothing about the task depends on it and a request nobody
+saw is correctly forgotten. It writes no `task_input` row — this is not an
+instruction to the agent, and the durable instruction history must not read as
+though it were. The desktop long-polls `GET /v1/desktop/view-commands`
+(loopback-only, single-consumer, same `cursor`/`streamId` contract as the
+transfer advisory lanes) and opens the file in that task's own tab set. It never
+changes which task the operator has selected: the tab is simply there when they
+look at that task.
+
 ## Mobile Notification Delivery
 
 `POST /v1/mobile/notifications` hands every validated notification to the
@@ -2211,7 +2230,28 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 - `kanna-cli machine transfer-peers [--machine-id <MACHINE_ID>] [--server-url <URL>]` calls `GET /v1/transfers/peers` and prints the machines a task can be moved to or from, with each one's current route.
 - `kanna-cli task push --task-id <TASK_ID> --to-machine <MACHINE_OR_PEER_ID> [--transport auto|lan|cloud] [--intent-key <KEY>] [--machine-id <MACHINE_ID>] [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/push-to-peer`. It runs on the machine that owns the task, so `--machine-id` is how a task is pushed off a sibling machine. It schedules the transfer; the response reports `moved: false`.
 - `kanna-cli task pull --source-task-id <TASK_ID> --from-machine <MACHINE_OR_PEER_ID> [--transport auto|lan|cloud] [--server-url <URL>]` calls `POST /v1/transfers/actions/pull-task`. It always runs on the machine the task is moving to and takes no `--machine-id`. It delivers the request; the response reports `moved: false` and a `requestId` that is stable for repeats inside the source's request window.
-- `kanna-cli task transfers --task-id <TASK_ID> [--machine-id <MACHINE_ID>] [--server-url <URL>]` calls `GET /v1/tasks/{task_id}/transfers` and prints the recorded moves with the coarse `pending` / `completed` / `failed` / `rejected` verdict. This is the surface that answers whether a scheduled move happened; a push or pull result never does.
+- `kanna-cli task transfers --task-id <TASK_ID> [--machine-id <MACHINE_ID>] [--server-url <URL>]` calls `GET /v1/tasks/{task_id}/transfers` and prints the recorded moves with the coarse `pending` / `completed` / `failed` / `rejected` verdict. This is the surface that answers whether a scheduled move happened; a push or pull result never does. A task id that names no task *here* still answers when a transfer was recorded against it — a pull this machine asked for and the source refused — rather than 404.
 
 The provider support and daemon-loss trigger matrix is documented in
 [`2026-07-30-session-death-recovery.md`](2026-07-30-session-death-recovery.md).
+
+### Mobile build observations
+
+`POST /v1/mobile/build` accepts the paired installation's self-reported
+`environment`, `channel`, `runtimeVersion`, `nativeVersion`, `nativeBuild`,
+`updateId`, and `source` (`ota`, `embedded`, `development`, `unknown`). Nullable
+identity fields mean unknown; embedded/development launches report no applied
+OTA id. The existing LAN pairing credential authenticates the installation;
+the server derives the device id from that credential, never the body. Relay
+account authority alone cannot report for an installation. Reports persist in
+the pairing store under its existing mutation lock, with a server-written
+`reportedAtUnixMs` (Unix milliseconds). Unpairing removes the observation. These are diagnostic claims,
+never authorization inputs.
+
+`GET /v1/mobile/builds` requires desktop-local access and returns `desktopId`
+and `devices: [{deviceId, deviceName, build}]`. `build` is null for older clients
+that have never reported. It explicitly projects public diagnostic fields and
+never exposes secret hashes or push credentials. `kd mobile ota` reads this
+endpoint; it does not read the pairing file or SQLite. Mobile reporting is best
+effort during trusted LAN connection setup and does not block using an older
+server. Remote-only operation does not refresh this observation.

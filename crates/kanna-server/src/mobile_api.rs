@@ -149,19 +149,22 @@ pub struct TaskSummary {
     pub parent_task_id: Option<String>,
     pub pinned: bool,
     pub pin_order: Option<i64>,
+    /// The agent this task is the account-wide singleton for, or `None` for an
+    /// ordinary task. Read from the `singleton-{agent}` workflow name bound at
+    /// claim time, so a client can show a directory singleton pinned by
+    /// default without asking the relay directory. Absent on a payload from a
+    /// peer that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub singleton_agent: Option<String>,
     #[serde(default)]
     pub blocked_by_task_ids: Vec<String>,
-    /// Inputs retained behind a typed terminal draft (or whose delivery is
-    /// explicitly uncertain). Zero means there is no sender-visible backlog.
-    #[serde(default)]
-    pub queued_input_count: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub queued_input_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskDetail {
+    /// Exact durable snapshot, also used as the replacement concurrency fence.
+    pub workflow_definition: Option<serde_json::Value>,
     pub id: String,
     pub repo_id: String,
     pub title: String,
@@ -186,18 +189,6 @@ pub struct TaskDetail {
     /// Optional only so a payload from a peer that predates the split still
     /// deserializes; this server always reports it.
     pub read_state: Option<String>,
-    /// Why messages delivered into this task's agent session are being
-    /// refused, or absent when they are not. `inherited-draft-unknown` means
-    /// the daemon cannot prove that composer is clear — it adopted the session
-    /// across a restart or handoff and the composer holds text nobody here saw
-    /// typed, or it parked a delivered message's text there unsubmitted — so
-    /// submitting would append to an unsent line; the session is otherwise healthy and idle, which is
-    /// why neither `activity` nor `runtimeState` shows anything wrong. A
-    /// sender that sees this should stop retrying and say so: an empty
-    /// composer clears itself, and anything else needs a human at that
-    /// terminal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_blocked: Option<String>,
     /// Deprecated input-only alias retained for mixed-version clients.
     #[serde(default, skip_serializing)]
     pub snippet: Option<String>,
@@ -255,10 +246,6 @@ pub struct TaskDetail {
     /// from a peer that predates the record still deserializes.
     #[serde(default)]
     pub delivered_input_count: i64,
-    #[serde(default)]
-    pub queued_input_count: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub queued_input_reason: Option<String>,
     pub parent_task_id: Option<String>,
     /// Direct children of this task, oldest first — the downward view of
     /// `parent_task_id`. **Closed children are included**: parentage is
@@ -778,22 +765,12 @@ impl MobileApi {
                     .latest_stage_run(&item.id)
                     .map_err(|e| format!("db error: {}", e))?
                     .and_then(|run| run.agent);
-                let queued_input_count = self
-                    ._db
-                    .count_queued_task_inputs(&item.id)
-                    .map_err(|e| format!("db error: {}", e))?;
-                let queued_input_reason = self
-                    ._db
-                    .queued_task_input_reason(&item.id)
-                    .map_err(|e| format!("db error: {}", e))?;
                 Ok(map_task_summary(
                     item,
                     repo_name,
                     blocked_by_task_ids,
                     &self.config.desktop_id,
                     agent,
-                    queued_input_count,
-                    queued_input_reason,
                 ))
             })
             .collect()
@@ -858,14 +835,6 @@ impl MobileApi {
             ._db
             .count_task_inputs(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
-        let queued_input_count = self
-            ._db
-            .count_queued_task_inputs(&item.id)
-            .map_err(|e| format!("db error: {}", e))?;
-        let queued_input_reason = self
-            ._db
-            .queued_task_input_reason(&item.id)
-            .map_err(|e| format!("db error: {}", e))?;
         let ports = self
             ._db
             .list_task_ports_for_item(&item.id)
@@ -887,8 +856,6 @@ impl MobileApi {
                 child_task_ids,
                 blocked_by_task_ids,
                 delivered_input_count,
-                queued_input_count,
-                queued_input_reason,
                 ports,
             },
         )))
@@ -1074,8 +1041,6 @@ fn map_task_summary(
     blocked_by_task_ids: Vec<String>,
     machine_id: &str,
     agent: Option<String>,
-    queued_input_count: i64,
-    queued_input_reason: Option<String>,
 ) -> TaskSummary {
     let full_prompt = item.prompt.clone();
     let prompt = full_prompt.as_deref().map(bound_task_listing_prompt);
@@ -1106,9 +1071,12 @@ fn map_task_summary(
         parent_task_id: item.parent_task_id,
         pinned: item.pinned.unwrap_or(0) != 0,
         pin_order: item.pin_order,
+        singleton_agent: item
+            .pipeline
+            .as_deref()
+            .and_then(crate::task_creator::directory_singleton_agent)
+            .map(str::to_string),
         blocked_by_task_ids,
-        queued_input_count,
-        queued_input_reason,
     }
 }
 
@@ -1122,8 +1090,6 @@ struct TaskDetailRelations {
     child_task_ids: Vec<String>,
     blocked_by_task_ids: Vec<String>,
     delivered_input_count: i64,
-    queued_input_count: i64,
-    queued_input_reason: Option<String>,
     ports: Vec<TaskPort>,
 }
 
@@ -1140,8 +1106,6 @@ fn map_task_detail(
         child_task_ids,
         blocked_by_task_ids,
         delivered_input_count,
-        queued_input_count,
-        queued_input_reason,
         mut ports,
     } = relations;
     let prompt = item.prompt.clone();
@@ -1222,6 +1186,10 @@ fn map_task_detail(
         .or(item.agent_provider);
     ports.sort_by(|left, right| left.port.cmp(&right.port).then(left.name.cmp(&right.name)));
     TaskDetail {
+        workflow_definition: item
+            .pipeline_def
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
         id: item.id,
         repo_id: item.repo_id,
         title,
@@ -1232,7 +1200,6 @@ fn map_task_detail(
         stage_transition,
         runtime_state: item.runtime_status,
         read_state: Some(read_state_for_activity(item.activity.as_deref()).to_string()),
-        input_blocked: item.input_blocked,
         activity: item.activity,
         snippet: None,
         waiting_prompt_snippet,
@@ -1253,8 +1220,6 @@ fn map_task_detail(
         revision_rounds: item.revision_rounds,
         revision_limit,
         delivered_input_count,
-        queued_input_count,
-        queued_input_reason,
         parent_task_id: item.parent_task_id,
         child_task_ids,
         blocked_by_task_ids,
@@ -2016,6 +1981,70 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(legacy.snippet.as_deref(), Some("Legacy output preview"));
+    }
+
+    #[test]
+    fn task_summaries_name_the_agent_an_account_wide_singleton_belongs_to() {
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            db_path: Db::test_db_path("task-summary-singleton"),
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "0.0.0.0".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+        };
+
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        for (id, workflow) in [
+            ("task-merge", "singleton-merge"),
+            ("task-ordinary", "single-reviewer"),
+        ] {
+            db.insert_test_pipeline_item(
+                id,
+                "repo-1",
+                "work",
+                None,
+                "in progress",
+                "2026-04-17 09:00:00",
+            )
+            .unwrap();
+            db.update_test_pipeline_item_stage_context(id, id, workflow, None, "claude")
+                .unwrap();
+        }
+
+        let api = super::MobileApi::new(config, db);
+        let tasks = api.list_repo_tasks("repo-1").unwrap();
+        let singleton = tasks.iter().find(|task| task.id == "task-merge").unwrap();
+        let ordinary = tasks
+            .iter()
+            .find(|task| task.id == "task-ordinary")
+            .unwrap();
+
+        assert_eq!(singleton.singleton_agent.as_deref(), Some("merge"));
+        assert_eq!(ordinary.singleton_agent, None);
+        assert_eq!(
+            serde_json::to_value(singleton).unwrap()["singletonAgent"],
+            "merge"
+        );
+        // An ordinary task says nothing rather than saying null, so an older
+        // client reading the payload sees exactly what it saw before.
+        assert!(serde_json::to_value(ordinary)
+            .unwrap()
+            .get("singletonAgent")
+            .is_none());
     }
 
     #[test]

@@ -13,7 +13,9 @@ mod stages;
 mod terminal_marker;
 mod types;
 mod work_tip;
+mod workflow_edit;
 mod worktree;
+pub(crate) use workflow_edit::validate_task_workflow_replacement;
 
 #[cfg(test)]
 mod tests;
@@ -570,17 +572,33 @@ pub(crate) fn prepare_rerun_stage_for_api(
     // `claude` onto another provider. A stage that never produced a run —
     // the blocked-at-creation task a rerun is being used to kick — falls
     // back to the creation request, which is what its first spawn would
-    // have used.
+    // have used. An explicit workflow execution edit supersedes that old
+    // template; the next spawn then resolves the newly authored definition.
     let previous_run = db
         .latest_stage_run_for_stage(task_id, &stage_name, run_kind)
         .map_err(|e| format!("db error: {}", e))?;
+    let superseded = previous_run
+        .as_ref()
+        .map(|run| db.stage_run_workflow_superseded(task_id, &run.id))
+        .transpose()
+        .map_err(|error| format!("db error: {error}"))?
+        .unwrap_or(false);
     let overrides = match previous_run.as_ref() {
+        Some(_) if superseded => SpawnAgentOverrides::default(),
         Some(run) => SpawnAgentOverrides::from_stage_run(run),
+        None if db
+            .workflow_stage_execution_edited(task_id, &stage_name)
+            .map_err(|error| format!("db error: {error}"))? =>
+        {
+            SpawnAgentOverrides::default()
+        }
         None => create_intent_agent_overrides(db, task_id),
     };
     // Reproducing a run reproduces where its provider came from too, so the
     // record keeps naming whoever picked this stage's model.
-    let provider_override = previous_run.and_then(|run| run.provider_override);
+    let provider_override = previous_run
+        .filter(|_| !superseded)
+        .and_then(|run| run.provider_override);
     let provider = resolve_agent_provider(
         overrides.provider.as_deref(),
         current_stage.agent_provider.as_deref(),
@@ -1494,6 +1512,7 @@ fn prepare_workspace_teardown_with_extra(
         build_spawn_env(config, task_id, &port_env, &worktree_path, repo_config).ok()?;
     let session_id = format!("td-{branch}");
     let shell_command = build_teardown_shell_command(&teardown);
+    let shell = crate::login_shell::login_shell();
     Some(PreparedWorkspaceTeardown {
         session_id,
         daemon_dir: config.daemon_dir.clone(),
@@ -1503,13 +1522,8 @@ fn prepare_workspace_teardown_with_extra(
         env: spawn_env,
         session: PreparedSessionSpawn::Pty {
             agent_executable: None,
-            executable: "/bin/zsh".to_string(),
-            args: vec![
-                "--login".to_string(),
-                "-i".to_string(),
-                "-c".to_string(),
-                shell_command,
-            ],
+            executable: shell.path().to_string(),
+            args: shell.login_interactive_args(&shell_command),
             cols: 80,
             rows: 24,
             agent_provider: AgentProvider::Claude,
@@ -1695,15 +1709,11 @@ fn build_prepared_session(
                 spawn_env.get("KANNA_CLI_PATH").map(String::as_str),
                 shell_path.as_deref(),
             );
+            let shell = crate::login_shell::login_shell();
             (
                 PreparedSessionSpawn::Pty {
-                    executable: "/bin/zsh".to_string(),
-                    args: vec![
-                        "--login".to_string(),
-                        "-i".to_string(),
-                        "-c".to_string(),
-                        full_cmd,
-                    ],
+                    executable: shell.path().to_string(),
+                    args: shell.login_interactive_args(&full_cmd),
                     cols: 80,
                     rows: 24,
                     agent_provider: provider,
@@ -1876,7 +1886,7 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
     } else {
         None
     };
-    let workflow_name = format!("singleton-{agent_name}");
+    let workflow_name = format!("{SINGLETON_WORKFLOW_PREFIX}{agent_name}");
     let workflow = definitions::WorkflowDefinition {
         name: Some(workflow_name.clone()),
         description: None,
@@ -1946,6 +1956,24 @@ pub(crate) fn prepare_singleton_agent_task_for_api(
 
 pub(crate) fn generate_singleton_task_id() -> Result<String, String> {
     generate_task_id()
+}
+
+/// The workflow-name prefix Kanna binds when it claims an account-wide
+/// singleton through the relay singleton directory.
+pub(crate) const SINGLETON_WORKFLOW_PREFIX: &str = "singleton-";
+
+/// The agent an account-wide singleton task belongs to, read back from the
+/// synthetic workflow name bound at claim time.
+///
+/// That name is the durable marker of directory-singleton identity: it is
+/// written once when the singleton is claimed and travels with the task row,
+/// so every surface — the owning machine's own lists, another machine's
+/// cross-machine rows, and mobile — can tell a singleton apart without asking
+/// the relay directory.
+pub(crate) fn directory_singleton_agent(workflow_name: &str) -> Option<&str> {
+    workflow_name
+        .strip_prefix(SINGLETON_WORKFLOW_PREFIX)
+        .filter(|agent| !agent.is_empty())
 }
 
 pub(crate) fn prepare_integration_task_for_api(

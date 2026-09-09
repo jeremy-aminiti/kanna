@@ -923,9 +923,16 @@ export function buildTerminalDocument({
           return;
         }
         const { width, height } = cellDimensions();
+        const gridHeight = Math.ceil(pinnedRows * height);
+        const availableHeight = Math.max(0, viewport.clientHeight - bottomInset);
         root.style.minWidth = "0px";
         root.style.width = Math.ceil(pinnedCols * width) + "px";
-        root.style.height = Math.ceil(pinnedRows * height) + "px";
+        root.style.height = gridHeight + "px";
+        // Followers preserve the owner's authoritative row count. When that
+        // grid is shorter than the phone's visible band, put the unused space
+        // above it so the live row still meets the input chrome. A taller grid
+        // keeps a zero offset and continues to use the existing viewport pan.
+        root.style.marginTop = Math.max(0, availableHeight - gridHeight) + "px";
         root.dataset.kannaCols = String(pinnedCols);
         root.dataset.kannaRows = String(pinnedRows);
       }
@@ -1396,6 +1403,8 @@ export function buildTerminalDocument({
           return;
         }
 
+        const rootBounds = root.getBoundingClientRect();
+        const viewportBounds = viewport.getBoundingClientRect();
         window.ReactNativeWebView.postMessage(JSON.stringify({
           type: "terminal-inspection",
           inspection: {
@@ -1409,6 +1418,11 @@ export function buildTerminalDocument({
               : null,
             documentInstanceId,
             frameCount: Number.parseInt(root.dataset.kannaFrameCount || "0", 10) || 0,
+            gridBottomGap: Math.max(
+              0,
+              viewportBounds.bottom - bottomInset - rootBounds.bottom
+            ),
+            gridTopGap: Math.max(0, rootBounds.top - viewportBounds.top),
             mentionedFiles: {
               mentions: Array.from(terminalFileMentionHistory.values()).reverse(),
               overflow: terminalFileMentionOverflow
@@ -1416,7 +1430,7 @@ export function buildTerminalDocument({
             rows: Number.parseInt(root.dataset.kannaRows || "", 10) || null,
             text: renderedTerminalText(),
             visibleRows: Array.from({ length: term.rows }, (_, row) => {
-              const line = term.buffer.active.getLine(term.buffer.active.baseY + row);
+              const line = term.buffer.active.getLine(term.buffer.active.viewportY + row);
               return line ? line.translateToString(true) : "";
             })
           }

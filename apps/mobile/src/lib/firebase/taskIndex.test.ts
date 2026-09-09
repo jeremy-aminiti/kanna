@@ -212,8 +212,6 @@ describe("cloud task index", () => {
         stage: "in progress",
         activity: "working",
         activityRevision: 7,
-        queuedInputCount: 2,
-        queuedInputReason: "input_held_by_draft",
         status: "active",
         repo: {
           cloudRepoId: "repo-1",
@@ -251,8 +249,6 @@ describe("cloud task index", () => {
       agentType: "agent",
       activity: "working",
       activityRevision: 7,
-      queuedInputCount: 2,
-      queuedInputReason: "input_held_by_draft",
       parentTaskId: null,
       blockedByTaskIds: [],
       pinned: false,
@@ -331,6 +327,25 @@ describe("cloud task index", () => {
     updatedAt: "2026-05-14T00:01:00.000Z",
     closedAt: null,
   };
+
+  it("carries the singleton agent and leaves a document without one absent", () => {
+    // Account-wide singletons are pinned by default on every machine, and the
+    // phone decides that from this field alone — dropping it here would make
+    // the pin appear on the LAN and vanish over the cloud.
+    expect(
+      mapCloudTaskSnapshot({ ...legacySnapshot, singletonAgent: "merge" })
+    ).toMatchObject({ singletonAgent: "merge" });
+
+    // A snapshot that never carried the field must stay absent rather than
+    // become a blank value, so a later LAN read can still fill it in.
+    const legacy = mapCloudTaskSnapshot(legacySnapshot);
+    expect(legacy.singletonAgent).toBeUndefined();
+    expect("singletonAgent" in legacy).toBe(false);
+    expect(
+      mapCloudTaskSnapshot({ ...legacySnapshot, singletonAgent: null })
+        .singletonAgent,
+    ).toBeNull();
+  });
 
   it("displays repos with a remote url hash under the canonical cross-machine repo id", () => {
     expect(
@@ -607,7 +622,7 @@ describe("cloud task index", () => {
     ]);
   });
 
-  it("forwards queued input status from raw Firestore documents", () => {
+  it("forwards the singleton agent from raw Firestore documents", () => {
     const onUpdate = vi.fn();
     const listeners = captureSnapshotListeners();
     createFirestoreTaskIndex({ kind: "firestore" } as never).subscribeRecentTasks(
@@ -615,18 +630,24 @@ describe("cloud task index", () => {
       onUpdate,
     );
     listeners.root().onNext({ docs: [desktopDocument("desktop-a")] });
-    listeners.child("desktop-a").onNext(taskSnapshot(validTask({
-      ownerDesktopId: "desktop-a",
-      queuedInputCount: 2,
-      queuedInputReason: "input_held_by_draft",
-    })));
+    listeners.child("desktop-a").onNext(taskSnapshot(
+      validTask({ ownerDesktopId: "desktop-a", singletonAgent: "task-manager" }),
+    ));
 
     expect(onUpdate).toHaveBeenLastCalledWith([
-      expect.objectContaining({
-        queuedInputCount: 2,
-        queuedInputReason: "input_held_by_draft",
-      }),
+      expect.objectContaining({ singletonAgent: "task-manager" }),
     ]);
+
+    // A document with no singleton agent, or a blank one, reports nothing —
+    // never an empty string that would read as a singleton identity.
+    for (const document of [
+      validTask({ ownerDesktopId: "desktop-a" }),
+      validTask({ ownerDesktopId: "desktop-a", singletonAgent: "   " }),
+    ]) {
+      listeners.child("desktop-a").onNext(taskSnapshot(document));
+      const [tasks] = onUpdate.mock.calls[onUpdate.mock.calls.length - 1];
+      expect(tasks[0].singletonAgent).toBeUndefined();
+    }
   });
 
   it("forwards the owner activity revision from raw Firestore documents", () => {

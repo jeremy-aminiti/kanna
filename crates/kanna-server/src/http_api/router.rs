@@ -3,6 +3,7 @@ use super::backup::create_backup;
 use super::cloud_desktops::{invoke_cloud_desktop, list_cloud_desktops};
 use super::cloud_relay::reconnect_cloud_relay;
 use super::desktop::list_desktops;
+use super::desktop_views::{open_desktop_view, wait_desktop_view_commands};
 #[cfg(debug_assertions)]
 use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine_controls};
 #[cfg(debug_assertions)]
@@ -15,8 +16,8 @@ use super::machine_stats::machine_stats;
 use super::mobile_notifications::{mobile_push_registration, notify_mobile};
 use super::operator_events::post_operator_events;
 use super::pairing::{
-    claim_pairing_session, create_pairing_session, reissue_push_pairing_certificate,
-    remove_trusted_device,
+    claim_pairing_session, create_pairing_session, mobile_builds, reissue_push_pairing_certificate,
+    remove_trusted_device, report_mobile_build,
 };
 use super::preview::{close_task_preview, open_task_preview};
 use super::repo_browser::{list_task_directory, read_task_file_range};
@@ -37,8 +38,8 @@ use super::state::{AppState, AuthenticatedHttpInvoke, HttpInvokeResponse, Tunnel
 use super::status::status;
 use super::task_actions::{
     abort_task_creation, advance_stage, close_task, complete_stage, pin_task, reopen_task,
-    reorder_pinned_tasks, request_revision, rerun_stage, resume_task, run_merge_agent,
-    set_task_parent, set_task_workflow, unpin_task,
+    reorder_pinned_tasks, replace_task_workflow, request_revision, rerun_stage, resume_task,
+    run_merge_agent, set_task_parent, set_task_workflow, unpin_task,
 };
 use super::task_activity::{apply_runtime_status, mark_task_read};
 use super::task_agent_session::put_task_agent_session;
@@ -60,13 +61,14 @@ use super::transfer_sidecar::{
 };
 use super::transfers::{
     approve_incoming_transfer, claim_pending_incoming_transfer, complete_task_transfer,
-    fail_outgoing_transfer, fail_pending_incoming_transfer, get_active_outgoing_transfer,
-    get_task_transfer, insert_task_transfer, insert_task_transfer_provenance,
-    list_incoming_transfer_cleanup_candidates, list_pending_incoming_transfers,
-    list_task_transfers, list_transfer_peers, mark_incoming_transfer_awaiting_acknowledgment,
-    mark_incoming_transfer_importing, mark_incoming_transfer_sidecar_cleanup_completed,
-    pull_task_from_peer, push_task_to_peer, reject_incoming_transfer, reject_task_transfer,
-    renew_incoming_transfer_claim, set_task_cloud_identity, update_task_transfer_payload,
+    dismiss_failed_transfer, fail_outgoing_transfer, fail_pending_incoming_transfer,
+    get_active_outgoing_transfer, get_task_transfer, insert_task_transfer,
+    insert_task_transfer_provenance, list_incoming_transfer_cleanup_candidates,
+    list_pending_incoming_transfers, list_task_transfers, list_transfer_peers,
+    mark_incoming_transfer_awaiting_acknowledgment, mark_incoming_transfer_importing,
+    mark_incoming_transfer_sidecar_cleanup_completed, pull_task_from_peer, push_task_to_peer,
+    reject_incoming_transfer, reject_task_transfer, renew_incoming_transfer_claim,
+    set_task_cloud_identity, update_task_transfer_payload,
 };
 use super::window_workspace::mutate_window_workspace;
 use axum::body::Body;
@@ -116,6 +118,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/stream", get(legacy_ksp_stream))
         .route("/v2/stream", get(ksp_stream))
         .route("/v1/desktops", get(list_desktops))
+        .route("/v1/desktop/views/open", post(open_desktop_view))
+        .route("/v1/desktop/view-commands", get(wait_desktop_view_commands))
         .route("/v1/repos", get(list_repos).post(add_repo))
         .route("/v1/repo-checkouts", post(start_repo_checkout))
         .route("/v1/repo-checkouts/{operation_id}", get(get_repo_checkout))
@@ -258,6 +262,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(set_task_parent),
         )
         .route(
+            "/v1/tasks/{task_id}/actions/replace-workflow",
+            post(replace_task_workflow),
+        )
+        .route(
             "/v1/tasks/{task_id}/actions/set-workflow",
             post(set_task_workflow),
         )
@@ -322,6 +330,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(reject_incoming_transfer),
         )
         .route(
+            "/v1/transfers/{transfer_id}/actions/dismiss-failure",
+            post(dismiss_failed_transfer),
+        )
+        .route(
             "/v1/transfers/provenance",
             post(insert_task_transfer_provenance),
         )
@@ -383,6 +395,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/transfers/cloud-proxies/{peer_id}",
             axum::routing::delete(remove_cloud_transfer_proxy),
         )
+        .route("/v1/mobile/build", post(report_mobile_build))
+        .route("/v1/mobile/builds", get(mobile_builds))
         .route("/v1/pairing/sessions", post(create_pairing_session))
         .route("/v1/pairing/sessions/claim", post(claim_pairing_session))
         .route(

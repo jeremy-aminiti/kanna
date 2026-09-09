@@ -21,7 +21,6 @@ import {
   TaskCreationError
 } from "../lib/api/client";
 import {
-  INPUT_HELD_BY_DRAFT_REASON,
   ServerRefusalError
 } from "../lib/transports/serverRefusal";
 import type { RepoSummary, TaskSummary } from "../lib/api/types";
@@ -33,6 +32,7 @@ import { terminalOutputToString } from "./terminalOutputBuffer";
 import { visibleActivityTasks } from "../screens/activityTaskOrder";
 import {
   emptyLocalTaskListPreferences,
+  localPinnedTaskIds,
   type LocalTaskListPreferences
 } from "./taskListPreferences";
 import type { TaskListPreferencesStore } from "./taskListPreferencesStorage";
@@ -542,6 +542,7 @@ describe("createMobileController", () => {
       status: "loaded",
       preferences: {
         pins: [{ taskId: "task-elsewhere", repoId: "repo-elsewhere" }],
+        unpinnedDefaults: [],
         dismissedActivity: [],
         pinsSeededFromServer: true
       }
@@ -730,6 +731,7 @@ describe("createMobileController", () => {
         { taskId: "task-closed", repoId: "repo-1" },
         { taskId: "task-other-machine", repoId: "repo-elsewhere" }
       ],
+      unpinnedDefaults: [{ taskId: "task-closed", repoId: "repo-1" }],
       dismissedActivity: [
         { taskId: "task-1", repoId: "repo-1", activityRevision: 7 }
       ],
@@ -743,13 +745,15 @@ describe("createMobileController", () => {
     await flushMicrotasks();
 
     // `task-closed` is gone from the all-open-tasks snapshot, and `task-1` is
-    // no longer unread, so both entries go. The pin for a repo this snapshot
-    // says nothing about survives.
+    // no longer unread, so both entries go — including the suppressed default
+    // pin for `task-closed`, which has no default left to turn off. The pin
+    // for a repo this snapshot says nothing about survives.
     expect(store.getState().localTaskListPreferences).toEqual({
       pins: [
         { taskId: "task-1", repoId: "repo-1" },
         { taskId: "task-other-machine", repoId: "repo-elsewhere" }
       ],
+      unpinnedDefaults: [],
       dismissedActivity: [],
       pinsSeededFromServer: true
     });
@@ -2616,6 +2620,82 @@ describe("createMobileController", () => {
     expect(store.getState().recentTasks).toEqual([recoveredTask]);
   });
 
+  it("pins an account-wide singleton by default from the live cloud subscription", async () => {
+    // Remote mode reads the cloud index rather than polling a desktop, so the
+    // singleton identity has to survive that path or the pin would appear on
+    // the LAN and vanish off it.
+    const store = createSessionStore();
+    const client = createClientMock();
+    const auth = createAuthSessionMock();
+    const preferences = createTaskListPreferencesStoreMock();
+    // Built through the real cloud mapper, so this covers the whole remote-mode
+    // path: Firestore document -> CloudTaskSummary -> store -> pinned rows.
+    const cloudDocument = {
+      localRepoId: "repo-a",
+      ownerDesktopId: "desktop-a",
+      stage: "in progress",
+      repo: { cloudRepoId: "repo-a", name: "Repo A" },
+      createdAt: "2026-09-07T00:00:00.000Z",
+      updatedAt: "2026-09-07T00:01:00.000Z"
+    };
+    const singleton = mapCloudTaskSnapshot({
+      ...cloudDocument,
+      ownerLocalTaskId: "task-merge",
+      title: "Merge Master",
+      singletonAgent: "merge",
+      // The owning machine stamped its own pin at claim time; the phone keeps
+      // its own record and must not fold this in as an explicit pin.
+      pinned: true,
+      pinOrder: 0
+    });
+    const ordinary = mapCloudTaskSnapshot({
+      ...cloudDocument,
+      ownerLocalTaskId: "task-ordinary",
+      title: "Ordinary work"
+    });
+    vi.mocked(auth.getState).mockReturnValue({
+      status: "signedIn",
+      user: { uid: "user-1", email: "u@example.com", displayName: null }
+    });
+    client.getStatus.mockResolvedValue({
+      state: "running",
+      desktopId: "cloud",
+      desktopName: "Kanna Cloud",
+      lanHost: "cloud",
+      lanPort: 0,
+      pairingCode: null
+    });
+    client.listRepos.mockResolvedValue([{ id: "repo-a", name: "Repo A" }]);
+    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
+    const controller = createMobileController(client, store, auth, {
+      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
+        liveUpdate = onUpdate;
+        return vi.fn();
+      }),
+      taskListPreferencesStore: preferences
+    });
+
+    await controller.bootstrap();
+    liveUpdate?.([singleton, ordinary]);
+    await flushMicrotasks();
+
+    const tasks = store.getState().recentTasks;
+    expect(tasks.map((task) => task.singletonAgent)).toEqual([
+      "merge",
+      undefined
+    ]);
+
+    // This is what the Tasks and Search screens compute for the pinned rows.
+    const stored = store.getState().localTaskListPreferences;
+    expect(localPinnedTaskIds(stored, tasks)).toEqual([singleton.id]);
+
+    // Pinned by default, not by an entry the operator never made — the seed
+    // must leave a directory singleton to its default so an unpin sticks.
+    expect(stored.pins).toEqual([]);
+    expect(stored.unpinnedDefaults).toEqual([]);
+    expect(preferences.saved().pins).toEqual([]);
+  });
+
   it("supplements live task repositories with explicit source repositories", async () => {
     const store = createSessionStore();
     const client = createClientMock();
@@ -2886,67 +2966,6 @@ describe("createMobileController", () => {
       errorMessage: null,
       recentTasks: [task]
     });
-  });
-
-  it("keeps the connection healthy when a task input is held at that terminal", async () => {
-    const store = createSessionStore();
-    const client = createClientMock();
-    const auth = createAuthSessionMock();
-    const task: TaskSummary = {
-      id: "task-1",
-      repoId: "repo-1",
-      title: "Cloud task",
-      stage: "in progress"
-    };
-    // The desktop is fine and connected; a human simply has an unsent line at
-    // that terminal. Reported 2026-08-20: before this, one held reply put the
-    // whole app into its error state.
-    const held = new ServerRefusalError(
-      "logical input for session task-1 was not submitted: a human has an unsent line at that terminal",
-      INPUT_HELD_BY_DRAFT_REASON,
-      409
-    );
-    vi.mocked(auth.getState).mockReturnValue({
-      status: "signedIn",
-      user: { uid: "user-1", email: "u@example.com", displayName: null }
-    });
-    client.getStatus.mockResolvedValue({
-      state: "running",
-      desktopId: "cloud",
-      desktopName: "Kanna Cloud",
-      lanHost: "cloud",
-      lanPort: 0,
-      pairingCode: null
-    });
-    client.sendTaskInput.mockRejectedValueOnce(held);
-    let liveUpdate: ((tasks: TaskSummary[]) => void) | null = null;
-    const controller = createMobileController(client, store, auth, {
-      subscribeCloudTasks: vi.fn((_uid, onUpdate) => {
-        liveUpdate = onUpdate;
-        return vi.fn();
-      })
-    });
-
-    await controller.bootstrap();
-    liveUpdate?.([task]);
-    const connectedState = store.getState().connectionState;
-    const taskCollectionStatus = store.getState().taskCollectionStatus;
-
-    await expect(
-      controller.sendTaskInput(task.id, "please also update the docs")
-    ).resolves.toEqual({
-      status: "queued",
-      reason: "input_held_by_draft",
-      message: held.message,
-      queuedInputCount: 1
-    });
-
-    expect(store.getState()).toMatchObject({
-      connectionState: connectedState,
-      taskCollectionStatus,
-      errorMessage: null
-    });
-    expect(store.getState().connectionState).not.toBe("error");
   });
 
   it("propagates a desktop uncertainty refusal without inviting a retry", async () => {

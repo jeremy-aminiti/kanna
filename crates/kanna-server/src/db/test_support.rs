@@ -18,6 +18,8 @@ impl Db {
 
     #[cfg(test)]
     pub fn open_for_tests(path: &str) -> Result<Self, rusqlite::Error> {
+        kanna_runtime_defaults::database_access::check(std::path::Path::new(path), true)
+            .map_err(rusqlite::Error::InvalidParameterName)?;
         let path_buf = PathBuf::from(path);
         let _ = std::fs::remove_file(&path_buf);
         // Removing only the database leaves a previous run's WAL and shared
@@ -140,7 +142,6 @@ impl Db {
                 runtime_event_baseline TEXT,
                 runtime_event_pending_at TEXT,
                 blocked_event_baseline INTEGER NOT NULL DEFAULT 0,
-                input_blocked TEXT,
                 composer_text TEXT,
                 composer_attestation TEXT
             );
@@ -261,6 +262,12 @@ impl Db {
             );
             CREATE INDEX idx_task_event_task_seq ON task_event(task_id, seq);
 
+            CREATE TABLE task_event_cursor_handle (
+                handle TEXT PRIMARY KEY,
+                cursor TEXT NOT NULL,
+                last_touched TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE task_input (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id TEXT NOT NULL,
@@ -271,19 +278,6 @@ impl Db {
                 delivered_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE INDEX idx_task_input_task_id ON task_input(task_id, id);
-
-            CREATE TABLE queued_task_input (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id TEXT NOT NULL,
-                source TEXT NOT NULL,
-                message TEXT NOT NULL,
-                state TEXT NOT NULL CHECK (state IN ('preparing', 'held', 'uncertain')),
-                reason TEXT,
-                session_pid INTEGER,
-                queued_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-            CREATE INDEX idx_queued_task_input_task_id
-                ON queued_task_input(task_id, id);
 
             CREATE TABLE task_transfer (
                 id TEXT PRIMARY KEY,
@@ -301,7 +295,8 @@ impl Db {
                 payload_json TEXT,
                 sidecar_cleanup_completed_at TEXT,
                 claim_owner_token TEXT,
-                claim_expires_at TEXT
+                claim_expires_at TEXT,
+                dismissed_at TEXT
             );
             CREATE UNIQUE INDEX idx_task_transfer_active_outgoing_source
             ON task_transfer(source_task_id)
