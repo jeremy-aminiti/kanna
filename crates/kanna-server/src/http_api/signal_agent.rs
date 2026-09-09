@@ -107,6 +107,7 @@ pub(super) async fn signal_agent(
             agent_provider: payload.agent_provider,
             effort: payload.effort,
         },
+        false,
     )
     .await
     .map(Json)
@@ -203,6 +204,7 @@ async fn deliver_merge_handoff(
         "merge".to_string(),
         message,
         SingletonAgentOverrides::default(),
+        true,
     )
     .await?;
     // Recorded only after delivery: a task that still owes the merge agent a
@@ -486,6 +488,7 @@ pub(super) async fn signal_agent_request(
     agent: String,
     message: String,
     overrides: SingletonAgentOverrides,
+    strict_recording: bool,
 ) -> Result<SignalAgentResponse, (axum::http::StatusCode, String)> {
     let message = message.trim().to_string();
     if message.is_empty() {
@@ -509,7 +512,7 @@ pub(super) async fn signal_agent_request(
                     machine_id.clone(),
                     "POST".to_string(),
                     path,
-                    serde_json::json!({ "input": message }),
+                    serde_json::json!({ "input": message, "strictRecording": strict_recording }),
                 )
                 .await
                 .map_err(|error| remote_singleton_unreachable(&machine_id, &task_id, error))?;
@@ -534,7 +537,7 @@ pub(super) async fn signal_agent_request(
             });
         }
         Some(SingletonOwner::Local(running)) => {
-            return signal_local_singleton(&state, &message, running).await;
+            return signal_local_singleton(&state, &message, running, strict_recording).await;
         }
         None => {}
     }
@@ -636,7 +639,12 @@ pub(super) async fn signal_agent_request(
                     // This is a state transition (closed reservation -> unowned),
                     // not a timer/retry loop. A competing creator remains fenced.
                     return Box::pin(signal_agent_request(
-                        state, repo_id, agent, message, overrides,
+                        state,
+                        repo_id,
+                        agent,
+                        message,
+                        overrides,
+                        strict_recording,
                     ))
                     .await;
                 }
@@ -654,7 +662,7 @@ pub(super) async fn signal_agent_request(
                         claim.machine_id.clone(),
                         "POST".to_string(),
                         path,
-                        serde_json::json!({ "input": message }),
+                    serde_json::json!({ "input": message, "strictRecording": strict_recording }),
                     )
                     .await
                     .map_err(|error| {
@@ -1021,16 +1029,26 @@ async fn signal_local_singleton(
     state: &Arc<AppState>,
     message: &str,
     running: crate::db::OpenAgentTask,
+    strict_recording: bool,
 ) -> Result<SignalAgentResponse, (axum::http::StatusCode, String)> {
     // Do not reuse `running.session_id`: following a handoff that can name a
     // retired PTY. The ordinary input path discovers the daemon's live task
     // session and fences its logical write to the observed PID.
-    super::task_input::deliver_server_task_input(
-        Arc::clone(state),
-        running.task_id.clone(),
-        message.to_string(),
-    )
-    .await?;
+    if strict_recording {
+        super::task_input::deliver_server_task_input_strict(
+            Arc::clone(state),
+            running.task_id.clone(),
+            message.to_string(),
+        )
+        .await?;
+    } else {
+        super::task_input::deliver_server_task_input(
+            Arc::clone(state),
+            running.task_id.clone(),
+            message.to_string(),
+        )
+        .await?;
+    }
     Ok(SignalAgentResponse {
         task_id: running.task_id,
         created: false,
