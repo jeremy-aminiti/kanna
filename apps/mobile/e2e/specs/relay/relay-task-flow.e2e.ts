@@ -78,6 +78,10 @@ interface RelayTaskFlowOptions {
     count(key: "ESC" | "ENTER"): number;
     waitForCount(key: "ESC" | "ENTER", count: number): Promise<void>;
   };
+  /** The shared Expo readiness gate: dismisses the dev-client startup
+   * overlays and waits out a Metro bundle fetch. A relaunch goes through
+   * exactly that startup again, so it must be awaited the same way. */
+  waitForAppReady(readySelector?: string): Promise<void>;
   waitForLocalTaskActivity(activity: TaskActivity): Promise<void>;
   waitForMobileTerminalGeometry(): Promise<void>;
   waitForQuickReplyInput(): Promise<void>;
@@ -364,6 +368,7 @@ function createRelayQuickReplyPersistenceJourney(
   driver: Browser,
   ui: RelayUi,
   bundleId: string,
+  waitForAppReady: (readySelector?: string) => Promise<void>,
 ): RelayQuickReplyPersistenceJourney {
   const openEditor = async () => {
     await openRelayProfileSheet(ui);
@@ -406,8 +411,11 @@ function createRelayQuickReplyPersistenceJourney(
     async relaunchPreservingData() {
       await relaunchRelayAppPreservingData(driver, bundleId);
       await dismissSavePasswordPrompt(driver);
-      const appShell = await driver.$(selectors.appShell);
-      await appShell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+      // A relaunched dev client refetches its bundle from Metro and can put
+      // the Expo startup overlays back up. A bare 30s wait on the shell loses
+      // that race on a busy machine and cannot dismiss an overlay it does not
+      // know about; the readiness gate handles both.
+      await waitForAppReady();
       await returnToTaskListShell(ui);
     },
     async save() {
@@ -2132,6 +2140,7 @@ export async function runRelayTaskFlow(
           driver,
           ui,
           options.bundleId,
+          options.waitForAppReady,
         ),
         options.customizedReply,
       ),
