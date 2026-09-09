@@ -958,6 +958,33 @@ async fn create_task_with_requested_id_and_inputs(
                 if let Some(existing) =
                     existing_create_task_response(&db, task_id, &payload.repo_id, &payload.prompt)?
                 {
+                    if payload.transfer_import.is_some() {
+                        let transfer_id = payload
+                            .transfer_import
+                            .as_ref()
+                            .and_then(|summary| summary.transfer_id.as_deref())
+                            .ok_or_else(|| {
+                                (
+                                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                                    "transferred task is missing transfer identity".to_string(),
+                                )
+                            })?;
+                        let manifest = db
+                            .transferred_task_manifest(transfer_id)
+                            .map_err(|error| db_write_error("db error", error))?;
+                        let prepared_for_task =
+                            manifest
+                                .as_ref()
+                                .is_some_and(|(_, _, _, local_task_id, state)| {
+                                    state == "prepared" && local_task_id.as_deref() == Some(task_id)
+                                });
+                        if !prepared_for_task {
+                            return Err((
+                                axum::http::StatusCode::CONFLICT,
+                                format!("transferred task {task_id} has no durable prepared proof"),
+                            ));
+                        }
+                    }
                     db.import_task_inputs(task_id, &imported_inputs)
                         .map_err(|error| db_write_error("could not import task inputs", error))?;
                     let existing_is_open = db
