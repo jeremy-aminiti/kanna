@@ -18,6 +18,7 @@ import { e2eAppMetrics, e2eTerminalOutputPerf } from "./e2eAppMetrics";
 import { e2eInvokeHistory } from "./e2eInvokeHistory";
 import { e2eEventHistory } from "./e2eEventHistory";
 import { createE2ERemoteCompanionApi } from "./e2eRemoteCompanion";
+import { terminalRendererOutcome } from "./composables/terminalRenderer";
 import {
   getE2EMobileInstallUrl,
   setE2EMobileInstallUrl,
@@ -288,6 +289,9 @@ try {
       resetStreamClient: resetSharedStreamClientForTests,
       serverWork: e2eServerWork,
       terminalStreams: e2eTerminalStreams,
+      get terminalRenderer() {
+        return terminalRendererOutcome();
+      },
     };
     Object.defineProperty(e2eHook, "mobileInstallUrl", {
       configurable: true,

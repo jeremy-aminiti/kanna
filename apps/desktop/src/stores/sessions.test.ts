@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbHandle, PipelineItem, Repo } from "../types/kanna";
+import { resetShellLaunchCacheForTests } from "../composables/shellLaunch";
 import {
   setDesktopServerClientHandlersForTests,
   updateDesktopServerClientHandlersForTests,
@@ -23,6 +24,8 @@ const mocks = vi.hoisted(() => {
         return "/tmp/kanna";
       case "get_workflow_socket_path":
         return "/tmp/kanna.sock";
+      case "shell_launch":
+        return { executable: "/bin/zsh", name: "zsh", loginArg: "--login" };
       case "ensure_term_init":
         return "/tmp/kanna-zdotdir";
       case "list_dir":
@@ -142,6 +145,9 @@ function makeItem(overrides: Partial<PipelineItem> = {}): PipelineItem {
 describe("createSessionsApi", () => {
   beforeEach(() => {
     vi.useRealTimers();
+    // The resolved shell is cached for the life of an app run, and a test run
+    // is not one: without this a later test inherits an earlier mock's answer.
+    resetShellLaunchCacheForTests();
     mocks.invokeMock.mockReset();
     mocks.invokeMock.mockImplementation(mocks.invokeDefault);
     mocks.postDesktopTaskActionMock.mockReset();

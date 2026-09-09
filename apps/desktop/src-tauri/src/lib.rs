@@ -367,6 +367,7 @@ pub fn run() {
             // Shell commands
             commands::shell::run_script,
             commands::shell::ensure_term_init,
+            commands::shell::shell_launch,
             // Transfer commands
             commands::transfer::list_transfer_peers,
             commands::transfer::upsert_external_transfer_peer,

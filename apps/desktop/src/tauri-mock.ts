@@ -30,6 +30,10 @@ function scheduleMockTerminalOutput(sessionId: string) {
 const invokeHandlers: Record<string, (...args: any[]) => any> = {
   list_sessions: () => [],
   spawn_session: () => ({}),
+  // The browser mock has no Rust side to resolve the shell policy; a shell it
+  // never actually spawns only has to be shaped like one.
+  shell_launch: () => ({ executable: "/bin/zsh", name: "zsh", loginArg: "--login" }),
+  ensure_term_init: () => null,
   attach_session_with_snapshot: (args?: { sessionId?: string }) => {
     if (args?.sessionId) {
       const sessionId = args.sessionId;

@@ -16,6 +16,7 @@ import { registerTerminalFileLinkProvider } from "./terminalFileLinkRegistry"
 import { createTerminalDropBridge, type TerminalDropBridge } from "./terminalDropBridge"
 import { isShiftEnter, SHIFT_ENTER_CSI_U } from "./terminalKeyboard"
 import { createTerminalInputProducerClassifier } from "./terminalInputProducer"
+import { recordTerminalRendererOutcome, requestedTerminalRenderer } from "./terminalRenderer"
 
 export interface InitializedTerminalView {
   term: Terminal
@@ -62,20 +63,25 @@ export function initializeTerminalView(params: {
   })
   term.loadAddon(params.fitAddon)
   term.loadAddon(new WebLinksAddon(params.handleLinkActivate))
-  // Keep E2E screenshots tied to xterm's painted DOM rows. WKWebView can
-  // report the WebGL-backed logical buffer while capturing a blank native
-  // surface when a second desktop window is open; production keeps WebGL.
-  if (!window.__KANNA_E2E__) {
+  // Production keeps WebGL; E2E defaults to the DOM renderer so screenshots
+  // stay tied to xterm's painted rows. See `terminalRenderer.ts` for why, and
+  // for how a rendering-specific run opts back into WebGL.
+  if (requestedTerminalRenderer(window) === "webgl") {
     try {
       const webgl = new WebglAddon()
       webgl.onContextLoss(() => {
         console.warn("[terminal] WebGL context lost, falling back to DOM renderer")
+        recordTerminalRendererOutcome({ renderer: "dom", reason: "context-lost" })
         webgl.dispose()
       })
       term.loadAddon(webgl)
+      recordTerminalRendererOutcome({ renderer: "webgl" })
     } catch (e) {
       console.warn("[terminal] WebGL addon failed, falling back to DOM renderer:", e)
+      recordTerminalRendererOutcome({ renderer: "dom", reason: "unavailable" })
     }
+  } else {
+    recordTerminalRendererOutcome({ renderer: "dom", reason: "requested" })
   }
   term.loadAddon(new ImageAddon())
 
