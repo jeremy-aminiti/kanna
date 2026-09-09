@@ -668,7 +668,11 @@ export async function startMobileRelayHarness(
         // The daemon owns the grid. A fresh observer's initial snapshot is
         // that authority stated out loud, independent of what any renderer
         // believes it is showing.
-        const observer = remote.terminal.collectTerminalEvents(
+        // The local KSP path, the same one this lane's desktop-shaped viewer
+        // uses; the relay collector does not carry terminal snapshots here.
+        // Read-only: a collector registers a viewer on resize() and nothing
+        // else, so observing cannot perturb the election it is measuring.
+        const observer = await remote.terminal.collectLocalTerminalEvents(
           harness,
           localTask.taskId
         );
