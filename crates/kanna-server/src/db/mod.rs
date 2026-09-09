@@ -2105,6 +2105,12 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )
     })?;
 
+    run_migration(
+        conn,
+        "071_event_subscriptions",
+        create_event_subscription_schema,
+    )?;
+
     Ok(())
 }
 
@@ -2123,12 +2129,6 @@ pub(crate) fn retire_pre_existing_transfer_alerts(
            AND local_task_id IS NULL
            AND dismissed_at IS NULL",
         [],
-    )?;
-
-    run_migration(
-        conn,
-        "071_event_subscriptions",
-        create_event_subscription_schema,
     )?;
 
     Ok(())

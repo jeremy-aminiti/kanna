@@ -350,7 +350,7 @@ async fn send_task_input_impl(
         })?,
         None => TaskInputSource::Unspecified,
     };
-    deliver_task_input(state, task_id, payload, source, None).await
+    deliver_task_input(state, task_id, payload, source, None, strict_recording).await
 }
 
 /// A wake that did not reach its session, carrying enough for the subscription
@@ -367,6 +367,7 @@ pub(super) async fn send_engine_wake(
 ) -> Result<bool, EngineWakeFailure> {
     let payload = TaskInputRequest {
         input,
+        strict_recording: false,
         source: None,
         attachment: None,
     };
@@ -376,6 +377,7 @@ pub(super) async fn send_engine_wake(
         payload,
         TaskInputSource::Engine,
         Some(subscription.run_id.clone()),
+        false,
     )
     .await
     .map(|response| response.status() == axum::http::StatusCode::ACCEPTED)
@@ -391,6 +393,7 @@ async fn deliver_task_input(
     payload: TaskInputRequest,
     source: TaskInputSource,
     expected_run: Option<String>,
+    strict_recording: bool,
 ) -> Result<Response, TaskInputHttpError> {
     let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id)
         .await
