@@ -392,13 +392,9 @@ async function main(): Promise<void> {
         setTaskActivity: relayHarness.setTaskActivity,
         taskRow: relayHarness.taskRow,
         taskOrdering: relayHarness.taskOrdering,
-<<<<<<< HEAD
         terminalKeys: relayHarness.terminalKeys,
-||||||| parent of d384ea4ab (Await the Expo readiness gate after a relaunch, not a bare shell wait)
-=======
         waitForAppReady: (readySelector) =>
           waitForExpoAppReady(driver!, readySelector),
->>>>>>> d384ea4ab (Await the Expo readiness gate after a relaunch, not a bare shell wait)
         waitForLocalTaskActivity: relayHarness.waitForLocalTaskActivity,
         waitForMobileTerminalGeometry:
           relayHarness.waitForMobileTerminalGeometry,

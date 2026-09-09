@@ -71,7 +71,6 @@ interface TerminalWebViewProps {
   onMentionedFilesChange?: (history: TerminalFileMentionHistory) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onTerminalInput?: (dataB64: string, kind: TaskTerminalInputKind) => void;
-  onTerminalInput?: (dataB64: string) => void;
   /** What this phone can display at its current zoom, measured inside the
    * page. The daemon owns the grid; this is only what the viewer proposes. */
   onCapacityChange?: (cols: number, rows: number) => void;

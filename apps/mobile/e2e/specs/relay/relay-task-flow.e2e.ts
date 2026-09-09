@@ -946,6 +946,11 @@ export async function verifyRelayMobileTerminalControlJourney(
     );
   }
 
+  process.stdout.write(
+    `[mobile-e2e] phone took control: daemon grid ${followed.cols}x${followed.rows} ` +
+      `-> ${taken.cols}x${taken.rows} (measured on this device at its current zoom)\n`,
+  );
+
   // Every renderer still shows the daemon's grid, which is now the phone's.
   let lastInspection: Awaited<ReturnType<RelayUi["inspectTerminalWebView"]>> | null = null;
   await ui.waitUntil(
@@ -983,6 +988,9 @@ export async function verifyRelayMobileTerminalControlJourney(
     },
   );
   await verifyRelayPtyRenderedGridAndCursor(ui, fixture);
+  process.stdout.write(
+    `[mobile-e2e] terminal control take/release passed at ${taken.cols}x${taken.rows}\n`,
+  );
 }
 
 export async function verifyRelayQuickReplyJourney(

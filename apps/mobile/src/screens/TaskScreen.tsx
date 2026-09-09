@@ -978,7 +978,6 @@ export function TaskScreen({
               onMentionedFilesChange={handleTerminalMentionedFilesChange}
               onOpenFile={handleTerminalOpenFile}
               onTerminalInput={sendTerminalInput}
-              onTerminalInput={onSendTerminalInput}
               onCapacityChange={handleTerminalCapacityChange}
               onRequestScrollback={onRequestTerminalScrollback}
             />
