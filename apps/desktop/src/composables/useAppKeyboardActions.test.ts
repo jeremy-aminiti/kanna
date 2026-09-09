@@ -6,9 +6,13 @@ import { useAppKeyboardActions } from "./useAppKeyboardActions";
 import type { ShortcutContext } from "./useShortcutContext";
 import { useMainTabs } from "./useMainTabs";
 
+const invokeMock = vi.hoisted(() => vi.fn());
+
 vi.mock("./useKeyboardShortcuts", () => ({
   useKeyboardShortcuts: vi.fn(),
 }));
+
+vi.mock("../invoke", () => ({ invoke: invokeMock }));
 
 function item(id: string): PipelineItem {
   return {
@@ -146,6 +150,17 @@ describe("useAppKeyboardActions durable selection", () => {
       selectedRepoId: "repo-1",
       selectedItemId: "cloud:repo:task-remote",
     });
+  });
+
+  it("refuses Open in IDE for a task owned by another machine without invoking a local path command", async () => {
+    const workspaceTask = remoteWorkspaceTask("cloud:repo:task-remote");
+    workspaceTask.capabilities = { canOpenShell: false } as WorkspaceTask["capabilities"];
+    const { keyboardActions, toast } = createHarness({ workspaceTask });
+
+    await keyboardActions.openInIDE();
+
+    expect(toast.warning).toHaveBeenCalledWith("toasts.remoteTaskPathUnavailable");
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
   it("advances a selected durable task behind a noncanonical UI slot", () => {
