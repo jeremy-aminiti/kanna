@@ -315,10 +315,11 @@ export async function runRelayTaskJourneys(
 ): Promise<void> {
   await journeys.verifyQuickReplyPersistence();
   await journeys.verifyMarkedRead();
-  await journeys.verifyPtySnapshotRevisit();
-  // Ownership of the grid is exercised while the terminal is still the
-  // rendered subject, and hands it back before the later journeys.
+  // Grid ownership is exercised before the revisit journey, whose stability
+  // check restarts the daemon underneath the session: an observer opened
+  // while that socket is gone sees no snapshot at all.
   await journeys.verifyMobileTerminalControl();
+  await journeys.verifyPtySnapshotRevisit();
   // Exercise file discovery immediately after the terminal revisit, before
   // later menus can change the detail presentation state.
   await journeys.verifyFilePreview();
@@ -2201,14 +2202,20 @@ export async function runRelayTaskFlow(
     }),
     verifyTerminalKeys: () =>
       verifyRelayTerminalKeys(driver, options.terminalKeys),
-    // Runs on the detail screen the terminal revisit leaves rendered, and
-    // hands the grid back before returning it in the same state.
-    verifyMobileTerminalControl: () =>
-      verifyRelayMobileTerminalControlJourney(driver, ui, options.fixture, {
+    // Opens the task itself and waits for a rendered authoritative terminal,
+    // so the daemon is known live before any geometry is observed, then
+    // returns to the list the way the other detail journeys do.
+    verifyMobileTerminalControl: async () => {
+      await openRelayFixtureTask(ui, options.fixture.taskId);
+      await waitForTaskTerminalLive(ui);
+      await waitForRenderedPtyTerminal(ui, options.fixture);
+      await verifyRelayMobileTerminalControlJourney(driver, ui, options.fixture, {
         observeAuthoritativeTerminalGeometry:
           options.observeAuthoritativeTerminalGeometry,
         restoreDesktopTerminalControl: options.restoreDesktopTerminalControl,
-      }),
+      });
+      await closeTaskForJourney();
+    },
     verifyTaskActionMenu: () => verifyRelayTaskActionMenuJourney(
       ui,
       isTabletWorkspace

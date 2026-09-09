@@ -72,9 +72,14 @@ describe("relay task flow orchestration", () => {
         calls.push("open", "rendered");
       },
       async verifyMobileTerminalControl() {
-        // Runs on the rendered detail screen and leaves it there.
-        expect(screen).toBe("detail");
-        calls.push("terminal-control");
+        // Opens the task, exercises grid ownership, and closes it again, so
+        // it runs while the daemon is live rather than after the revisit
+        // journey restarts it.
+        expect(screen).toBe("list");
+        screen = "detail";
+        calls.push("open", "terminal-control");
+        screen = "list";
+        calls.push("close");
       },
       async verifyTaskActionMenu() {
         expect(screen).toBe("detail");
@@ -106,11 +111,13 @@ describe("relay task flow orchestration", () => {
       "quick-reply-persistence",
       "marked-read",
       "open",
+      "terminal-control",
+      "close",
+      "open",
       "rendered",
       "close",
       "open",
       "rendered",
-      "terminal-control",
       "file-preview",
       "terminal-keys",
       "quick-reply",
