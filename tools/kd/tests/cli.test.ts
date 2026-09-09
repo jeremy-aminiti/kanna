@@ -391,6 +391,9 @@ describe("kd CLI", () => {
       const launcherDiagnostics = launches
         .map((launch) => launch.stderr)
         .join("");
+      // Every launch runs the built kd, which loads `node:sqlite`; the
+      // wrapper must keep Node's ExperimentalWarning for it off stderr.
+      expect(launcherDiagnostics).not.toMatch(/ExperimentalWarning/);
       expect(launcherDiagnostics.match(/Installing kd:/g)).toHaveLength(1);
       expect(
         launcherDiagnostics.match(/Waiting for kd installation:/g)?.length ??

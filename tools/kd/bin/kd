@@ -38,4 +38,9 @@ fi
 
 cleanup
 trap - EXIT HUP INT TERM
-exec node "$DIST_ENTRY" "$@"
+# kd loads `node:sqlite`, which every Node that ships it still labels
+# experimental, so a bare `node` prints an ExperimentalWarning on stderr at
+# each launch. kd-mcp serves MCP over stdio and its stderr is a diagnostics
+# channel that must stay clean; suppress that one warning class here, at the
+# process boundary, rather than every warning.
+exec node --disable-warning=ExperimentalWarning "$DIST_ENTRY" "$@"
