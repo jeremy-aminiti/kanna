@@ -345,27 +345,11 @@
 
       "rules": [
         {
-          "id": "codex/busy/interrupt-marker",
-          "status": "busy",
-          "channel": "grid",
-          "versions": "*",
-          "priority": 20,
-          "when": { "anyLineWrapped": { "contains": "esc to interrupt" } }
-        },
-        {
-          "id": "codex/busy/background-terminal",
-          "status": "busy",
-          "channel": "grid",
-          "versions": "*",
-          "priority": 25,
-          "when": { "anyLineWrapped": { "contains": "Waiting for background terminal" } }
-        },
-        {
           "id": "codex/busy/working-background-terminal",
           "status": "busy",
           "channel": "grid",
           "versions": "*",
-          "priority": 26,
+          "priority": 12,
           "when": {
             "anyLineWrapped": {
               "allOf": [
@@ -375,6 +359,22 @@
               ]
             }
           }
+        },
+        {
+          "id": "codex/busy/background-terminal",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 14,
+          "when": { "anyLineWrapped": { "contains": "Waiting for background terminal" } }
+        },
+        {
+          "id": "codex/busy/interrupt-marker",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 20,
+          "when": { "anyLineWrapped": { "contains": "esc to interrupt" } }
         },
         {
           "id": "codex/idle/composer",

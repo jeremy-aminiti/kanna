@@ -1624,3 +1624,120 @@ mod quota_notice_tests {
         }
     }
 }
+
+/// The measured Codex busy footers and the rule each one must be attributed to.
+///
+/// Rules are evaluated in ascending `priority` and the first match wins, so a
+/// rule that specialises another — three anchors where the other has one —
+/// must carry the *lower* number or it can never fire: written at 26 behind
+/// the generic `esc to interrupt` marker at 20, the background-terminal rule
+/// classified nothing, and the verdict was right for the wrong reason. The
+/// verdict is `busy` either way; the rule id is what a diagnosis reads, so it
+/// is what these pin. The captures live in
+/// `tests/cli-contract/fixtures/codex-busy-footers.json`, the repository's home
+/// for version-tagged provider CLI evidence, and are compiled in here so the
+/// frame and the rule it selects cannot drift apart in separate commits.
+#[cfg(test)]
+mod codex_busy_precedence_tests {
+    use crate::detection::classify::{Classifier, Evidence};
+    use crate::detection::version::CliVersion;
+    use crate::protocol::{AgentProvider, SessionStatus};
+
+    const CAPTURES: &str =
+        include_str!("../../../../tests/cli-contract/fixtures/codex-busy-footers.json");
+
+    struct Capture {
+        provider: AgentProvider,
+        cli_version: String,
+        rule_id: String,
+        status: SessionStatus,
+        frame: Vec<String>,
+    }
+
+    fn captures() -> Vec<Capture> {
+        let parsed: serde_json::Value =
+            serde_json::from_str(CAPTURES).expect("the capture fixture must be valid JSON");
+        parsed
+            .as_array()
+            .expect("the capture fixture is a list")
+            .iter()
+            .map(|entry| Capture {
+                provider: entry["provider"]
+                    .as_str()
+                    .and_then(|provider| provider.parse().ok())
+                    .expect("a capture names a supported provider"),
+                cli_version: entry["cliVersion"]
+                    .as_str()
+                    .expect("a capture names the CLI version it was measured at")
+                    .to_string(),
+                rule_id: entry["ruleId"]
+                    .as_str()
+                    .expect("a capture names the rule that must claim it")
+                    .to_string(),
+                status: match entry["status"].as_str() {
+                    Some("busy") => SessionStatus::Busy,
+                    Some("waiting") => SessionStatus::Waiting,
+                    Some("idle") => SessionStatus::Idle,
+                    other => panic!("a capture names a status, got {other:?}"),
+                },
+                frame: entry["frame"]
+                    .as_array()
+                    .expect("a capture carries a frame")
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_measured_footer_is_claimed_by_its_most_specific_rule() {
+        let captures = captures();
+        assert!(!captures.is_empty(), "the fixture keeps captures");
+        for capture in &captures {
+            let mut classifier = Classifier::with_version(
+                Some(capture.provider),
+                Some(CliVersion::parse(&capture.cli_version).expect("a capture's version parses")),
+            );
+            let verdict = classifier
+                .classify(&Evidence {
+                    lines: &capture.frame,
+                    title: "",
+                    progress: None,
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{:?} {} must classify {:?}",
+                        capture.provider, capture.cli_version, capture.frame
+                    )
+                });
+            assert_eq!(verdict.status, capture.status, "{:?}", capture.frame);
+            assert_eq!(verdict.rule_id, capture.rule_id, "{:?}", capture.frame);
+        }
+    }
+
+    /// The fixture proves the outcome; this pins the mechanism, so a later
+    /// renumbering that quietly demotes a specialised rule behind the generic
+    /// marker fails here by name rather than as a surprising attribution.
+    #[test]
+    fn specialised_codex_busy_rules_are_ordered_ahead_of_the_generic_marker() {
+        let resolved = crate::detection::bundled().resolve(AgentProvider::Codex, None);
+        let position = |id: &str| {
+            resolved
+                .rules
+                .iter()
+                .position(|rule| rule.id == id)
+                .unwrap_or_else(|| panic!("the bundled rules declare {id}"))
+        };
+        let generic = position("codex/busy/interrupt-marker");
+        for specialised in [
+            "codex/busy/working-background-terminal",
+            "codex/busy/background-terminal",
+        ] {
+            assert!(
+                position(specialised) < generic,
+                "{specialised} specialises codex/busy/interrupt-marker and must be evaluated first"
+            );
+        }
+    }
+}
