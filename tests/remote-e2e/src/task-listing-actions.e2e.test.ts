@@ -501,8 +501,72 @@ describe("remote task listing, creation, and actions E2E", () => {
     seen.push(...eventTypes(resumed));
     expect(seen).toHaveLength(4_102);
     expect(new Set(seen).size).toBe(4_102);
+
+    // Batching over the real relay. A blocking aggregate wait that needs three
+    // events must re-arm the remote leg as each one arrives, or the first
+    // event ends the wait and the caller pays a wake-up per event — the cost
+    // that made one manager's watch 79% of its token spend. The batch is armed
+    // at the live tail, then three events are appended while it blocks.
+    const batchArmed = asRecord(await invokeDesktop(
+      harness,
+      "GET",
+      `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&from=now&timeoutSecs=0`,
+      null
+    ));
+    const batchCursor = getString(batchArmed, "cursor");
+    const batched = invokeDesktop(
+      harness,
+      "GET",
+      `/v1/task-events?taskIds=${task.taskId}&shortCursor=true&cursor=${encodeURIComponent(batchCursor)}`
+        + "&minEvents=3&debounceMs=1000&timeoutSecs=60",
+      null
+    );
+    for (const type of ["run.started", "run.finished", "stage.changed"]) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await appendTaskEvent(remote, task.taskId, type);
+    }
+    const batchedResponse = asRecord(await batched);
+    expect(eventTypes(batchedResponse)).toEqual([
+      "run.started",
+      "run.finished",
+      "stage.changed"
+    ]);
+    expect(asRecord(batchedResponse).waitOutcome).toBe("events");
+
+    // The batched boundary is still a cursor: the next wait sees only what
+    // followed it, and the events already delivered are not replayed.
+    await appendTaskEvent(remote, task.taskId, "task.pr_created");
+    const afterBatch = asRecord(await invokeDesktop(
+      harness,
+      "GET",
+      `/v1/task-events?taskIds=${task.taskId}&shortCursor=true`
+        + `&cursor=${encodeURIComponent(getString(batchedResponse, "cursor"))}&timeoutSecs=10`,
+      null
+    ));
+    expect(eventTypes(afterBatch)).toEqual(["task.pr_created"]);
+
+    // The allow-list drops what it is not given and still advances past it.
+    await appendTaskEvent(remote, task.taskId, "task.activity_changed");
+    await appendTaskEvent(remote, task.taskId, "task.closed");
+    const allowListed = asRecord(await invokeDesktop(
+      harness,
+      "GET",
+      `/v1/task-events?taskIds=${task.taskId}&shortCursor=true`
+        + `&cursor=${encodeURIComponent(getString(afterBatch, "cursor"))}`
+        + "&eventTypes=task.closed&timeoutSecs=10",
+      null
+    ));
+    expect(eventTypes(allowListed)).toEqual(["task.closed"]);
+    const drained = asRecord(await invokeDesktop(
+      harness,
+      "GET",
+      `/v1/task-events?taskIds=${task.taskId}&shortCursor=true`
+        + `&cursor=${encodeURIComponent(getString(allowListed, "cursor"))}&timeoutSecs=0`,
+      null
+    ));
+    expect(eventTypes(drained)).toEqual([]);
     await remote.stop();
-  }, 360_000);
+  }, 420_000);
 
   it("launches, reuses, and honestly refuses a repository singleton command over the LAN route", async () => {
     // The route the phone's More tab uses. Its 503 was not a transport

@@ -43,8 +43,8 @@ use std::time::Duration;
 
 /// Upper bound on one response. A caller that asks for a whole repo's history
 /// gets it in batches with `hasMore` set rather than one unbounded page.
-const DEFAULT_EVENT_LIMIT: i64 = 100;
-const MAX_EVENT_LIMIT: i64 = 500;
+const DEFAULT_EVENT_LIMIT: i64 = kanna_tool_catalog::DEFAULT_TASK_EVENT_LIMIT;
+const MAX_EVENT_LIMIT: i64 = kanna_tool_catalog::MAX_TASK_EVENT_LIMIT;
 /// Keeps invalid public GET requests and legacy cursor decoding bounded. New
 /// parent cursors are normally under 100 bytes. A deployed p1 cursor may be up
 /// to 32 KiB; its bounded upgrade continuation adds one checkpoint field, so
@@ -110,8 +110,33 @@ pub(super) struct TaskEventsQuery {
     /// manager passes `task.activity_changed` so a human reading a task's
     /// output does not wake it. Unknown names drop nothing.
     exclude_event_types: Option<String>,
+    /// Comma-separated event type names the caller wants, to the exclusion of
+    /// every other type — the complement of `exclude_event_types` for a
+    /// manager that knows the short list it acts on. A filter, never part of
+    /// the cursor, exactly like the two exclusion lists.
+    event_types: Option<String>,
     timeout_secs: Option<u64>,
     limit: Option<i64>,
+    /// Do not return before this many events (after filters) have accumulated,
+    /// or the timeout elapses. Fewer, larger responses: the point of the
+    /// parameter is that a manager polling in a loop pays one response for a
+    /// stretch of feed rather than one per runtime flicker.
+    min_events: Option<i64>,
+    /// After the first matching event, keep collecting for this long — capped
+    /// at the remaining timeout — so a burst (a run finishing, its post
+    /// starting, a stage change, a PR created) comes back as one response
+    /// instead of four.
+    debounce_ms: Option<u64>,
+    /// Floor on how long one call occupies before it returns events, measured
+    /// from the start of the call. A caller polling in a loop therefore wakes
+    /// at most once per interval however fast events arrive.
+    min_interval_ms: Option<u64>,
+    /// Drop the announcements of this caller's own deliveries —
+    /// `task.input_delivered` and `task.raw_input_delivered` rows a manager
+    /// declared itself the author of — so sending input and then waiting does
+    /// not wake on the echo of the send.
+    #[serde(default)]
+    exclude_own: bool,
     /// Used by kanna-mcp's existing km1 fan-in so its native local sub-wait
     /// does not recursively start the server-side fan-in too.
     #[serde(default)]
@@ -762,11 +787,13 @@ fn resolve_scope(
     ))
 }
 
-/// Resolve `excludeTaskIds` to task ids and pair them with `excludeEventTypes`.
-/// Branch names are accepted like every other task reference; a value that
-/// resolves to nothing is kept verbatim so excluding a task that no longer
-/// exists is a harmless no-op rather than a failed watch. Event type names are
-/// taken literally for the same reason — an unrecognized one drops nothing.
+/// Resolve `excludeTaskIds` to task ids and pair them with `excludeEventTypes`
+/// and the `eventTypes` allow-list. Branch names are accepted like every other
+/// task reference; a value that resolves to nothing is kept verbatim so
+/// excluding a task that no longer exists is a harmless no-op rather than a
+/// failed watch. Event type names are taken literally for the same reason — an
+/// unrecognized exclusion drops nothing, and an unrecognized allow-list entry
+/// simply matches nothing.
 fn resolve_exclusions(
     db: &Db,
     query: &TaskEventsQuery,
@@ -784,6 +811,8 @@ fn resolve_exclusions(
     Ok(TaskEventFilters {
         exclude_task_ids,
         exclude_event_types: normalized_values(query.exclude_event_types.as_deref()),
+        include_event_types: normalized_values(query.event_types.as_deref()),
+        exclude_own_deliveries: query.exclude_own,
     })
 }
 
@@ -1265,9 +1294,9 @@ fn append_current_activity_snapshots(
         return Ok(());
     }
     // A synthetic row states the same fact as the durable event it is named
-    // after, so a caller that filtered that type out does not want it here
-    // either.
-    if filters.excludes_event_type(CURRENT_RUNTIME_SNAPSHOT_TYPE) {
+    // after, so a caller that filtered that type out — by excluding it, or by
+    // naming an allow-list without it — does not want it here either.
+    if !filters.allows_event_type(CURRENT_RUNTIME_SNAPSHOT_TYPE) {
         progress.settled_complete = true;
         return Ok(());
     }
@@ -1367,20 +1396,36 @@ async fn wait_local_task_events(
     }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let min_events = kanna_tool_catalog::clamp_task_event_min_events(query.min_events, limit);
+    let debounce = hold_duration(query.debounce_ms);
+    // Collected across re-reads, not per read: a batched wait returns one
+    // response for a stretch of the feed, and the checkpoint it hands back is
+    // the last read's, so nothing between the two is skipped or repeated.
+    let mut collected: Vec<Value> = Vec::new();
+    let mut collected_has_more = false;
+    // Set by the first event of the batch, never restarted by later ones: the
+    // window bounds how long a burst is held, not how long the last event of a
+    // steady stream can defer the response.
+    let mut debounce_deadline: Option<tokio::time::Instant> = None;
+    // Measured from the start of the call rather than from an event, so a
+    // caller that loops as fast as it can still wakes at most once per
+    // interval.
+    let interval_deadline = interval_hold_deadline(query.min_interval_ms, deadline);
     loop {
         // Arm the wake-up *before* reading, and `enable()` it so it is actually
         // registered: an append landing between the read and the await must
         // wake this call, not wait for the next re-check.
         let mut appended = Box::pin(crate::db::task_event_appended());
         appended.as_mut().enable();
-        let mut batch = read_batch(&db_path, &scope, &filters, cursor.as_ref(), limit)?;
+        let remaining_limit = limit.saturating_sub(collected.len() as i64).max(1);
+        let mut batch = read_batch(&db_path, &scope, &filters, cursor.as_ref(), remaining_limit)?;
         if query.include_current_activity {
             append_current_activity_snapshots(
                 &db_path,
                 &scope,
                 &filters,
                 &mut batch,
-                limit,
+                remaining_limit,
                 &mut current_progress,
             )
             .map_err(db_error)?;
@@ -1396,40 +1441,103 @@ async fn wait_local_task_events(
         } else {
             batch.cursor.clone()
         };
-        if !batch.events.is_empty() || batch.has_more {
+        collected_has_more |= batch.has_more;
+        let read_events = !batch.events.is_empty();
+        collected.append(&mut batch.events);
+        if read_events && debounce_deadline.is_none() && !debounce.is_zero() {
+            debounce_deadline = Some((tokio::time::Instant::now() + debounce).min(deadline));
+        }
+        let now = tokio::time::Instant::now();
+        let hold_until = hold_deadline(debounce_deadline, interval_deadline);
+        if kanna_tool_catalog::task_event_batch_is_complete(
+            collected.len(),
+            collected_has_more,
+            limit,
+            min_events,
+            hold_elapsed(hold_until, now),
+        ) {
             return Ok(Json(json!({
                 "waitOutcome": "events",
                 "cursor": output_cursor,
-                "events": batch.events,
-                "hasMore": batch.has_more,
+                "events": collected,
+                "hasMore": collected_has_more,
             })));
         }
 
-        let now = tokio::time::Instant::now();
         if now >= deadline {
+            // The window closed before the batch filled. Whatever accumulated
+            // is still returned and still acknowledged by the cursor: holding
+            // events back for a batch the caller never asked to wait longer
+            // for would lose them for a whole extra window.
+            let collected_count = collected.len();
             return Ok(Json(json!({
                 "waitOutcome": "timeout",
                 "cursor": output_cursor,
-                "events": [],
+                "events": collected,
                 "hasMore": false,
                 "waitTimeoutSecs": timeout_secs,
-                "waitHint": format!(
-                    "no matching task events within {timeout_secs}s. This is not an error \
-                     and nothing was lost — call kanna_wait_events again with the returned \
-                     cursor to keep watching."
-                ),
+                "waitHint": if collected_count == 0 {
+                    format!(
+                        "no matching task events within {timeout_secs}s. This is not an error \
+                         and nothing was lost — call kanna_wait_events again with the returned \
+                         cursor to keep watching."
+                    )
+                } else {
+                    format!(
+                        "{collected_count} matching task events within {timeout_secs}s, fewer \
+                         than the {min_events} requested. They are returned and acknowledged by \
+                         the cursor — call kanna_wait_events again with it to keep watching."
+                    )
+                },
             })));
         }
         // Advance the in-flight checkpoint before waiting. Without this, every
         // five-second recheck would rescan unrelated rows between the caller's
         // original cursor and the latest head.
         cursor = parse_cursor(Some(&batch.cursor))?;
+        // A batch already at `min_events` is only waiting out its hold window;
+        // anything short of it waits for the full timeout.
+        let wake_deadline = match hold_until {
+            Some(hold_until) if collected.len() >= min_events => hold_until,
+            _ => deadline,
+        };
         let _ = tokio::time::timeout(
-            (deadline - now).min(Duration::from_secs(WAIT_RECHECK_SECS)),
+            (wake_deadline.max(now) - now).min(Duration::from_secs(WAIT_RECHECK_SECS)),
             appended,
         )
         .await;
     }
+}
+
+fn hold_duration(hold_ms: Option<u64>) -> Duration {
+    Duration::from_millis(kanna_tool_catalog::clamp_task_event_hold_ms(hold_ms))
+}
+
+/// `minIntervalMs` as an absolute instant, known before any event arrives and
+/// capped at the wait's own deadline — a floor on the call, never an extension
+/// of it.
+fn interval_hold_deadline(
+    min_interval_ms: Option<u64>,
+    deadline: tokio::time::Instant,
+) -> Option<tokio::time::Instant> {
+    let interval = hold_duration(min_interval_ms);
+    (!interval.is_zero()).then(|| (tokio::time::Instant::now() + interval).min(deadline))
+}
+
+/// The later of the two hold windows: both must close before a batch that is
+/// otherwise ready may be returned.
+fn hold_deadline(
+    debounce_deadline: Option<tokio::time::Instant>,
+    interval_deadline: Option<tokio::time::Instant>,
+) -> Option<tokio::time::Instant> {
+    match (debounce_deadline, interval_deadline) {
+        (Some(debounce), Some(interval)) => Some(debounce.max(interval)),
+        (held, None) | (None, held) => held,
+    }
+}
+
+fn hold_elapsed(hold_until: Option<tokio::time::Instant>, now: tokio::time::Instant) -> bool {
+    hold_until.is_none_or(|hold_until| now >= hold_until)
 }
 
 fn invalid_aggregate_cursor() -> (axum::http::StatusCode, String) {
@@ -1622,6 +1730,12 @@ fn local_query_for_aggregate(
             .then(|| filters.exclude_task_ids.join(",")),
         exclude_event_types: (!filters.exclude_event_types.is_empty())
             .then(|| filters.exclude_event_types.join(",")),
+        event_types: (!filters.include_event_types.is_empty())
+            .then(|| filters.include_event_types.join(",")),
+        exclude_own: filters.exclude_own_deliveries,
+        // `minEvents` and `debounceMs` are deliberately *not* forwarded: they
+        // shape the aggregated response, and a per-machine minimum would hold
+        // a leg's events back while the fan-out already had enough of them.
         ..TaskEventsQuery::default()
     };
     match scope {
@@ -1675,6 +1789,12 @@ fn aggregate_query_path(query: &TaskEventsQuery) -> String {
             "excludeEventTypes={}",
             encode_path_segment(exclude_event_types)
         ));
+    }
+    if let Some(event_types) = query.event_types.as_deref() {
+        params.push(format!("eventTypes={}", encode_path_segment(event_types)));
+    }
+    if query.exclude_own {
+        params.push("excludeOwn=true".to_string());
     }
     if let Some(cursor) = query.cursor.as_deref() {
         params.push(format!("cursor={}", encode_path_segment(cursor)));
@@ -1958,6 +2078,8 @@ async fn wait_aggregate_task_events(
     let filters = TaskEventFilters {
         exclude_task_ids: normalized_values(query.exclude_task_ids.as_deref()),
         exclude_event_types: normalized_values(query.exclude_event_types.as_deref()),
+        include_event_types: normalized_values(query.event_types.as_deref()),
+        exclude_own_deliveries: query.exclude_own,
     };
     let supplied_cursor = query.cursor.as_deref();
     let decoded = supplied_cursor
@@ -2086,6 +2208,14 @@ async fn wait_aggregate_task_events(
     let mut completed_machines = HashSet::new();
     let mut failed_machines = HashSet::new();
     let mut has_more = !session.cursor.machines_with_more.is_empty();
+    // Batching is applied by the machine serving the wait, over the events of
+    // every leg together — the same place the timeout is enforced. A leg that
+    // has already answered is simply re-armed while the batch is still filling,
+    // which is how a burst split across machines still returns as one response.
+    let min_events = kanna_tool_catalog::clamp_task_event_min_events(query.min_events, limit);
+    let debounce = hold_duration(query.debounce_ms);
+    let mut debounce_deadline: Option<tokio::time::Instant> = None;
+    let interval_deadline = interval_hold_deadline(query.min_interval_ms, deadline);
     loop {
         let remaining_secs = if timeout_secs == 0 {
             0
@@ -2115,12 +2245,18 @@ async fn wait_aggregate_task_events(
             )?;
         }
 
+        // A batch already holding `min_events` is only waiting out its hold
+        // window; anything short of it waits for the whole timeout.
+        let join_deadline = match hold_deadline(debounce_deadline, interval_deadline) {
+            Some(hold_until) if events.len() >= min_events => hold_until,
+            _ => deadline,
+        };
         let joined = if timeout_secs == 0 {
             tokio::time::timeout_at(zero_timeout_deadline, session.pending.join_next())
                 .await
                 .unwrap_or_default()
         } else {
-            tokio::time::timeout_at(deadline, session.pending.join_next())
+            tokio::time::timeout_at(join_deadline, session.pending.join_next())
                 .await
                 .unwrap_or_default()
         };
@@ -2144,14 +2280,29 @@ async fn wait_aggregate_task_events(
             &mut has_more,
             limit,
         )?;
-        if !completion_had_events
+        if completion_had_events && debounce_deadline.is_none() && !debounce.is_zero() {
+            debounce_deadline = Some((tokio::time::Instant::now() + debounce).min(deadline));
+        }
+        let now = tokio::time::Instant::now();
+        let batch_complete = kanna_tool_catalog::task_event_batch_is_complete(
+            events.len(),
+            has_more,
+            limit,
+            min_events,
+            hold_elapsed(hold_deadline(debounce_deadline, interval_deadline), now),
+        );
+        // Re-arm the leg that just answered whenever this wait is still
+        // filling its batch. Without events that is the existing behaviour;
+        // with `minEvents` or `debounceMs` it is also what lets a machine's
+        // next events land in the same response instead of the next one.
+        if !batch_complete
             && !failed_machines.contains(&completed_machine_id)
             && timeout_secs > 0
-            && tokio::time::Instant::now() < deadline
+            && now < deadline
         {
             completed_machines.remove(&completed_machine_id);
         }
-        if !events.is_empty() || has_more {
+        if batch_complete {
             break;
         }
         if !machine_errors.is_empty() && completed_machines.len() >= active_machines.len() {
@@ -2174,7 +2325,21 @@ async fn wait_aggregate_task_events(
         registry.evict_expired(tokio::time::Instant::now());
         registry.insert_bounded(output_cursor.clone(), session);
     }
-    let wait_outcome = if !events.is_empty() || has_more {
+    // Recomputed after the loop: a batch that broke out on its debounce
+    // deadline is complete by the time the response is built, and a window
+    // that closed short of `min_events` reports `timeout` with whatever
+    // accumulated, exactly like the single-machine wait.
+    let batch_complete = kanna_tool_catalog::task_event_batch_is_complete(
+        events.len(),
+        has_more,
+        limit,
+        min_events,
+        hold_elapsed(
+            hold_deadline(debounce_deadline, interval_deadline),
+            tokio::time::Instant::now(),
+        ),
+    );
+    let wait_outcome = if batch_complete {
         "events"
     } else if !machine_errors.is_empty() {
         "partial"

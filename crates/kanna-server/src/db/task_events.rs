@@ -363,18 +363,30 @@ fn exclusion_clause(column: &str, exclude_task_ids: &[String]) -> String {
     format!(" AND {column} NOT IN ({placeholders})")
 }
 
+/// The allow-list counterpart of [`exclusion_clause`]. An empty list allows
+/// everything, so it contributes no clause at all rather than an `IN ()` that
+/// would match nothing.
+fn inclusion_clause(column: &str, include_values: &[String]) -> String {
+    if include_values.is_empty() {
+        return String::new();
+    }
+    let placeholders = vec!["?"; include_values.len()].join(", ");
+    format!(" AND {column} IN ({placeholders})")
+}
+
 fn exclusion_params(exclude_task_ids: &[String]) -> impl Iterator<Item = SqlValue> + '_ {
     exclude_task_ids
         .iter()
         .map(|task_id| SqlValue::Text(task_id.clone()))
 }
 
-/// What a reader wants dropped from whichever scope it chose.
+/// What a reader wants dropped from — or kept out of — whichever scope it
+/// chose.
 ///
-/// Both lists are filters, never scopes: neither participates in cursor
-/// identity, so a watcher may change either between two calls and keep its
-/// checkpoint. Filtering happens in SQL rather than after the read because the
-/// point of an exclusion is that the wait does *not* return — a manager that
+/// All three lists are filters, never scopes: none participates in cursor
+/// identity, so a watcher may change any of them between two calls and keep
+/// its checkpoint. Filtering happens in SQL rather than after the read because
+/// the point of a filter is that the wait does *not* return — a manager that
 /// dropped `task.activity_changed` must sleep through a human reading a task,
 /// not wake up and discard the row.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -383,27 +395,88 @@ pub struct TaskEventFilters {
     pub exclude_task_ids: Vec<String>,
     /// Event type names (`task.activity_changed`, …) that are dropped.
     pub exclude_event_types: Vec<String>,
+    /// Event type names the reader wants, to the exclusion of everything else.
+    /// Empty means every type is allowed — the allow-list is the complement of
+    /// `exclude_event_types` for a manager that knows the short list it acts
+    /// on and would otherwise have to enumerate every noisy type instead.
+    pub include_event_types: Vec<String>,
+    /// Drop the announcements of deliveries a manager declared itself the
+    /// author of. It breaks the loop where an orchestrator sends input to a
+    /// task and then waits on it: without this the delivery's own
+    /// `task.input_delivered` row ends the very next wait, before the agent it
+    /// spoke to has done anything.
+    ///
+    /// The match is positive and is exactly as wide as the delivering caller's
+    /// own declaration: `payload.source == "manager"` on
+    /// `task.input_delivered` and `task.raw_input_delivered`. An operator's
+    /// delivery is a human intervening in a task a manager is watching and is
+    /// never dropped, and a caller that declared nothing is indistinguishable
+    /// from that human, so it is not dropped either.
+    pub exclude_own_deliveries: bool,
 }
 
+/// Delivery announcements, and the source label that makes one a manager's own
+/// echo. Matched in SQL so a suppressed echo does not end the wait at all.
+const DELIVERY_EVENT_TYPES: [&str; 2] = ["task.input_delivered", "task.raw_input_delivered"];
+const OWN_DELIVERY_SOURCE: &str = "manager";
+
 impl TaskEventFilters {
-    pub fn excludes_event_type(&self, event_type: &str) -> bool {
-        self.exclude_event_types
+    /// Whether a row of this type survives both type lists. An explicit
+    /// exclusion still wins over the allow-list, so a caller that names both
+    /// gets the narrower feed rather than a contradiction.
+    pub fn allows_event_type(&self, event_type: &str) -> bool {
+        if self
+            .exclude_event_types
             .iter()
             .any(|excluded| excluded == event_type)
+        {
+            return false;
+        }
+        self.include_event_types.is_empty()
+            || self
+                .include_event_types
+                .iter()
+                .any(|included| included == event_type)
     }
 
-    /// `AND …` clauses for both lists, in the order [`Self::params`] binds
+    /// `AND …` clauses for every filter, in the order [`Self::params`] binds
     /// them.
     fn clauses(&self, task_id_column: &str) -> String {
         format!(
-            "{}{}",
+            "{}{}{}{}",
             exclusion_clause(task_id_column, &self.exclude_task_ids),
-            exclusion_clause("type", &self.exclude_event_types)
+            exclusion_clause("type", &self.exclude_event_types),
+            inclusion_clause("type", &self.include_event_types),
+            self.own_delivery_clause()
         )
     }
 
+    fn own_delivery_clause(&self) -> String {
+        if !self.exclude_own_deliveries {
+            return String::new();
+        }
+        let placeholders = vec!["?"; DELIVERY_EVENT_TYPES.len()].join(", ");
+        format!(" AND NOT (type IN ({placeholders}) AND json_extract(payload, '$.source') = ?)")
+    }
+
+    fn own_delivery_params(&self) -> Vec<SqlValue> {
+        if !self.exclude_own_deliveries {
+            return Vec::new();
+        }
+        DELIVERY_EVENT_TYPES
+            .iter()
+            .map(|event_type| SqlValue::Text((*event_type).to_string()))
+            .chain(std::iter::once(SqlValue::Text(
+                OWN_DELIVERY_SOURCE.to_string(),
+            )))
+            .collect()
+    }
+
     fn params(&self) -> impl Iterator<Item = SqlValue> + '_ {
-        exclusion_params(&self.exclude_task_ids).chain(exclusion_params(&self.exclude_event_types))
+        exclusion_params(&self.exclude_task_ids)
+            .chain(exclusion_params(&self.exclude_event_types))
+            .chain(exclusion_params(&self.include_event_types))
+            .chain(self.own_delivery_params())
     }
 }
 

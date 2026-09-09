@@ -984,6 +984,16 @@ fn parses_wait_events_and_rejects_removed_set_notify_command() {
         "--exclude-task-id",
         "noisy-a,noisy-b",
         "--include-self",
+        "--event-type",
+        "run.finished,task.pr_created",
+        "--min-events",
+        "5",
+        "--debounce-ms",
+        "2000",
+        "--min-interval-ms",
+        "5000",
+        "--exclude-own",
+        "false",
     ])
     .unwrap();
     match cli.command {
@@ -995,16 +1005,26 @@ fn parses_wait_events_and_rejects_removed_set_notify_command() {
                     repo_id,
                     repo_remote_url_hash,
                     exclude_task_id,
+                    event_type,
                     include_self,
+                    exclude_own,
                     local_only,
                     short_cursor,
                     cursor,
                     timeout_secs,
                     limit,
+                    min_events,
+                    debounce_ms,
+                    min_interval_ms,
                     ..
                 },
         } => {
             assert_eq!(exclude_task_id, vec!["noisy-a", "noisy-b"]);
+            assert_eq!(event_type, vec!["run.finished", "task.pr_created"]);
+            assert_eq!(min_events, Some(5));
+            assert_eq!(debounce_ms, Some(2000));
+            assert_eq!(min_interval_ms, Some(5000));
+            assert_eq!(exclude_own, Some(false));
             assert!(include_self);
             assert_eq!(task_id, vec!["child-a", "child-b", "child-c"]);
             assert_eq!(parent_task_id, None);
@@ -1125,6 +1145,8 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         repo_remote_url_hash: None,
         exclude_task_ids: &[],
         exclude_event_types: &[],
+        event_types: &[],
+        exclude_own: false,
         local_only: false,
         include_current_activity: true,
         short_cursor: true,
@@ -1132,6 +1154,9 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         cursor: Some("42"),
         timeout_secs: 30,
         limit: Some(10),
+        min_events: None,
+        debounce_ms: None,
+        min_interval_ms: None,
     });
     let query_pairs = |path: &str| {
         let mut pairs = path
@@ -1150,6 +1175,49 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
     );
     assert_eq!(query_pairs(&resolved.path), query_pairs(&typed));
 
+    // The batching parameters ride the same keys on both surfaces too, or a
+    // manager on the CLI fallback pays the per-event wake-up the MCP tool
+    // batches away.
+    let resolved_batched = kanna_tool_catalog::resolve_request(
+        &catalog,
+        "kanna_wait_events",
+        &json!({
+            "task_ids": ["child-a", "child-b"],
+            "event_types": ["run.finished", "task.pr_created"],
+            "exclude_own": true,
+            "min_events": 5,
+            "debounce_ms": 2000,
+            "min_interval_ms": 5000,
+            "timeout_secs": 30
+        }),
+    )
+    .unwrap();
+    let allowed_types = ["run.finished".to_string(), "task.pr_created".to_string()];
+    let typed_batched = crate::api::task_events_path(&crate::api::TaskEventsParams {
+        task_ids: &task_ids,
+        parent_task_id: None,
+        repo_id: None,
+        repo_remote_url_hash: None,
+        exclude_task_ids: &[],
+        exclude_event_types: &[],
+        event_types: &allowed_types,
+        exclude_own: true,
+        local_only: false,
+        include_current_activity: true,
+        short_cursor: true,
+        from: None,
+        cursor: None,
+        timeout_secs: 30,
+        limit: None,
+        min_events: Some(5),
+        debounce_ms: Some(2000),
+        min_interval_ms: Some(5000),
+    });
+    assert_eq!(
+        query_pairs(&resolved_batched.path),
+        query_pairs(&typed_batched)
+    );
+
     // Exclusions ride the same query key on both surfaces, so a manager on
     // the CLI fallback is silenced by exactly the tasks the MCP tool drops.
     let resolved_excluded = kanna_tool_catalog::resolve_request(
@@ -1166,6 +1234,8 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         repo_remote_url_hash: None,
         exclude_task_ids: &exclusions,
         exclude_event_types: &[],
+        event_types: &[],
+        exclude_own: false,
         local_only: false,
         include_current_activity: true,
         short_cursor: true,
@@ -1173,6 +1243,9 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         cursor: None,
         timeout_secs: 30,
         limit: None,
+        min_events: None,
+        debounce_ms: None,
+        min_interval_ms: None,
     });
     assert_eq!(
         query_pairs(&resolved_excluded.path),
@@ -1196,6 +1269,8 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         repo_remote_url_hash: None,
         exclude_task_ids: &[],
         exclude_event_types: &[],
+        event_types: &[],
+        exclude_own: false,
         local_only: false,
         include_current_activity: true,
         short_cursor: true,
@@ -1203,6 +1278,9 @@ fn typed_wait_events_path_matches_the_catalog_tool_path() {
         cursor: None,
         timeout_secs: 30,
         limit: None,
+        min_events: None,
+        debounce_ms: None,
+        min_interval_ms: None,
     });
     assert_eq!(
         query_pairs(&resolved_parent.path),

@@ -1073,7 +1073,7 @@ fn serve_defaults_listing_search_and_tail_watch_to_current_task_repo() {
         },
         ExpectedRequest {
             method: "GET",
-            path: "/v1/task-events?repoId=repo-current&excludeTaskIds=task-current&includeCurrentActivity=true&shortCursor=true&from=now&timeoutSecs=0",
+            path: "/v1/task-events?repoId=repo-current&excludeTaskIds=task-current&excludeOwn=true&includeCurrentActivity=true&shortCursor=true&from=now&timeoutSecs=0",
             body: None,
             response_status: "200 OK",
             response_body: json!({
@@ -1092,9 +1092,11 @@ fn serve_defaults_listing_search_and_tail_watch_to_current_task_repo() {
         },
         // include_self is consumed by the adapter: the caller's own task is
         // no longer excluded and nothing named includeSelf reaches the wire.
+        // excludeOwn is unrelated and survives — it drops the announcement of
+        // this manager's own deliveries, not its own task's events.
         ExpectedRequest {
             method: "GET",
-            path: "/v1/task-events?repoId=repo-current&includeCurrentActivity=true&shortCursor=true&from=now&timeoutSecs=0",
+            path: "/v1/task-events?repoId=repo-current&excludeOwn=true&includeCurrentActivity=true&shortCursor=true&from=now&timeoutSecs=0",
             body: None,
             response_status: "200 OK",
             response_body: json!({
