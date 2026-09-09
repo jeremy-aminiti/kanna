@@ -253,6 +253,12 @@ async fn run_import(
     let payload = if local_task_id.is_some() {
         stored
     } else {
+        if stored.repo.mode != RepoAcquisitionMode::TaskBundle {
+            return Err(ImportFailure::Terminal(
+                "source server uses a legacy transfer payload that cannot prove the task head or durable input ledger; update it and retry the transfer"
+                    .into(),
+            ));
+        }
         let finalized = control::finalize_from_source(state, transfer_id).await?;
         let payload = payload::parse_outgoing_transfer_payload(&finalized.payload)
             .map_err(ImportFailure::Terminal)?;
@@ -297,7 +303,9 @@ async fn run_import(
         )
         .map_err(|missing| ImportFailure::Terminal(missing.0))?;
 
-        let (repo_id, repo_path) = acquire_repo(state, transfer_id, &payload).await?;
+        let (repo_id, repo_path, imported_task_ref) =
+            acquire_repo(state, transfer_id, &payload).await?;
+        let imported_inputs = fetch_task_input_ledger(state, transfer_id, &payload).await?;
         // The destination task id — and therefore its worktree — is
         // deterministic before creation, which is what lets the transcript be
         // re-keyed to the destination slug before the agent spawns `--resume`.
@@ -308,16 +316,46 @@ async fn run_import(
             materialize_resume_state(state, work, transfer_id, &payload, &destination_worktree)
                 .await?;
 
-        let created = crate::http_api::create_task_in_process(
+        let created = crate::http_api::create_transferred_task_in_process(
             Arc::clone(state),
-            build_create_request(state, &repo_id, &payload, resume_session_id.clone()).await,
+            build_create_request(
+                state,
+                &repo_id,
+                &payload,
+                imported_task_ref,
+                resume_session_id.clone(),
+            )
+            .await,
             destination_task_id.clone(),
+            imported_inputs,
         )
         .await
         .map_err(|(status, message)| {
             format!("failed to create the transferred task ({status}): {message}")
         })?;
         local_task_id = Some(created.task_id);
+
+        let expected_head =
+            payload.task.head_oid.as_deref().ok_or_else(|| {
+                ImportFailure::Terminal("task bundle has no expected head".into())
+            })?;
+        let destination_branch = format!("task-{}", local_task_id.as_deref().unwrap_or_default());
+        let history_proved = {
+            let (repo_path, expected_head, destination_branch) = (
+                repo_path.clone(),
+                expected_head.to_string(),
+                destination_branch.clone(),
+            );
+            super::run_blocking("transferred task history verification", move || {
+                super::git::commit_is_ancestor(&repo_path, &expected_head, &destination_branch)
+            })
+            .await?
+        };
+        if !history_proved {
+            return Err(ImportFailure::Terminal(format!(
+                "destination task branch {destination_branch} does not contain transferred head {expected_head}"
+            )));
+        }
 
         if !db
             .mark_incoming_transfer_importing(
@@ -423,7 +461,7 @@ async fn acquire_repo(
     state: &Arc<AppState>,
     transfer_id: &str,
     payload: &OutgoingTransferPayload,
-) -> Result<(String, PathBuf), ImportFailure> {
+) -> Result<(String, PathBuf, Option<String>), ImportFailure> {
     let repo_name = payload.repo.name.clone().unwrap_or_else(|| "repo".into());
     let default_branch = payload
         .repo
@@ -447,7 +485,13 @@ async fn acquire_repo(
         .await?
     };
     if let Some((repo_id, repo_path)) = matched {
-        return Ok((repo_id, PathBuf::from(repo_path)));
+        let repo_path = PathBuf::from(repo_path);
+        let imported_ref = if payload.repo.mode == RepoAcquisitionMode::TaskBundle {
+            Some(import_verified_task_bundle(state, transfer_id, payload, &repo_path).await?)
+        } else {
+            None
+        };
+        return Ok((repo_id, repo_path, imported_ref));
     }
 
     let repo_path = match payload.repo.mode {
@@ -501,6 +545,23 @@ async fn acquire_repo(
             })
             .await?
         }
+        RepoAcquisitionMode::TaskBundle => {
+            let bundle = payload
+                .repo
+                .bundle
+                .as_ref()
+                .ok_or_else(|| "incoming task bundle is missing bundle metadata".to_string())
+                .map_err(ImportFailure::Terminal)?;
+            let fetched = control::fetch_artifact(state, transfer_id, &bundle.artifact_id).await?;
+            let repo_name = repo_name.clone();
+            let checkout_ref = bundle.ref_name.clone();
+            super::run_blocking("transfer repo restore", move || {
+                let repo_path = super::git::allocate_repo_path(&repos_home()?, &repo_name)?;
+                super::git::init_from_bundle(&repo_path, &fetched, checkout_ref.as_deref())?;
+                Ok(repo_path)
+            })
+            .await?
+        }
     };
 
     // `add_repo` canonicalizes the path and reads the repo's default branch
@@ -517,7 +578,69 @@ async fn acquire_repo(
         })
         .await?
     };
-    Ok((repo_id, repo_path))
+    let imported_ref = if payload.repo.mode == RepoAcquisitionMode::TaskBundle {
+        Some(import_verified_task_bundle(state, transfer_id, payload, &repo_path).await?)
+    } else {
+        None
+    };
+    Ok((repo_id, repo_path, imported_ref))
+}
+
+async fn import_verified_task_bundle(
+    state: &Arc<AppState>,
+    transfer_id: &str,
+    payload: &OutgoingTransferPayload,
+    repo_path: &Path,
+) -> Result<String, ImportFailure> {
+    let bundle = payload
+        .repo
+        .bundle
+        .as_ref()
+        .ok_or_else(|| ImportFailure::Terminal("task bundle has no bundle metadata".into()))?;
+    let source_ref = bundle
+        .ref_name
+        .as_deref()
+        .ok_or_else(|| ImportFailure::Terminal("task bundle has no source ref".into()))?;
+    let expected_head = payload
+        .task
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| ImportFailure::Terminal("task bundle has no expected head".into()))?;
+    let fetched = control::fetch_artifact(state, transfer_id, &bundle.artifact_id).await?;
+    let (repo_path, source_ref, expected_head) = (
+        repo_path.to_path_buf(),
+        source_ref.to_string(),
+        expected_head.to_string(),
+    );
+    super::run_blocking("transfer task bundle import", move || {
+        super::git::import_task_bundle_ref(&repo_path, &fetched, &source_ref, &expected_head)
+    })
+    .await
+    .map_err(ImportFailure::Terminal)
+}
+
+async fn fetch_task_input_ledger(
+    state: &Arc<AppState>,
+    transfer_id: &str,
+    payload: &OutgoingTransferPayload,
+) -> Result<Vec<crate::db::ImportedTaskInput>, ImportFailure> {
+    let metadata = payload
+        .input_ledger
+        .as_ref()
+        .ok_or_else(|| ImportFailure::Terminal("task bundle has no durable input ledger".into()))?;
+    let fetched = control::fetch_artifact(state, transfer_id, &metadata.artifact_id).await?;
+    let bytes = super::run_blocking("transfer input ledger read", move || {
+        std::fs::read(&fetched)
+            .map_err(|error| format!("failed to read transferred task input ledger: {error}"))
+    })
+    .await?;
+    payload::decode_task_input_ledger(
+        &bytes,
+        metadata,
+        &payload.task.source_peer_id,
+        &payload.task.source_task_id,
+    )
+    .map_err(ImportFailure::Terminal)
 }
 
 /// Matches the payload's repository against one this machine already has —
@@ -765,6 +888,7 @@ async fn build_create_request(
     state: &Arc<AppState>,
     repo_id: &str,
     payload: &OutgoingTransferPayload,
+    imported_task_ref: Option<String>,
     resume_session_id: Option<String>,
 ) -> crate::mobile_api::CreateTaskRequest {
     crate::mobile_api::CreateTaskRequest {
@@ -773,10 +897,12 @@ async fn build_create_request(
         display_name: payload.task.display_name.clone(),
         workflow_name: Some(payload.task.workflow.clone()),
         stage: Some(payload.task.stage.clone()),
-        base_ref: payload::resolve_incoming_base_branch(payload),
-        // An imported task keeps the base it was transferred with; nothing in
-        // the transfer payload distinguishes a fork point from a diff base.
-        diff_base_ref: None,
+        // Integrity-aware transfers fork from the private ref whose object id
+        // was just proved. Legacy payloads retain their historical resolver.
+        base_ref: imported_task_ref.or_else(|| payload::resolve_incoming_base_branch(payload)),
+        // The source task's diff base is distinct from its fork point once the
+        // exact transferred head is available locally.
+        diff_base_ref: payload.task.base_ref.clone(),
         review_context: None,
         agent: None,
         agent_provider: Some(payload.task.agent_provider.clone()),
@@ -926,6 +1052,65 @@ mod tests {
             "artifacts": [],
         }))
         .expect("a valid payload")
+    }
+
+    #[tokio::test]
+    async fn legacy_payload_is_a_recoverable_failure_before_source_finalization() {
+        let work = work_item("import:legacy-transfer");
+        let raw_payload = serde_json::json!({
+            "target_peer_id": "peer-destination",
+            "task": {
+                "source_peer_id": "peer-source",
+                "source_task_id": "task-source",
+                "resume_session_id": null,
+                "stage": "review",
+                "pipeline": "single-reviewer",
+                "branch": "task-source",
+                "base_ref": "origin/main",
+                "agent_type": "agent",
+                "agent_provider": "codex",
+            },
+            "repo": { "mode": "reuse-local", "path": "/repo" },
+            "artifacts": [],
+        });
+        let payload_json = serde_json::to_string(&raw_payload).expect("payload json");
+        let state = crate::http_api::test_state_with_seed(
+            "desktop-legacy-transfer-refusal",
+            "Legacy Refusal",
+            |db| {
+                db.insert_task_transfer(&crate::db::NewTaskTransfer {
+                    id: "legacy-transfer".into(),
+                    direction: "incoming".into(),
+                    status: "pending".into(),
+                    source_peer_id: Some("peer-source".into()),
+                    target_peer_id: None,
+                    source_desktop_id: None,
+                    target_desktop_id: None,
+                    source_task_id: Some("task-source".into()),
+                    local_task_id: None,
+                    error: None,
+                    payload_json: Some(payload_json),
+                })
+                .expect("incoming transfer");
+            },
+        );
+
+        let failure = run_import(&state, &work, "legacy-transfer")
+            .await
+            .expect_err("legacy payload was allowed to finalize and import");
+        let ImportFailure::Terminal(reason) = failure else {
+            panic!("legacy payload was treated as retryable");
+        };
+        assert!(reason.contains("cannot prove the task head"), "{reason}");
+        let transfer = state
+            .transfer_work()
+            .open_db()
+            .expect("db")
+            .get_task_transfer("legacy-transfer")
+            .expect("read transfer")
+            .expect("transfer");
+        assert_eq!(transfer.local_task_id, None);
+        assert_eq!(transfer.status, "claimed");
     }
 
     /// The retry seam migration 050 exists for.

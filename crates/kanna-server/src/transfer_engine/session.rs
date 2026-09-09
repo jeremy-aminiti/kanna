@@ -309,6 +309,10 @@ pub fn bundle_staging_path(staging_dir: &Path, transfer_id: &str) -> PathBuf {
     staging_dir.join(format!("kanna-transfer-{transfer_id}.bundle"))
 }
 
+pub fn input_ledger_staging_path(staging_dir: &Path, transfer_id: &str) -> PathBuf {
+    staging_dir.join(format!("kanna-transfer-{transfer_id}-task-inputs.json"))
+}
+
 /// The artifact ids the payload declares. Derived from the transfer id so a
 /// re-staged artifact replaces its predecessor rather than accumulating.
 pub fn artifact_id(transfer_id: &str, suffix: &str) -> String {

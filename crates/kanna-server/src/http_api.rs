@@ -107,7 +107,7 @@ pub async fn serve(state: std::sync::Arc<AppState>) -> Result<(), String> {
 pub(crate) use quota_recovery::parked_action_for_tests;
 pub(crate) use quota_recovery::{handle_quota_rejection, QuotaRejectionNotice};
 pub(crate) use task_actions::close_task_in_process;
-pub(crate) use tasks::create_task_in_process;
+pub(crate) use tasks::create_transferred_task_in_process;
 
 pub(crate) use task_input::{
     handle_task_terminal_state, mark_task_session_interrupted,
