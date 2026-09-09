@@ -344,6 +344,22 @@
           "when": { "anyLineWrapped": { "contains": "Waiting for background terminal" } }
         },
         {
+          "id": "codex/busy/working-background-terminal",
+          "status": "busy",
+          "channel": "grid",
+          "versions": "*",
+          "priority": 26,
+          "when": {
+            "anyLineWrapped": {
+              "allOf": [
+                { "contains": "Working (" },
+                { "contains": "background terminal running" },
+                { "contains": "esc to interrupt" }
+              ]
+            }
+          }
+        },
+        {
           "id": "codex/idle/composer",
           "status": "idle",
           "channel": "grid",

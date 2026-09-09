@@ -893,6 +893,22 @@ mod tests {
         )
         .expect("captured Codex handoff frame should classify");
         assert_eq!(codex.status, SessionStatus::Busy);
+
+        // Captured on the owner's MacBook Pro at 06:11 UTC on 2026-09-09
+        // while the daemon incorrectly reported this review session idle.
+        // The line is clipped by the real 80-column terminal, but its active
+        // spinner, interrupt hint, and running background-terminal count are
+        // all visible evidence of a live Codex turn.
+        let codex_working_background = verdict_for(
+            AgentProvider::Codex,
+            &["• Working (1m 58s • esc to interrupt) · 1 background terminal running · /ps to …"],
+        )
+        .expect("captured active Codex background-terminal frame should classify");
+        assert_eq!(codex_working_background.status, SessionStatus::Busy);
+        assert_eq!(
+            codex_working_background.rule_id,
+            "codex/busy/working-background-terminal"
+        );
     }
 
     #[test]
