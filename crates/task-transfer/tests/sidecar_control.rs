@@ -735,6 +735,7 @@ fn control_response_id(response: &ControlResponse) -> &str {
         | ControlResponse::FetchTransferArtifact { request_id, .. }
         | ControlResponse::PrepareTransferPreflight { request_id, .. }
         | ControlResponse::RequestTaskPull { request_id, .. }
+        | ControlResponse::ReportTaskPullRefusal { request_id }
         | ControlResponse::PrepareTransferCommit { request_id, .. }
         | ControlResponse::AbandonOutgoingTransfer { request_id, .. }
         | ControlResponse::FinalizeOutgoingTransfer { request_id, .. }

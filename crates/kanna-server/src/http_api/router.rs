@@ -61,13 +61,14 @@ use super::transfer_sidecar::{
 };
 use super::transfers::{
     approve_incoming_transfer, claim_pending_incoming_transfer, complete_task_transfer,
-    fail_outgoing_transfer, fail_pending_incoming_transfer, get_active_outgoing_transfer,
-    get_task_transfer, insert_task_transfer, insert_task_transfer_provenance,
-    list_incoming_transfer_cleanup_candidates, list_pending_incoming_transfers,
-    list_task_transfers, list_transfer_peers, mark_incoming_transfer_awaiting_acknowledgment,
-    mark_incoming_transfer_importing, mark_incoming_transfer_sidecar_cleanup_completed,
-    pull_task_from_peer, push_task_to_peer, reject_incoming_transfer, reject_task_transfer,
-    renew_incoming_transfer_claim, set_task_cloud_identity, update_task_transfer_payload,
+    dismiss_failed_transfer, fail_outgoing_transfer, fail_pending_incoming_transfer,
+    get_active_outgoing_transfer, get_task_transfer, insert_task_transfer,
+    insert_task_transfer_provenance, list_incoming_transfer_cleanup_candidates,
+    list_pending_incoming_transfers, list_task_transfers, list_transfer_peers,
+    mark_incoming_transfer_awaiting_acknowledgment, mark_incoming_transfer_importing,
+    mark_incoming_transfer_sidecar_cleanup_completed, pull_task_from_peer, push_task_to_peer,
+    reject_incoming_transfer, reject_task_transfer, renew_incoming_transfer_claim,
+    set_task_cloud_identity, update_task_transfer_payload,
 };
 use super::window_workspace::mutate_window_workspace;
 use axum::body::Body;
@@ -327,6 +328,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/transfers/{transfer_id}/actions/reject-incoming",
             post(reject_incoming_transfer),
+        )
+        .route(
+            "/v1/transfers/{transfer_id}/actions/dismiss-failure",
+            post(dismiss_failed_transfer),
         )
         .route(
             "/v1/transfers/provenance",

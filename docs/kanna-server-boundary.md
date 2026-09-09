@@ -988,8 +988,8 @@ reachable only by whoever held a private stdio pipe.
   control. Absence of the field is not evidence of a stale cursor.
   Single-consumer: a read prunes through the cursor it is given, so exactly one
   desktop process subscribes. This feed carries only *advisory* events —
-  pairing progress and remote terminal frames. The four state-mutating events
-  (`incoming_transfer_request`, `task_pull_requested`,
+  pairing progress and remote terminal frames. The state-mutating events
+  (`incoming_transfer_request`, `task_pull_requested`, `task_pull_refused`,
   `outgoing_transfer_committed`, `outgoing_transfer_finalization_requested`)
   never reach it: the sidecar's stdout reader appends them straight to the
   transfer engine's durable work queue in this process. A full advisory log
@@ -1063,6 +1063,8 @@ intents:
   "Agent-facing task transfer" below.
 - `POST /v1/transfers/{transfer_id}/actions/approve`
 - `POST /v1/transfers/{transfer_id}/actions/reject-incoming`
+- `POST /v1/transfers/{transfer_id}/actions/dismiss-failure` — marks a `failed`
+  transfer read so it stops marking its task; the record itself survives.
 
 Progress reaches the UI through the snapshot's `transfer_status`, which the
 sidebar already renders. There is no bespoke event protocol between the engine
@@ -1093,7 +1095,7 @@ without MCP:
 | `kanna_pull_task` | `task pull` | `POST /v1/transfers/actions/pull-task` |
 | `kanna_task_transfers` | `task transfers` | `GET /v1/tasks/{id}/transfers` |
 
-Four things are contract rather than convenience:
+These things are contract rather than convenience:
 
 - **A destination is canonical identity.** `to_machine` / `from_machine` accept
   a machine (desktop) id from `kanna_list_machines` or a transfer peer id from
@@ -1118,6 +1120,27 @@ Four things are contract rather than convenience:
   `sourceTaskId` and `localTaskId`. A pull's `requestId` is stable for repeats
   within the sidecar's five-minute window, so an unchanged id is a duplicate
   rather than a second move.
+- **A refused pull is recorded on the machine that asked.** A pull is answered
+  synchronously with a request id and fulfilled minutes later by the *source's*
+  engine, so a source that refuses has no reply left to travel back on. It
+  therefore reports the refusal as its own peer request, and the requester
+  records it as a `failed` incoming transfer with a `sourceTaskId` and no
+  `localTaskId` — nothing arrived and nothing will. `kanna_task_transfers`
+  answers for that source id even though no such task exists here, which is
+  what it used to answer 404 to, and the snapshot carries the row as a
+  `transferAlerts` entry so a window has something to show for a move it
+  started. Best effort in one direction only: the refusal is already durable on
+  the source, and a requester that cannot be reached never turns a refusal into
+  retried work.
+- **A transfer failure is reported until it is read.** Nothing else retires
+  one — the move that would have replaced it is the one that did not happen —
+  so a task wore its `⇄✗` marker for the rest of its life.
+  `POST /v1/transfers/{transfer_id}/actions/dismiss-failure` marks a `failed`
+  transfer read (`dismissedAt` on the summary), which stops the marker and the
+  alert without touching the record; a later `completed` transfer of the same
+  task retires it on its own. Only a `failed` transfer may be dismissed: an
+  in-flight one is the current truth about the task, and hiding it would lose
+  the move.
 - **A route that cannot carry the transfer is refused before anything is
   queued.** The relay authenticates every tunnel dial, and the Firebase
   credential it dials with is minted by the signed-in renderer and pushed to
@@ -1126,10 +1149,13 @@ Four things are contract rather than convenience:
   followed by `expected auth_ok text frame` on a socket nobody was watching. The
   server now reads that credential's own `exp` (`cloud_transfer_proxy.rs`), and
   a cloud route inside the expiry margin is reported unusable — with the fix,
-  which is opening the signed-in desktop app on that machine, or using the LAN
-  while both machines share a network. A stale cloud route behind a healthy LAN
-  route costs only the fallback, and the response says so rather than
-  downgrading silently. A cloud-routed *pull* additionally depends on the source
+  which is starting a transfer from the signed-in desktop app on that machine
+  (it refreshes the route as it goes), or using the LAN while both machines
+  share a network. What that check reads is strictly *this* machine's outbound
+  credential: a transfer that just arrived here was dialled with the other
+  machine's, so an incoming move proves nothing about the route reported here.
+  A stale cloud route behind a healthy LAN route costs only the fallback, and
+  the response says so rather than downgrading silently. A cloud-routed *pull* additionally depends on the source
   machine's own credential, which this machine cannot see; the tool description
   says so.
 
@@ -2204,7 +2230,7 @@ The CLI remains the shell/script interface; MCP is the structured agent-tool int
 - `kanna-cli machine transfer-peers [--machine-id <MACHINE_ID>] [--server-url <URL>]` calls `GET /v1/transfers/peers` and prints the machines a task can be moved to or from, with each one's current route.
 - `kanna-cli task push --task-id <TASK_ID> --to-machine <MACHINE_OR_PEER_ID> [--transport auto|lan|cloud] [--intent-key <KEY>] [--machine-id <MACHINE_ID>] [--server-url <URL>]` calls `POST /v1/tasks/{task_id}/actions/push-to-peer`. It runs on the machine that owns the task, so `--machine-id` is how a task is pushed off a sibling machine. It schedules the transfer; the response reports `moved: false`.
 - `kanna-cli task pull --source-task-id <TASK_ID> --from-machine <MACHINE_OR_PEER_ID> [--transport auto|lan|cloud] [--server-url <URL>]` calls `POST /v1/transfers/actions/pull-task`. It always runs on the machine the task is moving to and takes no `--machine-id`. It delivers the request; the response reports `moved: false` and a `requestId` that is stable for repeats inside the source's request window.
-- `kanna-cli task transfers --task-id <TASK_ID> [--machine-id <MACHINE_ID>] [--server-url <URL>]` calls `GET /v1/tasks/{task_id}/transfers` and prints the recorded moves with the coarse `pending` / `completed` / `failed` / `rejected` verdict. This is the surface that answers whether a scheduled move happened; a push or pull result never does.
+- `kanna-cli task transfers --task-id <TASK_ID> [--machine-id <MACHINE_ID>] [--server-url <URL>]` calls `GET /v1/tasks/{task_id}/transfers` and prints the recorded moves with the coarse `pending` / `completed` / `failed` / `rejected` verdict. This is the surface that answers whether a scheduled move happened; a push or pull result never does. A task id that names no task *here* still answers when a transfer was recorded against it — a pull this machine asked for and the source refused — rather than 404.
 
 The provider support and daemon-loss trigger matrix is documented in
 [`2026-07-30-session-death-recovery.md`](2026-07-30-session-death-recovery.md).

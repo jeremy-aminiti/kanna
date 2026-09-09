@@ -173,6 +173,22 @@ pub enum ControlRequest {
         #[serde(default)]
         transport: crate::runtime::TransferTransport,
     },
+    /// Tells the machine that asked for a pull that this one will not ship the
+    /// task, and why.
+    ///
+    /// A pull is answered synchronously with a request id and fulfilled minutes
+    /// later by the source's engine, so a refusal has no reply to travel back
+    /// on. Without this the requester learns nothing at all: no transfer
+    /// record, no notification, and a task that simply never arrives.
+    ReportTaskPullRefusal {
+        request_id: String,
+        requester_peer_id: String,
+        source_task_id: String,
+        pull_request_id: String,
+        reason: String,
+        #[serde(default)]
+        transport: crate::runtime::TransferTransport,
+    },
     PrepareTransferCommit {
         request_id: String,
         transfer_id: String,
@@ -328,6 +344,9 @@ pub enum ControlResponse {
         request_id: String,
         pull_request_id: String,
     },
+    ReportTaskPullRefusal {
+        request_id: String,
+    },
     PrepareTransferCommit {
         request_id: String,
         transfer_id: String,
@@ -402,6 +421,11 @@ pub enum PeerRequest {
     RequestTaskPull {
         request_id: String,
         requester_peer_id: String,
+        sealed_payload: String,
+    },
+    ReportTaskPullRefused {
+        request_id: String,
+        source_peer_id: String,
         sealed_payload: String,
     },
     SubmitTransferPayload {
@@ -552,6 +576,9 @@ pub enum PeerResponse {
         target_has_repo: bool,
     },
     RequestTaskPull {
+        request_id: String,
+    },
+    ReportTaskPullRefused {
         request_id: String,
     },
     SubmitTransferPayload {
@@ -761,6 +788,18 @@ pub enum SidecarEvent {
         request_id: String,
         requester_peer_id: String,
         source_task_id: String,
+    },
+    /// A pull this machine asked for will not be shipped.
+    ///
+    /// Emitted on the *requester*, from the source's report. It is the only
+    /// news the asking machine ever gets about a refusal, so it is durable
+    /// rather than advisory: it is recorded as a failed incoming transfer
+    /// before any window is told.
+    TaskPullRefused {
+        request_id: String,
+        source_peer_id: String,
+        source_task_id: String,
+        reason: String,
     },
     OutgoingTransferCommitted {
         transfer_id: String,

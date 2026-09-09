@@ -955,6 +955,61 @@ describe("Sidebar", () => {
     expect(titleByTaskId.get("task-local")?.attributes("title")).toBe("Never transferred");
   });
 
+  /**
+   * The failure marker was a bare glyph with a generic label: an operator
+   * looking at a task that would not move could not learn why from the UI at
+   * all, and nothing ever retired it — the move that would have replaced it is
+   * the one that did not happen.
+   */
+  it("puts the refusal reason on the failed marker and dismisses it when clicked", async () => {
+    const reason =
+      "task afed27d1 resumes codex session 5a2eb492 but its rollout could not be found";
+    const wrapper = mountSidebar([
+      item("task-failed", {
+        display_name: "Transfer broke",
+        created_at: "2026-01-01T12:00:00.000Z",
+        transfer_id: "refused-pull-7",
+        transfer_direction: "outgoing",
+        transfer_status: "failed",
+        transfer_error: reason,
+      }),
+    ], null);
+
+    const row = wrapper.find(".workflow-item");
+    expect(row.find(".item-title").attributes("title")).toContain(reason);
+    const marker = row.find(".transfer-task-marker");
+    expect(marker.attributes("title")).toContain(reason);
+    expect(marker.attributes("title")).toContain("sidebar.dismissTransferFailure");
+
+    await marker.trigger("click");
+    expect(wrapper.emitted("dismiss-transfer-failure")).toEqual([["refused-pull-7"]]);
+    // Clicking the marker must not also select the task it sits on.
+    expect(wrapper.emitted("select-item")).toBeUndefined();
+  });
+
+  /**
+   * Only a failure is dismissible, so only a failure may swallow the click. A
+   * transfer still in flight has to leave the row selectable, the same as any
+   * other part of the title.
+   */
+  it("leaves an in-flight transfer marker inert and selectable", async () => {
+    const wrapper = mountSidebar([
+      item("task-moving", {
+        display_name: "On its way",
+        created_at: "2026-01-01T12:00:00.000Z",
+        transfer_id: "transfer-live",
+        transfer_direction: "outgoing",
+        transfer_status: "streaming",
+      }),
+    ], null);
+
+    const marker = wrapper.find(".workflow-item .transfer-task-marker");
+    expect(marker.attributes("title")).toBe("sidebar.transferringTaskTooltip");
+    await marker.trigger("click");
+    expect(wrapper.emitted("dismiss-transfer-failure")).toBeUndefined();
+    expect(wrapper.emitted("select-item")).toBeTruthy();
+  });
+
   it("switches the sidebar into a filtered visual state and shows filtered repo counts", async () => {
     const workflowItems = [
       item("task-1", {

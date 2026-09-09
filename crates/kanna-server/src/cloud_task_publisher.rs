@@ -616,6 +616,7 @@ mod tests {
 
     fn ui_snapshot(activity: &str) -> UiSnapshot {
         UiSnapshot {
+            transfer_alerts: Vec::new(),
             entries: vec![SnapshotEntry {
                 repo: SnapshotRepo {
                     id: "repo-1".into(),

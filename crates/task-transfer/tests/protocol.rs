@@ -204,6 +204,48 @@ fn task_pull_control_peer_and_event_messages_roundtrip() {
         })
     );
     assert_roundtrip(event);
+
+    // The refusal that answers it, over the same three hops: the source's
+    // control request, the sealed peer request, and the event the requester's
+    // sidecar emits. `kanna-server` reads these keys out of raw JSON — it does
+    // not depend on this crate — so the shape is the contract.
+    assert_roundtrip(ControlRequest::ReportTaskPullRefusal {
+        request_id: "refusal-1".into(),
+        requester_peer_id: "peer-destination".into(),
+        source_task_id: "task-source".into(),
+        pull_request_id: "pull-1".into(),
+        reason: "its rollout could not be found".into(),
+        transport: TransferTransport::Lan,
+    });
+    assert_roundtrip(ControlResponse::ReportTaskPullRefusal {
+        request_id: "refusal-1".into(),
+    });
+    assert_roundtrip(PeerRequest::ReportTaskPullRefused {
+        request_id: "peer-refusal-1".into(),
+        source_peer_id: "peer-source".into(),
+        sealed_payload: "sealed-refusal".into(),
+    });
+    assert_roundtrip(PeerResponse::ReportTaskPullRefused {
+        request_id: "peer-refusal-1".into(),
+    });
+
+    let refused = SidecarEvent::TaskPullRefused {
+        request_id: "pull-1".into(),
+        source_peer_id: "peer-source".into(),
+        source_task_id: "task-source".into(),
+        reason: "its rollout could not be found".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&refused).unwrap(),
+        json!({
+            "type": "task_pull_refused",
+            "request_id": "pull-1",
+            "source_peer_id": "peer-source",
+            "source_task_id": "task-source",
+            "reason": "its rollout could not be found",
+        })
+    );
+    assert_roundtrip(refused);
 }
 
 #[test]

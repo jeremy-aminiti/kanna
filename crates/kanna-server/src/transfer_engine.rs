@@ -312,6 +312,7 @@ async fn execute(state: &Arc<AppState>, item: &crate::db::TransferWorkItem) -> R
         queue::KIND_IMPORT => import::import_transfer(state, item, &payload).await,
         queue::KIND_REJECT => import::reject_transfer(state, &payload).await,
         queue::KIND_SIDECAR_CLEANUP => import::release_settled_reservation(state, &payload).await,
+        queue::KIND_PULL_REFUSED => import::record_pull_refusal(state, &payload).await,
         queue::KIND_PUSH => push::push_task(state, item, &payload).await,
         queue::KIND_FINALIZE => push::finalize(state, item, &payload).await,
         queue::KIND_OUTGOING_COMMITTED => push::outgoing_committed(state, item, &payload).await,
@@ -345,6 +346,9 @@ async fn report_exhausted_work(
                         item.id
                     );
                 }
+                // A pull that gives up is as invisible to the machine that
+                // asked as a pull that is refused outright.
+                push::report_refusal_to_requester(state, &request, &reason).await;
             }
         }
         return;

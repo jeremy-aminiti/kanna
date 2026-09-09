@@ -24,12 +24,61 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 
+/// The provider conversation a push of this task would carry.
+///
+/// Both halves come out of one row on purpose. `pipeline_item.agent_provider`
+/// is stamped once, when the task is *created*, and is never restamped at a
+/// stage boundary; `pipeline_item.agent_session_id` is the live mirror that
+/// every spawn rewrites. Reading a provider from the first and a session id
+/// from the second pairs a session with a CLI that never opened it, and the
+/// pair is then unshippable by construction: on 2026-09-08 task afed27d1 — a
+/// Claude task whose latest run was Claude — was refused because the plan
+/// demanded a Codex rollout for a Codex session id left on the task row by a
+/// run months earlier.
+///
+/// The task's latest `stage_run` records the provider and the provider session
+/// together, which is what [`crate::task_creator::resume`] resumes and what
+/// task detail reports as `agentProvider`. The task row survives only as the
+/// fallback for a task that has no run yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceSession {
+    provider: Option<String>,
+    session_id: Option<String>,
+}
+
+impl SourceSession {
+    fn resolve(
+        latest_run: Option<&crate::db::StageRun>,
+        item_provider: Option<&str>,
+        item_session_id: Option<&str>,
+    ) -> Self {
+        match latest_run {
+            // The run names the CLI that is live here, so the session to ship
+            // is that run's — including when it has none yet, which is a
+            // Codex spawn that has not published its id in the terminal
+            // footer. Reaching back to the task row for one there is exactly
+            // the composition this exists to stop.
+            Some(run) if run.agent_provider.is_some() => Self {
+                provider: run.agent_provider.clone(),
+                session_id: run.provider_session_id.clone(),
+            },
+            // No run yet, or one too old to have recorded a provider: the task
+            // row is then the only pair there is, and its two halves were at
+            // least written by the same spawn.
+            _ => Self {
+                provider: item_provider.map(str::to_string),
+                session_id: item_session_id.map(str::to_string),
+            },
+        }
+    }
+}
+
 /// The source task as the engine needs it: the durable task row plus the two
-/// fields that live beside it — the provider session a push must ship, and the
+/// facts that live beside it — the provider session a push must ship, and the
 /// worktree that session's transcript is keyed by.
 struct SourceTask {
     item: crate::db::PipelineItem,
-    agent_session_id: Option<String>,
+    session: SourceSession,
     worktree_path: Option<std::path::PathBuf>,
 }
 
@@ -41,10 +90,18 @@ impl SourceTask {
         else {
             return Ok(None);
         };
+        let latest_run = db
+            .latest_stage_run(&item.id)
+            .map_err(|error| format!("db error: {error}"))?;
+        let item_session_id = db
+            .task_agent_session_id(&item.id)
+            .map_err(|error| format!("db error: {error}"))?;
         Ok(Some(Self {
-            agent_session_id: db
-                .task_agent_session_id(&item.id)
-                .map_err(|error| format!("db error: {error}"))?,
+            session: SourceSession::resolve(
+                latest_run.as_ref(),
+                item.agent_provider.as_deref(),
+                item_session_id.as_deref(),
+            ),
             worktree_path: db
                 .get_task_worktree_path(&item.id)
                 .map_err(|error| format!("db error: {error}"))?
@@ -55,8 +112,8 @@ impl SourceTask {
 
     fn plan_identity(&self) -> String {
         session::session_plan_identity(
-            self.agent_session_id.as_deref(),
-            self.item.agent_provider.as_deref(),
+            self.session.session_id.as_deref(),
+            self.session.provider.as_deref(),
             self.item.agent_type.as_deref(),
             self.item.branch.as_deref(),
         )
@@ -68,8 +125,8 @@ impl SourceTask {
     /// runtime workers like the rest of the engine's filesystem work.
     async fn plan(&self) -> Result<Option<session::SessionArtifactPlan>, String> {
         let (session_id, provider, agent_type, worktree, task_id) = (
-            self.agent_session_id.clone(),
-            self.item.agent_provider.clone(),
+            self.session.session_id.clone(),
+            self.session.provider.clone(),
             self.item.agent_type.clone(),
             self.worktree_path.clone(),
             self.item.id.clone(),
@@ -132,6 +189,7 @@ pub async fn push_task(
         Err(Err(TerminalPush(reason))) => {
             report_terminal_push(state, work, request, &reason)?;
             log::error!("refused to push a task the source cannot ship: {reason}");
+            report_refusal_to_requester(state, request, &reason).await;
             Ok(())
         }
     }
@@ -175,6 +233,53 @@ pub(super) fn report_terminal_push(
     db.fail_outgoing_task_transfer(&transfer_id, reason)
         .map_err(|error| format!("db error: {error}"))?;
     Ok(())
+}
+
+/// Tells the machine that asked for this task that it is not coming.
+///
+/// A push scheduled by a *pull* is the one case where the operator watching for
+/// the task is on the other machine, and a refusal there is silent: the pull
+/// was answered synchronously with a request id minutes earlier, so nothing
+/// carries the outcome back. Without this the requester has no transfer record
+/// at all — `kanna_task_transfers` answers 404 and the UI shows nothing, which
+/// is what "it doesn't seem to be working" looked like on 2026-09-08.
+///
+/// Best effort, and deliberately not a failure of anything: the refusal is
+/// already durably recorded here, and an unreachable requester (or one running
+/// a build without this request) must not turn a refusal into retried work.
+pub(super) async fn report_refusal_to_requester(
+    state: &Arc<AppState>,
+    request: &Value,
+    reason: &str,
+) {
+    // Only a pull carries these: an operator's own push already reports its
+    // refusal on the machine that started it.
+    let (Some(requester_peer_id), Some(pull_request_id), Some(source_task_id)) = (
+        string_field(request, "requester_peer_id"),
+        string_field(request, "request_id"),
+        string_field(request, "source_task_id"),
+    ) else {
+        return;
+    };
+    let mut params = serde_json::json!({
+        "requesterPeerId": requester_peer_id,
+        "sourceTaskId": source_task_id,
+        "pullRequestId": pull_request_id,
+        "reason": reason,
+    });
+    if let Some(transport) = string_field(request, "transport") {
+        params["transport"] = Value::String(transport);
+    }
+    if let Err(error) = state
+        .transfer_sidecar()
+        .control("report-task-pull-refusal", params)
+        .await
+    {
+        log::error!(
+            "could not tell {requester_peer_id} that its pull of {source_task_id} was refused; \
+             that machine has no record of the attempt: {error}"
+        );
+    }
 }
 
 /// `Err(Ok(_))` is retriable; `Err(Err(_))` is terminal.
@@ -482,11 +587,11 @@ async fn build_payload(
             local_task_id: Some(source.item.id.clone()),
             // The staged plan wins: it is the only thing that knows an
             // OpenCode session id, and for every other provider it is the same
-            // id the task row carries.
+            // id the task's latest run carries.
             resume_session_id: staged
                 .session_id
                 .clone()
-                .or_else(|| source.agent_session_id.clone()),
+                .or_else(|| source.session.session_id.clone()),
             prompt: source.item.prompt.clone(),
             stage: source
                 .item
@@ -499,9 +604,13 @@ async fn build_payload(
             display_name: source.item.display_name.clone(),
             base_ref: source.item.base_ref.clone(),
             agent_type: source.item.agent_type.clone(),
+            // The provider the session shipped above belongs to, not the one
+            // the task was created under: the destination spawns this CLI, and
+            // a payload that names a different one hands a Claude transcript to
+            // `codex --resume`.
             agent_provider: source
-                .item
-                .agent_provider
+                .session
+                .provider
                 .clone()
                 .unwrap_or_else(|| "claude".to_string()),
         },
@@ -699,7 +808,7 @@ async fn run_finalization(
         work,
         &source.item.id,
         source.item.agent_type.as_deref(),
-        source.item.agent_provider.as_deref(),
+        source.session.provider.as_deref(),
     )
     .await;
     let finalized_cleanly = finalization_outcome.cleanly_finalized();
@@ -715,7 +824,7 @@ async fn run_finalization(
     refuse_session_downgrade(
         session_seen_before_finalization.as_deref(),
         staged.session_id.as_deref(),
-        refreshed.item.agent_provider.as_deref(),
+        refreshed.session.provider.as_deref(),
     )?;
     let remote_url = if existing.repo.mode == RepoAcquisitionMode::ReuseLocal {
         None
@@ -865,6 +974,154 @@ pub async fn outgoing_committed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stage_run(
+        agent_provider: Option<&str>,
+        provider_session_id: Option<&str>,
+    ) -> crate::db::StageRun {
+        crate::db::StageRun {
+            id: "run-1".into(),
+            task_id: "task-1".into(),
+            stage: "in progress".into(),
+            kind: "main".into(),
+            agent: Some("implement".into()),
+            agent_provider: agent_provider.map(str::to_string),
+            model: None,
+            effort: None,
+            status: "running".into(),
+            result: None,
+            feedback: None,
+            session_id: Some("task-1".into()),
+            provider_session_id: provider_session_id.map(str::to_string),
+            cwd: Some("/repo/.kanna-worktrees/task-1".into()),
+            resumed_from_run_id: None,
+            resume_fallback_reason: None,
+            completion_transition: None,
+            trigger: "unspecified".into(),
+            provider_override: None,
+            started_at: "2026-08-21 00:00:00".into(),
+            finished_at: None,
+        }
+    }
+
+    /// The 2026-09-08 refusal.
+    ///
+    /// `pipeline_item.agent_provider` is stamped at task creation and never
+    /// restamped at a stage boundary, so a task that has been running Claude
+    /// for weeks still says `codex` there — beside an `agent_session_id` a much
+    /// later spawn rewrote. Composing the two demanded a Codex rollout for a
+    /// Claude task, which no machine could ever produce, and the task was
+    /// stranded on its source.
+    #[test]
+    fn a_task_whose_latest_run_is_claude_never_plans_a_codex_artifact() {
+        let resolved = SourceSession::resolve(
+            Some(&stage_run(
+                Some("claude"),
+                Some("2c4a3f9e-1d55-4b8a-9d0e-6f7a1c2b3d4e"),
+            )),
+            Some("codex"),
+            Some("5a2eb492-4fb9-4175-b345-2ef5f44b6932"),
+        );
+        assert_eq!(resolved.provider.as_deref(), Some("claude"));
+        assert_eq!(
+            resolved.session_id.as_deref(),
+            Some("2c4a3f9e-1d55-4b8a-9d0e-6f7a1c2b3d4e"),
+        );
+    }
+
+    /// A provider and a session id are only ever read from the same row.
+    ///
+    /// A run that has not learned its provider session yet (Codex publishes
+    /// its id in the terminal footer, after the spawn) ships nothing rather
+    /// than reaching back to the task row for an id another CLI opened.
+    #[test]
+    fn a_run_without_a_provider_session_does_not_borrow_the_task_rows() {
+        let resolved = SourceSession::resolve(
+            Some(&stage_run(Some("codex"), None)),
+            Some("claude"),
+            Some("2c4a3f9e-1d55-4b8a-9d0e-6f7a1c2b3d4e"),
+        );
+        assert_eq!(resolved.provider.as_deref(), Some("codex"));
+        assert_eq!(resolved.session_id, None);
+    }
+
+    /// The task row is still the answer where it is the only one: a task whose
+    /// first run has not been recorded yet, and a run too old to have recorded
+    /// a provider.
+    #[test]
+    fn the_task_row_answers_when_no_run_names_a_provider() {
+        let no_run = SourceSession::resolve(None, Some("claude"), Some("session-a"));
+        assert_eq!(no_run.provider.as_deref(), Some("claude"));
+        assert_eq!(no_run.session_id.as_deref(), Some("session-a"));
+
+        let providerless_run = SourceSession::resolve(
+            Some(&stage_run(None, None)),
+            Some("claude"),
+            Some("session-a"),
+        );
+        assert_eq!(providerless_run.provider.as_deref(), Some("claude"));
+        assert_eq!(providerless_run.session_id.as_deref(), Some("session-a"));
+    }
+
+    /// `SourceTask::load` is wired to the resolution above: the payload's
+    /// provider, the plan's provider and the plan identity all come from the
+    /// latest run rather than from the creation-time task row.
+    #[test]
+    fn the_loaded_source_task_takes_its_session_from_the_latest_run() {
+        let db = crate::db::Db::open_for_tests(&crate::db::Db::test_db_path(
+            "transfer-push-source-session",
+        ))
+        .expect("db");
+        db.insert_test_repo("repo-1", "Repo").expect("repo");
+        db.insert_test_pipeline_item(
+            "task-1",
+            "repo-1",
+            "do the thing",
+            None,
+            "in progress",
+            "2026-08-21 00:00:00",
+        )
+        .expect("task");
+        db.update_pipeline_item_agent_binding("task-1", "codex", "pty", None)
+            .expect("creation-time binding");
+        db.update_pipeline_item_agent_session_id(
+            "task-1",
+            Some("5a2eb492-4fb9-4175-b345-2ef5f44b6932"),
+        )
+        .expect("stale session mirror");
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-1",
+            task_id: "task-1",
+            stage: "in progress",
+            kind: "main",
+            agent: Some("implement"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-1"),
+            provider_session_id: Some("2c4a3f9e-1d55-4b8a-9d0e-6f7a1c2b3d4e"),
+            cwd: Some("/repo/.kanna-worktrees/task-1"),
+            resumed_from_run_id: None,
+        })
+        .expect("latest run");
+
+        let source = SourceTask::load(&db, "task-1")
+            .expect("load")
+            .expect("the task");
+        assert_eq!(source.session.provider.as_deref(), Some("claude"));
+        assert_eq!(
+            source.session.session_id.as_deref(),
+            Some("2c4a3f9e-1d55-4b8a-9d0e-6f7a1c2b3d4e"),
+        );
+        assert!(
+            source.plan_identity().contains("claude"),
+            "{}",
+            source.plan_identity()
+        );
+    }
 
     /// Discovery runs twice — before the shutdown, so a transfer that cannot
     /// ship fails with the agent still alive, and after it, so the conversation

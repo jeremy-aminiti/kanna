@@ -295,7 +295,8 @@ impl Db {
                 payload_json TEXT,
                 sidecar_cleanup_completed_at TEXT,
                 claim_owner_token TEXT,
-                claim_expires_at TEXT
+                claim_expires_at TEXT,
+                dismissed_at TEXT
             );
             CREATE UNIQUE INDEX idx_task_transfer_active_outgoing_source
             ON task_transfer(source_task_id)

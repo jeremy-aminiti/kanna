@@ -98,9 +98,26 @@ export interface RepoSnapshotEntry {
   items: PipelineItem[];
 }
 
+/**
+ * A failed transfer with no task on this machine to be reported on.
+ *
+ * Every other transfer failure rides the task it was moving. A pull the source
+ * refuses has no such task — nothing arrived and nothing will — so the machine
+ * that asked for the move has nowhere to show it, and showed nothing.
+ */
+export interface TransferAlert {
+  transferId: string;
+  direction: string;
+  sourceTaskId?: string | null;
+  sourcePeerId?: string | null;
+  error?: string | null;
+  startedAt?: string | null;
+}
+
 export interface KannaSnapshot {
   entries: RepoSnapshotEntry[];
   repoSidebarOrder?: Record<string, number>;
+  transferAlerts?: TransferAlert[];
   taskBlockers: TaskBlocker[];
   blockerTaskStates?: BlockerTaskStates;
   worktreePaths: Record<string, string>;
@@ -135,6 +152,7 @@ export interface StoreState {
   repos: Ref<Repo[]>;
   items: Ref<PipelineItem[]>;
   taskUiSlots: Ref<TaskUiSlot[]>;
+  transferAlerts: Ref<TransferAlert[]>;
   taskBlockers: Ref<TaskBlocker[]>;
   blockerTaskStates: Ref<BlockerTaskStates>;
   worktreePaths: Ref<Record<string, string>>;
@@ -285,6 +303,7 @@ export function createStoreState(): StoreState {
   const repos = ref<Repo[]>([]);
   const items = ref<PipelineItem[]>([]);
   const taskUiSlots = ref<TaskUiSlot[]>([]);
+  const transferAlerts = ref<TransferAlert[]>([]);
   const taskBlockers = ref<TaskBlocker[]>([]);
   const blockerTaskStates = ref<BlockerTaskStates>({});
   const worktreePaths = ref<Record<string, string>>({});
@@ -315,6 +334,7 @@ export function createStoreState(): StoreState {
     repos,
     items,
     taskUiSlots,
+    transferAlerts,
     taskBlockers,
     blockerTaskStates,
     worktreePaths,

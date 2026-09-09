@@ -133,6 +133,7 @@ Use this branch as the default when the user does not specify a target branch. B
     repos: state.repos,
     items: state.items,
     taskUiSlots: state.taskUiSlots,
+    transferAlerts: state.transferAlerts,
     taskBlockers: state.taskBlockers,
     blockerTaskStates: state.blockerTaskStates,
     snapshotSettings: state.snapshotSettings,
@@ -196,6 +197,7 @@ Use this branch as the default when the user does not specify a target branch. B
     pushTaskToPeer: transfer.pushTaskToPeer,
     approveIncomingTransfer: transfer.approveIncomingTransfer,
     rejectIncomingTransfer: transfer.rejectIncomingTransfer,
+    dismissFailedTransfer: transfer.dismissFailedTransfer,
     blockTask: tasks.blockTask,
     editBlockedTask: tasks.editBlockedTask,
     listBlockersForItem: async (itemId: string) =>

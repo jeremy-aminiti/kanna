@@ -298,7 +298,39 @@ useTransferFailureToasts(
   toRef(store, "items"),
   toast.error,
   () => t("toasts.transferFinalizationFailed"),
+  // A pull the other machine refuses has no task here to ride on, so it
+  // arrives as a transfer alert instead — the only news this machine gets
+  // about a move it started.
+  toRef(store, "transferAlerts"),
+  (taskId: string) => t("toasts.transferPullRefused", { taskId }),
+  retireAnnouncedTransferAlert,
 );
+
+/**
+ * Retires a task-less failure the moment it has been announced.
+ *
+ * It has no marker to click and no task to sit on, so the toast is the whole
+ * telling and nothing else would ever set `dismissed_at` for it. No snapshot
+ * reload: the composable's own bookkeeping covers this window until the next
+ * ordinary refresh, and the next window's snapshot no longer carries the row.
+ * A failed dismissal is logged and left alone — the alert stays, and is
+ * announced again later, which is the safe direction to fail in.
+ */
+function retireAnnouncedTransferAlert(transferId: string): void {
+  void store.dismissFailedTransfer(transferId).catch((error: unknown) => {
+    console.error("[App] failed to retire an announced transfer alert:", error);
+  });
+}
+
+/** The operator clicking a task's own `⇄✗` marker. */
+async function dismissTransferFailure(transferId: string): Promise<void> {
+  try {
+    await store.dismissFailedTransfer(transferId);
+    await store.reloadSnapshot();
+  } catch (error) {
+    console.error("[App] dismissFailedTransfer failed:", error);
+  }
+}
 const appTaskTransfer = useAppTaskTransfer({
   store,
   toast,
@@ -564,6 +596,7 @@ const modalLayerController = {
         @hide-repo="store.hideRepo"
         @rename-repo="store.renameRepo"
         @reorder-repos="reorderSidebarRepos"
+        @dismiss-transfer-failure="dismissTransferFailure"
       />
       <div
         v-if="canResizeSidebar"

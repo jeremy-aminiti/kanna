@@ -96,6 +96,7 @@ export interface DesktopServerClientHandlersForTests {
   ) => MaybePromise<boolean>;
   approveIncomingTaskTransfer?: (transferId: string) => MaybePromise<boolean>;
   rejectIncomingTaskTransfer?: (transferId: string) => MaybePromise<boolean>;
+  dismissFailedTaskTransfer?: (transferId: string) => MaybePromise<boolean>;
 }
 
 let clientHandlersForTests: DesktopServerClientHandlersForTests | null = null;
@@ -1068,6 +1069,21 @@ export async function approveIncomingTaskTransfer(transferId: string): Promise<b
     { method: "POST" },
   );
   return response.scheduled;
+}
+
+/**
+ * Marks a failed transfer read, so it stops marking its task (or standing as a
+ * transfer alert). The record itself is untouched.
+ */
+export async function dismissFailedTaskTransfer(transferId: string): Promise<boolean> {
+  if (clientHandlersForTests?.dismissFailedTaskTransfer) {
+    return await clientHandlersForTests.dismissFailedTaskTransfer(transferId);
+  }
+  const response = await requestJson<{ dismissed: boolean }>(
+    `/v1/transfers/${encodeURIComponent(transferId)}/actions/dismiss-failure`,
+    { method: "POST" },
+  );
+  return response.dismissed;
 }
 
 export async function rejectIncomingTaskTransfer(transferId: string): Promise<boolean> {

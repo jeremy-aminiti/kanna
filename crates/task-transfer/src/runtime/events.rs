@@ -76,12 +76,22 @@ pub struct TaskPullRequestedEvent {
     pub source_task_id: String,
 }
 
+/// A pull this machine asked for that the source will not ship.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskPullRefusedEvent {
+    pub request_id: String,
+    pub source_peer_id: String,
+    pub source_task_id: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeEvent {
     PairingStarted(PairingStartedEvent),
     PairingRequested(PairingRequestedEvent),
     PairingCompleted(PairingCompletedEvent),
     TaskPullRequested(TaskPullRequestedEvent),
+    TaskPullRefused(TaskPullRefusedEvent),
     IncomingTransferRequest(IncomingTransferEvent),
     OutgoingTransferCommitted(OutgoingTransferCommittedEvent),
     OutgoingTransferFinalizationRequested(OutgoingTransferFinalizationRequestedEvent),

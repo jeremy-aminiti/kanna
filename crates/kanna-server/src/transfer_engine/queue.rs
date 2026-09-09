@@ -21,6 +21,7 @@ pub const KIND_PUSH: &str = "push";
 pub const KIND_FINALIZE: &str = "finalize";
 pub const KIND_OUTGOING_COMMITTED: &str = "outgoing-committed";
 pub const KIND_SIDECAR_CLEANUP: &str = "sidecar-cleanup";
+pub const KIND_PULL_REFUSED: &str = "pull-refused";
 
 /// A value no other work id will reuse.
 ///
@@ -165,6 +166,20 @@ pub fn durable_event_work(event: &Value, incarnation: &str) -> Option<DurableEve
                 transfer_id: None,
             })
         }
+        // Keyed like the pull it answers, and for the same reason: the source
+        // mints `pull-<peer>-<n>` from a counter that restarts with its
+        // process, so two different refusals can name the same id after a
+        // respawn. The incarnation here is *this* machine's sidecar, which is
+        // what the id is being deduplicated within.
+        "task_pull_refused" => {
+            let request_id = string_field(event, "request_id")?;
+            let source_peer_id = string_field(event, "source_peer_id").unwrap_or_default();
+            Some(DurableEventWork {
+                id: format!("pull-refused:{incarnation}:{source_peer_id}:{request_id}"),
+                kind: KIND_PULL_REFUSED,
+                transfer_id: None,
+            })
+        }
         "outgoing_transfer_committed" => {
             let transfer_id = string_field(event, "transfer_id")?;
             Some(DurableEventWork {
@@ -185,13 +200,14 @@ pub fn durable_event_work(event: &Value, incarnation: &str) -> Option<DurableEve
     }
 }
 
-/// The four event kinds whose delivery changes state on the receiving side.
+/// The event kinds whose delivery changes state on the receiving side.
 /// Everything else the sidecar emits is advisory and goes to the window.
 pub fn is_durable_transfer_event(event_type: &str) -> bool {
     matches!(
         event_type,
         "incoming_transfer_request"
             | "task_pull_requested"
+            | "task_pull_refused"
             | "outgoing_transfer_committed"
             | "outgoing_transfer_finalization_requested"
     )
@@ -214,6 +230,15 @@ mod tests {
                 json!({ "type": "task_pull_requested", "request_id": "pull-7" }),
                 "pull:sidecar-a:pull-7",
                 KIND_PUSH,
+            ),
+            (
+                json!({
+                    "type": "task_pull_refused",
+                    "request_id": "pull-peer-b-3",
+                    "source_peer_id": "peer-b",
+                }),
+                "pull-refused:sidecar-a:peer-b:pull-peer-b-3",
+                KIND_PULL_REFUSED,
             ),
             (
                 json!({ "type": "outgoing_transfer_committed", "transfer_id": "t-2" }),
