@@ -159,11 +159,12 @@ fn apply_watcher_runtime_status(
         )
         .map_err(|error| format!("db error: {error}"))?;
 
-    // Busy is selection-independent: every live observer agrees it means
-    // working, so the watcher remains an authoritative writer even while a
-    // terminal client is attached. Idle/waiting still belong to the attached
-    // client because only it knows whether the task is selected (idle) or
-    // unselected (unread).
+    // Busy is selection-independent for the runtime dimension. It does not
+    // erase unread output: a live task can be both busy and unread. The
+    // watcher remains the authoritative runtime writer even while a terminal
+    // client is attached. Idle/waiting still belong to the attached client
+    // because only it knows whether the task is selected (idle) or unselected
+    // (unread).
     if state.terminal_attachments().is_attached(session_id) && status != "busy" {
         return Ok(Some(WatcherRuntimeStatusResult { task_id, changed }));
     }
@@ -1817,8 +1818,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             item.activity.as_deref(),
-            Some("working"),
-            "the next frame carrying the busy marker should undo the misread"
+            Some("unread"),
+            "the next busy frame must not erase unread output"
         );
         let events = Db::open(&config.db_path)
             .unwrap()

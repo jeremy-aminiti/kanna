@@ -1096,6 +1096,15 @@ describe("relay task row presentation", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("accepts the iOS visual truncation ellipsis", async () => {
+    await expect(
+      assertRelayTaskRowPresentation(
+        createTaskRow(`${expectedTaskRowLabel()}. …`),
+        taskRowExpectation,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it("rejects a duplicated waiting preview rendered twice", async () => {
     const duplicatedLabel =
       `${expectedTaskRowLabel()}. ${taskRowExpectation.waitingPromptSnippet}`;

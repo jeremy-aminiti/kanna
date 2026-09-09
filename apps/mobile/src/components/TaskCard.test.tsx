@@ -570,6 +570,54 @@ describe("TaskCard", () => {
     },
   );
 
+  it("shows running independently from unread output", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+    const tree = TaskCard({
+      task: {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Busy with unread output",
+        stage: "in progress",
+        activity: "unread",
+        runtimeState: "busy",
+        readState: "unread"
+      },
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    expect(tree.props?.accessibilityValue).toEqual({
+      text: "working, unread"
+    });
+    expect(
+      findNodeByProp(tree, "testID", "mobile.task-running.task-1")
+    ).not.toBeNull();
+    expect(findTextNodeByCompleteText(tree, "running")).not.toBeNull();
+    expect(flattenStyle(
+      findTextNodeByCompleteText(tree, "Busy with unread output")?.props?.style
+    )).toMatchObject({ fontWeight: "bold", fontStyle: "normal" });
+  });
+
+  it("does not show the running indicator for an unread idle task", () => {
+    if (!TaskCard) throw new Error("TaskCard was not loaded");
+    const tree = TaskCard({
+      task: {
+        id: "task-1",
+        repoId: "repo-1",
+        title: "Finished with unread output",
+        stage: "review",
+        activity: "unread",
+        runtimeState: "idle",
+        readState: "unread"
+      },
+      onPress: vi.fn()
+    }) as ElementNode;
+
+    expect(tree.props?.accessibilityValue).toEqual({ text: "unread" });
+    expect(
+      findNodeByProp(tree, "testID", "mobile.task-running.task-1")
+    ).toBeNull();
+  });
+
   it.each<{
     activity: TaskActivity | undefined;
     expectedFontWeight: "bold" | "normal";

@@ -211,6 +211,8 @@ describe("cloud task index", () => {
         displayName: "Short renamed cloud task",
         stage: "in progress",
         activity: "working",
+        runtimeState: "busy",
+        readState: "read",
         activityRevision: 7,
         status: "active",
         repo: {
@@ -248,6 +250,8 @@ describe("cloud task index", () => {
       agentProvider: "claude",
       agentType: "agent",
       activity: "working",
+      runtimeState: "busy",
+      readState: "read",
       activityRevision: 7,
       parentTaskId: null,
       blockedByTaskIds: [],

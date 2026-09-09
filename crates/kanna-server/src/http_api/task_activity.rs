@@ -33,7 +33,10 @@ pub(crate) fn activity_for_runtime_status(
 ) -> Option<&'static str> {
     match status {
         "busy" => {
-            if current_activity == Some("working") {
+            // Runtime answers whether the agent is alive; activity also keeps
+            // whether its latest output is unread. A busy task may therefore
+            // remain `unread` until someone reads that output.
+            if matches!(current_activity, Some("working" | "unread")) {
                 None
             } else {
                 Some("working")
@@ -186,9 +189,9 @@ mod tests {
     }
 
     #[test]
-    fn busy_transitions_are_selection_independent() {
+    fn busy_transitions_preserve_unreadness() {
         for selected in [false, true] {
-            for current in [None, Some("idle"), Some("unread")] {
+            for current in [None, Some("idle")] {
                 assert_eq!(
                     activity_for_runtime_status(current, "busy", selected),
                     Some("working"),
@@ -198,6 +201,11 @@ mod tests {
             assert_eq!(
                 activity_for_runtime_status(Some("working"), "busy", selected),
                 None
+            );
+            assert_eq!(
+                activity_for_runtime_status(Some("unread"), "busy", selected),
+                None,
+                "busy does not mark unread output read"
             );
         }
     }

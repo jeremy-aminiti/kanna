@@ -1,10 +1,36 @@
 # Mobile Task Activity E2E Coverage
 
+## Simulator verification — 2026-09-09
+
+The relay Appium lane captured the list before any detail visit:
+
+- `docs/task-screenshots/12ae15f6-screenshots/busy-read-list.png` — busy-and-read rendered as Running.
+- `docs/task-screenshots/12ae15f6-screenshots/busy-unread-list.png` — busy-and-unread was distinguishable with unread attention while the list accessibility value remained `working, unread`.
+
+The ignored screenshots remain on disk and are not committed. This is JS-only; staging `runtimeVersion` remains `2.2.3`.
+
+The relay Appium discriminator now establishes both busy-and-read
+(`activity: working`, `runtimeState: busy`, `readState: read`) and
+busy-and-unread (`activity: unread`, `runtimeState: busy`, `readState: unread`)
+before any detail navigation. For each list-row assertion, the harness captures
+the owner-server task and its Firestore publication at that same transition,
+requires matching `activity`, `runtimeState`, `readState`, and
+`activityRevision`, and requires that revision to be present. The rendered row
+is `working` for busy-and-read and `working, unread` for busy-and-unread.
+
 The relay Appium lane seeds a cloud task with `status: active` and
 `activity: working`, then PATCHes only the Firestore `activity` field. The app's
 live Firestore listener must update the existing rendered task card through
 `working`, `unread`, and `idle` before the flow opens the task and continues its
 terminal/input checks.
+
+Before any detail navigation, the lane also holds the owner task at the
+previously ambiguous combination `activity: unread`, `runtimeState: busy`, and
+`readState: unread`, waits for that exact combination in both the owner-server
+list response and its Firestore publication, and asserts the native task row's
+value is `working, unread`. This proves the list renders the live runtime and
+unread axes independently; opening detail cannot be the operation that repairs
+the row.
 
 The same lane then makes the owner-server task unread through its runtime-status
 route, PATCHes the cloud fixture to unread, and opens it on mobile. The harness

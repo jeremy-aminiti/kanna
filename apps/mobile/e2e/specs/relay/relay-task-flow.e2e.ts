@@ -49,8 +49,10 @@ interface RelayTaskFlowOptions {
   customizedReply: string;
   fixture: PtyTerminalFixture;
   prepareTaskUnreadForMarkRead(): Promise<void>;
+  setTaskBusyRead(): Promise<void>;
   restoreTallTerminalGeometry(): Promise<void>;
   resyncTerminalConnection(): Promise<void>;
+  setTaskBusyUnread(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: RelayTaskRowExpectation;
   taskOrdering: RelayTaskOrderingFixture;
@@ -343,7 +345,9 @@ function createRelayQuickReplyPersistenceJourney(
 ): RelayQuickReplyPersistenceJourney {
   const openEditor = async () => {
     await openRelayProfileSheet(ui);
-    const quickRepliesButton = await driver.$("~Open Quick Replies");
+    const quickRepliesButton = await driver.$(
+      selectors.accountQuickRepliesButton,
+    );
     await quickRepliesButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
     await ui.waitUntil(
       async () => await quickRepliesButton.isEnabled().catch(() => false),
@@ -1521,7 +1525,10 @@ export async function assertRelayTaskRowPresentation(
     "TASK",
     "RECENT",
   ];
-  if (label !== expectedLabel || forbidden.some((value) => label.includes(value))) {
+  // iOS may append a visual truncation ellipsis to the accessibility label.
+  // The semantic row fields still have to match exactly.
+  const expectedLabels = [expectedLabel, `${expectedLabel}. …`];
+  if (!expectedLabels.includes(label) || forbidden.some((value) => label.includes(value))) {
     throw new Error(
       `Relay task row rendered unexpected content: ${JSON.stringify(label)}; ` +
         `expected ${JSON.stringify(expectedLabel)}`,
@@ -1742,6 +1749,61 @@ async function waitForTaskActivity(
   }
 }
 
+async function waitForTaskRowValue(
+  ui: Pick<RelayUi, "getTaskRowById" | "waitUntil">,
+  taskId: string,
+  expectedValues: readonly string[],
+): Promise<void> {
+  let lastObserved: string | null = null;
+  await ui.waitUntil(async () => {
+    const task = await ui.getTaskRowById(taskId);
+    lastObserved = await task.getAttribute("value").catch(() => null);
+    return lastObserved !== null && expectedValues.includes(lastObserved);
+  }, {
+    interval: POLL_INTERVAL_MS,
+    timeout: SCREEN_TIMEOUT_MS,
+    timeoutMsg:
+      `Expected relay task ${taskId} rendered value ${expectedValues.join(" or ")}; ` +
+      `last value was ${String(lastObserved)}`,
+  });
+}
+
+async function waitForBusyUnreadTaskRow(
+  ui: Pick<RelayUi, "getTaskRowById" | "waitUntil">,
+  taskId: string,
+): Promise<void> {
+  let lastObserved: string | null = null;
+  await ui.waitUntil(async () => {
+    const task = await ui.getTaskRowById(taskId);
+    lastObserved = await task.getAttribute("value").catch(() => null);
+    return lastObserved === "working, unread";
+  }, {
+    interval: POLL_INTERVAL_MS,
+    timeout: SCREEN_TIMEOUT_MS,
+    timeoutMsg:
+      `Expected relay task ${taskId} to render running and unread on the list ` +
+      `without visiting detail; last value was ${String(lastObserved)}`
+  });
+}
+
+async function waitForBusyReadTaskRow(
+  ui: Pick<RelayUi, "getTaskRowById" | "waitUntil">,
+  taskId: string,
+): Promise<void> {
+  let lastObserved: string | null = null;
+  await ui.waitUntil(async () => {
+    const task = await ui.getTaskRowById(taskId);
+    lastObserved = await task.getAttribute("value").catch(() => null);
+    return lastObserved === "working";
+  }, {
+    interval: POLL_INTERVAL_MS,
+    timeout: SCREEN_TIMEOUT_MS,
+    timeoutMsg:
+      `Expected relay task ${taskId} to render running and read on the list ` +
+      `without visiting detail; last value was ${String(lastObserved)}`
+  });
+}
+
 async function waitForSelectedTaskDetailActivity(
   ui: Pick<RelayUi, "getTaskDetailActivity" | "waitUntil">,
   expectedActivity: TaskActivity,
@@ -1775,7 +1837,9 @@ export async function verifyRelayTaskActivityTransitions(
 ): Promise<void> {
   await waitForTaskActivity(ui, taskId, "working");
   await setTaskActivity("unread");
-  await waitForTaskActivity(ui, taskId, "unread");
+  // The activity remains unread even if the independent runtime state returns
+  // to busy before the list samples it.
+  await waitForTaskRowValue(ui, taskId, ["unread", "working, unread"]);
   await setTaskActivity("idle");
   await waitForTaskActivity(ui, taskId, "idle");
 }
@@ -1793,7 +1857,7 @@ export async function verifyRelayTaskMarkedRead(
   },
 ): Promise<void> {
   await actions.prepareUnread();
-  await waitForTaskActivity(ui, taskId, "unread");
+  await waitForTaskRowValue(ui, taskId, ["unread", "working, unread"]);
   await actions.openTask();
   await actions.waitForOwnerIdle();
   await actions.waitForSelectedDetailIdle();
@@ -1918,6 +1982,20 @@ export async function runRelayTaskFlow(
     );
   }
   await assertRelayTaskRowPresentation(exactTaskRow, options.taskRow);
+  await options.setTaskBusyRead();
+  await waitForBusyReadTaskRow(ui, options.fixture.taskId);
+  const busyReadScreenshotPath =
+    process.env.KANNA_E2E_TASK_BUSY_READ_SCREENSHOT_PATH?.trim();
+  if (busyReadScreenshotPath) {
+    await driver.saveScreenshot(busyReadScreenshotPath);
+  }
+  await options.setTaskBusyUnread();
+  await waitForBusyUnreadTaskRow(ui, options.fixture.taskId);
+  const busyUnreadScreenshotPath =
+    process.env.KANNA_E2E_TASK_BUSY_UNREAD_SCREENSHOT_PATH?.trim();
+  if (busyUnreadScreenshotPath) {
+    await driver.saveScreenshot(busyUnreadScreenshotPath);
+  }
   await options.setTaskActivity("unread");
   await waitForTaskActivity(ui, options.fixture.taskId, "unread");
   if (!isTabletWorkspace) {

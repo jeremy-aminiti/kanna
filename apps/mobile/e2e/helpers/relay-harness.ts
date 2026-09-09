@@ -143,6 +143,7 @@ interface RemoteHarness {
     firestore: number;
     relay: number;
   };
+  restartDaemon(): Promise<void>;
   restartServerWithIdentity(identity: {
     desktopId: string;
     desktopSecret?: string | null;
@@ -225,6 +226,7 @@ interface TerminalFlowModule {
 
 interface FirestoreFieldValue {
   booleanValue?: boolean;
+  integerValue?: string;
   mapValue?: { fields: FirestoreFields };
   nullValue?: null;
   stringValue?: string;
@@ -270,8 +272,10 @@ export interface MobileRelayHarness {
   emitFilePreviewLinks(): Promise<void>;
   expirePairingSession(): Promise<void>;
   prepareTaskUnreadForMarkRead(): Promise<void>;
+  setTaskBusyRead(): Promise<void>;
   restoreTallTerminalGeometry(): Promise<void>;
   resyncTerminalConnection(): Promise<void>;
+  setTaskBusyUnread(): Promise<void>;
   setTaskActivity(activity: TaskActivity): Promise<void>;
   taskRow: {
     originalPromptSnippet: string;
@@ -667,6 +671,49 @@ export async function startMobileRelayHarness(
         terminalEvents?.takeControl();
         terminalFixture.expectedRows = 43;
         terminalFixture.expectBottomAnchored = false;
+      },
+      async setTaskBusyUnread() {
+        // Establish unread while settled, then move only the runtime axis.
+        // This is the state that exposed the activity/runtime overload in the
+        // list: activity remains unread while runtime becomes busy.
+        // The preceding busy-and-read discriminator left the runtime already
+        // busy, so force a fresh busy edge before settling. The server derives
+        // unread from that genuine busy → idle transition when unselected,
+        // then preserves it when the task becomes busy again.
+        await setLocalTaskRuntimeStatus(harness, localTask.taskId, "idle");
+        await setLocalTaskRuntimeStatus(harness, localTask.taskId, "busy");
+        const ownerTask = await waitForLocalTaskDimensions(harness, localTask, {
+          activity: "unread",
+          runtimeState: "busy",
+          readState: "unread"
+        });
+        await waitForCloudTaskDimensions({
+          activity: "unread",
+          activityRevision: ownerTask.activityRevision,
+          auth,
+          harness,
+          readState: "unread",
+          runtimeState: "busy",
+          task: localTask
+        });
+      },
+      async setTaskBusyRead() {
+        await setLocalTaskRuntimeStatus(harness, localTask.taskId, "busy");
+        await postLocalTaskAction(harness, localTask.taskId, "mark-read");
+        const ownerTask = await waitForLocalTaskDimensions(harness, localTask, {
+          activity: "working",
+          runtimeState: "busy",
+          readState: "read"
+        });
+        await waitForCloudTaskDimensions({
+          activity: "working",
+          activityRevision: ownerTask.activityRevision,
+          auth,
+          harness,
+          readState: "read",
+          runtimeState: "busy",
+          task: localTask
+        });
       },
       setTaskActivity(activity) {
         return setPublishedTaskActivity({
@@ -1125,8 +1172,13 @@ async function setPublishedTaskActivity(input: {
   task: ScriptedTask;
 }): Promise<void> {
   if (input.activity === "working") {
+    // A busy edge preserves unreadness. Mark the task read first, then make
+    // the runtime busy so this fixture requests the combined display value.
+    await postLocalTaskAction(input.harness, input.task.taskId, "mark-read");
     await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "busy");
   } else if (input.activity === "unread") {
+    // This establishes unread from either a settled or a live fixture state:
+    // busy preserves existing unreadness, while idle records it for a read task.
     await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "busy");
     await setLocalTaskRuntimeStatus(input.harness, input.task.taskId, "idle");
   } else {
@@ -1209,6 +1261,39 @@ async function waitForLocalTaskActivity(
   );
 }
 
+async function waitForLocalTaskDimensions(
+  harness: RemoteHarness,
+  task: ScriptedTask,
+  expected: { activity: TaskActivity; runtimeState: string; readState: string },
+  timeoutMs = 10_000,
+): Promise<{ activityRevision: number }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastObserved: unknown = null;
+  while (Date.now() < deadline) {
+    const response = await localProcessFetch(
+      `${harness.lanBaseUrl}/v1/repos/${encodeURIComponent(task.repoId)}/tasks`,
+    );
+    if (response.ok) {
+      const tasks = await response.json() as Array<Record<string, unknown>>;
+      const observed = tasks.find((candidate) => candidate.id === task.taskId);
+      lastObserved = observed ?? null;
+      if (
+        observed?.activity === expected.activity &&
+        observed.runtimeState === expected.runtimeState &&
+        observed.readState === expected.readState &&
+        typeof observed.activityRevision === "number" &&
+        Number.isSafeInteger(observed.activityRevision) &&
+        observed.activityRevision >= 0
+      ) return { activityRevision: observed.activityRevision };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Expected owner task ${task.taskId} dimensions ${JSON.stringify(expected)}; ` +
+      `last observed ${JSON.stringify(lastObserved)}`,
+  );
+}
+
 async function waitForCloudTaskActivity(input: {
   activity: TaskActivity;
   auth: AuthSession;
@@ -1264,6 +1349,56 @@ async function waitForCloudTaskActivity(input: {
   throw new Error(
     `Expected published task ${input.task.taskId} activity ${input.activity}; ` +
       `last observed ${String(lastObserved)} with task id ${String(publishedTaskId)}`
+  );
+}
+
+async function waitForCloudTaskDimensions(input: {
+  activity: TaskActivity;
+  activityRevision: number;
+  auth: AuthSession;
+  harness: RemoteHarness;
+  readState: string;
+  runtimeState: string;
+  task: ScriptedTask;
+}, timeoutMs = CLOUD_PUBLICATION_TIMEOUT_MS): Promise<void> {
+  const path = [
+    "users", input.auth.uid, "desktops", input.harness.desktopId, "tasks"
+  ].map(encodeURIComponent).join("/");
+  const url =
+    `http://127.0.0.1:${input.harness.ports.firestore}/v1/projects/kanna-local/` +
+    `databases/(default)/documents/${path}?pageSize=100`;
+  const deadline = Date.now() + timeoutMs;
+  let lastObserved: unknown = null;
+  while (Date.now() < deadline) {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${input.auth.idToken}` }
+    });
+    const body = await response.json().catch(() => null) as {
+      documents?: Array<{ fields?: FirestoreFields }>;
+    } | null;
+    const fields = body?.documents?.find((document) =>
+      document.fields?.ownerLocalTaskId?.stringValue === input.task.taskId &&
+      document.fields?.localRepoId?.stringValue === input.task.repoId
+    )?.fields;
+    lastObserved = fields ? {
+      activity: fields.activity?.stringValue,
+      runtimeState: fields.runtimeState?.stringValue,
+      readState: fields.readState?.stringValue,
+      activityRevision: fields.activityRevision?.integerValue
+    } : null;
+    if (
+      response.ok &&
+      fields?.activity?.stringValue === input.activity &&
+      fields.runtimeState?.stringValue === input.runtimeState &&
+      fields.readState?.stringValue === input.readState &&
+      fields.activityRevision?.integerValue === String(input.activityRevision)
+    ) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Expected published task ${input.task.taskId} dimensions ` +
+      `${JSON.stringify({ activity: input.activity, runtimeState: input.runtimeState, readState: input.readState, activityRevision: input.activityRevision })}; ` +
+      `last observed ${JSON.stringify(lastObserved)}`,
   );
 }
 

@@ -95,6 +95,10 @@ export function TaskCard({
     task.activity === "working" || task.activity === "unread"
       ? task.activity
       : "idle";
+  // `activity` blends runtime and read state: a busy task with unread output
+  // reports `unread`. Keep unread typography, but render runtime independently
+  // so opening detail is never required to discover that the agent is alive.
+  const isRunning = task.runtimeState === "busy";
   const titleActivityStyle =
     effectiveActivity === "unread"
       ? styles.titleUnread
@@ -122,7 +126,13 @@ export function TaskCard({
       }
       accessibilityLabel={accessibilityLabel}
       accessibilityRole="button"
-      accessibilityValue={{ text: effectiveActivity }}
+      accessibilityValue={{
+        text: isRunning && effectiveActivity === "unread"
+          ? "working, unread"
+          : isRunning
+            ? "working"
+            : effectiveActivity
+      }}
       accessible
       style={[
         styles.card,
@@ -190,6 +200,16 @@ export function TaskCard({
                 ]}
               >
                 blocked
+              </Text>
+            </View>
+          ) : null}
+          {isRunning ? (
+            <View
+              style={[styles.stagePill, styles.runningPill]}
+              testID={MOBILE_E2E_IDS.taskRunningIndicator(uiId)}
+            >
+              <Text style={[styles.stageLabel, styles.runningLabel]}>
+                running
               </Text>
             </View>
           ) : null}
@@ -292,6 +312,12 @@ const styles = StyleSheet.create({
   titleWorking: {
     fontStyle: "italic",
     fontWeight: "normal"
+  },
+  runningPill: {
+    backgroundColor: "#163D31"
+  },
+  runningLabel: {
+    color: "#8DE0BE"
   },
   /** Bounded metadata keeps both a long id and the title readable. */
   pillColumn: {
