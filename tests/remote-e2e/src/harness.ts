@@ -39,6 +39,8 @@ export interface RemoteHarnessOptions {
   lanHost?: string;
   repoRoot?: string;
   keepArtifacts?: boolean;
+  /** Disable accelerated cursor eviction when verifying production wait retention. */
+  expireShortCursors?: boolean;
   timeoutMs?: number;
 }
 
@@ -71,7 +73,7 @@ export interface RemoteHarness {
   restartServerWithIdentity(identity: { desktopId: string; desktopSecret?: string | null }): Promise<void>;
   restartDaemon(): Promise<void>;
   startRelay(): Promise<void>;
-  startAdditionalDesktop(): Promise<RemoteDesktop>;
+  startAdditionalDesktop(identity?: { desktopId: string; desktopSecret: string }): Promise<RemoteDesktop>;
   startServer(): Promise<void>;
   stopRelay(): Promise<void>;
   stopServer(): Promise<void>;
@@ -400,7 +402,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
             }
           : {}),
         KANNA_E2E_TEST_SQL: "1",
-        KANNA_E2E_SHORT_CURSOR_TTL_SECS: "1",
+        KANNA_E2E_SHORT_CURSOR_TTL_SECS: options.expireShortCursors === false ? undefined : "1",
         HOME: zshStartupDir,
         PATH: serverProviderPath(fakeAgentBinDir, process.env.PATH),
         RUST_LOG: process.env.RUST_LOG ?? "info",
@@ -489,9 +491,9 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     );
   };
 
-  const startAdditionalDesktop = async (): Promise<RemoteDesktop> => {
+  const startAdditionalDesktop = async (identity?: { desktopId: string; desktopSecret: string }): Promise<RemoteDesktop> => {
     const desktopRoot = join(root, `desktop-${randomUUID()}`);
-    const desktopId = `remote-e2e-${process.pid}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const desktopId = identity?.desktopId ?? `remote-e2e-${process.pid}-${Date.now()}-${randomUUID().slice(0, 8)}`;
     const desktopPorts = await allocatePorts();
     const desktopDaemonDir = join(desktopRoot, "daemon");
     const desktopDbPath = join(desktopRoot, "kanna.sqlite3");
@@ -505,6 +507,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       daemonDir: desktopDaemonDir,
       dbPath: desktopDbPath,
       desktopId,
+      desktopSecret: identity?.desktopSecret,
       environment,
       lanHost,
       repoRoot,
@@ -554,7 +557,7 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
       cwd: repoRoot, inventoryRoot: repoRoot,
       env: { ...process.env, KANNA_SERVER_CONFIG: targetConfigPath,
         ...(environment === "staging" ? { KANNA_CLOUD_ENV: "staging", KANNA_FIREBASE_PROJECT_ID: "kanna-staging", KANNA_RELAY_URL: "wss://relay-staging.kanna.build" } : {}),
-        KANNA_E2E_TEST_SQL: "1", KANNA_E2E_SHORT_CURSOR_TTL_SECS: "1", HOME: zshStartupDir,
+        KANNA_E2E_TEST_SQL: "1", KANNA_E2E_SHORT_CURSOR_TTL_SECS: options.expireShortCursors === false ? undefined : "1", HOME: zshStartupDir,
         PATH: serverProviderPath(fakeAgentBinDir, process.env.PATH), RUST_LOG: process.env.RUST_LOG ?? "info", ZDOTDIR: zshStartupDir }
     }
   );
