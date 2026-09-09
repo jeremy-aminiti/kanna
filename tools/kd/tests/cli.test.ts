@@ -617,6 +617,16 @@ describe("kd CLI", () => {
     await expect(runCli(["rust-cache", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd rust-cache <command>"));
 
+    await expect(runCli(["release", "cut", "--help"])).resolves.toBe(0);
+    // The recut flags are implemented and confirmation-gated, so the help text has to
+    // name each one and what it must match; a silent recut flag is how an operator ends
+    // up reaching for a reset instead.
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd release cut"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("--recut"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("--confirm-recut <staging-version|empty>"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("--confirm-old-tip <sha>"));
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("KANNA_RELEASE_REQUESTER"));
+
     await expect(runCli(["pages", "--help"])).resolves.toBe(0);
     // Matched exactly, so this pins `build-schema` as the only `pages` command rather
     // than merely asserting it is present.
