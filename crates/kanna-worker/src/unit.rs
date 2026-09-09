@@ -159,8 +159,11 @@ mod tests {
     /// different database on its next boot.
     #[test]
     fn the_unit_launches_against_the_resolved_database() {
-        let by_default = Options::parse(&["--data-dir".to_string(), "/srv/worker".to_string()])
-            .expect("options should parse");
+        let by_default = Options::parse_with_inherited_db_path(
+            &["--data-dir".to_string(), "/srv/worker".to_string()],
+            None,
+        )
+        .expect("options should parse");
         assert_eq!(
             by_default.db_path(),
             PathBuf::from("/srv/worker/kanna-worker.db")
@@ -175,12 +178,15 @@ mod tests {
         )
         .contains("--db-path /srv/worker/kanna-worker.db "));
 
-        let explicit = Options::parse(&[
-            "--data-dir".to_string(),
-            "/srv/worker".to_string(),
-            "--db-path".to_string(),
-            "/srv/worker/isolated.db".to_string(),
-        ])
+        let explicit = Options::parse_with_inherited_db_path(
+            &[
+                "--data-dir".to_string(),
+                "/srv/worker".to_string(),
+                "--db-path".to_string(),
+                "/srv/worker/isolated.db".to_string(),
+            ],
+            Some("/srv/worker/from-env.db".into()),
+        )
         .expect("options should parse");
         assert_eq!(explicit.db_path(), PathBuf::from("/srv/worker/isolated.db"));
 
@@ -197,16 +203,11 @@ mod tests {
             "the resolved database must reach ExecStart: {unit}"
         );
 
-        // Selected through the environment instead. This test owns the
-        // variable and restores it; no other test in this crate reads it.
-        let previous = std::env::var_os("KANNA_DB_PATH");
-        std::env::set_var("KANNA_DB_PATH", "/srv/worker/from-env.db");
-        let from_env = Options::parse(&["--data-dir".to_string(), "/srv/worker".to_string()])
-            .expect("options should parse");
-        match previous {
-            Some(value) => std::env::set_var("KANNA_DB_PATH", value),
-            None => std::env::remove_var("KANNA_DB_PATH"),
-        }
+        let from_env = Options::parse_with_inherited_db_path(
+            &["--data-dir".to_string(), "/srv/worker".to_string()],
+            Some("/srv/worker/from-env.db".into()),
+        )
+        .expect("options should parse");
         assert_eq!(from_env.db_path(), PathBuf::from("/srv/worker/from-env.db"));
         assert!(render_with(
             "/opt/kanna/bin/kanna-worker",
