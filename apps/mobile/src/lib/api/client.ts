@@ -404,6 +404,7 @@ export class RepoNotRegisteredError extends TaskCreationError {
 export function createKannaClient(transport: KannaTransport): KannaClient {
   const reissuePushPairingCertificate = transport.reissuePushPairingCertificate;
   const resumeTask = transport.resumeTask;
+  const queueReviewedPrForMerge = transport.queueReviewedPrForMerge;
   return {
     ...(transport.observeDesktopTaskSummaries
       ? {
@@ -464,13 +465,13 @@ export function createKannaClient(transport: KannaTransport): KannaClient {
     abortTaskCreation: (input) => transport.abortTaskCreation(input),
     runMergeAgent: (taskId) => transport.runMergeAgent(taskId),
     advanceTaskStage: (taskId) => transport.advanceTaskStage(taskId),
-    ...(transport.queueReviewedPrForMerge
+    ...(queueReviewedPrForMerge
       ? {
           queueReviewedPrForMerge: (
             taskId: string,
             decision: HumanReviewDecisionRequest,
             summary: string
-          ) => transport.queueReviewedPrForMerge!(taskId, decision, summary)
+          ) => queueReviewedPrForMerge(taskId, decision, summary)
         }
       : {}),
     ...(resumeTask

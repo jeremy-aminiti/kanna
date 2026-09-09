@@ -46,6 +46,7 @@ import type {
   MobileView,
   PendingRepoCommandTask,
   PendingTaskCreation,
+  SessionState,
   SessionStore,
   TaskCreationAttempt
 } from "./sessionStore";
@@ -396,6 +397,16 @@ export function createMobileController(
         routeIdentity: string;
         prompt: string;
         ports: TaskSummary["ports"];
+        /**
+         * The review identity and latest human merge decision this detail read
+         * carried, kept beside the prompt so a cache hit can put them back.
+         *
+         * `setSelectedTask` clears `selectedTaskReviewState` on every selection
+         * change, and the cache-hit path is what a re-entry to an
+         * already-loaded task takes — so without this the merge control was
+         * present on first open and gone forever afterwards.
+         */
+        reviewState: SessionState["selectedTaskReviewState"];
       }
     | null = null;
   /**
@@ -643,7 +654,16 @@ export function createMobileController(
       ? JSON.stringify([task.ownerDesktopId, task.ownerLocalTaskId])
       : client.getTaskRouteIdentity?.(task.id) ?? task.id;
 
-  const loadSelectedTaskPrompt = (taskId: string) => {
+  /**
+   * Read the selected task's detail, or replay the last read of it.
+   *
+   * `force` bypasses both the cache and the in-flight guard. It is for the
+   * cases where the task's detail is known to have changed *because of
+   * something this client just did* — recording a human merge authorization —
+   * where replaying the previous read would show the operator a control they
+   * have already used.
+   */
+  const loadSelectedTaskPrompt = (taskId: string, force = false) => {
     const task = findTask(taskId);
     if (!client.getTask || !task) {
       return;
@@ -651,14 +671,16 @@ export function createMobileController(
     const routeIdentity = taskPromptRouteIdentity(task);
     const detailIdentity = JSON.stringify([taskId, routeIdentity]);
     if (
+      !force &&
       loadedTaskPrompt?.taskId === taskId &&
       loadedTaskPrompt.routeIdentity === routeIdentity
     ) {
       store.setTaskPrompt(taskId, loadedTaskPrompt.prompt);
       store.setTaskPorts(taskId, loadedTaskPrompt.ports);
+      store.setSelectedTaskReviewState(loadedTaskPrompt.reviewState);
       return;
     }
-    if (activeTaskDetailIdentity === detailIdentity) {
+    if (!force && activeTaskDetailIdentity === detailIdentity) {
       return;
     }
 
@@ -678,21 +700,22 @@ export function createMobileController(
         // The review identity travels with detail, not with the task list, so
         // this is the only place the merge control can learn which pull
         // request — and which exact commit — it would be authorizing.
-        store.setSelectedTaskReviewState(
+        const reviewState =
           detail.reviewContext || detail.humanReviewDecision
             ? {
                 taskId,
                 reviewContext: detail.reviewContext ?? null,
                 humanReviewDecision: detail.humanReviewDecision ?? null
               }
-            : null
-        );
+            : null;
+        store.setSelectedTaskReviewState(reviewState);
         if (typeof detail.prompt === "string") {
           loadedTaskPrompt = {
             taskId,
             routeIdentity,
             prompt: detail.prompt,
-            ports: detail.ports
+            ports: detail.ports,
+            reviewState
           };
           store.setTaskPrompt(taskId, detail.prompt);
         }
@@ -3662,10 +3685,11 @@ export function createMobileController(
             "This connection cannot deliver a human review merge authorization."
           );
         }
-        // Re-read detail so the recorded decision and its delivery outcome
-        // replace the control, rather than the screen implying nothing
-        // happened.
-        loadSelectedTaskPrompt(taskId);
+        // Force the re-read. By the time this control can be pressed the
+        // task's prompt is already cached, so an ordinary call would replay
+        // the pre-decision detail and leave the control offering to authorize
+        // a head it has just authorized.
+        loadSelectedTaskPrompt(taskId, true);
         return { status: "delivered" as const, response };
       } catch (error) {
         return {

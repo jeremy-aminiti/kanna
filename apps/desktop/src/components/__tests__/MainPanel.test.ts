@@ -851,7 +851,7 @@ describe("MainPanel", () => {
    * stopped part-way needs a person to reconcile that session — never another
    * copy of the request, which would read there as a second authorization.
    */
-  it("stops offering to queue a decision that was delivered or may already be there", async () => {
+  it("stops offering to queue a decision that was delivered or whose outcome is unknown", async () => {
     const reviewedHead = "a".repeat(40);
     const detailWithDecision = (deliveryStatus: string) => ({
       id: "task-pending",
@@ -886,7 +886,10 @@ describe("MainPanel", () => {
     });
     const { default: MainPanel } = await import("../MainPanel.vue");
 
-    for (const status of ["delivered", "uncertain"]) {
+    // `pending` belongs here too: a decision recorded whose outcome was never
+    // reported may already be in the merge master's session, so it needs
+    // reconciling rather than a second copy of the request.
+    for (const status of ["delivered", "uncertain", "pending"]) {
       fetchTaskDetailMock.mockResolvedValue(detailWithDecision(status));
       const wrapper = mount(MainPanel, {
         props: {

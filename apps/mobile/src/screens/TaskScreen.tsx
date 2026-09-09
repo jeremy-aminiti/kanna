@@ -564,6 +564,12 @@ export function TaskScreen({
     draftInput: string;
     attachment: PreparedImageAttachment | null;
   } | null>(null);
+  /**
+   * Whether a merge authorization for this task is still waiting on the
+   * server. A ref rather than state: it must gate the very next press, and a
+   * render cannot be relied on to have happened in between.
+   */
+  const mergeAuthorizationInFlightRef = useRef(false);
   // The composer is one multiline TextInput between a one-line minimum and a
   // five-line maximum, scrolling itself past that. Height is never set from
   // state, so nothing here measures content, defers a stale measurement, or
@@ -781,13 +787,22 @@ export function TaskScreen({
     taskCreationPhase === "idle" &&
     Boolean(onQueueReviewedPrForMerge) &&
     activeReviewContext !== null &&
-    // Already delivered is done; an uncertain delivery needs a person to
-    // reconcile the merge session, not a second copy of the request.
+    // Already delivered is done. `pending` and `uncertain` both mean the
+    // outcome is unknown and need a person to reconcile the merge session,
+    // not a second copy of the request.
     (!decisionForCurrentHead || decisionForCurrentHead.deliveryStatus === "failed");
 
   const confirmQueueForMerge = () => {
     const context = activeReviewContext;
     if (!context || !onQueueReviewedPrForMerge) {
+      return;
+    }
+    // A second press while the first is still in flight would record nothing
+    // new but would ask the server to deliver the same decision twice, and the
+    // merge master reads a duplicate as a second person authorizing the merge.
+    // The action menu has no pending state of its own — `isTaskActionPending`
+    // covers stage actions only — so the guard lives here.
+    if (mergeAuthorizationInFlightRef.current) {
       return;
     }
     const actionText = `I reviewed ${context.prUrl} at ${context.headSha} and authorize the merge agent to merge it into ${context.baseRef} when safe.`;
@@ -803,6 +818,10 @@ export function TaskScreen({
         {
           text: "Authorize",
           onPress: () => {
+            if (mergeAuthorizationInFlightRef.current) {
+              return;
+            }
+            mergeAuthorizationInFlightRef.current = true;
             void onQueueReviewedPrForMerge(
               {
                 reviewContextVersion: context.version,
@@ -810,16 +829,20 @@ export function TaskScreen({
                 actionText
               },
               `Human-reviewed ${context.prUrl}`
-            ).then((result) => {
-              Alert.alert(
-                result.status === "delivered"
-                  ? "Request delivered"
-                  : "Not delivered",
-                result.status === "delivered"
-                  ? "The merge agent has your authorization. It decides when it is safe to merge."
-                  : result.message
-              );
-            });
+            )
+              .then((result) => {
+                Alert.alert(
+                  result.status === "delivered"
+                    ? "Request delivered"
+                    : "Not delivered",
+                  result.status === "delivered"
+                    ? "The merge agent has your authorization. It decides when it is safe to merge."
+                    : result.message
+                );
+              })
+              .finally(() => {
+                mergeAuthorizationInFlightRef.current = false;
+              });
           }
         }
       ]

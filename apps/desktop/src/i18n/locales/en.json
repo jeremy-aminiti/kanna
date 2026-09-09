@@ -352,7 +352,7 @@
     "reviewMergeConfirm": "Authorize merge",
     "reviewMergeSending": "Sending…",
     "reviewMergeDelivery": {
-      "pending": "Your merge authorization is recorded but has not reached the merge agent yet.",
+      "pending": "Your merge authorization was recorded but never reported an outcome. Read the merge agent's session and reconcile it — do not send it again.",
       "delivered": "Request delivered to merge task {mergeTask} on {machine}. The merge agent decides when it is safe to merge.",
       "failed": "The merge agent did not receive the request: {detail}. Your decision is recorded; sending again delivers the same one.",
       "uncertain": "Delivery stopped part-way and the merge agent may already hold this request: {detail}. Read that session and reconcile it — do not send it again."

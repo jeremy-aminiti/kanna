@@ -455,13 +455,36 @@ async fn deliver_human_review_merge_request(
                 owner_local_repo_id: None,
             });
         }
+        // Two states mean "the outcome is unknown", and both refuse rather
+        // than send again, because delivering twice is how one human decision
+        // becomes two MERGE requests in the merge master's session.
+        //
+        // `uncertain` is a delivery that demonstrably stopped part-way.
+        // `pending` on a decision this request did **not** create is the same
+        // fact arrived at differently: an earlier request recorded the
+        // decision and never came back to say what happened — it is either
+        // still in flight beside us or it died between the record and the
+        // outcome. Two presses racing on the same head land exactly here. A
+        // decision this request just created is `pending` by construction and
+        // is not that case.
         "uncertain" => {
             return Err((
                 axum::http::StatusCode::CONFLICT,
                 format!(
-                    "the merge request for decision {} stopped part-way and may already be in the \
-                     merge master's session. Read that session and reconcile it; do not send \
-                     this again.",
+                    "the merge request for decision {} stopped part-way and may already be in \
+                     the merge master's session. Read that session and reconcile it; do not \
+                     send this again.",
+                    decision.id
+                ),
+            ));
+        }
+        "pending" if !created => {
+            return Err((
+                axum::http::StatusCode::CONFLICT,
+                format!(
+                    "the merge request for decision {} was recorded but never reported an \
+                     outcome, so it may already be in the merge master's session or may still \
+                     be on its way. Read that session and reconcile it; do not send this again.",
                     decision.id
                 ),
             ));

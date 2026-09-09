@@ -3936,6 +3936,57 @@ mod human_review_merge_authorization {
         let _ = std::fs::remove_file(config.db_path);
     }
 
+    /// A decision recorded but never reported on is the same fact as an
+    /// uncertain one, reached differently: the request that created it is
+    /// either still in flight beside this one or died before saying what
+    /// happened. Two presses racing on the same head land here, and delivering
+    /// again is how one human decision becomes two MERGE requests.
+    #[tokio::test]
+    async fn refuses_a_second_request_while_the_first_has_no_recorded_outcome() {
+        let unique = format!("human-review-pending-{}", unique_test_suffix());
+        let (status, body, _inputs, config) = post_queue_request(
+            &unique,
+            |db| {
+                seed_review_child(db, "task-review");
+                seed_merge_singleton(db);
+                // Recorded, never delivered: exactly the row an in-flight
+                // first press leaves behind.
+                let (decision, created) = db
+                    .record_human_review_decision(crate::db::NewHumanReviewDecision {
+                        task_id: "task-review",
+                        review_context_version: 1,
+                        pr_url: PR_URL,
+                        head: Some("contributor/repo:feature/from-a-fork"),
+                        head_sha: REVIEWED_HEAD,
+                        base_ref: "main",
+                        base_sha: None,
+                        action_text: "I reviewed it and authorize the merge.",
+                        origin: "operator",
+                        device_provenance: None,
+                        source_machine_id: Some("desktop-concurrency"),
+                    })
+                    .unwrap();
+                assert!(created);
+                assert_eq!(decision.delivery_status, "pending");
+            },
+            queue_body(1, REVIEWED_HEAD),
+            false,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("never reported an outcome"), "{body}");
+        let db = Db::open(&config.db_path).unwrap();
+        // Still one authorization, and the merge master was told nothing: the
+        // fake daemon is aborted without ever having been connected to.
+        assert_eq!(
+            db.count_test_human_review_decisions("task-review").unwrap(),
+            1
+        );
+        drop(db);
+        let _ = std::fs::remove_file(config.db_path);
+    }
+
     /// A delivery that stopped part-way may already be in the merge master's
     /// session. Resending it would put two authorizations there for one human
     /// decision, so it is refused and handed to a person to reconcile.

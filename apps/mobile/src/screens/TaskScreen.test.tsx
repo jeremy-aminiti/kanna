@@ -669,8 +669,59 @@ describe("TaskScreen", () => {
    * stopped part-way needs a person to reconcile that session rather than a
    * second copy of the request. Neither re-offers the control.
    */
-  it("stops offering the merge control once this head has been decided", () => {
+  it.each(["delivered", "uncertain", "pending"] as const)(
+    "stops offering the merge control once this head has a %s decision",
+    (deliveryStatus) => {
+      const reviewedHead = "a".repeat(40);
+      const tree = renderTaskScreen({
+        reviewState: {
+          taskId: "task-1",
+          reviewContext: {
+            version: 4,
+            prUrl: "https://github.com/acme/repo/pull/12",
+            headRef: "feature/x",
+            headSha: reviewedHead,
+            baseRef: "main",
+            updatedAt: "2026-09-08T00:00:00Z"
+          },
+          humanReviewDecision: {
+            id: "hrd-1",
+            taskId: "task-1",
+            reviewContextVersion: 4,
+            prUrl: "https://github.com/acme/repo/pull/12",
+            headSha: reviewedHead,
+            baseRef: "main",
+            actionText: "I reviewed it and authorize the merge.",
+            origin: "operator",
+            createdAt: "2026-09-08T00:00:00Z",
+            deliveryStatus
+          }
+        },
+        onQueueReviewedPrForMerge: vi.fn()
+      });
+
+      pressByTestId(tree, "mobile.task-more-button");
+      expect(componentMocks.showTaskActionMenu).toHaveBeenCalledWith(
+        { mentionedFilesLabel: "Mentioned Files (0)" },
+        expect.any(Function)
+      );
+    }
+  );
+
+  /**
+   * The action menu has no pending state of its own, so nothing outside the
+   * control stops a second press while the first authorization is still on the
+   * wire — and the server would then be asked to deliver one decision twice.
+   */
+  it("ignores a second authorization while the first is still in flight", () => {
     const reviewedHead = "a".repeat(40);
+    let resolveFirst: ((result: { status: "delivered" }) => void) | undefined;
+    const onQueueReviewedPrForMerge = vi.fn(
+      () =>
+        new Promise<{ status: "delivered" }>((resolve) => {
+          resolveFirst = resolve;
+        })
+    );
     const tree = renderTaskScreen({
       reviewState: {
         taskId: "task-1",
@@ -682,27 +733,34 @@ describe("TaskScreen", () => {
           baseRef: "main",
           updatedAt: "2026-09-08T00:00:00Z"
         },
-        humanReviewDecision: {
-          id: "hrd-1",
-          taskId: "task-1",
-          reviewContextVersion: 4,
-          prUrl: "https://github.com/acme/repo/pull/12",
-          headSha: reviewedHead,
-          baseRef: "main",
-          actionText: "I reviewed it and authorize the merge.",
-          origin: "operator",
-          createdAt: "2026-09-08T00:00:00Z",
-          deliveryStatus: "delivered"
-        }
+        humanReviewDecision: null
       },
-      onQueueReviewedPrForMerge: vi.fn()
+      onQueueReviewedPrForMerge
     });
 
-    pressByTestId(tree, "mobile.task-more-button");
-    expect(componentMocks.showTaskActionMenu).toHaveBeenCalledWith(
-      { mentionedFilesLabel: "Mentioned Files (0)" },
-      expect.any(Function)
-    );
+    const authorizeOnce = () => {
+      componentMocks.showTaskActionMenu.mockClear();
+      componentMocks.alert.mockClear();
+      pressByTestId(tree, "mobile.task-more-button");
+      const onSelect = componentMocks.showTaskActionMenu.mock.calls[0]![1] as (
+        selectedAction: "queue-for-merge"
+      ) => void;
+      onSelect("queue-for-merge");
+      const buttons = componentMocks.alert.mock.calls[0]?.[2] as
+        | Array<{ text: string; onPress?: () => void }>
+        | undefined;
+      buttons?.find((button) => button.text === "Authorize")?.onPress?.();
+    };
+
+    authorizeOnce();
+    expect(onQueueReviewedPrForMerge).toHaveBeenCalledTimes(1);
+
+    authorizeOnce();
+    expect(onQueueReviewedPrForMerge).toHaveBeenCalledTimes(1);
+
+    // Once the first resolves the control is usable again — the guard is about
+    // concurrency, not a one-shot lock.
+    resolveFirst?.({ status: "delivered" });
   });
 
   /** An ordinary task has no pull-request identity, so there is no control. */

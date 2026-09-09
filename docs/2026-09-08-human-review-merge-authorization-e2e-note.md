@@ -63,9 +63,14 @@ scripted agent, and asserts:
   version and head that were displayed, a delivered or uncertain decision stops
   re-offering it while a failed delivery does not, a head that moved past an
   earlier decision re-offers it, and a server refusal is surfaced verbatim.
-- **Mobile** (`screens/TaskScreen.test.tsx`, `screens/taskActionMenu.test.ts`):
-  the same availability rules, the confirmation text, and the exact decision
-  the control submits.
+- **Mobile** (`screens/TaskScreen.test.tsx`, `screens/taskActionMenu.test.ts`,
+  `state/mobileController.test.ts`, `lib/transports/lanTransport.test.ts`,
+  `lib/transports/remoteTransport.test.ts`): the same availability rules, the
+  confirmation text, the exact decision the control submits, that a second
+  press while the first is still in flight sends nothing, that authorizing
+  re-reads task detail so the recorded decision withdraws the control, that
+  re-entering the task restores the review identity from cache, and the request
+  body each transport puts on the wire.
 - **Agent contracts** (`packages/core/src/workflow/qa-assets.test.ts`): both
   review agents refuse to relay the verdict and point at the control; the merge
   agent's human-reviewed request policy, expected-head precondition, and
@@ -89,11 +94,16 @@ row. Until then, the seam between "the button was clicked" and "the store was
 called" is covered by component tests only.
 
 **Also not covered end to end:** the mobile control, on a device. Its action
-menu, its confirmation text, the decision it submits, and every transport layer
-under it have unit coverage, and the server action it calls is the same one the
-remote E2E exercises — but no Appium case presses `Queue for Merge` on a
-simulator. The same fixture problem applies: the driven app needs a task with a
-published review context, which the mobile E2E lane does not seed today.
+menu, its confirmation text, the decision it submits, the controller's state
+handling around it, and the request body of both its transports have unit
+coverage, and the server action it calls is the same one the remote E2E
+exercises — but no Appium case presses `Queue for Merge` on a simulator, and
+the LAN and remote transports are covered at their own boundary rather than
+against a live server. The same fixture problem applies: the driven app needs a
+task with a published review context, which the mobile E2E lane does not seed
+today. The flow was instead verified by hand on the iOS Simulator; that run is
+recorded in the task result rather than here, because the worktree's
+screenshots do not outlive it.
 
 **And not covered end to end:** a reviewer and a merge singleton on *different*
 machines. The remote E2E exercises the relay transport but resolves the
