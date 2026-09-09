@@ -1635,6 +1635,11 @@ export function createCloudLanClient(
     ): TaskTerminalSubscription {
       const route = routeForTaskStream(taskId);
       if (route.source === "unavailable") {
+        listener({
+          type: "input_availability",
+          taskId,
+          unavailableReason: "terminal_detached"
+        });
         listener({ type: "error", taskId, message: route.message });
         return { close() {} };
       }
