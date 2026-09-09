@@ -16,12 +16,15 @@ pub struct Options {
     pub lan_port: Option<u16>,
     pub transfer_port: Option<u16>,
     pub unit_path: Option<PathBuf>,
-    /// Explicit database file.
+    /// Explicit database file, when one was named (`--db-path`, else
+    /// `KANNA_DB_PATH`).
     ///
-    /// A worker with no way to name one could only ever be the machine's
-    /// single canonical instance -- it would open the developer's real
-    /// database from a test, and two worktrees could not run side by side,
-    /// which is exactly what `kd` gives the desktop.
+    /// Without one the worker uses its own database under `data_dir`, never
+    /// the desktop's: a worker is a separate instance with its own database,
+    /// daemon directory and credentials, and the desktop's database is
+    /// guarded against every process that is not the desktop. A name that
+    /// resolves to that guarded file is refused at parse time, whichever way
+    /// it was supplied, rather than authorized.
     pub db_path: Option<PathBuf>,
 }
 
@@ -68,7 +71,7 @@ impl Options {
             }
         }
 
-        Ok(Self {
+        let options = Self {
             data_dir: match data_dir {
                 Some(dir) => dir,
                 None => default_data_dir()?,
@@ -77,7 +80,9 @@ impl Options {
             transfer_port,
             unit_path,
             db_path,
-        })
+        };
+        refuse_desktop_database(&options.db_path())?;
+        Ok(options)
     }
 
     pub fn server_config_path(&self) -> PathBuf {
@@ -123,15 +128,46 @@ impl Options {
     }
 
     /// The database this worker's server opens: the explicit one when given,
-    /// otherwise the machine's canonical one.
+    /// otherwise the worker's own, beside its other state under `data_dir`.
     pub fn db_path(&self) -> PathBuf {
         self.db_path
             .clone()
-            .unwrap_or_else(kanna_runtime_defaults::preferred_desktop_db_path)
+            .unwrap_or_else(|| kanna_runtime_defaults::worker_db_path(&self.data_dir))
     }
 
     pub fn api_base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.lan_port())
+    }
+}
+
+/// A worker never opens the desktop's database, and never asks to.
+///
+/// The desktop database guard (`kanna_runtime_defaults::database_access`)
+/// refuses that file to every process the desktop did not authorize, and the
+/// worker is deliberately not one of them: exporting the desktop's
+/// authorization would turn a separate instance into a second writer on the
+/// desktop's store. So a database that resolves to a guarded path is refused
+/// here, before it is written into `server.toml` or a systemd unit, with the
+/// remedy -- instead of starting a server that the guard then refuses with a
+/// message about an authorization the worker must not grant.
+fn refuse_desktop_database(db_path: &Path) -> Result<(), String> {
+    match kanna_runtime_defaults::database_access::protected_desktop_database(db_path)? {
+        Some(protected) => {
+            let alias = if protected == db_path {
+                String::new()
+            } else {
+                format!(" (it resolves to {})", protected.display())
+            };
+            Err(format!(
+                "REFUSED: {} is the desktop app's database{alias}. A worker is its own Kanna \
+                 instance and never opens the desktop's database: leave --db-path and \
+                 KANNA_DB_PATH unset to use {} under --data-dir, or name a file that is not \
+                 the desktop's.",
+                db_path.display(),
+                kanna_runtime_defaults::WORKER_DB_NAME,
+            ))
+        }
+        None => Ok(()),
     }
 }
 
@@ -415,6 +451,69 @@ mod tests {
         assert!(Options::parse(&["--lan-port".to_string(), "0".to_string()]).is_err());
         assert!(Options::parse(&["--lan-port".to_string()]).is_err());
         assert!(Options::parse(&["--nope".to_string()]).is_err());
+    }
+
+    /// A default worker run must start: its database is its own, under the
+    /// data directory it was given, so the desktop database guard has nothing
+    /// to say about it. The Phase 1 gate always named a database explicitly,
+    /// which is how the default was able to point at the desktop's guarded
+    /// file without anything noticing.
+    #[test]
+    fn the_default_database_is_the_workers_own_under_its_data_dir() {
+        let parsed = Options::parse(&["--data-dir".to_string(), "/srv/worker".to_string()])
+            .expect("options should parse");
+        assert_eq!(
+            parsed.db_path(),
+            PathBuf::from("/srv/worker/kanna-worker.db")
+        );
+        for protected in kanna_runtime_defaults::database_access::production_database_paths()
+            .expect("the protected set resolves on a developer machine")
+        {
+            assert_ne!(parsed.db_path(), protected);
+            assert_ne!(
+                parsed.db_path().file_name(),
+                protected.file_name(),
+                "the worker's database must not even share the desktop's file name"
+            );
+        }
+        assert!(
+            build_server_config(&parsed, &identity(), None)
+                .contains("db_path = \"/srv/worker/kanna-worker.db\"\n"),
+            "server.toml must carry the worker's own database"
+        );
+    }
+
+    /// Pointing the worker at the desktop's database is refused with the
+    /// remedy, not authorized. The check resolves the path exactly as the
+    /// guard does, so nothing here creates or opens the file -- the
+    /// assertion is about a name.
+    #[test]
+    fn a_desktop_database_is_refused_rather_than_authorized() {
+        let protected = kanna_runtime_defaults::database_access::production_database_paths()
+            .expect("the protected set resolves on a developer machine");
+        assert!(!protected.is_empty());
+        for path in protected {
+            let error = Options::parse(&[
+                "--data-dir".to_string(),
+                "/srv/worker".to_string(),
+                "--db-path".to_string(),
+                path.to_string_lossy().into_owned(),
+            ])
+            .expect_err("the desktop's database must be refused");
+            assert!(error.starts_with("REFUSED:"), "{error}");
+            assert!(
+                error.contains(&path.to_string_lossy().into_owned()),
+                "{error}"
+            );
+            assert!(
+                error.contains("--data-dir"),
+                "the refusal names the remedy: {error}"
+            );
+            assert!(
+                !error.contains(kanna_runtime_defaults::database_access::DESKTOP_ACCESS_ENV),
+                "the worker must not advertise the desktop's authorization: {error}"
+            );
+        }
     }
 
     /// A headless worker is local-only: no relay URL and no device token means

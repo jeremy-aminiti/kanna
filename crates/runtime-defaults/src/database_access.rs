@@ -94,6 +94,20 @@ pub fn production_database_paths() -> Result<Vec<PathBuf>, String> {
     Ok(production_database_paths_for_home(&account_home()?))
 }
 
+/// The protected desktop database `path` names, if it names one, resolved the
+/// same way [`check`] resolves it (symlinks, hard links and parent aliases
+/// included). A launcher that must never open the desktop's database at all
+/// asks this before it writes the path anywhere. Answering never authorizes
+/// access.
+pub fn protected_desktop_database(path: &Path) -> Result<Option<PathBuf>, String> {
+    let protected = production_database_paths()?;
+    let resolved = protected
+        .iter()
+        .map(|production| resolve_existing_ancestor(production))
+        .collect::<Result<Vec<_>, _>>()?;
+    protected_match(path, &protected, &resolved)
+}
+
 /// The same set for an explicit home, so the derivation can be exercised
 /// without the account the tests are running as.
 pub fn production_database_paths_for_home(home: &Path) -> Vec<PathBuf> {
@@ -136,6 +150,30 @@ fn check_resolved(
                 .into(),
         );
     }
+    if protected_match(path, protected, resolved_protected)?.is_none() {
+        return Ok(());
+    }
+    if isolated {
+        return Err(format!(
+            "REFUSED: isolated/test/worktree process cannot access desktop production database {} (including legacy paths). Supply an isolated database path; XDG_DATA_HOME does not isolate macOS.",
+            path.display()
+        ));
+    }
+    if !desktop {
+        return Err(format!(
+            "REFUSED: opening desktop production database {} requires deliberate {DESKTOP_ACCESS_ENV}=desktop authorization. Supply an isolated database path for tests; XDG_DATA_HOME does not isolate macOS.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Which of `protected` `path` names, by resolved path or by inode.
+fn protected_match(
+    path: &Path,
+    protected: &[PathBuf],
+    resolved_protected: &[PathBuf],
+) -> Result<Option<PathBuf>, String> {
     let resolved = resolve_existing_ancestor(path)?;
     // One stat for the caller, not one per protected path: this runs before
     // every database open. `None` means there is no file yet, so no alias of
@@ -147,23 +185,11 @@ fn check_resolved(
                 && resolved
                     .to_string_lossy()
                     .eq_ignore_ascii_case(&canonical_production.to_string_lossy()));
-        if !same_path && !matches!(identity, Some(id) if Some(id) == file_identity(production)) {
-            continue;
-        }
-        if isolated {
-            return Err(format!(
-                "REFUSED: isolated/test/worktree process cannot access desktop production database {} (including legacy paths). Supply an isolated database path; XDG_DATA_HOME does not isolate macOS.",
-                path.display()
-            ));
-        }
-        if !desktop {
-            return Err(format!(
-                "REFUSED: opening desktop production database {} requires deliberate {DESKTOP_ACCESS_ENV}=desktop authorization. Supply an isolated database path for tests; XDG_DATA_HOME does not isolate macOS.",
-                path.display()
-            ));
+        if same_path || matches!(identity, Some(id) if Some(id) == file_identity(production)) {
+            return Ok(Some(production.clone()));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Resolve existing ancestors too: a fresh installation has no database yet,
@@ -465,6 +491,34 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read(&production).unwrap(), b"owner data");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_launcher_can_ask_which_desktop_database_a_path_names() {
+        let (root, production) = fixture();
+        let protected = vec![production.clone()];
+        let resolved = protected
+            .iter()
+            .map(|path| resolve_existing_ancestor(path))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            protected_match(&production, &protected, &resolved).unwrap(),
+            Some(production.clone())
+        );
+        assert_eq!(
+            protected_match(&root.join("worker/kanna-worker.db"), &protected, &resolved).unwrap(),
+            None
+        );
+        assert!(!production.parent().unwrap().exists());
+        for real in production_database_paths().unwrap() {
+            assert_eq!(protected_desktop_database(&real).unwrap(), Some(real));
+        }
+        assert_eq!(
+            protected_desktop_database(&root.join("own.db")).unwrap(),
+            None
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

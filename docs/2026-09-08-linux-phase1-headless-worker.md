@@ -202,11 +202,20 @@ agent CLIs need come from interactive shell startup files that never run there.
 Surviving logout needs `loginctl enable-linger`, which `install-unit` reports
 rather than doing.
 
-The worker takes an explicit `--db-path` (and honours `KANNA_DB_PATH`). Without
-one it could only ever be a machine's single canonical instance — it opened
-this developer's real Kanna database the first time the gate ran — and two
-worktrees could not run side by side, which is what `kd` already gives the
-desktop.
+The worker takes an explicit `--db-path` (and honours `KANNA_DB_PATH`); without
+one it uses **its own database, `kanna-worker.db` under `--data-dir`**. It used
+to default to the desktop's database instead — it opened this developer's real
+Kanna database the first time the gate ran, and two worktrees could not run
+side by side — and once the desktop database guard landed
+(`kanna-runtime-defaults::database_access`, 2026-09-09) that default meant a
+plain `kanna-worker run --data-dir …` had its server refused at `Config::load`,
+unseen by the gate because every case passed `--db-path`. A worker is a
+separate instance with its own database, daemon directory and credentials, so
+the fix is the default, not an authorization: the worker is never handed
+`KANNA_DESKTOP_DB_ACCESS`, and a `--db-path` (or `KANNA_DB_PATH`) that resolves
+to a guarded desktop database — by symlink, hard link or parent alias, the
+same resolution the guard does — is refused by `Options::parse` with the
+remedy, before it reaches `server.toml` or a systemd unit.
 
 Three more things the launcher had to get right, each reproduced with real
 binaries rather than reasoned about:
@@ -223,11 +232,12 @@ binaries rather than reasoned about:
   *group*.
 - **The generated unit carries the database it resolved.** `render` dropped
   `--db-path`, so an isolated worker installed as a unit came back up against
-  the machine's canonical desktop database on its next boot — the one database
-  an isolated instance must never touch. Whatever `install-unit` resolved
-  (`--db-path`, else `KANNA_DB_PATH`, else the canonical path) is now in
-  `ExecStart`, and the gate runs the generated command for real and asks the
-  server which database it opened.
+  a different database on its next boot — at the time, the machine's canonical
+  desktop database, the one database an isolated instance must never touch.
+  Whatever `install-unit` resolved (`--db-path`, else `KANNA_DB_PATH`, else
+  `kanna-worker.db` under `--data-dir`) is now in `ExecStart`, and the gate
+  runs the generated command for real and asks the server which database it
+  opened.
 - **`server.toml` is private.** It carries `desktop_secret`, and it was being
   written with a plain `fs::write`: under the default 022 umask that is 0644,
   which made the 0600 on the identity file beside it pointless. It is now
@@ -495,8 +505,8 @@ To run the worker by hand:
 
 ```
 cargo build -p kanna-worker -p kanna-daemon -p kanna-server -p kanna-cli
-.build/debug/kanna-worker run --data-dir /tmp/worker --db-path /tmp/worker.db \
-  --lan-port 49120 --transfer-port 49130
+.build/debug/kanna-worker run --data-dir /tmp/worker --lan-port 49120 \
+  --transfer-port 49130                       # database: /tmp/worker/kanna-worker.db
 .build/debug/kanna-worker print-unit          # the systemd --user unit
 .build/debug/kanna-worker install-unit        # writes it, then tells you the next steps
 ```

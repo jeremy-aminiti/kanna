@@ -33,7 +33,8 @@ pub async fn run(options: Options) -> Result<(), String> {
 
     // The database directory is the launcher's to create -- the desktop gets
     // it for free from Tauri's app-data directory, and the server only opens
-    // the file it is given.
+    // the file it is given. By default that file is the worker's own, under
+    // `data_dir`; `Options::parse` has already refused the desktop's.
     let db_path = options.db_path();
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
