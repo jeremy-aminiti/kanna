@@ -1427,6 +1427,14 @@ async fn wait_local_task_events(
     }
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    // Reuse the aggregate's existing zero-time drain budget for a paged
+    // bootstrap. Positive waits must never extend their receiver deadline
+    // merely because excluded rows remain.
+    let drain_deadline = if timeout_secs == 0 {
+        tokio::time::Instant::now() + ZERO_TIMEOUT_DRAIN_BUDGET
+    } else {
+        deadline
+    };
     let min_events = kanna_tool_catalog::clamp_task_event_min_events(query.min_events, limit);
     let debounce = hold_duration(query.debounce_ms);
     // Collected across re-reads, not per read: a batched wait returns one
@@ -1509,12 +1517,20 @@ async fn wait_local_task_events(
             })));
         }
 
-        if query.orchestration_notifications && batch.has_more && collected.len() < limit as usize {
-            cursor = parse_cursor(Some(&batch.cursor))?;
+        if query.orchestration_notifications
+            && batch.has_more
+            && collected.len() < limit as usize
+            && now < drain_deadline
+        {
             tokio::task::yield_now().await;
-            continue;
+            // Yielding can cross the deadline. Return the checkpoint already
+            // consumed, without starting another read or losing the backlog.
+            if tokio::time::Instant::now() < drain_deadline {
+                cursor = parse_cursor(Some(&batch.cursor))?;
+                continue;
+            }
         }
-        if now >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             // The window closed before the batch filled. Whatever accumulated
             // is still returned and still acknowledged by the cursor: holding
             // events back for a batch the caller never asked to wait longer
@@ -1524,7 +1540,7 @@ async fn wait_local_task_events(
                 "waitOutcome": "timeout",
                 "cursor": output_cursor,
                 "events": collected,
-                "hasMore": false,
+                "hasMore": query.orchestration_notifications && batch.has_more,
                 "waitTimeoutSecs": timeout_secs,
                 "waitHint": if collected_count == 0 {
                     format!(
@@ -2389,7 +2405,9 @@ async fn wait_aggregate_task_events(
         if !batch_complete
             && !failed_machines.contains(&completed_machine_id)
             && ((timeout_secs > 0 && now < deadline)
-                || (query.orchestration_notifications
+                || (timeout_secs == 0
+                    && now < zero_timeout_deadline
+                    && query.orchestration_notifications
                     && session
                         .cursor
                         .machines_with_more

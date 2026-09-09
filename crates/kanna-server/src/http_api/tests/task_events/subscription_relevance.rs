@@ -41,7 +41,7 @@ fn noise(db: &Db, count: usize) {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn automatic_review_to_pr_and_noise_drain_before_limit_without_changing_raw_history() {
     let state = test_state_with_seed("selection-auto", "Selection", seed_orchestration);
     let db = Db::open(&state.config().db_path).unwrap();
@@ -79,7 +79,7 @@ async fn automatic_review_to_pr_and_noise_drain_before_limit_without_changing_ra
         .any(|(_, kind)| kind == "task.activity_changed"));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn mixed_filtered_pages_preserve_failure_after_stage_change_and_exact_continuation() {
     let state = test_state_with_seed("selection-failure", "Selection", seed_orchestration);
     let db = Db::open(&state.config().db_path).unwrap();
@@ -371,4 +371,44 @@ async fn subscription_worker_publishes_only_attention_and_ack_resumes_after_filt
     );
     service.abort();
     let _ = service.await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn excluded_backlog_cannot_extend_deadline_and_resumes_without_cursor_loss() {
+    for timeout_secs in [0, 1] {
+        let state = test_state_with_seed(
+            &format!("selection-deadline-{timeout_secs}"),
+            "Selection",
+            seed_orchestration,
+        );
+        let db = Db::open(&state.config().db_path).unwrap();
+        noise(&db, 20);
+        let tail = db.latest_task_event_seq().unwrap();
+        let mut q = query(1);
+        q["timeoutSecs"] = json!(timeout_secs);
+        let wait = tokio::spawn(selected(state.clone(), q));
+        // Let the wait consume a page and yield to drain the filtered backlog.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let page = wait.await.unwrap();
+        assert_eq!(page["waitOutcome"], "timeout");
+        assert_eq!(page["events"], json!([]));
+        assert_eq!(page["hasMore"], true);
+        let checkpoint = page["cursor"].as_str().unwrap().parse::<i64>().unwrap();
+        assert!(
+            checkpoint > 0 && checkpoint < tail,
+            "expired wait must stop draining before the tail: {page}"
+        );
+        db.append_task_event("child-b", TaskEventKind::AwaitingInput, json!({}))
+            .unwrap();
+        let mut resume = query(1);
+        resume["cursor"] = page["cursor"].clone();
+        let attention = selected(state.clone(), resume.clone()).await;
+        assert_eq!(
+            event_pairs(&attention),
+            vec![("child-b".into(), "task.awaiting_input".into())]
+        );
+        resume["cursor"] = attention["cursor"].clone();
+        assert_eq!(selected(state, resume).await["events"], json!([]));
+    }
 }

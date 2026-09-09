@@ -23,13 +23,21 @@ a confirmed question, failure, manual gate and an observation fault. Confirm the
 mailbox carries only relevant rows and repeated reads do not submit duplicate
 wakes. Stop all owned processes. No shared production/staging probes are needed.
 
-The permit-lifetime fix in task `2c7a34b9` must land first. Its current draft pins
-`event_subscriptions.rs::step` collection across unrelated notifications and
-adds `tests/task_events/subscription_remote.rs`, registered in `tests/task_events.rs`.
-This task changes `collect` in the former and registers a separate relevance
-module in the latter. Preserve the pinned future, mailbox validation and bounded
-retirement; neither edit should absorb the other's lifecycle design. Reconcile
-against the committed permit fix before final verification/handoff.
+The permit-lifetime fix in task `2c7a34b9` remains an explicit predecessor and
+must merge first. Its committed checkpoint
+`667476f4d8c0969a70a357b91864b23b4dc5b2e0` was integrated locally after draft
+checkpoint `e47e038d6`, with no conflicts. The pinned `event_subscriptions.rs::step`
+and `subscription_remote.rs` boundary suite are preserved; this task's `collect`
+change and separate `subscription_relevance` module remain alongside them.
+No push, PR or handoff is permitted until the predecessor's review/gate clears.
+
+Filtered native-page draining now checks the existing wait deadline before
+another read, including after its scheduling yield. Zero-time bootstrap draining
+uses the existing aggregate zero-time drain budget. A timeout retains the consumed
+checkpoint and reports remaining raw pages without counting them toward actionable
+batch thresholds. Aggregate re-arming likewise cannot continue a positive wait
+past its deadline. Paused-clock regressions cover both timeout modes and resuming
+through the excluded backlog to the next actionable event; they remain unrun.
 
 Other shared surfaces are limited to the subscription/wait catalog descriptions,
 subscription section of the server boundary document and manager event-loop
