@@ -143,3 +143,26 @@ describe("Rust test orchestration", () => {
     });
   });
 });
+
+describe("buildRustTestCommands --desktop", () => {
+  it("adds the desktop crate and its frontend build on Linux", () => {
+    const commands = buildRustTestCommands("linux", { desktop: true });
+    expect(commands.map((command) => command.name)).toContain("frontend");
+    const clippy = commands.find((command) => command.name === "clippy");
+    expect(clippy?.args).not.toContain("kanna-desktop");
+    const workspace = commands.find((command) => command.name === "workspace");
+    expect(workspace?.args).not.toContain("kanna-desktop");
+  });
+
+  it("keeps Linux headless by default, because the worker's gate must not need WebKitGTK", () => {
+    const commands = buildRustTestCommands("linux");
+    expect(commands.map((command) => command.name)).not.toContain("frontend");
+    expect(commands.find((command) => command.name === "clippy")?.args).toContain("kanna-desktop");
+  });
+
+  it("changes nothing on macOS, where the desktop crate is always in", () => {
+    expect(buildRustTestCommands("darwin", { desktop: true })).toEqual(
+      buildRustTestCommands("darwin"),
+    );
+  });
+});

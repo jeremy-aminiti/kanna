@@ -206,9 +206,9 @@ predicted (`02-app-startup.png`).
 
 ### 3.3.4 Still open
 
-- **Two simultaneous isolated instances** were not exercised. It needs a second
-  checkout with its own Cargo build directory, which is a full second Rust
-  build; it belongs with M6's harness work rather than with this spike.
+- **Two simultaneous isolated instances** were not exercised by hand. The mock
+  E2E lane starts a secondary instance itself, and it now gets far enough on
+  Linux to do so (§3.7), but that is a by-product rather than a measurement.
 - A page reload against a repo-less *Repo shell* surfaces `Failed to reconnect
   to existing session: shell cwd is not readable:` with an empty path. Recorded,
   not chased: it is a reconnect path with no repo selected, and nothing
@@ -376,6 +376,79 @@ not established — the plausible candidates are memory pressure (15 GiB, runnin
 llvmpipe-backed GNOME plus a Rust build) and the graphics stack itself. It is
 recorded because it is a fact about this workbench that anyone repeating this
 work will meet, not because it is diagnosed.
+
+## 3.7 M6: the lanes on Linux
+
+### `kd` needed a command line tool that is not there
+
+`./kd test desktop-mock-e2e` did not reach its first assertion. It died in
+`kd dev up --delete-db` with `spawn sqlite3 ENOENT`: `kd` shelled out to the
+`sqlite3` CLI to create and to seed development databases. macOS ships one;
+a stock Ubuntu image does not, and installing it needs the password.
+
+`kd` now uses the `node:sqlite` bundled with the Node it already requires, so
+the dependency is removed rather than moved — and the repository's "bundled
+SQLite" rule still holds, since nothing links a system `libsqlite3`.
+`./kd doctor` and the getting-started prerequisites drop `sqlite3` with it.
+
+One bundling detail is worth knowing before someone "simplifies" it back:
+esbuild's builtin list for this bundle's target predates `node:sqlite`, so a
+static `import ... from "node:sqlite"` is emitted as `from "sqlite"` — a
+package that does not exist — and a cold `kd` launch dies with
+`ERR_MODULE_NOT_FOUND` before running anything. The module is resolved through
+`createRequire` for exactly that reason, and `tests/cli.test.ts` covers the cold
+launch that caught it.
+
+### `./kd test rust --desktop`
+
+Phase 1 excluded the desktop crate off macOS and said Phase 2 was where the
+GUI's own lane belonged. Linux's default stays headless — the worker is the
+shipped Linux product and its gate must not require WebKitGTK — but "excluded
+by default" had become indistinguishable from "cannot run", which is how a
+Linux desktop regression reaches a review with nothing to catch it.
+`--desktop` is the switch that tells them apart, and it is a no-op on macOS.
+
+### The mock lane runs on Linux, and 8 of 48 targets pass
+
+That is the honest headline, and the failures are more useful than the number.
+
+**One was mine.** `app-launch` asserted `Press ⌘I to create one.` and got
+`Press Ctrl+Shift+I to create one.` — the M4 change working, caught by the only
+thing that could catch it. Both hint assertions are now written against the
+host platform rather than against macOS.
+
+**Most of the rest share one cause.** The failures concentrate in
+`importRepoThroughUi`, where `waitForElement(".modal-overlay .resolved-url",
+5_000)` times out; nearly every target that needs a repository fixture dies
+there, and the eight that pass are the eight that do not import one. This is a
+deadline calibrated on an accelerated machine, not a broken feature:
+
+```
+{"secondsToFirstWebDriverSession": 18.6, "secondsToMountedUi": 41.9}
+```
+
+The app answers WebDriver 18.6 s after launch and has a mounted UI at 41.9 s —
+a 23-second gap that is close to nothing on a Mac. Every per-element deadline
+in the harness sits on top of that, and `.resolved-url` in particular waits on
+two Tauri round trips (`file_exists`, then `git_repository_state`) against an
+86 MB checkout.
+
+**A few are real Linux platform differences,** each seen once:
+
+- Window geometry: the harness expects `{x: 32, y: 32, width: 1132, height: 772}`
+  and gets `{x: 0, y: 0, width: 1184, height: 871}`. Wayland clients do not
+  position their own windows, and mutter sized this one to the virtual monitor.
+  This is a case to classify as platform-specific, not to "fix".
+- `Timed out waiting for 1 windows` and `expected [2] to deeply equal [1]`:
+  multi-window lifecycle differs and needs its own look.
+- A computed style expected `fontStyle: italic` and got none — a font fallback,
+  since the VM has no JetBrains Mono.
+
+**Why this stops here.** The remaining work is a platform-aware deadline scale
+plus a per-target platform classification, and calibrating those against a
+software-rendered VM would calibrate against a machine nobody ships. It should
+be done once the VM has GPU access — the owner-gated item in §2 — so the
+numbers describe the platform rather than the absence of a driver.
 
 ## 4. What this changes about the plan
 

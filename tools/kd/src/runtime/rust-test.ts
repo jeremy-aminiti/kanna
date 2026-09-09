@@ -8,18 +8,34 @@ export interface RustTestCommand {
 
 interface ExecutedRustTestCommand extends RustTestCommand, CommandResult {}
 
+export interface RustTestOptions {
+  /**
+   * Include the Tauri desktop crate on a platform whose default is headless.
+   *
+   * Linux's default stays headless because the worker is the shipped Linux
+   * product and its gate must not depend on WebKitGTK being installed. But the
+   * desktop crate does build and test there, so "excluded by default" had
+   * become indistinguishable from "cannot run" — which is how a Linux desktop
+   * regression would reach a review with nothing to catch it. This is the
+   * switch that tells them apart. No effect on macOS, where the desktop crate
+   * is always in.
+   */
+  desktop?: boolean;
+}
+
 /**
  * The lanes `./kd test rust` runs.
  *
- * Off macOS the desktop crate is excluded and its frontend build skipped.
- * That is not a lowered bar: the Tauri app is not part of the headless
- * worker's surface, and Phase 2 is where the GUI's own lane belongs. The
- * sidecars, the daemon and the server are still built and tested in full.
+ * Off macOS the desktop crate is excluded and its frontend build skipped by
+ * default. That is not a lowered bar: the Tauri app is not part of the
+ * headless worker's surface. `--desktop` opts back in; the sidecars, the
+ * daemon and the server are built and tested in full either way.
  */
 export function buildRustTestCommands(
   platform: NodeJS.Platform = process.platform,
+  options: RustTestOptions = {},
 ): RustTestCommand[] {
-  const headless = platform !== "darwin";
+  const headless = platform !== "darwin" && !options.desktop;
   const commands: RustTestCommand[] = [
     {
       name: "agent-protocol",
@@ -65,9 +81,10 @@ export async function executeRustTests(input: {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
+  desktop?: boolean;
 }) {
   const commands: ExecutedRustTestCommand[] = [];
-  for (const command of buildRustTestCommands()) {
+  for (const command of buildRustTestCommands(process.platform, { desktop: input.desktop })) {
     const result = await input.runner.run(command.command, command.args, {
       cwd: input.repoRoot,
       env: input.env,
@@ -82,5 +99,11 @@ export async function executeRustTests(input: {
       };
     }
   }
-  return { ok: true, message: "Canonical Rust tests passed.", data: { commands } };
+  return {
+    ok: true,
+    message: input.desktop
+      ? "Canonical Rust tests passed, including the desktop crate."
+      : "Canonical Rust tests passed.",
+    data: { commands },
+  };
 }

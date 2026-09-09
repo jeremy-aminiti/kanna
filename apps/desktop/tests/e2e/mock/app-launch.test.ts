@@ -58,7 +58,8 @@ describe("app launch", () => {
 
   it("shows onboarding guidance in main panel", async () => {
     await pauseForSlowMode("before onboarding guidance assertion");
-    const el = await client.waitForText(".main-panel", "Press ⇧⌘J to open a shell");
+    const shellShortcut = process.platform === "darwin" ? "⇧⌘J" : "Ctrl+Alt+J";
+    const el = await client.waitForText(".main-panel", `Press ${shellShortcut} to open a shell`);
     expect(el).toBeTruthy();
   });
 
@@ -73,10 +74,16 @@ describe("app launch", () => {
     expect(bodyText).toContain("v0.125.0-beta.1+20260429");
   });
 
-  it("shows repo creation shortcut hint", async () => {
+  it("shows repo creation shortcut hint for the platform running the app", async () => {
     await pauseForSlowMode("before repo creation hint assertion");
     const bodyText = await client.executeSync<string>("return document.body.innerText;");
-    expect(bodyText).toContain("Press ⌘I to create one.");
+    // Not a glyph substitution: a Linux keyboard has no Command key, and the
+    // binding itself moves (see `composables/shortcutPlatform.ts`). Asking the
+    // app which platform it thinks it is on would let a wrong answer pass, so
+    // this asserts against the host's platform instead.
+    const expected =
+      process.platform === "darwin" ? "Press ⌘I to create one." : "Press Ctrl+Shift+I to create one.";
+    expect(bodyText).toContain(expected);
   });
 
   it("shows keyboard shortcuts reference", async () => {

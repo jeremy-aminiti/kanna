@@ -17,8 +17,10 @@ macOS with the following installed (all verified by `./kd setup --check`, per
 - Zig — required by the build toolchain
 - `tmux` — `kd dev up` runs the dev processes in a background tmux session
 
-`sqlite3` is also used (it ships with macOS); it is not part of the setup
-check, but `./kd doctor` verifies it.
+`sqlite3` is **not** a prerequisite. `kd` reads and seeds development databases
+through the `node:sqlite` bundled with Node, so a machine that has never
+installed the command line tool — which is every stock Ubuntu image — works
+the same as macOS, which ships one.
 
 For agent sessions you also need at least one agent CLI installed and
 authenticated (Claude CLI is the default provider; Copilot, Codex, OpenCode,
@@ -31,7 +33,7 @@ git clone <repo-url> kanna
 cd kanna
 ./kd setup          # runs the full prerequisite checks, then pnpm install
 ./kd setup --check  # the same checks without installing anything
-./kd doctor         # quick binary check: git, pnpm, tmux, rustc, cargo, sqlite3
+./kd doctor         # quick binary check: git, pnpm, tmux, rustc, cargo
 ```
 
 The `./kd` launcher self-bootstraps on first run (it pnpm-installs and builds

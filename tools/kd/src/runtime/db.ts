@@ -1,7 +1,17 @@
-import { lstatSync, mkdirSync, readlinkSync, realpathSync, rmSync, statSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import type { CommandRunner } from "./process";
+import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
+
+// Resolved at runtime rather than imported. esbuild's builtin list for this
+// bundle's target predates `node:sqlite`, so a static import is emitted as
+// `from "sqlite"` — a package that does not exist — and a cold `kd` launch
+// dies with ERR_MODULE_NOT_FOUND before it runs anything. `createRequire` is
+// opaque to the bundler, which is the point.
+const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
+  DatabaseSync: new (path: string) => DatabaseSyncType;
+};
 
 export interface DevDbTarget {
   dbName: string;
@@ -64,20 +74,43 @@ export function deleteSqliteDb(dbPath: string): void {
   rmSync(`${dbPath}-shm`, { force: true });
 }
 
-export async function resetSqliteDb(runner: CommandRunner, target: DevDbTarget): Promise<void> {
-  assertNotProductionDb(target);
-  deleteSqliteDb(target.dbPath);
-  const result = await runner.run("sqlite3", [target.dbPath, "PRAGMA user_version;"]);
-  if (result.exitCode !== 0) {
-    throw new Error(`Failed to initialize ${target.dbPath}: ${result.stderr}`);
+/**
+ * Both of these used to shell out to the `sqlite3` CLI, which made a command
+ * line tool a prerequisite for `kd dev up --delete-db` and for every E2E lane
+ * that seeds a database. On a stock Ubuntu image it is not installed, and the
+ * failure surfaced as `spawn sqlite3 ENOENT` from inside a test run — nowhere
+ * near the thing that needed it.
+ *
+ * `node:sqlite` is bundled with the Node that `kd` already requires, so this
+ * removes the dependency rather than moving it. It also keeps the repository's
+ * "bundled SQLite" rule intact: nothing here links a system libsqlite3.
+ */
+function withDatabase<T>(dbPath: string, work: (db: DatabaseSyncType) => T): T {
+  const db = new DatabaseSync(dbPath);
+  try {
+    return work(db);
+  } finally {
+    db.close();
   }
 }
 
-export async function seedSqliteDb(runner: CommandRunner, repoRoot: string, dbPath: string): Promise<void> {
+export function resetSqliteDb(target: DevDbTarget): void {
+  assertNotProductionDb(target);
+  deleteSqliteDb(target.dbPath);
+  try {
+    withDatabase(target.dbPath, (db) => db.exec("PRAGMA user_version;"));
+  } catch (error) {
+    throw new Error(`Failed to initialize ${target.dbPath}: ${(error as Error).message}`);
+  }
+}
+
+export function seedSqliteDb(repoRoot: string, dbPath: string): void {
   assertNotProductionDb({ dbName: basename(dbPath), dbPath });
   const seedPath = join(repoRoot, "apps", "desktop", "tests", "e2e", "seed.sql");
-  const result = await runner.run("sqlite3", [dbPath, `.read ${seedPath}`]);
-  if (result.exitCode !== 0) {
-    throw new Error(`Failed to seed ${dbPath}: ${result.stderr}`);
+  try {
+    const seed = readFileSync(seedPath, "utf8");
+    withDatabase(dbPath, (db) => db.exec(seed));
+  } catch (error) {
+    throw new Error(`Failed to seed ${dbPath}: ${(error as Error).message}`);
   }
 }
