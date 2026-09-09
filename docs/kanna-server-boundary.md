@@ -562,7 +562,7 @@ in `docs/task-specs/c9f5721b.md` and enforced by the router authorization tests.
 - `GET /v1/tasks/search?query=...`
 - `GET /v1/tasks/{task_id}/children` (durable direct-child fan-out history; includes closed children)
 - `GET /v1/tasks/{task_id}/inputs?tail=...` (durable instruction history: every message delivered into the task's agent session from outside it)
-- `GET /v1/task-events?taskIds=...|parentTaskId=...|repoId=...|repoRemoteUrlHash=...&excludeTaskIds=...&cursor=...&timeoutSecs=...&limit=...` (multi-task, multi-machine event feed; blocks server-side until an event arrives or the window elapses; `excludeTaskIds` is a filter over the chosen scope, see [Task Event Feed](#task-event-feed))
+- `GET /v1/task-events?taskIds=...|parentTaskId=...|repoId=...|repoRemoteUrlHash=...&excludeTaskIds=...&excludeEventTypes=...&eventTypes=...&excludeOwn=...&cursor=...&timeoutSecs=...&limit=...&minEvents=...&debounceMs=...&minIntervalMs=...` (multi-task, multi-machine event feed; blocks server-side until the batch is complete or the window elapses; `excludeTaskIds`, `excludeEventTypes`, `eventTypes` and `excludeOwn` are filters over the chosen scope, see [Task Event Feed](#task-event-feed))
 - `POST /v1/tasks`
 - `POST /v1/tasks/{task_id}/input` (optionally with one base64 image `attachment`; see [Image attachments](#image-attachments))
 - `POST /v1/tasks/{task_id}/actions/complete-stage`
@@ -1371,7 +1371,12 @@ cursor-based, not snapshot-diffed:
   one — the log cannot drift from the state.
 - The wait blocks inside the server, bounded by
   `kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS`, so `kanna-mcp` and `kanna-cli`
-  each issue one plain GET and neither owns a polling loop.
+  each issue one plain GET and neither owns a polling loop. The ceiling stays
+  240s for every path including MCP: `CLIENT_TOOL_CALL_BUDGET_SECS` is 300s
+  because that is where MCP clients abort a `tools/call` and discard its
+  result, and a static assertion keeps a minute of headroom under it. Fewer
+  calls therefore come from batching what one call returns, not from longer
+  ones — see [Batching a task-event wait](#batching-a-task-event-wait).
 - `task.awaiting_input` comes from the daemon's `Waiting` session status, which
   is a positive match on a prompt the agent CLI rendered. It is deliberately
   never inferred from a session going quiet; see
@@ -1577,6 +1582,101 @@ set adds the caller's own id to `exclude_task_ids` unless `include_self` /
 `--include-self` is given. Explicit `taskIds` and `parentTaskId` scopes are
 taken literally — the former is already explicit and the latter excludes the
 parent structurally.
+
+`eventTypes` (comma-separated event type names) is the allow-list complement
+of `excludeEventTypes`, and the third filter over the chosen scope. It exists
+because the exclusion list is the wrong shape for the common manager: one that
+acts on `run.finished`, `task.pr_created`, `task.revision_requested`,
+`task.merge_signaled`, `task.input_delivered`, `task.created` and
+`task.closed` had to enumerate every noisy type instead, and silently started
+waking on every type added afterwards. Empty means every type. An explicit
+`excludeEventTypes` entry still wins, so naming both narrows rather than
+contradicts; a name matching no event type simply matches nothing. Like the
+two exclusion lists it is filtered in SQL, is not part of any cursor, and
+consumes what it drops rather than deferring it — a watcher that widens the
+list later does not get the dropped rows replayed. It is forwarded verbatim to
+every machine leg of an aggregate wait, and an allow-list that does not name
+`task.runtime_changed` suppresses the synthetic `includeCurrentActivity` rows
+with it.
+
+`excludeOwn` breaks the loop where an orchestrator sends input to a task and
+then waits on it: the delivery's own `task.input_delivered` row ends the very
+next wait, before the agent it spoke to has done anything, and the manager
+wakes again on each status flip that follows. It drops `task.input_delivered`
+and `task.raw_input_delivered` rows whose `payload.source` is `manager` —
+raw terminal writes count as own for the same reason ordinary ones do. The
+match is positive and exactly as wide as the delivering caller's own
+declaration. **An operator delivery is never dropped**, because a human
+intervening in a watched task is precisely what a manager must see, and a
+delivery whose caller declared nothing is indistinguishable from that human,
+so it is not dropped either — a manager that wants the suppression declares
+`source: "manager"` on `kanna_send_task_input`, which is what the input record
+asks of it anyway. The label is as far as the record goes: `task_input` records
+*that* a manager spoke, not *which* one, so `excludeOwn` also drops a peer
+manager's delivery into a task this one is watching. That is the honest reading
+of the data — inventing an identity the row does not carry would be worse — and
+a manager that must see its peers' deliveries passes `excludeOwn=false` and
+filters them itself, or reads them with `kanna_task_inputs`, which is the
+durable record and is unaffected. Also a filter, never part of the cursor. Its default is
+client policy, not a server default: `args_with_self_exclusion` in
+`kanna-tool-catalog` sets it for a call made from inside a task session
+(`KANNA_TASK_ID`), on every scope rather than only the repository one, because
+the loop it breaks happens under an explicit `taskIds` watch. The typed
+`kanna-cli task wait-events` applies the same rule; a direct HTTP caller that
+omits it keeps the unfiltered feed.
+
+### Batching a task-event wait
+
+Three parameters shape *when* one wait returns. None of them changes *what* it
+eventually returns: the cursor contract is unchanged, so a batched boundary
+delivers every event exactly once, in sequence order, and a batch that is cut
+short by its timeout still acknowledges what it collected.
+
+- `minEvents` (default 1) holds the wait until that many filtered events have
+  accumulated. It is capped at `limit`, since a response cannot carry more than
+  a page — otherwise asking for more than a page would turn every wait into a
+  timeout.
+- `debounceMs` (default 0, ceiling 60s) keeps collecting for that long after
+  the **first** event of the batch, so a burst — a run finishing, its post
+  starting, a stage change, a PR created — comes back as one response. The
+  window is opened once and never restarted by later events, so a steady stream
+  cannot defer a response indefinitely.
+- `minIntervalMs` (default 0, ceiling 60s) floors how long one call takes
+  before it returns events, measured from the start of the call rather than
+  from an event. It is the rate limit for a caller that loops: however fast
+  events arrive, it wakes at most once per interval. There is no per-caller
+  server state behind it and deliberately so — a wait has no authenticated
+  caller, and the loop's own cadence is what the floor governs.
+
+They compose: the wait returns once it holds `minEvents` and every hold window
+has closed. Two things override all three, because waiting cannot improve
+them — `hasMore`, and a full page. Both mean the caller must call again
+immediately anyway. And the timeout overrides them in the other direction: an
+elapsed window returns whatever accumulated, `waitOutcome: "timeout"` with a
+possibly non-empty `events` array, rather than holding events back for a batch
+the caller never asked to wait longer for.
+
+`minEvents` and `debounceMs` compose with the cross-machine fan-out the way the
+timeout does — enforced by the machine serving the wait, over every leg's
+events together. They are deliberately *not* forwarded to the legs: a
+per-machine minimum would hold one machine's events back while the fan-out
+already had enough of them, and a per-machine debounce would stack on the one
+applied at the top. A leg that has already answered is simply re-armed while
+the batch is still filling, which is how a burst split across machines comes
+back as one response. `kanna-mcp`'s own `km1` client fan-in applies the same
+rule, from the same `kanna_tool_catalog::task_event_batch_is_complete`, so
+`minEvents` counts the same events on every path. The filters are the opposite
+case and *are* forwarded verbatim, because a leg must not return rows the
+caller asked to drop.
+
+The point of all of this is the cost of watching. A singleton manager that
+watched a repository in 100-second legs made ~4,700 requests in two days —
+every leg returned in seconds because runtime flicker counts as an event, and
+79% of that session's token spend was this one surface. `minEvents`,
+`debounceMs`, `eventTypes`, `minIntervalMs` and `excludeOwn` move that cost
+into the server. The complement for continuous management remains
+`kanna_subscribe_events`, whose durable mailbox owns observation; this is the
+cheap version for plain polling.
 
 A cursor is bound to its scope. Resuming a `repoId` cursor with `taskIds` or
 `parentTaskId` (or vice versa) is rejected with HTTP 400 `cursor belongs to a

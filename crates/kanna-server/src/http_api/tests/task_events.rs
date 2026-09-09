@@ -5111,3 +5111,605 @@ async fn subscriptions_require_a_direct_desktop_connection() {
     .await;
     assert_eq!(response.status, StatusCode::UNAUTHORIZED.as_u16());
 }
+
+// --- Batched waits -------------------------------------------------------
+//
+// The manager these cover watched a repository in 100-second legs for two
+// days. Every leg returned in seconds because runtime flicker counts as an
+// event, so it made thousands of calls and read every one of those responses
+// into its context. `minEvents`, `debounceMs`, `eventTypes`, `minIntervalMs`
+// and `excludeOwn` are that cost moved into the server, and the property they
+// must all keep is the one the cursor already promised: batching changes how
+// often a watcher wakes, never which events it is eventually given.
+
+/// The batch fills early, so the wait returns as soon as the third event lands
+/// rather than sitting out its window.
+#[tokio::test]
+async fn min_events_returns_as_soon_as_the_batch_fills() {
+    let (router, db_path) = events_router();
+    let watch = "/v1/task-events?includeCurrentActivity=false&taskIds=child-a,child-b,child-c";
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-a1", "child-a", "in progress");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("advance stage");
+        db.update_pipeline_item_stage("child-b", "review")
+            .expect("advance stage");
+    }
+
+    let started = std::time::Instant::now();
+    let body = get_json_body(&router, &format!("{watch}&minEvents=3&timeoutSecs=20")).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a batch that is already full must not wait out its window"
+    );
+    assert_eq!(body["waitOutcome"], json!("events"));
+    assert_eq!(event_pairs(&body).len(), 3);
+}
+
+/// The window closes first. The events that did accumulate are returned — and
+/// acknowledged by the cursor, so the next call must not see them again.
+#[tokio::test]
+async fn min_events_returns_fewer_at_timeout_without_replaying_them() {
+    let (router, db_path) = events_router();
+    let watch = "/v1/task-events?includeCurrentActivity=false&taskIds=child-a,child-b,child-c";
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-a1", "child-a", "in progress");
+    }
+
+    let body = get_json_body(&router, &format!("{watch}&minEvents=5&timeoutSecs=1")).await;
+    assert_eq!(
+        body["waitOutcome"],
+        json!("timeout"),
+        "a window that closed short of minEvents is a timeout, not a full batch"
+    );
+    assert_eq!(
+        event_pairs(&body),
+        vec![("child-a".to_string(), "run.started".to_string())],
+        "whatever accumulated is still returned"
+    );
+    assert!(body["waitHint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("fewer than the 5 requested")));
+
+    let next = get_json_body(
+        &router,
+        &format!(
+            "{watch}&minEvents=5&timeoutSecs=1&cursor={}",
+            cursor_of(&body)
+        ),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&next),
+        Vec::new(),
+        "a timed-out batch acknowledged its events; they must not be replayed"
+    );
+}
+
+/// Three events 50 ms apart come back as one response, not three.
+#[tokio::test]
+async fn debounce_collects_a_burst_into_one_response() {
+    let (router, db_path) = events_router();
+    let watch = "/v1/task-events?includeCurrentActivity=false&taskIds=child-a,child-b,child-c";
+
+    let writer_db_path = db_path.clone();
+    let writer = tokio::spawn(async move {
+        let db = Db::open(&writer_db_path).expect("open db");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        start_run(&db, "run-a1", "child-a", "in progress");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        db.finish_stage_run("run-a1", "succeeded", Some("done"), None)
+            .expect("finish run");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("advance stage");
+    });
+
+    // The window is an order of magnitude wider than the burst it collects, so
+    // a loaded machine stretching the writer cannot turn this into a flake.
+    let body = get_json_body(&router, &format!("{watch}&debounceMs=3000&timeoutSecs=30")).await;
+    writer.await.expect("writer");
+    assert_eq!(body["waitOutcome"], json!("events"));
+    assert_eq!(
+        event_pairs(&body),
+        vec![
+            ("child-a".to_string(), "run.started".to_string()),
+            ("child-a".to_string(), "run.finished".to_string()),
+            ("child-a".to_string(), "stage.changed".to_string()),
+        ],
+        "a burst spread over 150ms must arrive as one response"
+    );
+}
+
+/// A lone event waits out the window and then returns; the window is opened by
+/// the first event, so it does not start from the call.
+#[tokio::test]
+async fn debounce_holds_a_lone_event_for_its_window_then_returns() {
+    let (router, db_path) = events_router();
+    let watch = "/v1/task-events?includeCurrentActivity=false&taskIds=child-a";
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-a1", "child-a", "in progress");
+    }
+
+    let started = std::time::Instant::now();
+    let body = get_json_body(&router, &format!("{watch}&debounceMs=700&timeoutSecs=20")).await;
+    let held = started.elapsed();
+    assert_eq!(body["waitOutcome"], json!("events"));
+    assert_eq!(event_pairs(&body).len(), 1);
+    assert!(
+        held >= Duration::from_millis(600),
+        "the lone event must be held for its debounce window (held {held:?})"
+    );
+    assert!(
+        held < Duration::from_secs(5),
+        "and released at the end of it, not at the timeout (held {held:?})"
+    );
+}
+
+/// The allow-list is a filter, so an unlisted type never appears — and the
+/// cursor still advances past it, exactly like an exclusion.
+#[tokio::test]
+async fn event_types_allow_list_drops_other_types_and_still_advances_the_cursor() {
+    let (router, db_path) = events_router();
+    let watch = "/v1/task-events?includeCurrentActivity=false&taskIds=child-a";
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-a1", "child-a", "in progress");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("advance stage");
+        db.finish_stage_run("run-a1", "succeeded", Some("done"), None)
+            .expect("finish run");
+        db.update_pipeline_item_pr("child-a", Some(7), "https://github.com/o/r/pull/7")
+            .expect("record pr");
+    }
+
+    let body = get_json_body(
+        &router,
+        &format!("{watch}&eventTypes=run.finished,task.pr_created&timeoutSecs=1"),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&body),
+        vec![
+            ("child-a".to_string(), "run.finished".to_string()),
+            ("child-a".to_string(), "task.pr_created".to_string()),
+        ],
+        "only the named types are delivered"
+    );
+
+    // The dropped rows were consumed, not deferred: a watcher that widens its
+    // allow-list later does not get them replayed.
+    let widened = get_json_body(
+        &router,
+        &format!("{watch}&timeoutSecs=1&cursor={}", cursor_of(&body)),
+    )
+    .await;
+    assert_eq!(
+        event_pairs(&widened),
+        Vec::new(),
+        "the cursor advanced past the filtered rows"
+    );
+    assert_eq!(widened["waitOutcome"], json!("timeout"));
+}
+
+/// An explicit exclusion still wins over the allow-list, and the synthetic
+/// current-state rows go with the type they are named after.
+#[tokio::test]
+async fn event_types_allow_list_composes_with_exclusions_and_synthetic_state() {
+    let (router, db_path) = events_router();
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-a1", "child-a", "in progress");
+        db.finish_stage_run("run-a1", "succeeded", Some("done"), None)
+            .expect("finish run");
+        settle_runtime_tasks(&db, &["child-b"]);
+    }
+
+    let both = get_json_body(
+        &router,
+        "/v1/task-events?taskIds=child-a,child-b&includeCurrentActivity=true\
+         &eventTypes=run.finished,task.runtime_changed&timeoutSecs=1",
+    )
+    .await;
+    let types = event_pairs(&both)
+        .into_iter()
+        .map(|(_, event_type)| event_type)
+        .collect::<HashSet<_>>();
+    assert!(types.contains("run.finished"));
+    assert!(
+        types.contains("task.runtime_changed"),
+        "an allow-list naming the runtime type keeps its synthetic rows: {types:?}"
+    );
+
+    let narrowed = get_json_body(
+        &router,
+        "/v1/task-events?taskIds=child-a,child-b&includeCurrentActivity=true\
+         &eventTypes=run.finished,task.runtime_changed&excludeEventTypes=task.runtime_changed\
+         &timeoutSecs=1",
+    )
+    .await;
+    let types = event_pairs(&narrowed)
+        .into_iter()
+        .map(|(_, event_type)| event_type)
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        types,
+        HashSet::from(["run.finished".to_string()]),
+        "an explicit exclusion narrows the allow-list rather than fighting it"
+    );
+}
+
+/// The cursor contract across a batched boundary: every event arrives exactly
+/// once, in order, whether it landed before the call, during it, or between
+/// two calls.
+#[tokio::test]
+async fn a_batched_boundary_loses_and_duplicates_nothing() {
+    let (router, db_path) = events_router();
+    let watch = "/v1/task-events?includeCurrentActivity=false&taskIds=child-a,child-b,child-c\
+                 &minEvents=3&debounceMs=300";
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-a1", "child-a", "in progress");
+    }
+
+    let writer_db_path = db_path.clone();
+    let writer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let db = Db::open(&writer_db_path).expect("open db");
+        db.finish_stage_run("run-a1", "succeeded", Some("done"), None)
+            .expect("finish run");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("advance stage");
+    });
+
+    let first = get_json_body(&router, &format!("{watch}&timeoutSecs=20")).await;
+    writer.await.expect("writer");
+    let mut seen = event_pairs(&first);
+    let cursor = cursor_of(&first);
+
+    // Fired with nobody listening, straddling the boundary the batch closed on.
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-b1", "child-b", "in progress");
+        db.close_pipeline_item("child-c").expect("close child");
+    }
+
+    let second = get_json_body(&router, &format!("{watch}&timeoutSecs=1&cursor={cursor}")).await;
+    seen.extend(event_pairs(&second));
+    assert_eq!(
+        seen,
+        vec![
+            ("child-a".to_string(), "run.started".to_string()),
+            ("child-a".to_string(), "run.finished".to_string()),
+            ("child-a".to_string(), "stage.changed".to_string()),
+            ("child-b".to_string(), "run.started".to_string()),
+            ("child-c".to_string(), "task.closed".to_string()),
+        ],
+        "a batched boundary delivers every event exactly once, in sequence order"
+    );
+
+    let drained = get_json_body(
+        &router,
+        &format!("{watch}&timeoutSecs=1&cursor={}", cursor_of(&second)),
+    )
+    .await;
+    assert_eq!(event_pairs(&drained), Vec::new());
+}
+
+/// The feedback loop the owner named: send input to a task, wait on it
+/// immediately, and the delivery's own announcement ends the wait before the
+/// agent it spoke to has done anything. `excludeOwn` drops that echo; a human's
+/// delivery into the same task is never dropped.
+#[tokio::test]
+async fn a_manager_waiting_after_sending_input_does_not_wake_on_its_own_echo() {
+    let (router, db_path) = events_router();
+    let watch = "/v1/task-events?includeCurrentActivity=false&taskIds=child-a";
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.record_task_input(
+            "child-a",
+            crate::db::TaskInputSource::Manager,
+            "please rerun the failing test",
+        )
+        .expect("record manager input");
+        db.append_raw_input_event(
+            "child-a",
+            crate::db::TaskInputSource::Manager.as_str(),
+            4242,
+            "delivered",
+            &[crate::db::RawInputWriteRecord {
+                key: Some("enter".to_string()),
+                bytes_hex: "0d".to_string(),
+                class: "submission",
+                status: "written",
+            }],
+        )
+        .expect("record manager raw input");
+    }
+
+    let echoed = get_json_body(&router, &format!("{watch}&timeoutSecs=1")).await;
+    assert_eq!(
+        event_pairs(&echoed)
+            .into_iter()
+            .map(|(_, event_type)| event_type)
+            .collect::<Vec<_>>(),
+        vec![
+            "task.input_delivered".to_string(),
+            "task.raw_input_delivered".to_string()
+        ],
+        "without excludeOwn the echo is delivered, as it always was"
+    );
+
+    // The same feed, with the echo suppressed: the wait sleeps through its own
+    // delivery and returns only what the task then did.
+    let writer_db_path = db_path.clone();
+    let writer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let db = Db::open(&writer_db_path).expect("open db");
+        db.record_task_input(
+            "child-a",
+            crate::db::TaskInputSource::Operator,
+            "and please look at the flake too",
+        )
+        .expect("record operator input");
+        start_run(&db, "run-a1", "child-a", "in progress");
+    });
+
+    let started = std::time::Instant::now();
+    let body = get_json_body(&router, &format!("{watch}&excludeOwn=true&timeoutSecs=20")).await;
+    writer.await.expect("writer");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the wait must still be woken by real work"
+    );
+    assert_eq!(
+        event_pairs(&body)
+            .into_iter()
+            .map(|(_, event_type)| event_type)
+            .collect::<Vec<_>>(),
+        vec![
+            "task.input_delivered".to_string(),
+            "run.started".to_string()
+        ],
+        "the manager's own two deliveries are dropped; the operator's is not"
+    );
+    let source = body["events"][0]["payload"]["source"]
+        .as_str()
+        .expect("delivery source");
+    assert_eq!(
+        source, "operator",
+        "a human intervening in a watched task is exactly what a manager must see"
+    );
+}
+
+/// Send input, wait immediately, and the status flips that follow do not each
+/// buy a wake-up: one call, held for its interval, carries the burst.
+#[tokio::test]
+async fn min_interval_consolidates_the_burst_that_follows_a_send() {
+    let (router, db_path) = events_router();
+    let watch = "/v1/task-events?includeCurrentActivity=false&taskIds=child-a&excludeOwn=true";
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        db.record_task_input("child-a", crate::db::TaskInputSource::Manager, "carry on")
+            .expect("record manager input");
+    }
+
+    // The task reacts over the next 150ms, the way a session does after input
+    // lands: a run starts, finishes, and the stage moves. The interval is an
+    // order of magnitude wider than that, so a loaded machine stretching the
+    // writer cannot turn a real assertion into a flake.
+    let writer_db_path = db_path.clone();
+    let writer = tokio::spawn(async move {
+        let db = Db::open(&writer_db_path).expect("open db");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        start_run(&db, "run-a1", "child-a", "in progress");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        db.finish_stage_run("run-a1", "succeeded", Some("done"), None)
+            .expect("finish run");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("advance stage");
+    });
+
+    let started = std::time::Instant::now();
+    let body = get_json_body(
+        &router,
+        &format!("{watch}&minIntervalMs=3000&timeoutSecs=30"),
+    )
+    .await;
+    let held = started.elapsed();
+    writer.await.expect("writer");
+    assert!(
+        held >= Duration::from_millis(2_900),
+        "the call is floored at its interval however early the first event lands (held {held:?})"
+    );
+    assert_eq!(
+        event_pairs(&body)
+            .into_iter()
+            .map(|(_, event_type)| event_type)
+            .collect::<Vec<_>>(),
+        vec![
+            "run.started".to_string(),
+            "run.finished".to_string(),
+            "stage.changed".to_string()
+        ],
+        "one response carries what the task did, with no echo of the send"
+    );
+}
+
+/// A full page is never held: `hasMore` means the caller must drain, and
+/// waiting cannot add anything to a response that is already full.
+#[tokio::test]
+async fn a_full_page_is_returned_immediately_despite_a_hold_window() {
+    let (router, db_path) = events_router();
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-a1", "child-a", "in progress");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("advance stage");
+        db.update_pipeline_item_stage("child-a", "pr")
+            .expect("advance stage again");
+    }
+
+    let started = std::time::Instant::now();
+    let body = get_json_body(
+        &router,
+        "/v1/task-events?includeCurrentActivity=false&taskIds=child-a&limit=2\
+         &minEvents=2&debounceMs=30000&minIntervalMs=30000&timeoutSecs=20",
+    )
+    .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a page the caller must drain is not worth holding"
+    );
+    assert_eq!(body["waitOutcome"], json!("events"));
+    assert_eq!(body["hasMore"], json!(true));
+    assert_eq!(event_pairs(&body).len(), 2);
+}
+
+/// `minEvents` cannot exceed the page size, or a caller that asked for more
+/// events than a response can carry would always run to timeout.
+#[tokio::test]
+async fn min_events_is_capped_by_the_page_size() {
+    let (router, db_path) = events_router();
+
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "run-a1", "child-a", "in progress");
+        db.update_pipeline_item_stage("child-a", "review")
+            .expect("advance stage");
+    }
+
+    let started = std::time::Instant::now();
+    let body = get_json_body(
+        &router,
+        "/v1/task-events?includeCurrentActivity=false&taskIds=child-a&limit=2\
+         &minEvents=50&timeoutSecs=20",
+    )
+    .await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "minEvents above the limit must not turn every wait into a timeout"
+    );
+    assert_eq!(body["waitOutcome"], json!("events"));
+    assert_eq!(event_pairs(&body).len(), 2);
+}
+
+/// `minEvents` counts the fan-out's events together, not each machine's own:
+/// one event on each of two machines completes a batch of two, and the legs are
+/// re-armed while it fills rather than each ending the wait.
+#[tokio::test]
+async fn min_events_counts_events_across_every_machine_of_a_fan_out() {
+    const REMOTE_HASH: &str = "sha256:batched-across-two-machines";
+    let source = test_state_with_seed("desktop-source-batched", "Source Mac", |db| {
+        db.insert_test_repo("repo-source-id", "Kanna Source")
+            .expect("insert source repo");
+        db.patch_repo(
+            "repo-source-id",
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
+        )
+        .expect("set source remote hash");
+        db.insert_test_pipeline_item(
+            "local-child",
+            "repo-source-id",
+            "local child",
+            Some("Local Child"),
+            "in progress",
+            "2026-09-09 00:00:00",
+        )
+        .expect("insert source task");
+    });
+    let peer = test_state_with_seed("desktop-peer-batched", "Peer Mac", |db| {
+        db.insert_test_repo("repo-peer-different-id", "Kanna Peer")
+            .expect("insert peer repo");
+        db.patch_repo(
+            "repo-peer-different-id",
+            crate::db::RepoPatch {
+                remote_url_hash: Some(Some(REMOTE_HASH)),
+                ..crate::db::RepoPatch::default()
+            },
+        )
+        .expect("set peer remote hash");
+        db.insert_test_pipeline_item(
+            "remote-child",
+            "repo-peer-different-id",
+            "remote child",
+            Some("Remote Child"),
+            "in progress",
+            "2026-09-09 00:00:00",
+        )
+        .expect("insert peer task");
+    });
+    let connected = Arc::new(AtomicBool::new(true));
+    let relay = connect_test_relay_peer(&source, Arc::clone(&peer), Arc::clone(&connected));
+    let source_router = router(Arc::clone(&source));
+
+    // One event on each machine. Neither leg alone completes a batch of two.
+    Db::open(&source.config().db_path)
+        .expect("open source db")
+        .update_pipeline_item_stage("local-child", "review")
+        .expect("append source event");
+    Db::open(&peer.config().db_path)
+        .expect("open peer db")
+        .update_pipeline_item_stage("remote-child", "review")
+        .expect("append peer event");
+
+    let body = get_account_json_body(
+        &source_router,
+        &source,
+        "/v1/task-events?includeCurrentActivity=false&repoId=repo-source-id&minEvents=2&timeoutSecs=20",
+    )
+    .await;
+    assert_eq!(body["waitOutcome"], "events", "{body:#?}");
+    assert_eq!(body["machineErrors"], json!([]));
+    let machines = body["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|event| event["machineId"].as_str().unwrap_or_default().to_string())
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        machines,
+        HashSet::from([
+            "desktop-source-batched".to_string(),
+            "desktop-peer-batched".to_string()
+        ]),
+        "a batch of two must be filled from both machines, not one twice"
+    );
+    assert_eq!(
+        event_pairs(&body)
+            .into_iter()
+            .map(|(task_id, _)| task_id)
+            .collect::<HashSet<_>>(),
+        HashSet::from(["local-child".to_string(), "remote-child".to_string()])
+    );
+
+    // The batched boundary is still a cursor: nothing is replayed after it.
+    let drained = get_account_json_body(
+        &source_router,
+        &source,
+        &format!(
+            "/v1/task-events?includeCurrentActivity=false&repoId=repo-source-id&minEvents=2&timeoutSecs=1&cursor={}",
+            cursor_of(&body)
+        ),
+    )
+    .await;
+    assert_eq!(event_pairs(&drained), Vec::new());
+
+    relay.abort();
+}

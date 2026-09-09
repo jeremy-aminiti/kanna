@@ -40,6 +40,8 @@ async fn typed_cli_round_trips_the_server_ks1_aggregate_cursor() {
         repo_remote_url_hash: None,
         exclude_task_ids: &[],
         exclude_event_types: &[],
+        event_types: &[],
+        exclude_own: false,
         local_only: false,
         include_current_activity: true,
         short_cursor: false,
@@ -47,6 +49,9 @@ async fn typed_cli_round_trips_the_server_ks1_aggregate_cursor() {
         cursor,
         timeout_secs: 0,
         limit: Some(100),
+        min_events: None,
+        debounce_ms: None,
+        min_interval_ms: None,
     };
 
     let first = wait_task_events_via_api(&base_url, &params(None))
@@ -262,7 +267,7 @@ async fn catalog_cli_defaults_listing_search_and_watch_to_the_task_repository() 
         (
             "kanna_wait_events",
             serde_json::json!({ "from": "now", "timeout_secs": 0 }),
-            "/v1/task-events?repoId=repo-current&excludeTaskIds=task-current&includeCurrentActivity=true&shortCursor=true&from=now&timeoutSecs=0",
+            "/v1/task-events?repoId=repo-current&excludeTaskIds=task-current&excludeOwn=true&includeCurrentActivity=true&shortCursor=true&from=now&timeoutSecs=0",
             serde_json::json!({
                 "waitOutcome": "timeout",
                 "cursor": "17",

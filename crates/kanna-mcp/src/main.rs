@@ -1,10 +1,12 @@
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use kanna_tool_catalog::{
-    args_with_repo_context, args_with_self_exclusion, clamp_wait_timeout_secs, encode_path_segment,
-    load_catalog, repo_context_task_id, resolve_request, runtime_info_snapshot,
-    task_value_matches_wait_until, wait_resolved_result, wait_timeout_result, Catalog, Method,
-    ResolvedRequest, ResponseKind, RuntimeAdapterIdentity, WaitUntil, DEFAULT_WAIT_TIMEOUT_SECS,
+    args_with_repo_context, args_with_self_exclusion, clamp_task_event_hold_ms,
+    clamp_task_event_limit, clamp_task_event_min_events, clamp_wait_timeout_secs,
+    encode_path_segment, load_catalog, repo_context_task_id, resolve_request,
+    runtime_info_snapshot, task_event_batch_is_complete, task_value_matches_wait_until,
+    wait_resolved_result, wait_timeout_result, Catalog, Method, ResolvedRequest, ResponseKind,
+    RuntimeAdapterIdentity, WaitUntil, DEFAULT_WAIT_TIMEOUT_SECS,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -1009,6 +1011,12 @@ fn spawn_machine_event_wait(
     // otherwise its local leg would recursively fan out and duplicate the
     // remote legs that kanna-mcp is deliberately retaining here.
     machine_args.insert("local_only".to_string(), Value::Bool(true));
+    // Batching belongs to the fan-in, not to a leg: a per-machine minimum
+    // would hold one machine's events back while this loop already had enough
+    // of them, and a per-machine debounce would stack on the one applied here.
+    machine_args.remove("min_events");
+    machine_args.remove("debounce_ms");
+    machine_args.remove("min_interval_ms");
     match session.cursor.cursors_by_machine.get(machine_id) {
         Some(cursor) => {
             machine_args.insert(
@@ -1213,6 +1221,28 @@ async fn wait_events_across_machines(
     let mut failed_machines = HashSet::new();
     let mut completed_machines = HashSet::new();
     let mut has_more = false;
+    // The same batching the server applies to its own fan-out, applied here to
+    // the client-held one, so `min_events` counts the events of every machine
+    // together on both paths.
+    let limit = clamp_task_event_limit(args.get("limit").and_then(Value::as_i64));
+    let min_events =
+        clamp_task_event_min_events(args.get("min_events").and_then(Value::as_i64), limit);
+    let debounce = Duration::from_millis(clamp_task_event_hold_ms(
+        args.get("debounce_ms").and_then(Value::as_u64),
+    ));
+    let min_interval = Duration::from_millis(clamp_task_event_hold_ms(
+        args.get("min_interval_ms").and_then(Value::as_u64),
+    ));
+    let mut debounce_deadline: Option<tokio::time::Instant> = None;
+    let interval_deadline = (!min_interval.is_zero())
+        .then(|| (tokio::time::Instant::now() + min_interval).min(deadline));
+    let hold_deadline = |debounce_deadline: Option<tokio::time::Instant>| match (
+        debounce_deadline,
+        interval_deadline,
+    ) {
+        (Some(debounce), Some(interval)) => Some(debounce.max(interval)),
+        (held, None) | (None, held) => held,
+    };
 
     loop {
         let remaining_secs = if timeout_secs == 0 {
@@ -1247,12 +1277,16 @@ async fn wait_events_across_machines(
             )?;
         }
 
+        let join_deadline = match hold_deadline(debounce_deadline) {
+            Some(hold_until) if events.len() >= min_events => hold_until,
+            _ => deadline,
+        };
         let joined = if timeout_secs == 0 && inherited_pending {
             session.pending.try_join_next()
         } else if timeout_secs == 0 {
             session.pending.join_next().await
         } else {
-            tokio::time::timeout_at(deadline, session.pending.join_next())
+            tokio::time::timeout_at(join_deadline, session.pending.join_next())
                 .await
                 .unwrap_or_default()
         };
@@ -1270,7 +1304,17 @@ async fn wait_events_across_machines(
             &mut has_more,
         )?;
 
-        if !events.is_empty() || has_more {
+        if !events.is_empty() && debounce_deadline.is_none() && !debounce.is_zero() {
+            debounce_deadline = Some((tokio::time::Instant::now() + debounce).min(deadline));
+        }
+        if task_event_batch_is_complete(
+            events.len(),
+            has_more,
+            limit,
+            min_events,
+            hold_deadline(debounce_deadline)
+                .is_none_or(|hold_until| tokio::time::Instant::now() >= hold_until),
+        ) {
             break;
         }
         if (timeout_secs == 0 && session.pending_machines.is_empty())

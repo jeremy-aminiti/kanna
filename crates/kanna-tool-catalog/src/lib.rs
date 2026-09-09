@@ -245,6 +245,58 @@ pub fn clamp_wait_timeout_secs(timeout_secs: u64) -> u64 {
     timeout_secs.min(MAX_WAIT_TIMEOUT_SECS)
 }
 
+/// Rows in one `/v1/task-events` response when the caller does not choose, and
+/// the ceiling it may raise that to. Declared here rather than only in
+/// `catalog.json` for the same reason as the wait window: the server, the
+/// MCP fan-in and the CLI must agree on the page size, and an override catalog
+/// must not be able to move it.
+pub const DEFAULT_TASK_EVENT_LIMIT: i64 = 100;
+pub const MAX_TASK_EVENT_LIMIT: i64 = 500;
+
+/// Ceiling on `debounceMs` and `minIntervalMs`. The remaining wait window
+/// already caps both; this only stops a caller asking to hold a response
+/// longer than any batch it could plausibly be waiting for.
+pub const MAX_TASK_EVENT_HOLD_MS: u64 = 60_000;
+
+pub fn clamp_task_event_limit(limit: Option<i64>) -> i64 {
+    limit
+        .unwrap_or(DEFAULT_TASK_EVENT_LIMIT)
+        .clamp(1, MAX_TASK_EVENT_LIMIT)
+}
+
+/// `minEvents` is capped by the page size: a caller that asks to wait for more
+/// events than one response can carry would otherwise always run to timeout.
+pub fn clamp_task_event_min_events(min_events: Option<i64>, limit: i64) -> usize {
+    min_events.unwrap_or(1).clamp(1, limit) as usize
+}
+
+pub fn clamp_task_event_hold_ms(hold_ms: Option<u64>) -> u64 {
+    hold_ms.unwrap_or(0).min(MAX_TASK_EVENT_HOLD_MS)
+}
+
+/// Whether a batched task-event wait may return now — the one rule shared by
+/// the server's single-machine wait, its cross-machine fan-out, and the MCP
+/// client fan-in, so `minEvents` counts the same events on every path.
+///
+/// `hasMore` and a full page both mean waiting longer cannot add anything to
+/// *this* response, so they release it whatever the caller asked to hold for.
+/// Otherwise the batch is ready once it holds `min_events` and every hold
+/// window (`debounceMs`, `minIntervalMs`) has closed. Callers pass
+/// `hold_elapsed` because each owns its own clock — the shared part is the
+/// rule, not the timekeeping.
+pub fn task_event_batch_is_complete(
+    collected: usize,
+    has_more: bool,
+    limit: i64,
+    min_events: usize,
+    hold_elapsed: bool,
+) -> bool {
+    if has_more || collected >= limit.max(0) as usize {
+        return true;
+    }
+    collected >= min_events && hold_elapsed
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Catalog {
     pub tools: Vec<ToolDef>,
@@ -1173,6 +1225,18 @@ pub fn args_with_self_exclusion(
         .and_then(Value::as_str)
         .is_some_and(|parent_task_id| !parent_task_id.trim().is_empty());
     let explicit_task_scope = explicit_task_ids || explicit_parent_scope;
+    // Echo suppression is not scope-dependent the way self-exclusion is: the
+    // loop it exists to break — send input to a child, wait, wake on the
+    // delivery announcement — happens under an explicit `task_ids` scope. A
+    // caller in a task session gets it by default on every scope, and an
+    // explicit value always wins.
+    if current_task_id
+        .map(str::trim)
+        .is_some_and(|task_id| !task_id.is_empty())
+        && !matches!(resolved_args.get("exclude_own"), Some(value) if !value.is_null())
+    {
+        resolved_args.insert("exclude_own".to_string(), Value::Bool(true));
+    }
     let Some(self_task_id) =
         task_event_self_exclusion(explicit_task_scope, include_self, current_task_id)
     else {

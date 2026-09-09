@@ -131,6 +131,11 @@ pub(crate) struct TaskEventsParams<'a> {
     /// Event type names dropped from the chosen scope, so the wait does not
     /// return for something the caller would only discard.
     pub(crate) exclude_event_types: &'a [String],
+    /// Event type names to receive to the exclusion of every other type. Empty
+    /// means every type, which is the unfiltered feed.
+    pub(crate) event_types: &'a [String],
+    /// Drop the caller's own manager-labelled delivery announcements.
+    pub(crate) exclude_own: bool,
     pub(crate) local_only: bool,
     pub(crate) include_current_activity: bool,
     pub(crate) short_cursor: bool,
@@ -138,6 +143,12 @@ pub(crate) struct TaskEventsParams<'a> {
     pub(crate) cursor: Option<&'a str>,
     pub(crate) timeout_secs: u64,
     pub(crate) limit: Option<i64>,
+    /// Hold the wait open until this many filtered events accumulate.
+    pub(crate) min_events: Option<i64>,
+    /// Keep collecting for this long after the batch's first event.
+    pub(crate) debounce_ms: Option<u64>,
+    /// Floor on how long one call takes before it returns events.
+    pub(crate) min_interval_ms: Option<u64>,
 }
 
 pub(crate) fn task_events_path(params: &TaskEventsParams<'_>) -> String {
@@ -178,6 +189,15 @@ pub(crate) fn task_events_path(params: &TaskEventsParams<'_>) -> String {
             encode_path_segment(&params.exclude_event_types.join(","))
         ));
     }
+    if !params.event_types.is_empty() {
+        query.push(format!(
+            "eventTypes={}",
+            encode_path_segment(&params.event_types.join(","))
+        ));
+    }
+    if params.exclude_own {
+        query.push("excludeOwn=true".to_string());
+    }
     if params.local_only {
         query.push("localOnly=true".to_string());
     }
@@ -194,6 +214,15 @@ pub(crate) fn task_events_path(params: &TaskEventsParams<'_>) -> String {
     }
     if let Some(limit) = params.limit {
         query.push(format!("limit={limit}"));
+    }
+    if let Some(min_events) = params.min_events {
+        query.push(format!("minEvents={min_events}"));
+    }
+    if let Some(debounce_ms) = params.debounce_ms {
+        query.push(format!("debounceMs={debounce_ms}"));
+    }
+    if let Some(min_interval_ms) = params.min_interval_ms {
+        query.push(format!("minIntervalMs={min_interval_ms}"));
     }
     format!("/v1/task-events?{}", query.join("&"))
 }
