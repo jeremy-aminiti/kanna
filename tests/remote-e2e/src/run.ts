@@ -30,7 +30,7 @@ if (staging && dev && args.includes("--dev")) {
 }
 
 if (staging) {
-  if (mobileRelay || desktopPairing) {
+  if (mobileRelay || mobileRelayTerminalControl || desktopPairing) {
     throw new Error("Layer C/D staging remote-e2e lanes are human-gated.");
   }
   const credentials = buffyStagingCredentialsFromEnv(process.env);
@@ -40,7 +40,7 @@ if (staging) {
   }
 }
 
-if (!mobileRelay && !desktopPairing) {
+if (!mobileRelay && !mobileRelayTerminalControl && !desktopPairing) {
   for (const specFile of remoteHarnessSpecFiles(staging)) {
     await runCommand("pnpm", remoteHarnessVitestArgs(specFile), {
       cwd: fileURLToPath(new URL("..", import.meta.url)),

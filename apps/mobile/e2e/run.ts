@@ -90,7 +90,7 @@ export function resolveSmokeModeAppEnv(
 
 export function requiresExactExpoEnvironment(mode: string): boolean {
   return (
-    mode === "relay" ||
+    mode === "relay" || mode === "relay-terminal-control" ||
     mode === "hybrid" ||
     mode === "profile-disconnected" ||
     mode === "search-focus"
@@ -103,7 +103,7 @@ export function resolveSimulatorAlertHandling(
   if (mode === "hybrid" || mode === "search-focus") {
     return "accept";
   }
-  if (mode === "relay" || mode === "profile-disconnected") {
+  if (mode === "relay" || mode === "relay-terminal-control" || mode === "profile-disconnected") {
     return "manual";
   }
   return "dismiss";

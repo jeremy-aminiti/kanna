@@ -3468,7 +3468,7 @@ export const taskDefinitions = [
       if (parsed.dev && parsed.staging) {
         return { ok: false, message: "remote-e2e accepts only one of --dev or --staging." };
       }
-      if (parsed.staging && (parsed.mobileRelay || parsed.desktopPairing)) {
+      if (parsed.staging && (parsed.mobileRelay || parsed.mobileRelayTerminalControl || parsed.desktopPairing)) {
         return {
           ok: false,
           message: "remote-e2e staging is only supported for the headless Layer B lane."
