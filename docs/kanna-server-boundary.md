@@ -1846,7 +1846,12 @@ contract allows it, walks the stage's ordered candidate list once:
   is one state with an `action` sentence and no retry loop.
 - `kanna_get_task` reports `providerRejection` for the stage the task currently
   occupies, including every provider refused there. `rerun_stage` re-resolves
-  around that set; `resume` cannot, and is refused.
+  around that set. `resume` cannot: it reopens the recorded provider's *own*
+  conversation, and re-pointing that would be a fresh session wearing a
+  resume's name. A past refusal does not refuse it — reopening once the
+  allowance has reset is exactly what the `parked-work-observed` action tells
+  the operator to do. Use `kanna_rerun_stage` when the stage's other candidates
+  should be considered.
 
 Full contract: [`docs/specs/provider-quota-recovery.md`](specs/provider-quota-recovery.md).
 
