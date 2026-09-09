@@ -16,6 +16,7 @@ import {
   type DesktopTaskDetail,
 } from "../services/desktopServerClient";
 import { isBlockerResolved } from "../utils/blockerResolution";
+import { isRemotePresentationTaskId } from "../utils/remoteTaskIdentity";
 import { invoke } from "../invoke";
 import TaskHeader from "./TaskHeader.vue";
 import TerminalTabs from "./TerminalTabs.vue";
@@ -297,6 +298,25 @@ const parkedRevisionAvailable = computed(() => {
     && latestRun.summary?.startsWith("Parked for human review:") === true;
 });
 
+/**
+ * Task detail comes from the server that owns the task. A task running on
+ * another machine is shown here under a `cloud:` presentation id this server
+ * has never heard of, so asking for its detail is a guaranteed 404 — and the
+ * watcher below re-fires on every activity, stage and `updated_at` change the
+ * cloud index syncs, so it asked tens of thousands of times for one selected
+ * remote task. Every miss also fans out over the relay to each reachable
+ * peer, so the noise lands in the other machine's log too.
+ *
+ * Nothing is lost by not asking: every detail-derived affordance here (the
+ * parked revision recovery) is an owner-side operation, and `taskDetail` was
+ * never populated for a remote task anyway — the fetch always failed.
+ */
+const taskDetailIsLocal = computed(() => {
+  const taskId = item.value?.id;
+  if (!taskId) return false;
+  return !props.cloudTask && !isRemotePresentationTaskId(taskId);
+});
+
 let taskDetailRequest = 0;
 async function loadTaskDetail(taskId: string): Promise<void> {
   const request = ++taskDetailRequest;
@@ -317,6 +337,9 @@ watch(
     item.value?.stage ?? null,
     item.value?.updated_at ?? null,
     item.value?.has_running_post ?? 0,
+    // A task that transfers in stops being remote without changing id, and
+    // must pick up the detail it can now be asked for.
+    taskDetailIsLocal.value,
   ] as const,
   ([taskId], previous) => {
     if (taskId !== previous?.[0]) {
@@ -326,7 +349,11 @@ watch(
       revisionSummary.value = "";
       revisionPrompt.value = "";
     }
-    if (taskId) void loadTaskDetail(taskId);
+    if (taskId && taskDetailIsLocal.value) {
+      void loadTaskDetail(taskId);
+    } else if (taskDetail.value) {
+      taskDetail.value = null;
+    }
   },
   { immediate: true },
 );

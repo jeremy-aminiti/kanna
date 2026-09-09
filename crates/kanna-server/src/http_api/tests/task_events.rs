@@ -1408,7 +1408,9 @@ async fn short_cursor_upgrades_legacy_state_and_preserves_call_to_call_continuit
     .await;
     let handle = cursor_of(&upgraded);
     assert!(handle.starts_with("kh1."));
-    assert_eq!(handle.len(), "kh1.".len() + 8);
+    // `kh1.<issuer>.<nonce>` — the issuer is what separates "you were away too
+    // long" from "you sent this to the wrong machine".
+    assert_eq!(handle.len(), "kh1.".len() + 8 + 1 + 8);
     assert!(upgraded["events"].as_array().is_some_and(Vec::is_empty));
 
     db.update_pipeline_item_stage("child-a", "review")
@@ -1501,32 +1503,116 @@ async fn short_cursor_survives_server_state_replacement_without_losing_events() 
     );
 }
 
+/// A handle this server issued and no longer holds is a checkpoint it cannot
+/// recover — but "restart without a cursor" is a recovery the server can
+/// perform itself, and the old 400 asked the caller to perform it instead. A
+/// caller that re-armed mechanically got an instantaneous, permanent failure
+/// it could repeat forever: one did, ~100 times a second for eleven hours,
+/// writing 22.8 GB of one identical line. Recovering in place is what makes
+/// the retry loop impossible rather than merely discouraged.
 #[tokio::test]
-async fn invalid_or_expired_short_cursor_names_the_safe_recovery() {
+async fn an_expired_short_cursor_restarts_from_retained_history_instead_of_failing() {
     let state = test_state_with_seed("desktop-task-events", "Task Events", seed_orchestration);
+    let db_path = state.config().db_path.clone();
     let app = router(Arc::clone(&state));
-    let expired = crate::http_api::task_events::issue_expired_short_cursor_for_test(&state);
-
-    for cursor in ["kh1.nothex00", expired.as_str()] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::get(format!(
-                    "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={cursor}&timeoutSecs=0"
-                ))
-                .body(Body::empty())
-                .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("error body");
-        let body = String::from_utf8_lossy(&body);
-        assert!(body.contains("restart without a cursor"), "{body}");
-        assert!(body.contains("replay retained history"), "{body}");
+    {
+        let db = Db::open(&db_path).expect("open db");
+        start_run(&db, "expired-run", "child-a", "in progress");
     }
+
+    for cursor in [
+        // Shaped like a handle from before the issuer field, and one this
+        // server minted and has since dropped from both tiers.
+        "kh1.nothex00".to_string(),
+        crate::http_api::task_events::issue_expired_short_cursor_for_test(&state),
+    ] {
+        let recovered = get_json_body(
+            &app,
+            &format!(
+                "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={cursor}&timeoutSecs=0"
+            ),
+        )
+        .await;
+        assert_eq!(recovered["cursorReset"], serde_json::json!(true));
+        let reason = recovered["cursorResetReason"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            reason.contains(&cursor),
+            "reason must name the handle: {reason}"
+        );
+        assert!(
+            reason.contains("restarted from retained history"),
+            "{reason}"
+        );
+
+        // Retained history is replayed, so the reset loses nothing that was
+        // still on the feed.
+        assert!(
+            event_pairs(&recovered)
+                .iter()
+                .any(|(task_id, event_type)| task_id == "child-a" && event_type == "run.started"),
+            "retained history must be replayed: {recovered}"
+        );
+
+        // A fresh handle, so the change is visible in the response, and it
+        // works — the next poll blocks like any other rather than failing
+        // again. That is what breaks the loop.
+        let handle = cursor_of(&recovered);
+        assert_ne!(handle, cursor);
+        let next = get_json_body(
+            &app,
+            &format!(
+                "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={handle}&timeoutSecs=0"
+            ),
+        )
+        .await;
+        assert!(next.get("cursorReset").is_none(), "{next}");
+        assert_eq!(cursor_of(&next), handle);
+    }
+}
+
+/// The shape that actually produced the flood: a handle minted by one machine
+/// and replayed against another. Its checkpoint lives in the issuing server's
+/// cache and SQLite rows, so no retry here can ever resolve it — and reporting
+/// that as "invalid or expired" sent an operator looking for a retention bug
+/// instead of a misrouted wait. Refuse it by name; do not reset, because this
+/// server's retained history is not what the caller is watching.
+#[tokio::test]
+async fn a_short_cursor_from_another_machine_is_refused_by_name_not_reported_as_expired() {
+    let issuer = test_state_with_seed("desktop-cursor-issuer", "Issuer", seed_orchestration);
+    let issuer_app = router(Arc::clone(&issuer));
+    let armed = get_json_body(
+        &issuer_app,
+        "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&from=now&timeoutSecs=0",
+    )
+    .await;
+    let handle = cursor_of(&armed);
+
+    let other = test_state_with_seed("desktop-cursor-other", "Other", seed_orchestration);
+    let other_app = router(Arc::clone(&other));
+    let response = other_app
+        .oneshot(
+            Request::get(format!(
+                "/v1/task-events?taskIds=child-a&localOnly=true&shortCursor=true&cursor={handle}&timeoutSecs=0"
+            ))
+            .body(Body::empty())
+            .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("error body");
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("issued by another machine"), "{body}");
+    assert!(body.contains("desktop-cursor-other"), "{body}");
+    assert!(
+        !body.contains("expired"),
+        "a misrouted wait is not an expiry: {body}"
+    );
 }
 
 /// Replaying a cursor is how a crashed orchestrator resumes. The same cursor
@@ -1833,6 +1919,78 @@ async fn aggregate_rejects_a_peer_cursor_error_instead_of_returning_a_wedged_con
     assert!(
         !body.contains("\"cursor\""),
         "must not issue a continuation: {body}"
+    );
+
+    relay.abort();
+}
+
+/// The fan-out must ask a leg with a rejected cursor exactly once. Its
+/// per-machine restart loop deliberately re-arms a leg that came back empty,
+/// which is right for a drained long poll and catastrophic for a leg that
+/// fails instantly: the outer wait would spin its peer for the whole timeout,
+/// once per poll, forever. Count the legs, not just the status code.
+#[tokio::test]
+async fn an_aggregate_leg_with_a_rejected_cursor_is_asked_once_per_poll() {
+    use axum::body::to_bytes;
+    use tower::ServiceExt;
+
+    let source = test_state_with_seed("desktop-leg-source", "Source", |_| {});
+    let peer = test_state_with_seed("desktop-leg-peer", "Peer", |db| {
+        db.insert_test_repo("repo-peer", "Peer Repo")
+            .expect("insert peer repo");
+        db.insert_test_pipeline_item(
+            "remote-task",
+            "repo-peer",
+            "remote task",
+            Some("Remote Task"),
+            "in progress",
+            "2026-09-08 00:00:00",
+        )
+        .expect("insert peer task");
+    });
+    let invokes = Arc::new(AtomicUsize::new(0));
+    let relay = connect_test_relay_peer_with_long_poll_budget(
+        &source,
+        Arc::clone(&peer),
+        Arc::clone(&invokes),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let app = router(Arc::clone(&source));
+    let poisoned = aggregate_tasks_cursor(
+        "desktop-leg-source",
+        "desktop-leg-peer",
+        &["remote-task"],
+        "0",
+        "ksh1.deadbeef",
+    );
+    let token = source
+        .local_task_events_token
+        .as_deref()
+        .expect("task-event credential");
+
+    // A real long-poll budget, so a leg that respawns has time to do it many
+    // times over: a zero timeout would pass whatever the loop did.
+    let response = app
+        .oneshot(
+            Request::get(format!(
+                "/v1/task-events?taskIds=remote-task&cursor={poisoned}&timeoutSecs=5"
+            ))
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("request"),
+        )
+        .await
+        .expect("aggregate response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read error body");
+    let body = String::from_utf8(body.to_vec()).expect("utf8 error");
+    assert!(body.contains("machine desktop-leg-peer rejected its embedded task-event cursor"));
+    assert_eq!(
+        invokes.load(Ordering::SeqCst),
+        1,
+        "a leg whose cursor was rejected must not be retried within the poll"
     );
 
     relay.abort();

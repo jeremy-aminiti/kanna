@@ -796,13 +796,35 @@ new peers from retained history. A server that has no relay route keeps the
 native cursor shape and, for an account-wide-authorized caller, adds a
 relay-unavailable `machineErrors` warning.
 Agent-facing catalog calls set `shortCursor=true`. The server then retains the
-full native or `ks1.` checkpoint behind a durable `kh1.` plus eight-hex-digit
-handle. Each successful resume advances that same handle, so a busy watcher
-does not accumulate abandoned entries or evict its live checkpoint. The
-mapping is stored in the server database and survives server and relay
-restarts; abandoned mappings are pruned with the 14-day event-retention
-window. An unknown or corrupt handle is a handle-resolution failure, distinct
-from a native cursor whose event position predates retained history. Callers
+full native or `ks1.` checkpoint behind a durable
+`kh1.<issuer>.<nonce>` handle, where both fields are eight hex digits and the
+issuer identifies the server that minted it. Each successful resume advances
+that same handle, so a busy watcher does not accumulate abandoned entries or
+evict its live checkpoint. The mapping is stored in the server database and
+survives server and relay restarts; abandoned mappings are pruned with the
+14-day event-retention window.
+
+A handle is only resolvable on the server that issued it — its process cache
+and its `task_event_cursor_handle` rows are local — and the two ways it can
+fail to resolve are answered differently, because they are different faults:
+
+- **This server issued it and no longer holds it.** The wait **restarts from
+  retained history and returns a new handle**, reporting `cursorReset: true`
+  and a `cursorResetReason` naming the handle. This is the recovery the
+  response used to instruct the caller to perform; the server performs it
+  instead, because a caller that re-armed mechanically got an instantaneous,
+  permanent 400 it could repeat at machine speed. One did, ~100 times a second
+  for eleven hours, writing 22.8 GB of one identical line. Nothing is lost:
+  the handle only stops resolving once its checkpoint has aged out, and
+  retained history is replayed in full.
+- **Another machine issued it.** The wait is refused with `400` naming the
+  issuing token and this server, because no retry here can ever resolve it and
+  this server's retained history is not what the caller is watching. That
+  refusal is a routing fault — the wait belongs on the issuing machine — not
+  an expiry, and it must never be reported as one.
+
+A handle-resolution failure remains distinct from a native cursor whose event
+position predates retained history. Callers
 that omit `shortCursor` keep receiving the deployed stateless
 cursor shapes, and numeric, `p1.`, `p3.`, `kc1.`, and `ks1.` inputs remain
 accepted; resuming one with short cursors enabled upgrades the response.

@@ -114,6 +114,12 @@ pub(crate) async fn wait_for_old_daemon_release_with(
     }
 }
 
+/// Rotate the daemon log at this size and keep this many rotated files, so one
+/// process's log occupies bounded disk however hard it is logging. Kept in
+/// step with `kanna-server`'s `logging` module.
+const MAX_LOG_FILE_BYTES: u64 = 32 * 1024 * 1024;
+const KEPT_ROTATED_LOG_FILES: usize = 5;
+
 pub(crate) async fn run_daemon() {
     match handle_cli_args() {
         CliAction::RunDaemon => {}
@@ -150,6 +156,14 @@ pub(crate) async fn run_daemon() {
                     .discriminant(std::process::id().to_string()),
             )
             .format(flexi_logger::detailed_format)
+            // Same cap as `kanna-server`: a stuck session that logs in a tight
+            // loop must not be able to fill the disk. See
+            // `kanna-server/src/logging.rs`.
+            .rotate(
+                flexi_logger::Criterion::Size(MAX_LOG_FILE_BYTES),
+                flexi_logger::Naming::Numbers,
+                flexi_logger::Cleanup::KeepLogFiles(KEPT_ROTATED_LOG_FILES),
+            )
             .duplicate_to_stderr(flexi_logger::Duplicate::Info)
             .start()
     });

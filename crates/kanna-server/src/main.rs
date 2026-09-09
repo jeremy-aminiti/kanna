@@ -11,6 +11,7 @@ mod http_api;
 mod human_control;
 mod internal_ports;
 mod ksp;
+mod logging;
 mod login_shell;
 mod mobile_api;
 mod pairing;
@@ -95,28 +96,12 @@ async fn main() {
         }
     };
 
-    // Log to a file in the instance's daemon data dir (like the daemon
-    // does), duplicated to stderr. The desktop app spawns this sidecar with
-    // null stdio, so stderr-only logging would discard everything — the file
-    // is the durable record of stage transitions and revision decisions.
-    // RUST_LOG overrides the default filter. `kanna_daemon=warn` must stay in
-    // the default: the KSP terminal path emits its `terminal_perf`
-    // stall/backpressure records under the shared `kanna_daemon` target, and
-    // a `kanna_server`-only filter silently discards the diagnostics that
-    // pinpoint terminal freezes.
-    let _ = std::fs::create_dir_all(&config.daemon_dir);
-    if let Ok(logger) =
-        flexi_logger::Logger::try_with_env_or_str("kanna_server=info,kanna_daemon=warn")
-    {
-        let _ = logger
-            .log_to_file(
-                flexi_logger::FileSpec::default()
-                    .directory(&config.daemon_dir)
-                    .discriminant(std::process::id().to_string()),
-            )
-            .duplicate_to_stderr(flexi_logger::Duplicate::Info)
-            .start();
-    }
+    // Log to a rotated, timestamped file in the instance's daemon data dir
+    // (like the daemon does). The desktop app spawns this sidecar with null
+    // stdio, so stderr-only logging would discard everything — the file is
+    // the durable record of stage transitions and revision decisions. See
+    // `logging` for the size cap and the stable `kanna-server.log` symlink.
+    let _logger_handle = logging::init(std::path::Path::new(&config.daemon_dir));
     kanna_daemon::terminal_perf::start_global_watchdog();
 
     let relay_url = config.relay_url.trim().to_string();

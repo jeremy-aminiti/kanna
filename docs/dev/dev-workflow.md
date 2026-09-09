@@ -577,6 +577,7 @@ Two things to know when driving a worker:
 | Frontend behavior, console output | `/tmp/kanna-webview-*.log` (worktrees use the directory name, e.g. `kanna-webview-task-348cf000.log`; main uses a cwd hash) |
 | Dev process output (vite, tauri, mobile) | `./kd dev log [mobile]`, or attach with `./kd dev up --attach` |
 | Daemon behavior, PTY sessions | `kanna-daemon.log` (current process), `kanna-daemon_*.log` (history), and `kanna-daemon-lifecycle.log` (startup/handoff audit) in the instance's daemon dir |
+| Server behavior, HTTP errors, stage transitions | `kanna-server.log` (symlink to the current process's file) and `kanna-server_*.log` (history) in the same directory. Both rotate at 32 MiB keeping 5 files, so one process holds at most ~192 MiB. `kanna-server-stderr.log` beside them holds only raw sidecar stderr — panics and pre-logger output |
 | Local API | `curl http://127.0.0.1:48120/v1/status` (main/production instance) |
 | Resolved instance config | `./kd env print` |
 | Silent agent CLI failures | The agent SDK captures stderr — check it |
