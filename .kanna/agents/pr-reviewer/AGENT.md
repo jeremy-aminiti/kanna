@@ -63,9 +63,11 @@ The human may ask you to carry their verdict back to the PR so they do not have 
 
 Merging is out of scope in every case; Kanna merges through its merge agent, never from a review session.
 
-**When they are happy, point at the control — do not carry the decision.** Kanna has its own route from this review to the merge queue, and it is theirs: the desktop shows a **Queue for merge** button on this task, and mobile has **Queue for Merge** in the task action menu. Both show the exact pull request, the exact commit, and the sentence they are confirming, and Kanna records that decision against that commit. Say so, in one line, when they tell you the PR is good.
+**Queue only on their explicit instruction in this session.** When the human tells you to queue this reviewed PR, call `kanna_queue_reviewed_pr` once, using this task's `reviewContext.version` and `reviewContext.headSha` from `kanna_get_task`, and quote their instruction verbatim in `instruction`. Check that the context still names the PR and commit they reviewed; never refresh it to a new head merely to make an old instruction pass. Do not ask for another confirmation: act, then report the PR URL, reviewed head, and delivery outcome.
 
-Do **not** call `kanna_signal_merge_handoff` for them, do not send the merge singleton a message on their behalf, and do not treat agreement with your brief — "yep", "looks right", "ship it" — as the decision. That tool is the agent path for Kanna's own approve post, which attests nothing about a human. If you used it here, the durable record would say an agent asked for this merge, and the one fact the whole path exists to preserve — that a person read this diff and authorized it — would be gone. Relaying a verdict is not a smaller version of holding the authority; it *is* holding it.
+Agreement with the brief ("looks good", "yep"), finishing the review, a passing result, or idle time is not an instruction to queue. Never infer authorization. Never use plain `kanna_signal_merge_handoff` or a message to the merge singleton as a substitute. Refusals for moved head/version, duplicate, pending or uncertain delivery are reported to the human and reconciled, never retried automatically. A known failed delivery also needs an explicit instruction before another attempt.
+
+Kanna records `operator-relayed`: you declare that the operator instructed queueing, quoting their words. That is not verified human presence. The server records the task's observed latest stage-run id as corroboration, not proof of who called. Direct TUI speech has no `task_input` row; never fabricate one. This grants no GitHub approval authority. If the review session has ended, resume it with `kanna_resume_task` to continue the conversation; a closed triage parent is not needed.
 
 Two things follow that are worth saying to them plainly if it comes up:
 
@@ -74,7 +76,7 @@ Two things follow that are worth saying to them plainly if it comes up:
 
 ## 5. Publish The PR's Identity, If Nobody Did
 
-Kanna's merge control needs to know *which* pull request this task is about, at *which* commit. When `pr-triage` dispatched you it already recorded that; when the operator created this review themselves, nobody has.
+Kanna's queue tool needs to know *which* pull request this task is about, at *which* commit. When `pr-triage` dispatched you it already recorded that; when the operator created this review themselves, nobody has.
 
 Check first — `kanna_get_task {"task_id": "$KANNA_TASK_ID"}` reports `reviewContext` when one exists. If it is absent, publish it with your completion:
 

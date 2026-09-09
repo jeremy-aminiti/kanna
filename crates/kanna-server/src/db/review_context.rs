@@ -10,21 +10,21 @@
 //! neither its `task-*` branch nor that local ref names anything the forge can
 //! merge, and the task that produced the PR may live on another machine or not
 //! exist at all. Without a durable projection of the PR's own identity, every
-//! consumer downstream of the review session — the desktop control, the merge
+//! consumer downstream of the review session — the read-only client projection, the merge
 //! master reading the request on another machine — would be reduced to parsing
 //! terminal text or guessing from a branch name. An agent supplies it; that
 //! makes it a claim about the forge, never an approval.
 //!
 //! [`HumanReviewDecision`] is the authority. It is created only by an explicit
-//! operator action in the desktop or mobile UI and is immutable once written:
+//! operator instruction (relayed by its review agent) and is immutable once written:
 //! the exact PR, head SHA and base it was taken against, the exact sentence the
-//! human confirmed, and when. Delivery outcome is recorded *beside* it rather
+//! human instructed, and when. Delivery outcome is recorded *beside* it rather
 //! than in it, so a redelivery never rewrites what was decided. One decision
-//! per (task, reviewed head): a second click on the same head resolves to the
+//! per (task, reviewed head): a repeated call on the same head resolves to the
 //! same row, and a PR that moves needs a fresh read and a fresh decision.
 //!
-//! The declared `operator` origin is not cryptographic proof of human
-//! presence — a local agent runs as the same OS user and can reach this API.
+//! The declared `operator-relayed` (or retained direct `operator`) origin is
+//! not cryptographic proof of human presence — a local agent runs as the same OS user and can reach this API.
 //! It is the same declared-but-unverified model the input ledger and revision
 //! origin already use, and it is honest about that: what the row proves is that
 //! *this* decision, with this text, was recorded at this time against this
@@ -40,7 +40,7 @@ use serde_json::json;
 /// Every field except `pr_url`, `head_sha` and `base_ref` is optional because
 /// a standalone review — one created without the triage dispatcher — knows
 /// less than a dispatched child does, and refusing to record the part it knows
-/// would leave the operator with no control at all.
+/// would leave the reviewer unable to identify the PR.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewContextInput {
@@ -236,13 +236,13 @@ pub struct HumanReviewDecision {
     pub base_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_sha: Option<String>,
-    /// The exact sentence the operator confirmed, stored verbatim.
+    /// The exact instruction the operator gave, stored verbatim.
     pub action_text: String,
-    /// Declared, unverified: always `operator` on the supported path.
+    /// Declared, unverified: `operator-relayed` or retained direct `operator`.
     pub origin: String,
-    /// Whatever authenticated device or account provenance the request
-    /// carried, as JSON, or absent when the caller was an unauthenticated
-    /// local process. It corroborates; it does not prove a person.
+    /// The conversation channel and server-observed latest review run, or
+    /// provenance carried by a retained direct request. Corroboration only,
+    /// never proof of caller identity or human presence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_provenance: Option<serde_json::Value>,
     /// The machine the decision was taken on.
@@ -389,7 +389,7 @@ impl Db {
     /// Record a human's merge authorization for one reviewed head, or return
     /// the decision that already exists for it.
     ///
-    /// Idempotent on `(task_id, head_sha)` so a double click, a retried
+    /// Idempotent on `(task_id, head_sha)` so a duplicate call, a retried
     /// request, or a client that lost the response resolves to the same
     /// decision instead of manufacturing a second authorization. The returned
     /// flag says whether this call created it, which is what tells a caller

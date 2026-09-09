@@ -2257,7 +2257,7 @@ describe("createMobileController", () => {
       headSha: REVIEWED_HEAD,
       baseRef: "main",
       actionText: "I reviewed it and authorize the merge.",
-      origin: "operator",
+      origin: "operator-relayed",
       createdAt: "2026-09-08T00:00:00Z",
       deliveryStatus: "delivered" as const,
       mergeTaskId: "task-merge",
@@ -2271,57 +2271,22 @@ describe("createMobileController", () => {
       return client;
     }
 
-    it("re-reads detail after authorizing so the decision withdraws the control", async () => {
+    it("projects the relayed decision from task detail without an authorization action", async () => {
       const store = createSessionStore();
       const client = createReviewClient();
-      client.getTask = vi.fn(async (taskId: string) =>
-        taskId === reviewTask.id
-          ? { ...reviewTask, reviewContext }
-          : { ...otherTask }
-      );
-      client.queueReviewedPrForMerge = vi.fn().mockResolvedValue({
-        taskId: "task-merge",
-        created: false,
-        ownerDesktopId: "desktop-1"
-      });
+      client.getTask = vi.fn(async () => ({
+        ...reviewTask, reviewContext, humanReviewDecision: deliveredDecision
+      }));
       const controller = createMobileController(client, store);
-
       await controller.bootstrap();
       controller.openTask(reviewTask.id);
       await flushMicrotasks();
-
       expect(store.getState().selectedTaskReviewState).toMatchObject({
         taskId: reviewTask.id,
-        humanReviewDecision: null
-      });
-      const detailReadsBeforeAuthorizing = client.getTask.mock.calls.length;
-
-      // The server has recorded the decision by the time the call resolves,
-      // so the next read of detail is the one that must be believed.
-      client.getTask = vi.fn(async () => ({
-        ...reviewTask,
         reviewContext,
-        humanReviewDecision: deliveredDecision
-      }));
-      const result = await controller.queueReviewedPrForMerge(
-        reviewTask.id,
-        {
-          reviewContextVersion: 1,
-          headSha: REVIEWED_HEAD,
-          actionText: deliveredDecision.actionText
-        },
-        "Human-reviewed https://github.com/acme/repo/pull/12"
-      );
-      await flushMicrotasks();
-
-      expect(result.status).toBe("delivered");
-      expect(detailReadsBeforeAuthorizing).toBeGreaterThan(0);
-      // The forced read happened rather than the cache replaying the
-      // pre-decision detail.
-      expect(client.getTask).toHaveBeenCalledWith(reviewTask.id);
-      expect(
-        store.getState().selectedTaskReviewState?.humanReviewDecision
-      ).toMatchObject({ id: "hrd-1", deliveryStatus: "delivered" });
+        humanReviewDecision: { id: "hrd-1", deliveryStatus: "delivered", origin: "operator-relayed" }
+      });
+      expect(controller).not.toHaveProperty("queueReviewedPrForMerge");
     });
 
     it("restores the review identity when the task is opened again from cache", async () => {

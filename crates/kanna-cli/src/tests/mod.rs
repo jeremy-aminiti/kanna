@@ -463,6 +463,19 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
+            "kanna_queue_reviewed_pr",
+            TypedToolSurface {
+                command_path: &["task", "queue-reviewed-pr"],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("review_context_version", "review_context_version"),
+                    ("head_sha", "head_sha"),
+                    ("instruction", "instruction"),
+                    ("summary", "summary"),
+                ],
+            },
+        ),
+        (
             "kanna_rerun_stage",
             TypedToolSurface {
                 command_path: &["task", "rerun-stage"],

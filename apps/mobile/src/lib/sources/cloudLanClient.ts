@@ -1527,24 +1527,6 @@ export function createCloudLanClient(
       invokeTaskActionRoute(taskId, (client, routedTaskId) =>
         client.advanceTaskStage(routedTaskId)
       ),
-    // Routed but not id-rewritten: the answer names the merge singleton, which
-    // is a different task from the review this was called on.
-    queueReviewedPrForMerge: async (taskId, decision, summary) => {
-      const route = routeForTask(taskId);
-      if (route.source === "unavailable") {
-        throw new Error(route.message);
-      }
-      if (!route.client.queueReviewedPrForMerge) {
-        // Never fall back to a generic merge request. Without the recorded
-        // decision the merge agent cannot tell a human authorization from an
-        // agent's policy request, and sending one anyway would misrepresent
-        // who approved this pull request.
-        throw new Error(
-          "The desktop that owns this task is running an older Kanna and cannot accept a human review merge authorization. Update it, or queue the merge from that machine."
-        );
-      }
-      return await route.client.queueReviewedPrForMerge(route.taskId, decision, summary);
-    },
     resumeTask: (taskId) =>
       invokeTaskActionRoute(taskId, (client, routedTaskId) => {
         if (!client.resumeTask) {

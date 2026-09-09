@@ -457,6 +457,50 @@ fn machine_stats_tool_uses_the_aggregate_server_route() {
     assert_eq!(server.join().expect("fixture server").len(), 1);
 }
 
+#[test]
+fn reviewed_pr_queue_preserves_the_instruction_and_reports_refusal_without_retry() {
+    let instruction = "  Queue this PR, please.\n";
+    let body = json!({
+        "reviewContextVersion": 4,
+        "headSha": "a".repeat(40),
+        "instruction": instruction,
+    });
+    let delivered = json!({ "taskId": "task-merge", "created": false });
+    let refusal = json!({ "error": "decision already delivered; do not send this again" });
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/tasks/task-review/actions/queue-reviewed-pr",
+            body: Some(body.clone()),
+            response_status: "200 OK",
+            response_body: delivered.clone(),
+        },
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/tasks/task-review/actions/queue-reviewed-pr",
+            body: Some(body),
+            response_status: "409 Conflict",
+            response_body: refusal,
+        },
+    ]);
+    let call = |id| {
+        json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {
+                "name": "kanna_queue_reviewed_pr",
+                "arguments": {
+                    "task_id": "task-review", "review_context_version": 4,
+                    "head_sha": "a".repeat(40), "instruction": instruction,
+                }
+            }
+        })
+    };
+    let responses = run_kanna_mcp(&base_url, &[call(1), call(2)]);
+    assert_eq!(tool_text(&responses[0]), delivered);
+    assert!(tool_error_text(&responses[1]).contains("do not send this again"));
+    assert_eq!(server.join().expect("fixture server").len(), 2);
+}
+
 fn status_fixture(environment: &str, version: &str, lan_port: u16) -> Value {
     json!({
         "state": "running",

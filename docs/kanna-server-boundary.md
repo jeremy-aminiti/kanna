@@ -1696,9 +1696,8 @@ cursor-based, not snapshot-diffed:
   [Human-reviewed merge authorization](#human-reviewed-merge-authorization).
 - `task.human_review_decision` announces that a human authorized merging one
   reviewed head (`payload.decisionId`, `prUrl`, `headSha`, `baseRef`, `origin`,
-  `reviewContextVersion`). It is created only by the operator's *Queue for
-  merge* control, and `payload.origin` is declared and unverified in the same
-  way `task.input_delivered`'s source is. Same section.
+  `reviewContextVersion`). The conversation tool records `operator-relayed`;
+  the retained direct API records `operator`. Both origins are declared and unverified.
 - `task.human_review_decision_delivery` reports how far that decision's
   delivery to the merge singleton got (`payload.decisionId`, `status`:
   `pending` | `delivered` | `failed` | `uncertain`, plus `detail`, `prUrl`,
@@ -2358,14 +2357,16 @@ effect, and nothing is enforced on its behalf.
 
 ### Human-reviewed merge authorization
 
-The route above has a second caller with a different contract. On the
-human-assisted PR review path a *person* is the reviewer, and the two agents
-there are deliberately denied merge authority: `pr-reviewer` may not approve or
-merge, `pr-triage` may not join or aggregate. Relaying an inferred verdict
-through either would hand it back, so the gesture lives in the desktop and
-mobile "Queue for merge" controls and reaches this route as a
-`humanReviewDecision` body field. That field is absent from the agent tool
-catalog and from `kanna-cli`, exactly as `RequestRevisionRequest.origin` is.
+The human-assisted review path records an explicit operator instruction through
+`kanna_queue_reviewed_pr` / `POST /v1/tasks/{task_id}/actions/queue-reviewed-pr`.
+Its body is `{reviewContextVersion, headSha, instruction, summary?}`. The reviewer
+quotes the instruction verbatim, never infers it from agreement or a completed
+review, and reports the PR, head and outcome without another confirmation.
+The tool catalog serves both MCP and `kanna-cli tool call kanna_queue_reviewed_pr`.
+The existing `signal-merge-handoff` branch with `humanReviewDecision` remains
+for compatibility, but desktop/mobile no longer expose authorization controls.
+Plain `kanna_signal_merge_handoff` still carries no decision parameters and its
+ordinary policy request behavior is unchanged.
 
 Two durable records back it, and they are separate because they are different
 kinds of claim:
@@ -2379,17 +2380,17 @@ kinds of claim:
   a local `pr/<n>` ref, so its branch and fork point are unmergeable local
   names and a fork PR has no `origin/<headRefName>` at all. A refresh bumps
   `version`. Announced as `task.review_context_changed`.
-- **`human_review_decision`** — the authority. Created only by that control,
-  immutable, unique per `(task_id, head_sha)` so a double click or retried
+- **`human_review_decision`** — the authority. Recorded before delivering the explicit instruction,
+  immutable, unique per `(task_id, head_sha)` so a duplicate call or retried
   request resolves to the same decision rather than a second authorization. It
-  records the PR, head and base it was taken against, the exact confirmed
-  sentence, the machine, and the time; delivery outcome is stored beside it,
+  records the PR, head and base it was taken against, the verbatim
+  instruction, the machine, and the time; delivery outcome is stored beside it,
   never inside it, so a redelivery never rewrites what was decided. Announced
   as `task.human_review_decision` and `task.human_review_decision_delivery`.
 
 Unlike the agent path, the server binds this request. The head and base come
 from the stored context, not from the caller, so a request cannot name one PR
-in the confirmation and another on the wire; the context version and head SHA
+in the instruction and another on the wire; the context version and head SHA
 the operator saw must still be current, and where the review worktree exists
 its checked-out commit must be that head. A pull request that moved under its
 reviewer is refused — it needs a fresh read, not a decision inherited onto a
@@ -2409,12 +2410,22 @@ history would answer neither.
 **The authority boundary, stated.** Only the explicit operator action creates a
 decision — a stage completion, a Close, a label, a generic `MERGE` message, or
 an agent reporting that its human seemed happy is not one, and the merge agent
-reads the durable record rather than inferring one. The `operator` origin is
-declared and unverified, the same model `task_input`'s source uses: keeping the
-field out of the tool catalog is a product and audit boundary, **not** isolation
-from a hostile local process, which runs as the same user and can reach this
-API. What the row proves is that this decision, with this text, was recorded at
-this time against this exact head. The decision authorizes *queueing only*: it
+reads the durable record rather than inferring one. The conversation route
+records `operator-relayed`, with the verbatim instruction in `actionText` and
+`deviceProvenance: {channel: "agent-session", observedStageRunId}`. The run id
+comes from this review task's latest run (null if absent); it corroborates state,
+not caller identity or human presence. The retained direct API records
+`operator`. Both origins are declared, unverified, using the same local-process
+trust class as the input ledger. Never fabricate a `task_input` row for direct
+TUI speech. No new schema or authentication root is involved.
+
+The conversation route returns 409 for an already delivered, pending, or
+uncertain decision. The retained direct API keeps its idempotent success for
+already delivered decisions. Neither sends again. A strict ledger write failure
+after daemon acknowledgment records `uncertain`, because the MERGE already
+reached the PTY. Refusals are reported and reconciled, never blindly retried.
+Queueing requires a live or resumed review conversation (`kanna_resume_task`),
+not a living triage parent. The decision authorizes *queueing only*: it
 submits no GitHub review, changes no labels, and does not close the review task.
 See [pr-review-dispatch.md](./specs/pr-review-dispatch.md#the-humans-route-to-the-merge-queue).
 

@@ -1,140 +1,103 @@
-# Human-reviewed merge authorization: E2E coverage and the one gap
+# Human-reviewed merge authorization: E2E coverage and remaining gaps
 
-**Date:** 2026-09-08
-**Surface:** the operator's "Queue for merge" control on a PR review task, and
-everything between it and the repository's merge singleton.
-**Design:** [specs/pr-review-dispatch.md](./specs/pr-review-dispatch.md#the-humans-route-to-the-merge-queue),
-[kanna-server-boundary.md](./kanna-server-boundary.md#human-reviewed-merge-authorization).
+**Date:** 2026-09-08; revised 2026-09-09 for the owner's conversation entry point.
+**Surface:** an explicit instruction in the PR review conversation, relayed by
+`kanna_queue_reviewed_pr` through the existing decision/delivery path.
+**Design:** [PR review](./specs/pr-review-dispatch.md#the-humans-route-to-the-merge-queue),
+[server boundary](./kanna-server-boundary.md#human-reviewed-merge-authorization).
 
-## Why this needs E2E at all
+## Coverage added or retained
 
-The behaviour is a boundary, and the boundary is the whole feature: a human's
-merge authorization must be a record of a *person acting*, created by a field
-no agent-facing surface can send, pinned to the exact commit they read, and
-delivered to a merge singleton that may be on another machine with no living
-review or triage session. Every one of those clauses crosses a component
-boundary. A unit test can show that one function refuses a stale head; only an
-end-to-end run shows that the control, the route, the durable records, the
-daemon delivery, and the message the merge agent actually reads are the same
-system.
+The decision must name the exact reviewed PR/head/version and quote the
+instruction verbatim. `operator-relayed` is an honest declaration, not verified
+human presence. The observed latest stage-run id corroborates task state; it
+does not prove who spoke or who called. No TUI speech is fabricated into
+`task_input`. No speech classifier or GitHub approval is involved.
 
-## What is covered end to end
+- **Remote E2E** (`tests/remote-e2e/src/task-listing-actions.e2e.test.ts`): the
+  scripted review PTY executes the real catalog-backed CLI tool. The server
+  records the relayed decision and delivers to a live merge singleton through
+  the daemon. Assertions cover verbatim instruction, observed run, PR identity,
+  `MERGE` plus `HUMAN-REVIEW-DECISION` with origin, moved-head refusal with no
+  decision, a repeated call refused with no second delivery, and untouched
+  `merge_signaled_at`. The fixture command is explicit scripted tool input;
+  this is not a test of a model interpreting human speech.
+- **Server integration** (`http_api/tests/input.rs`,
+  `human_review_merge_authorization`): the same relayed route, provenance,
+  no-context/head/version refusals, and delivered/pending/uncertain refusals.
+  The strict-recording regression acknowledges input at the fake daemon,
+  forces `task_input` INSERT to fail, checks `uncertain`, then repeats the HTTP
+  request and checks 409 plus exactly one daemon submission.
+- **Non-authorization**: existing `http_api/tests/actions.rs` completion with
+  review metadata creates no decision; ordinary policy handoff in `input.rs`
+  also creates none. DB tests retain uniqueness, immutable decisions and
+  separate delivery updates. Catalog tests keep plain handoff's parameters
+  unchanged and require head/version/instruction on the new tool.
+- **Desktop**: `MainPanel.test.ts` retains read-only PR identity, overlap and
+  delivery status, including stale-head handling, and asserts no queue action.
+  The button, confirmation, action plumbing and its obsolete suite are removed.
+- **Mobile**: task screen/action-menu tests retain only the remaining actions.
+  Controller tests cover read-only decision projection and cached review-context
+  restore. Queue actions and transport methods are removed; this adds no native
+  code and changes no runtime version.
+- **Agent contracts**: `qa-assets.test.ts` pins explicit instruction only,
+  verbatim relay, no inferred approval, no extra confirmation, and no automatic
+  retries. The merge agent still checks the exact head and never manufactures
+  a decision or changes a PR under an old decision.
 
-`tests/remote-e2e/src/task-listing-actions.e2e.test.ts` —
-*"carries a human's merge authorization from the review task to the merge
-singleton"* — runs against the real relay, `kanna-server`, SQLite, daemon and a
-scripted agent, and asserts:
+## Execution status and remaining gaps
 
-- a review task created with a `reviewContext` projects it back through task
-  detail, which is the only place the control can learn which pull request and
-  which commit it would be authorizing;
-- a decision naming a head that has moved is refused, and **no**
-  `human_review_decision` row is written;
-- an accepted authorization writes one immutable decision carrying the PR, the
-  PR's own qualified head (`owner/name:branch`, never the review task's
-  `task-*` branch and never the local `pr/<n>` ref), the base, the exact
-  confirmed sentence, `operator` origin, and its delivery outcome;
-- the request the merge singleton actually receives carries the `MERGE` line
-  with that head, plus `HUMAN-REVIEW-DECISION`, `HUMAN-AUTHORIZATION`,
-  `TRIAGE-RANK` and `RELATED-PR`;
-- a second press resolves to the same decision and sends the merge master
-  nothing further;
-- `pipeline_item.merge_signaled_at` — the approve post's one-handoff stamp, a
-  different question on a different workflow — is untouched.
+Focused checks on 2026-09-09 passed: desktop MainPanel 26 tests, mobile
+screen/menu/controller/transports 437, agent asset contracts 61, and scripted
+fixture helpers 12. Desktop, mobile and remote-harness TypeScript checks passed.
 
-## What is covered by narrower tests
+After `RESUME FOCUSED VERIFICATION PR1401`, the following Rust checks passed
+sequentially with `CARGO_BUILD_JOBS=1` and one test thread:
 
-- **Server contract** (`crates/kanna-server/src/http_api/tests/input.rs`,
-  `mod human_review_merge_authorization`): the wire line and durable decision,
-  refusal on a moved head, on a superseded context version, and on a task with
-  no published context; no resend of a delivered decision; refusal to resend an
-  `uncertain` delivery.
-- **Durable records** (`crates/kanna-server/src/db/tests.rs`): version bump on
-  refresh, rejection of a context that cannot identify the PR or commit, one
-  decision per reviewed head with a moved head producing a second decision
-  rather than a rewrite, and delivery outcome recorded without touching the
-  decision.
-- **Publication paths** (`http_api/tests/actions.rs`): a standalone reviewer
-  publishing its PR identity through `complete_stage` metadata, and a malformed
-  context refused rather than silently dropped.
-- **Desktop** (`components/__tests__/MainPanel.test.ts`,
-  `stores/workflow.queueReviewedPr.test.ts`): the control appears only with a
-  published context, confirmation is a separate step, the request carries the
-  version and head that were displayed, a delivered or uncertain decision stops
-  re-offering it while a failed delivery does not, a head that moved past an
-  earlier decision re-offers it, and a server refusal is surfaced verbatim.
-- **Mobile** (`screens/TaskScreen.test.tsx`, `screens/taskActionMenu.test.ts`,
-  `state/mobileController.test.ts`, `lib/transports/lanTransport.test.ts`,
-  `lib/transports/remoteTransport.test.ts`): the same availability rules, the
-  confirmation text, the exact decision the control submits, that a second
-  press while the first is still in flight sends nothing, that authorizing
-  re-reads task detail so the recorded decision withdraws the control, that
-  re-entering the task restores the review identity from cache, and the request
-  body each transport puts on the wire.
-- **Agent contracts** (`packages/core/src/workflow/qa-assets.test.ts`): both
-  review agents refuse to relay the verdict and point at the control; the merge
-  agent's human-reviewed request policy, expected-head precondition, and
-  "queue authorization only" limits.
+| Target and selector | Passed |
+| --- | ---: |
+| `kanna-server --bin kanna-server human_review_merge_authorization` | 8 |
+| Server `merge_handoff_route_sends_an_ordinary_repo_policy_request` | 1 |
+| Server `merge_handoff_does_not_signal_when` | 2 |
+| Server `complete_stage_publishes_a_standalone_reviewers_pull_request_identity` | 1 |
+| Server `complete_stage_refuses_a_review_context_it_cannot_use` | 1 |
+| `kanna-tool-catalog --test catalog` | 42 |
+| `kanna-cli --bin kanna-cli typed_cli_surfaces_match_catalog_tools_and_params` | 1 |
+| `kanna-mcp --test stdio_http reviewed_pr_queue_preserves_the_instruction_and_reports_refusal_without_retry` | 1 |
 
-## The gap
+The MCP test drives the real stdio adapter into an HTTP fixture, preserving the
+verbatim instruction and returning a duplicate refusal without automatic retry.
+The server regression executes HTTP → daemon acknowledgment → failed ledger
+INSERT → uncertain decision → refused retry, with exactly one submission.
 
-**There is no driven desktop-UI E2E for this control.** The assertions above
-that a *click* produces the request are component-level: they mount
-`MainPanel.vue` and call the store, rather than driving the shipped app through
-`tauri-plugin-webdriver`. The repository has a desktop WebDriver lane
-(`kd test remote-e2e --desktop-pairing`), but it is scoped to the pairing UI
-and gaining a second scenario in it is its own piece of work — it needs a
-seeded review task with a review context in a driven instance, which today's
-harness does not build.
+Scoped Clippy passed with `-D warnings` and `CARGO_BUILD_JOBS=1` for the default
+library/binary targets of `kanna-server`, `kanna-tool-catalog`, `kanna-cli`, and
+`kanna-mcp`, plus the catalog and stdio HTTP test targets separately. Formatting
+and diff checks passed. This is focused evidence, not a full Rust lane.
 
-What would make it testable: a desktop-pairing-style lane fixture that seeds a
-task with a `reviewContext` in the driven instance's database, so the test can
-open the task, press the control, confirm, and assert the `human_review_decision`
-row. Until then, the seam between "the button was clicked" and "the store was
-called" is covered by component tests only.
+`./kd test all`, workspace-wide builds/full Rust lanes, and live multi-instance
+remote E2E remain **held and unrun** until `RESUME HEAVY VERIFICATION PR1401`.
+The revised live remote scenario is written but has not passed a run. PR #1401
+also remains held until the final verified head receives independent review.
 
-**Also not covered end to end:** the mobile control, on a device. Its action
-menu, its confirmation text, the decision it submits, the controller's state
-handling around it, and the request body of both its transports have unit
-coverage, and the server action it calls is the same one the remote E2E
-exercises — but no Appium case presses `Queue for Merge` on a simulator, and
-the LAN and remote transports are covered at their own boundary rather than
-against a live server. The same fixture problem applies: the driven app needs a
-task with a published review context, which the mobile E2E lane does not seed
-today.
+The prior desktop click-to-store and mobile action-menu/confirmation E2E gaps
+are retired with those controls, not claimed as tested. Read-only desktop
+status and mobile detail/cache projection have narrower tests; the rendered
+read-only remnant has no new desktop/device E2E pass.
 
-**What the simulator did and did not establish**, stated exactly, because this
-is the durable record: the build installed, launched, and ran this branch's JS
-(Metro logged its bundle for the device) and the app rendered its Tasks shell.
-It got no further. A Simulator cannot pair with a desktop on the same host —
-`machinePairing.ts` builds its claim URL from the Bonjour record, so it
-addresses the Mac by its `.local` name, which on a Simulator sharing the host's
-network stack resolves to loopback, where `lan_trust`'s DNS-rebinding guard
-correctly refuses it. Without a paired desktop there is no task to open, so
-**none of the five Queue for Merge interaction states were exercised**: the
-action-menu row, the confirmation alert naming PR/commit/base, "Request
-delivered" with the control withdrawn afterwards, "Not delivered" on a server
-refusal, and re-entering the task restoring the control. That guard is right
-and the limitation is simulator-only — a physical iPhone resolves the same name
-to the LAN IP and takes the paired-device branch — so nothing was changed for
-it. Those five states **remain a human gate on a physical iPhone after merge**;
-the manager waived them for this task under the owner's 2026-09-09 directive,
-so their absence is not a defect in this branch.
+The earlier simulator pass installed and launched the app and rendered its
+Tasks shell. It could not pair with a desktop on the same host: the Bonjour
+`.local` name resolved to loopback and `lan_trust` correctly refused it. No
+paired review task or queue interaction was exercised. Durable input 269's
+mobile on-device waiver remains; it now applies only to the read-only remnant.
+No new waiver is introduced and no pairing guard is changed.
 
-**And not covered end to end:** a reviewer and a merge singleton on *different*
-machines. The remote E2E exercises the relay transport but resolves the
-singleton on the same desktop. The cross-machine path is the ordinary
-`signal_agent_request` remote-owner branch, which this change does not modify —
-it inherits whatever coverage that branch has — but the specific claim that a
-merge master on another machine can read the decision back through
-`kanna_get_task` with `machine_id` is asserted in the merge agent's
-instructions and in the message contents, not by a two-machine run.
+A reviewer and merge singleton on **different machines** remain untested in
+this scenario. The remote fixture drives the relay but resolves the singleton
+on the same desktop. The message and merge-agent contract carry machine/id and
+read-back guidance; that is not a two-machine E2E result.
 
-## Not a gap
-
-Deterministic wiring tests cannot prove that an LLM follows a policy. That the
-merge agent honours the expected-head precondition, refuses to rebase under an
-old decision, and never manufactures a decision is pinned as an
-**asset-contract** assertion over `.kanna/agents/merge/AGENT.md`, which is the
-same instrument the rest of this repository's agent policy uses. It is
-deliberate, not a substitute waiting to be replaced by a live-agent test.
+Queueing now requires a live or resumed review conversation; `kanna_resume_task`
+is recovery when the session stops. A closed triage parent remains irrelevant.
+Deterministic wiring and asset tests cannot prove that a model follows its
+contract or that a human was present; neither is claimed.

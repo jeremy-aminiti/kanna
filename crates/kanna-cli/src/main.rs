@@ -636,6 +636,30 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
+    /// Relay an explicit operator queue instruction for one reviewed PR
+    QueueReviewedPr {
+        /// Review task whose conversation contains the instruction
+        #[arg(long)]
+        task_id: String,
+        /// Exact published review context version
+        #[arg(long)]
+        review_context_version: i64,
+        /// Exact commit the human reviewed
+        #[arg(long)]
+        head_sha: String,
+        /// Operator's queue instruction, verbatim; never an inferred verdict
+        #[arg(long)]
+        instruction: String,
+        /// Optional concise PR summary
+        #[arg(long)]
+        summary: Option<String>,
+        /// Machine that owns the review task; omit for this machine
+        #[arg(long)]
+        machine_id: Option<String>,
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
     /// Move a task to another machine, preserving its prompt, delivered input
     /// history, workflow stage, committed work, and agent session
     ///

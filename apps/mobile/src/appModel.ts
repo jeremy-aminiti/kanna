@@ -1304,18 +1304,6 @@ function createTrustedLanFallbackClient({
       (await resolveClient(desktopId)).runMergeAgent(taskId),
     advanceTaskStage: async (taskId) =>
       (await resolveClient(desktopId)).advanceTaskStage(taskId),
-    queueReviewedPrForMerge: async (taskId, decision, summary) => {
-      const client = await resolveClient(desktopId);
-      if (!client.queueReviewedPrForMerge) {
-        // Refuse rather than downgrade: a merge request without the recorded
-        // human decision is an agent's policy request, and sending one would
-        // misrepresent who authorized this pull request.
-        throw new Error(
-          "The desktop that owns this task is running an older Kanna and cannot accept a human review merge authorization. Update it, or queue the merge from that machine."
-        );
-      }
-      return client.queueReviewedPrForMerge(taskId, decision, summary);
-    },
     resumeTask: async (taskId) => {
       const client = await resolveClient(desktopId);
       if (!client.resumeTask) {
@@ -1561,17 +1549,6 @@ function createDelegatingClient(getClient: () => KannaClient): KannaClient {
     abortTaskCreation: (input) => getClient().abortTaskCreation(input),
     runMergeAgent: (taskId) => getClient().runMergeAgent(taskId),
     advanceTaskStage: (taskId) => getClient().advanceTaskStage(taskId),
-    queueReviewedPrForMerge: (taskId, decision, summary) => {
-      const client = getClient();
-      if (!client.queueReviewedPrForMerge) {
-        return Promise.reject(
-          new Error(
-            "The desktop that owns this task is running an older Kanna and cannot accept a human review merge authorization. Update it, or queue the merge from that machine."
-          )
-        );
-      }
-      return client.queueReviewedPrForMerge(taskId, decision, summary);
-    },
     resumeTask: (taskId) => {
       const client = getClient();
       if (!client.resumeTask) {

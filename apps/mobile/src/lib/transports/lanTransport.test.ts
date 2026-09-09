@@ -25,56 +25,6 @@ describe("createLanTransport", () => {
     );
   });
 
-  /**
-   * The operator's merge authorization on the wire. It deliberately carries no
-   * branch, target, or PR URL: the server derives those from the task's stored
-   * review context, so this request cannot confirm one pull request and queue
-   * another.
-   */
-  it("sends a human merge authorization with only the operator's decision", async () => {
-    const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        taskId: "task-merge",
-        created: false,
-        ownerDesktopId: "desktop-2"
-      })
-    });
-    const transport = createLanTransport("http://127.0.0.1:48120", fetchImpl);
-
-    await expect(
-      transport.queueReviewedPrForMerge?.(
-        "task/review",
-        {
-          reviewContextVersion: 3,
-          headSha: "a".repeat(40),
-          actionText: "I reviewed it and authorize the merge."
-        },
-        "Human-reviewed https://github.com/acme/repo/pull/12"
-      )
-    ).resolves.toEqual({
-      taskId: "task-merge",
-      created: false,
-      ownerDesktopId: "desktop-2"
-    });
-    expect(fetchImpl).toHaveBeenCalledWith(
-      "http://127.0.0.1:48120/v1/tasks/task%2Freview/actions/signal-merge-handoff",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          summary: "Human-reviewed https://github.com/acme/repo/pull/12",
-          humanReviewDecision: {
-            reviewContextVersion: 3,
-            headSha: "a".repeat(40),
-            actionText: "I reviewed it and authorize the merge."
-          }
-        })
-      }
-    );
-  });
-
   it("opens preview through the validated LAN host without exposing pairing credentials in the URL", async () => {
     const fetchImpl = vi.fn<FetchLike>().mockResolvedValue({
       ok: true,

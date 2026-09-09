@@ -48,63 +48,6 @@ describe("remote transport", () => {
     });
   });
 
-  /**
-   * Routed to the task's owner like any other task action, but read with
-   * `requestTask` rather than `requestTaskAction`: the answer names the merge
-   * singleton, which is a different task from the review this was called on,
-   * so its id must not be rewritten back to the review task.
-   */
-  it("routes a human merge authorization to the task owner without rewriting the merge task id", async () => {
-    const invokeDesktop = vi.fn<RemoteDesktopInvoker>().mockResolvedValue({
-      taskId: "task-merge",
-      created: false,
-      ownerDesktopId: "desktop-owner"
-    });
-    const transport = createRemoteTransport({
-      listDesktopRecords: async () => [],
-      getSelectedDesktopId: () => null,
-      invokeDesktop,
-      listCloudTasks: async () => [{
-        id: "cloud-review-1",
-        repoId: "cloud-repo-1",
-        title: "PR #12 review",
-        stage: "review",
-        ownerDesktopId: "desktop-owner",
-        ownerLocalRepoId: "local-repo-1",
-        ownerLocalTaskId: "local-review-1"
-      }]
-    });
-
-    await expect(
-      transport.queueReviewedPrForMerge?.(
-        "cloud-review-1",
-        {
-          reviewContextVersion: 3,
-          headSha: "a".repeat(40),
-          actionText: "I reviewed it and authorize the merge."
-        },
-        "Human-reviewed https://github.com/acme/repo/pull/12"
-      )
-    ).resolves.toEqual({
-      taskId: "task-merge",
-      created: false,
-      ownerDesktopId: "desktop-owner"
-    });
-    expect(invokeDesktop).toHaveBeenCalledWith({
-      desktopId: "desktop-owner",
-      method: "POST",
-      path: "/v1/tasks/local-review-1/actions/signal-merge-handoff",
-      body: {
-        summary: "Human-reviewed https://github.com/acme/repo/pull/12",
-        humanReviewDecision: {
-          reviewContextVersion: 3,
-          headSha: "a".repeat(40),
-          actionText: "I reviewed it and authorize the merge."
-        }
-      }
-    });
-  });
-
   it("propagates an advance-stage conflict from the owning desktop without retrying", async () => {
     const held = new RemoteTransportError(
       "remote_invocation_failed",

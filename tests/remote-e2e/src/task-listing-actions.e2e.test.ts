@@ -750,165 +750,93 @@ describe("remote task listing, creation, and actions E2E", () => {
     }
   }, 180_000);
 
-  /**
-   * The human-assisted PR review path, end to end through the real relay,
-   * server, database and daemon.
-   *
-   * The wiring is the risk here, not any one layer. A review child names its
-   * pull request nowhere except this durable context — it forks from
-   * `pull/<n>/head` into a local `pr/<n>` ref — and the authority that reaches
-   * the merge singleton has to be a record of a *person*, created by a field
-   * no agent-facing surface can send, pinned to the commit they read. So this
-   * exercises the whole chain: dispatch the identity, read it back the way the
-   * control does, authorize it, and prove that what the merge master actually
-   * received names the PR's own head and cites the recorded decision.
-   */
-  it("carries a human's merge authorization from the review task to the merge singleton", async () => {
+  /** Real catalog CLI call from a scripted review PTY, through the server and
+   * daemon into an existing merge singleton. This tests relay wiring, not a
+   * model's interpretation of natural language or verified human presence. */
+  it("relays an explicit review instruction through the catalog tool exactly once", async () => {
     const prUrl = "https://github.com/acme/repo/pull/4242";
-    const reviewedHead = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
     const review = await createScriptedTask(harness, {
       displayName: "PR #4242 review",
       prompt: "Review pull request #4242 for a human reviewer.",
+      continuousOutput: false,
+      reviewedPrQueue: {
+        cliPath: remoteHarnessKannaCliPath(harness.repoRoot),
+        serverUrl: `http://127.0.0.1:${harness.ports.server}`
+      },
       reviewContext: {
-        prUrl,
-        headRepo: "contributor/repo",
-        headRef: "feature/from-a-fork",
-        headSha: reviewedHead,
-        baseRef: "main",
-        triageRank: 1,
+        prUrl, headRepo: "contributor/repo", headRef: "feature/from-a-fork",
+        baseRef: "main", triageRank: 1,
         relatedPrUrls: ["https://github.com/acme/repo/pull/4243"]
       }
     });
-
-    // What the desktop and mobile controls read. Without this projection the
-    // only way to learn which pull request is being authorized would be to
-    // parse the review session's terminal.
     const detail = asRecord(await invokeDesktop(harness, "GET", `/v1/tasks/${review.taskId}`, null));
     const context = asRecord(detail.reviewContext);
-    expect(context.version).toBe(1);
-    expect(context.prUrl).toBe(prUrl);
-    expect(context.headSha).toBe(reviewedHead);
-    expect(context.headRef).toBe("feature/from-a-fork");
+    const reviewedHead = String(context.headSha);
+    expect(reviewedHead).toMatch(/^[a-f0-9]{40}$/);
     expect(detail.humanReviewDecision ?? null).toBeNull();
+    const merge = asRecord(await invokeDesktop(harness, "POST",
+      `/v1/repos/${review.repoId}/agents/merge/signal`, {
+        message: "Wait for a reviewed PR.", agentProvider: "codex"
+      }));
+    const mergeTaskId = String(merge.taskId);
+    const reviewEvents = collectTerminalEvents(harness, review.taskId);
+    const mergeEvents = collectTerminalEvents(harness, mergeTaskId);
+    try {
+      await waitForTerminalOutput(reviewEvents, "SCRIPT_INPUT_READY");
+      await waitForTerminalOutput(mergeEvents, "SCRIPT_INPUT_READY");
+      const instruction = "Queue this PR, please.";
+      const call = (headSha: string) => invokeDesktop(harness, "POST", `/v1/tasks/${review.taskId}/input`, {
+        input: "QUEUE_REVIEWED_PR:" + JSON.stringify({
+          task_id: review.taskId, review_context_version: context.version,
+          head_sha: headSha, instruction
+        }),
+        source: "operator"
+      });
+      await call("0".repeat(40));
+      await waitForTerminalOutput(reviewEvents, "reviewed head moved");
+      expect(await querySql(harness,
+        "SELECT id FROM human_review_decision WHERE task_id = ?1", [review.taskId])).toEqual([]);
 
-    // A decision taken against a head that has moved is refused, not applied
-    // to a commit nobody read.
-    const staleRefusal = await invokeDesktop(
-      harness,
-      "POST",
-      `/v1/tasks/${review.taskId}/actions/signal-merge-handoff`,
-      {
-        summary: `Human-reviewed ${prUrl}`,
-        humanReviewDecision: {
-          reviewContextVersion: 1,
-          headSha: "0".repeat(40),
-          actionText: "I reviewed it and authorize the merge."
-        }
-      }
-    ).then(() => null, (error: unknown) => error);
-    expect(staleRefusal).toBeInstanceOf(Error);
-    expect((staleRefusal as Error).message).toContain("reviewed head moved");
-    expect(await querySql(
-      harness,
-      "SELECT id FROM human_review_decision WHERE task_id = ?1",
-      [review.taskId]
-    )).toEqual([]);
+      await call(reviewedHead);
+      await waitForTerminalOutput(reviewEvents, "SCRIPT_QUEUE_EXIT:0");
+      await waitForTerminalOutput(mergeEvents, "origin=operator-relayed");
+      const [decision] = await querySql(harness,
+        `SELECT id, pr_url, head, head_sha, base_ref, action_text, origin,
+                device_provenance, delivery_status, merge_task_id
+         FROM human_review_decision WHERE task_id = ?1`, [review.taskId]);
+      expect(decision).toMatchObject({
+        pr_url: prUrl, head: "contributor/repo:feature/from-a-fork",
+        head_sha: reviewedHead, base_ref: "main", action_text: instruction,
+        origin: "operator-relayed", delivery_status: "delivered", merge_task_id: mergeTaskId
+      });
+      expect(JSON.parse(String(decision!.device_provenance))).toEqual({
+        channel: "agent-session", observedStageRunId: asRecord(detail.latestRun).id
+      });
+      const inputs = () => querySql(harness,
+        "SELECT message FROM task_input WHERE task_id = ?1", [mergeTaskId]);
+      const delivered = await inputs();
+      expect(delivered).toHaveLength(1);
+      const message = String(delivered[0]!.message);
+      expect(message).toContain(`MERGE contributor/repo:feature/from-a-fork -> main [TASK ${review.taskId}] [PR ${prUrl}]`);
+      expect(message).toContain(`HUMAN-REVIEW-DECISION ${decision!.id}`);
+      expect(message).toContain(`reviewed-head=${reviewedHead}`);
+      expect(message).toContain(`HUMAN-AUTHORIZATION ${JSON.stringify(instruction)}`);
+      expect(message).toContain("origin=operator-relayed");
+      expect(message).toContain("TRIAGE-RANK 1");
+      expect(message).toContain("RELATED-PR https://github.com/acme/repo/pull/4243");
 
-    const actionText =
-      `I reviewed ${prUrl} at ${reviewedHead} and authorize the merge agent to merge it into main when safe.`;
-    const queued = asRecord(await invokeDesktop(
-      harness,
-      "POST",
-      `/v1/tasks/${review.taskId}/actions/signal-merge-handoff`,
-      {
-        summary: `Human-reviewed ${prUrl}`,
-        humanReviewDecision: {
-          reviewContextVersion: 1,
-          headSha: reviewedHead,
-          actionText
-        }
-      }
-    ));
-    const mergeTaskId = String(queued.taskId);
-    expect(mergeTaskId).toBeTruthy();
-    expect(mergeTaskId).not.toBe(review.taskId);
-
-    const [decision] = await querySql(
-      harness,
-      `SELECT id, pr_url, head, head_sha, base_ref, action_text, origin, delivery_status,
-              merge_task_id, source_machine_id
-       FROM human_review_decision WHERE task_id = ?1`,
-      [review.taskId]
-    );
-    expect(decision).toMatchObject({
-      pr_url: prUrl,
-      // The PR's own head, never the review task's branch and never `pr/<n>`.
-      head: "contributor/repo:feature/from-a-fork",
-      head_sha: reviewedHead,
-      base_ref: "main",
-      action_text: actionText,
-      origin: "operator",
-      delivery_status: "delivered",
-      merge_task_id: mergeTaskId
-    });
-
-    // What the merge master was actually sent. No merge singleton existed, so
-    // the request became the singleton's first prompt — which is the shape the
-    // merge agent reads either way. The singleton may live on another machine
-    // with no living review or triage session, so everything it needs to
-    // resolve the request travels in the request itself.
-    const [mergeRow] = await querySql(
-      harness,
-      "SELECT prompt FROM pipeline_item WHERE id = ?1",
-      [mergeTaskId]
-    );
-    const message = String(mergeRow?.prompt ?? "");
-    expect(message).toContain(
-      `MERGE contributor/repo:feature/from-a-fork -> main [TASK ${review.taskId}] [PR ${prUrl}]`
-    );
-    expect(message).toContain(`HUMAN-REVIEW-DECISION ${decision!.id}`);
-    expect(message).toContain(`reviewed-head=${reviewedHead}`);
-    expect(message).toContain(`HUMAN-AUTHORIZATION ${JSON.stringify(actionText)}`);
-    expect(message).toContain("TRIAGE-RANK 1");
-    expect(message).toContain("RELATED-PR https://github.com/acme/repo/pull/4243");
-
-    // A second press is the same decision, not a second authorization, and the
-    // merge master is not told twice.
-    await invokeDesktop(
-      harness,
-      "POST",
-      `/v1/tasks/${review.taskId}/actions/signal-merge-handoff`,
-      {
-        summary: `Human-reviewed ${prUrl}`,
-        humanReviewDecision: {
-          reviewContextVersion: 1,
-          headSha: reviewedHead,
-          actionText
-        }
-      }
-    );
-    expect(await querySql(
-      harness,
-      "SELECT id FROM human_review_decision WHERE task_id = ?1",
-      [review.taskId]
-    )).toHaveLength(1);
-    // Nothing was written to the merge session the second time: a decision the
-    // merge master already holds is never re-sent, because a duplicate reads
-    // there as a second person authorizing the merge.
-    expect(await querySql(
-      harness,
-      "SELECT id FROM task_input WHERE task_id = ?1",
-      [mergeTaskId]
-    )).toEqual([]);
-
-    // The approve post's one-handoff stamp answers a different question on a
-    // different workflow, and a per-head review decision must not answer it.
-    const [reviewRow] = await querySql(
-      harness,
-      "SELECT merge_signaled_at FROM pipeline_item WHERE id = ?1",
-      [review.taskId]
-    );
-    expect(reviewRow?.merge_signaled_at ?? null).toBeNull();
+      await call(reviewedHead);
+      await waitForTerminalOutput(reviewEvents, "was already delivered; do not send this again");
+      expect(await inputs()).toEqual(delivered);
+      expect(await querySql(harness,
+        "SELECT id FROM human_review_decision WHERE task_id = ?1", [review.taskId])).toHaveLength(1);
+      const [row] = await querySql(harness,
+        "SELECT merge_signaled_at FROM pipeline_item WHERE id = ?1", [review.taskId]);
+      expect(row?.merge_signaled_at ?? null).toBeNull();
+    } finally {
+      reviewEvents.close();
+      mergeEvents.close();
+    }
   }, 120_000);
 
   it("advances stages, completes stages, requests revision, runs merge agent, and closes with current durable-task semantics", async () => {

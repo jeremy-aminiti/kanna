@@ -599,18 +599,15 @@ pub struct MergeHandoffRequest {
     pub summary: String,
     /// A human's explicit merge authorization for a reviewed head.
     ///
-    /// Deliberately absent from the agent tool catalog and from `kanna-cli`,
-    /// the same way `RequestRevisionRequest.origin` is: only the desktop and
-    /// mobile controls send it. That is a product boundary and an audit
-    /// boundary, **not** isolation from a malicious local agent — anything
-    /// running as this user can reach this API and read the same credential.
-    /// What the recorded decision proves is that this authorization, with this
-    /// text, was taken against this exact head at this time.
+    /// Retained direct-decision API. The separate queue-reviewed-pr tool
+    /// reuses this payload internally with an honest operator-relayed origin.
+    /// Neither route proves human presence; the ordinary policy handoff tool
+    /// continues to expose no decision fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_review_decision: Option<HumanReviewDecisionRequest>,
 }
 
-/// The operator's confirmation, as the control collected it.
+/// The operator's instruction, bound to the reviewed context.
 ///
 /// It carries no PR identity of its own: the server derives the PR, head, and
 /// base from the task's stored review context, so a caller cannot name one PR
@@ -623,7 +620,7 @@ pub struct MergeHandoffRequest {
 pub struct HumanReviewDecisionRequest {
     pub review_context_version: i64,
     pub head_sha: String,
-    /// The exact sentence the operator confirmed, stored verbatim on the
+    /// The exact instruction the operator gave, stored verbatim on the
     /// decision so the record says what they authorized, not a paraphrase.
     pub action_text: String,
     /// Authenticated device or account provenance the client can prove, when
@@ -2438,7 +2435,7 @@ mod tests {
         assert_eq!(detail.stage_transition.as_deref(), Some("manual"));
     }
 
-    /// Task detail is what the merge control reads. Nothing else on a review
+    /// Task detail is what the review agent and read-only clients read. Nothing else on a review
     /// task names its pull request — the child forks from `pull/<n>/head` into
     /// a local `pr/<n>` ref — so if this projection were missing, the only way
     /// to learn which PR is being authorized would be to parse the review

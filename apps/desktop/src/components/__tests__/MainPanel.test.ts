@@ -770,14 +770,7 @@ describe("MainPanel", () => {
     expect(wrapper.find(".blocked-placeholder").exists()).toBe(false);
   });
 
-  /**
-   * The operator's own route to the merge queue. `pr-reviewer` and `pr-triage`
-   * are deliberately denied merge authority, so this control is the only place
-   * a human's verdict becomes a merge request — and what it sends has to be
-   * the exact pull request and commit they were shown, not anything inferred
-   * from the task.
-   */
-  it("authorizes the merge of the exact reviewed commit and shows what happened", async () => {
+  it("shows the reviewed identity and overlaps without queue actions", async () => {
     const reviewedHead = "a".repeat(40);
     fetchTaskDetailMock.mockResolvedValue({
       id: "task-pending",
@@ -798,17 +791,11 @@ describe("MainPanel", () => {
         updatedAt: "2026-09-08T00:00:00Z",
       },
     });
-    const queueReviewedPrForMerge = vi.fn(async () => ({
-      status: "delivered" as const,
-      mergeTaskId: "task-merge",
-      ownerDesktopId: "desktop-2",
-    }));
     const { default: MainPanel } = await import("../MainPanel.vue");
     const wrapper = mount(MainPanel, {
       props: {
         uiSlot: readySlot(durableTask({ stage: "review" })),
         hasRepos: true,
-        queueReviewedPrForMerge,
       },
       global: {
         mocks: { $t: (key: string) => key },
@@ -820,29 +807,11 @@ describe("MainPanel", () => {
     });
 
     await flushPromises();
-    expect(wrapper.find('[data-testid="review-merge-control"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="review-merge-status"]').exists()).toBe(true);
     // Overlapping pull requests are shown before the decision, not after: they
     // are what the reviewer needs to know while deciding.
     expect(wrapper.find('[data-testid="review-merge-overlap"]').exists()).toBe(true);
-    // Confirmation is a separate step; the button alone authorizes nothing.
-    expect(wrapper.find('[data-testid="review-merge-confirm"]').exists()).toBe(false);
-
-    await wrapper.find('[data-testid="open-review-merge-confirm"]').trigger("click");
-    await flushPromises();
-    const statement = wrapper.find('[data-testid="review-merge-statement"]').text();
-    expect(statement).toContain("https://github.com/acme/repo/pull/12");
-    expect(statement).toContain(reviewedHead);
-    expect(statement).toContain("main");
-
-    await wrapper.find('[data-testid="submit-review-merge"]').trigger("submit");
-    await flushPromises();
-
-    expect(queueReviewedPrForMerge).toHaveBeenCalledWith("task-pending", {
-      reviewContextVersion: 4,
-      headSha: reviewedHead,
-      actionText: statement,
-      summary: "Human-reviewed https://github.com/acme/repo/pull/12",
-    });
+    expect(wrapper.find('[data-testid="open-review-merge-confirm"]').exists()).toBe(false);
     expect(wrapper.find('[data-testid="review-merge-confirm"]').exists()).toBe(false);
   });
 
@@ -851,7 +820,7 @@ describe("MainPanel", () => {
    * stopped part-way needs a person to reconcile that session — never another
    * copy of the request, which would read there as a second authorization.
    */
-  it("stops offering to queue a decision that was delivered or whose outcome is unknown", async () => {
+  it("retains read-only delivery status without offering an action", async () => {
     const reviewedHead = "a".repeat(40);
     const detailWithDecision = (deliveryStatus: string) => ({
       id: "task-pending",
@@ -889,13 +858,12 @@ describe("MainPanel", () => {
     // `pending` belongs here too: a decision recorded whose outcome was never
     // reported may already be in the merge master's session, so it needs
     // reconciling rather than a second copy of the request.
-    for (const status of ["delivered", "uncertain", "pending"]) {
+    for (const status of ["delivered", "uncertain", "pending", "failed"]) {
       fetchTaskDetailMock.mockResolvedValue(detailWithDecision(status));
       const wrapper = mount(MainPanel, {
         props: {
           uiSlot: readySlot(durableTask({ stage: "review" })),
           hasRepos: true,
-          queueReviewedPrForMerge: vi.fn(),
         },
         global: {
           mocks: { $t: (key: string) => key },
@@ -912,26 +880,6 @@ describe("MainPanel", () => {
         status,
       ).toBe(false);
     }
-
-    // A refused delivery is safe to send again: nothing reached the merge
-    // master, and the same decision goes out rather than a new one.
-    fetchTaskDetailMock.mockResolvedValue(detailWithDecision("failed"));
-    const retryable = mount(MainPanel, {
-      props: {
-        uiSlot: readySlot(durableTask({ stage: "review" })),
-        hasRepos: true,
-        queueReviewedPrForMerge: vi.fn(),
-      },
-      global: {
-        mocks: { $t: (key: string) => key },
-        stubs: {
-          TaskHeader: { template: '<div data-testid="task-header" />' },
-          TerminalTabs: { template: '<div data-testid="terminal-tabs" />' },
-        },
-      },
-    });
-    await flushPromises();
-    expect(retryable.find('[data-testid="open-review-merge-confirm"]').exists()).toBe(true);
   });
 
   /**
@@ -939,7 +887,7 @@ describe("MainPanel", () => {
    * decision named. The control must not offer to authorize it under a
    * decision taken on a commit that is no longer the head.
    */
-  it("re-offers the control when the reviewed head moved past an earlier decision", async () => {
+  it("does not show a stale decision as authorizing the current head", async () => {
     fetchTaskDetailMock.mockResolvedValue({
       id: "task-pending",
       stage: "review",
@@ -975,7 +923,6 @@ describe("MainPanel", () => {
       props: {
         uiSlot: readySlot(durableTask({ stage: "review" })),
         hasRepos: true,
-        queueReviewedPrForMerge: vi.fn(),
       },
       global: {
         mocks: { $t: (key: string) => key },
@@ -990,7 +937,7 @@ describe("MainPanel", () => {
     // The old decision belongs to a commit nobody would be merging now, so it
     // is not shown as covering this head.
     expect(wrapper.find('[data-testid="review-merge-decision"]').exists()).toBe(false);
-    expect(wrapper.find('[data-testid="open-review-merge-confirm"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="open-review-merge-confirm"]').exists()).toBe(false);
   });
 
   /** An ordinary task has no pull-request identity, so there is no control. */
@@ -1000,7 +947,6 @@ describe("MainPanel", () => {
       props: {
         uiSlot: readySlot(),
         hasRepos: true,
-        queueReviewedPrForMerge: vi.fn(),
       },
       global: {
         mocks: { $t: (key: string) => key },
@@ -1012,7 +958,7 @@ describe("MainPanel", () => {
     });
 
     await flushPromises();
-    expect(wrapper.find('[data-testid="review-merge-control"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="review-merge-status"]').exists()).toBe(false);
   });
 
   it("shows no refused-input banner for a task whose session accepts messages", async () => {

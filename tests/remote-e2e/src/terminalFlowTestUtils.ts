@@ -123,6 +123,7 @@ export async function createScriptedTask(
     terminalKeyTraceFile?: string;
     tracePartialInput?: boolean;
     traceTerminalKeys?: boolean;
+    reviewedPrQueue?: ScriptedAgentOptions["reviewedPrQueue"];
     waitingPromptSnippet?: string;
     agentProvider?: "claude" | "codex";
     /**
@@ -147,6 +148,7 @@ export async function createScriptedTask(
     terminalKeyTraceFile: options.terminalKeyTraceFile,
     tracePartialInput: options.tracePartialInput,
     traceTerminalKeys: options.traceTerminalKeys,
+    reviewedPrQueue: options.reviewedPrQueue,
   });
 
   const repo = asCreatedRepo(await harness.client.invokeDesktop({
@@ -176,7 +178,13 @@ export async function createScriptedTask(
       agentType: "pty",
       ...(options.reviewContext === undefined
         ? {}
-        : { reviewContext: options.reviewContext }),
+        : { reviewContext: {
+            ...options.reviewContext,
+            // A fixture review must name the actual checked-out commit too.
+            headSha: options.reviewContext.headSha ?? (await execFileAsync(
+              "git", ["rev-parse", "HEAD"], { cwd: repoPath }
+            )).stdout.trim()
+          } }),
       ...(options.terminalCols === undefined
         ? {}
         : { terminalCols: options.terminalCols }),

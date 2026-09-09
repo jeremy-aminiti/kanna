@@ -941,6 +941,25 @@ pub(crate) async fn run(command: TaskCommands) {
                 process::exit(1);
             }
         }
+        TaskCommands::QueueReviewedPr {
+            task_id,
+            review_context_version,
+            head_sha,
+            instruction,
+            summary,
+            machine_id,
+            server_url,
+        } => {
+            let mut args = json!({
+                "task_id": task_id,
+                "review_context_version": review_context_version,
+                "head_sha": head_sha,
+                "instruction": instruction,
+            });
+            insert_optional(&mut args, "summary", summary);
+            insert_optional(&mut args, "machine_id", machine_id);
+            run_catalog_task_tool("kanna_queue_reviewed_pr", &args, server_url.as_deref()).await;
+        }
         TaskCommands::RerunStage {
             task_id,
             server_url,

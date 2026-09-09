@@ -1017,6 +1017,16 @@ async fn merge_handoff_route_sends_an_ordinary_repo_policy_request() {
     let db = Db::open_for_tests(&config.db_path).unwrap();
     db.insert_test_repo("repo-1", "Repo One").unwrap();
     seed_approvable_source(&db, "task-source", "approve-source", 51);
+    db.upsert_task_review_context(
+        "task-source",
+        &crate::db::ReviewContextInput {
+            pr_url: "https://github.com/acme/repo/pull/51".to_string(),
+            head_sha: "a".repeat(40),
+            base_ref: "main".to_string(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     db.insert_test_pipeline_item(
         "task-merge",
         "repo-1",
@@ -1081,6 +1091,12 @@ async fn merge_handoff_route_sends_an_ordinary_repo_policy_request() {
         "MERGE feature/head -> main [TASK task-source] [PR https://github.com/acme/repo/pull/51]: Ready for repository policy"
     );
     assert_eq!(merge_signal_event_count(&db, "task-source"), 1);
+    assert!(
+        db.latest_human_review_decision("task-source")
+            .unwrap()
+            .is_none(),
+        "ordinary policy handoff must not create human authorization"
+    );
     drop(db);
 
     let _ = std::fs::remove_file(socket_path);
@@ -3591,11 +3607,11 @@ mod merge_handoff_on_close {
 /// a pull request they read at a commit that has not moved since.
 mod human_review_merge_authorization {
     use super::*;
-    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
-    use tokio::io::{AsyncWriteExt, BufReader};
+    use kanna_daemon::protocol::Command as DaemonCommand;
     use tokio::net::UnixListener;
 
     const REVIEWED_HEAD: &str = "1111111111111111111111111111111111111111";
+    const INSTRUCTION: &str = "  Queue this PR, please.\n";
     const PR_URL: &str = "https://github.com/acme/repo/pull/77";
 
     fn review_context() -> crate::db::ReviewContextInput {
@@ -3628,6 +3644,24 @@ mod human_review_merge_authorization {
         .unwrap();
         db.upsert_task_review_context(task_id, &review_context())
             .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-review",
+            task_id,
+            stage: "review",
+            kind: "main",
+            agent: Some("pr-reviewer"),
+            agent_provider: Some("codex"),
+            model: None,
+            effort: None,
+            status: "succeeded",
+            result: None,
+            feedback: None,
+            session_id: Some("review-session"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
     }
 
     fn seed_merge_singleton(db: &Db) {
@@ -3663,13 +3697,81 @@ mod human_review_merge_authorization {
     fn queue_body(version: i64, head_sha: &str) -> String {
         serde_json::json!({
             "summary": "Human-reviewed pull request 77",
-            "humanReviewDecision": {
-                "reviewContextVersion": version,
-                "headSha": head_sha,
-                "actionText": "I reviewed it and authorize the merge.",
-            }
+            "reviewContextVersion": version,
+            "headSha": head_sha,
+            "instruction": INSTRUCTION,
         })
         .to_string()
+    }
+
+    #[tokio::test]
+    async fn does_not_resend_acknowledged_input_when_its_ledger_insert_failed() {
+        let unique = format!("human-review-record-failed-{}", unique_test_suffix());
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let daemon_server = spawn_live_session_daemon(listener, "task-merge", 2);
+        let config = merge_test_config(&unique, &daemon_dir);
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        seed_review_child(&db, "task-review");
+        seed_merge_singleton(&db);
+        rusqlite::Connection::open(&config.db_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_merge_handoff_input
+                 BEFORE INSERT ON task_input
+                 BEGIN SELECT RAISE(ABORT, 'forced task_input persistence failure'); END",
+            )
+            .unwrap();
+
+        let app = super::super::router(Arc::new(super::super::AppState::new(config.clone())));
+        for expected_status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::CONFLICT] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/tasks/task-review/actions/queue-reviewed-pr")
+                        .header("content-type", "application/json")
+                        .body(Body::from(queue_body(1, REVIEWED_HEAD)))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected_status);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            if expected_status == StatusCode::INTERNAL_SERVER_ERROR {
+                assert!(body.contains("task_input_record_failed"), "{body}");
+            } else {
+                assert!(body.contains("do not send this again"), "{body}");
+            }
+            let decision = db
+                .latest_human_review_decision("task-review")
+                .unwrap()
+                .unwrap();
+            assert_eq!(decision.delivery_status, "uncertain");
+            assert_eq!(
+                db.count_test_human_review_decisions("task-review").unwrap(),
+                1
+            );
+            assert_eq!(db.count_task_inputs("task-merge").unwrap(), 0);
+        }
+
+        // The HTTP retry is refused by the durable decision, before daemon
+        // discovery or submission. Only the first request reached the PTY.
+        assert!(matches!(
+            daemon_server.await.unwrap().as_slice(),
+            [DaemonCommand::List, DaemonCommand::SubmitInputIfSession { session_id, expected_pid: 42, .. }]
+                if session_id == "task-merge"
+        ));
+        drop(app);
+        drop(db);
+        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_dir_all(daemon_dir);
+        let _ = std::fs::remove_file(config.db_path);
     }
 
     /// Drive one request against a live fake daemon, returning the HTTP
@@ -3684,31 +3786,7 @@ mod human_review_merge_authorization {
         std::fs::create_dir_all(&daemon_dir).unwrap();
         let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
         let listener = UnixListener::bind(&socket_path).unwrap();
-        let daemon_server = tokio::spawn(async move {
-            let mut inputs: Vec<String> = Vec::new();
-            let Ok(Ok((stream, _))) =
-                tokio::time::timeout(std::time::Duration::from_millis(1500), listener.accept())
-                    .await
-            else {
-                return inputs;
-            };
-            let (read_half, mut write_half) = stream.into_split();
-            let mut reader = BufReader::new(read_half);
-            // Exactly one request: the caller says up front whether it expects
-            // a delivery, and a second read on a closed connection would panic
-            // rather than report what was sent.
-            if let DaemonCommand::SubmitInput { data, .. } =
-                read_test_daemon_command(&mut reader, &mut write_half).await
-            {
-                inputs.push(String::from_utf8_lossy(&data).to_string());
-            }
-            let _ = write_half
-                .write_all(
-                    format!("{}\n", serde_json::to_string(&DaemonEvent::Ok).unwrap()).as_bytes(),
-                )
-                .await;
-            inputs
-        });
+        let daemon_server = spawn_live_session_daemon(listener, "task-merge", 2);
 
         let config = merge_test_config(unique, &daemon_dir);
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -3718,7 +3796,7 @@ mod human_review_merge_authorization {
 
         let response = super::super::router(Arc::new(super::super::AppState::new(config.clone())))
             .oneshot(
-                Request::post("/v1/tasks/task-review/actions/signal-merge-handoff")
+                Request::post("/v1/tasks/task-review/actions/queue-reviewed-pr")
                     .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
@@ -3735,7 +3813,17 @@ mod human_review_merge_authorization {
         .unwrap();
 
         let inputs = if expect_delivery {
-            daemon_server.await.unwrap()
+            daemon_server
+                .await
+                .unwrap()
+                .into_iter()
+                .filter_map(|command| match command {
+                    DaemonCommand::SubmitInputIfSession { data, .. } => {
+                        Some(String::from_utf8(data).unwrap())
+                    }
+                    _ => None,
+                })
+                .collect()
         } else {
             daemon_server.abort();
             Vec::new()
@@ -3783,7 +3871,8 @@ mod human_review_merge_authorization {
         assert!(decision_line.contains(&format!("reviewed-head={REVIEWED_HEAD}")));
         assert!(decision_line.contains("base=main@2222222222222222222222222222222222222222"));
         assert!(decision_line.contains("review-task=task-review"));
-        assert!(message.contains("HUMAN-AUTHORIZATION \"I reviewed it and authorize the merge.\""));
+        assert!(message.contains(&format!("HUMAN-AUTHORIZATION {INSTRUCTION:?}")));
+        assert!(decision_line.contains("origin=operator-relayed"));
         assert!(message.contains("PRODUCING-TASK task-producer machine=desktop-other"));
         assert!(message.contains("TRIAGE-RANK 2 triage-task=task-triage"));
         assert!(message.contains("RELATED-PR https://github.com/acme/repo/pull/78"));
@@ -3794,7 +3883,19 @@ mod human_review_merge_authorization {
             .unwrap()
             .expect("the decision is durable");
         assert_eq!(decision.head_sha, REVIEWED_HEAD);
-        assert_eq!(decision.origin, "operator");
+        assert_eq!(decision.origin, "operator-relayed");
+        assert_eq!(decision.action_text, INSTRUCTION);
+        assert_eq!(
+            decision.device_provenance,
+            Some(serde_json::json!({
+                "channel": "agent-session", "observedStageRunId": "run-review"
+            }))
+        );
+        assert_eq!(
+            db.count_task_inputs("task-review").unwrap(),
+            0,
+            "direct TUI speech is not an injected input"
+        );
         assert_eq!(decision.delivery_status, "delivered");
         assert_eq!(decision.merge_task_id.as_deref(), Some("task-merge"));
         // The approve post's one-handoff stamp answers a different question on
@@ -3928,7 +4029,7 @@ mod human_review_merge_authorization {
 
         // Nothing was written to the merge session: the fake daemon is aborted
         // without ever having been connected to.
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::CONFLICT);
         let db = Db::open(&config.db_path).unwrap();
         let count = db.count_test_human_review_decisions("task-review").unwrap();
         assert_eq!(count, 1, "a retry must not create a second authorization");

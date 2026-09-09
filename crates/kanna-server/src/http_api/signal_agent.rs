@@ -127,6 +127,46 @@ pub(super) async fn signal_merge_handoff(
         .map(Json)
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct QueueReviewedPrRequest {
+    review_context_version: i64,
+    head_sha: String,
+    instruction: String,
+    #[serde(default)]
+    summary: String,
+}
+
+/// An agent declares an explicit operator instruction in its review session.
+/// This is an audit declaration, not authentication of the person or caller.
+pub(super) async fn queue_reviewed_pr(
+    _access: PrivilegedTaskAccess,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+    Json(payload): Json<QueueReviewedPrRequest>,
+) -> Result<Json<SignalAgentResponse>, (axum::http::StatusCode, String)> {
+    let task_id = super::task_actions::resolve_task_id_for_mutation(&state, &task_id).await?;
+    deliver_human_review_merge_request(
+        state,
+        task_id,
+        crate::mobile_api::MergeHandoffRequest {
+            branch: None,
+            target: None,
+            pr_url: None,
+            summary: payload.summary,
+            human_review_decision: Some(crate::mobile_api::HumanReviewDecisionRequest {
+                review_context_version: payload.review_context_version,
+                head_sha: payload.head_sha,
+                action_text: payload.instruction,
+                device_provenance: None,
+            }),
+        },
+        true,
+    )
+    .await
+    .map(Json)
+}
+
 async fn signal_merge_handoff_impl(
     state: Arc<AppState>,
     task_id: String,
@@ -136,11 +176,11 @@ async fn signal_merge_handoff_impl(
     // Two callers, two contracts. An agent's request is an ordinary policy
     // message that Kanna does not attest; a human-review request carries a
     // durable decision this server records itself and the merge master reads
-    // back. They must not be able to impersonate one another, so the presence
-    // of the decision — a field no agent-facing surface can send — selects the
-    // path, and each validates only its own required shape.
+    // back. This retained API branch records a direct operator declaration;
+    // the separate queue-reviewed-pr tool records an honest relayed origin.
+    // The ordinary agent policy tool still exposes no decision fields.
     if payload.human_review_decision.is_some() {
-        return deliver_human_review_merge_request(state, task_id, payload).await;
+        return deliver_human_review_merge_request(state, task_id, payload, false).await;
     }
     let branch = required_handoff_field("branch", payload.branch.as_deref())?;
     let target = required_handoff_field("target", payload.target.as_deref())?;
@@ -281,12 +321,9 @@ async fn deliver_merge_handoff(
 
 /// Deliver a **human's** merge authorization for a reviewed pull request.
 ///
-/// This is the route the desktop and mobile "Queue for merge" control uses,
-/// and it is the only way a person's review decision reaches the merge
-/// singleton. It exists because the two agents on the human-assisted review
-/// path are deliberately denied merge authority — `pr-reviewer` may not
-/// approve or merge, `pr-triage` may not join or aggregate — and relaying an
-/// inferred verdict through either of them would quietly give it back.
+/// Shared by the conversation tool and the retained direct-decision API.
+/// The reviewer may relay an explicit instruction, never infer one from its
+/// review or the human's agreement. Triage still does not aggregate verdicts.
 ///
 /// Four things happen here that the ordinary agent path does not do:
 ///
@@ -300,7 +337,7 @@ async fn deliver_merge_handoff(
 ///    moved under the reviewer is refused, not merged from a stale decision.
 /// 3. **The decision is recorded before anything is delivered**, immutably and
 ///    idempotently per reviewed head, so the record of what a human authorized
-///    survives a delivery that fails, and a second click cannot become a
+///    survives a delivery that fails, and a repeated call cannot become a
 ///    second authorization.
 /// 4. **`merge_signaled_at` is left alone.** That stamp answers "does this
 ///    task still owe the approve post's one handoff?" — a different question,
@@ -310,15 +347,18 @@ async fn deliver_human_review_merge_request(
     state: Arc<AppState>,
     task_id: String,
     payload: crate::mobile_api::MergeHandoffRequest,
+    operator_relayed: bool,
 ) -> Result<SignalAgentResponse, (axum::http::StatusCode, String)> {
     let decision_request = payload
         .human_review_decision
         .clone()
         .expect("caller checked the decision is present");
-    let action_text = required_handoff_field(
+    required_handoff_field(
         "humanReviewDecision.actionText",
         Some(&decision_request.action_text),
     )?;
+    // Validate non-emptiness without trimming the quoted instruction.
+    let action_text = decision_request.action_text.clone();
     let claimed_head = required_handoff_field(
         "humanReviewDecision.headSha",
         Some(&decision_request.head_sha),
@@ -413,6 +453,19 @@ async fn deliver_human_review_merge_request(
                         ),
                     )
                 })?;
+            let provenance = if operator_relayed {
+                // This is the task's observed run, not proof the caller is
+                // that agent or that a human spoke. Direct TUI speech is not
+                // task_input and must never be fabricated into that ledger.
+                let run = db.latest_stage_run(&task_id)
+                    .map_err(|error| db_write_error("db error", error))?;
+                Some(serde_json::json!({
+                    "channel": "agent-session",
+                    "observedStageRunId": run.map(|run| run.id),
+                }))
+            } else {
+                decision_request.device_provenance.clone()
+            };
             let (decision, created) = db
                 .record_human_review_decision(crate::db::NewHumanReviewDecision {
                     task_id: &task_id,
@@ -427,8 +480,8 @@ async fn deliver_human_review_merge_request(
                     // ledger and revision origin use, and the same limit: it
                     // records who the caller said was acting, beside what the
                     // server can itself observe.
-                    origin: "operator",
-                    device_provenance: decision_request.device_provenance.as_ref(),
+                    origin: if operator_relayed { "operator-relayed" } else { "operator" },
+                    device_provenance: provenance.as_ref(),
                     source_machine_id: Some(&state.config.desktop_id),
                 })
                 .map_err(|error| db_write_error("db error", error))?;
@@ -443,6 +496,15 @@ async fn deliver_human_review_merge_request(
     // no request here that a retry could make more true.
     match decision.delivery_status.as_str() {
         "delivered" => {
+            if operator_relayed {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        "decision {} was already delivered; do not send this again",
+                        decision.id
+                    ),
+                ));
+            }
             log::info!(
                 "human review decision {} for {} was already delivered; not re-sending",
                 decision.id,
@@ -556,7 +618,12 @@ async fn deliver_human_review_merge_request(
 /// submits, so resending would put two authorizations in the merge master's
 /// session for one human decision.
 fn classify_delivery_failure(reason: &str) -> crate::db::ReviewDecisionDelivery {
-    if reason.contains("delivery_uncertain") || reason.contains("input_held_by_draft") {
+    // A ledger failure follows acknowledged delivery: even though recording
+    // failed, retrying would submit the same human authorization twice.
+    if reason.contains("delivery_uncertain")
+        || reason.contains("input_held_by_draft")
+        || reason.contains("task_input_record_failed")
+    {
         crate::db::ReviewDecisionDelivery::Uncertain
     } else {
         crate::db::ReviewDecisionDelivery::Failed
@@ -577,7 +644,7 @@ fn human_review_request_lines(
     task_id: &str,
 ) -> Vec<String> {
     let mut lines = vec![format!(
-        "HUMAN-REVIEW-DECISION {} reviewed-head={} base={}{} review-task={} machine={} decided-at={}",
+        "HUMAN-REVIEW-DECISION {} reviewed-head={} base={}{} review-task={} machine={} decided-at={} origin={}",
         decision.id,
         decision.head_sha,
         stored.context.base_ref,
@@ -590,6 +657,7 @@ fn human_review_request_lines(
         task_id,
         decision.source_machine_id.as_deref().unwrap_or("unknown"),
         decision.created_at,
+        decision.origin,
     )];
     lines.push(format!("HUMAN-AUTHORIZATION {:?}", decision.action_text));
     if let Some(producing) = stored.context.producing_task_id.as_deref() {

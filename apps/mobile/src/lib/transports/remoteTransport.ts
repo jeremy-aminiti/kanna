@@ -22,8 +22,6 @@ import type {
   RepoFileRange,
   RepoCommandCatalog,
   RunRepoCommandResponse,
-  HumanReviewDecisionRequest,
-  MergeHandoffSignalResponse,
   TaskActionResponse,
   TaskActivityResponse,
   TaskDiffContent,
@@ -862,21 +860,6 @@ export function createRemoteTransport({
         (localTaskId) =>
           `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/advance-stage`,
         { source: "operator" }
-      ),
-    // `requestTask`, not `requestTaskAction`: the merge singleton's answer is a
-    // signal response naming the merge task, which is a different id from the
-    // review task this was called on, so it must not be rewritten back to it.
-    queueReviewedPrForMerge: (
-      taskId: string,
-      decision: HumanReviewDecisionRequest,
-      summary: string
-    ) =>
-      requestTask<MergeHandoffSignalResponse>(
-        taskId,
-        "POST",
-        (localTaskId) =>
-          `/v1/tasks/${encodeURIComponent(localTaskId)}/actions/signal-merge-handoff`,
-        { summary, humanReviewDecision: decision }
       ),
     resumeTask: (taskId: string) =>
       requestTaskAction(

@@ -18,8 +18,6 @@ import { MOBILE_E2E_IDS } from "../e2eTestIds";
 import { LoadingText } from "../components/LoadingText";
 import { displayTaskId } from "../lib/api/taskIdentity";
 import type {
-  HumanReviewDecision,
-  HumanReviewDecisionRequest,
   RepoDirectoryListing,
   RepoFileRange,
   TaskDiffContent,
@@ -30,7 +28,6 @@ import type {
   TaskInputAttachment,
   TaskPort,
   TaskPreviewOpenResult,
-  TaskReviewContext,
   TaskSummary
 } from "../lib/api/types";
 import { isTaskBlocked, type BlockerTaskRef } from "../lib/api/taskIdentity";
@@ -147,27 +144,8 @@ interface TaskScreenProps {
   desktopSupportsAttachments?: boolean;
   terminalInputUnavailableReason?: TaskTerminalInputUnavailableReason | null;
   pendingTaskAction?: TaskStageAction | TaskCreationAction | null;
-  /**
-   * The selected task's pull-request review identity and latest human merge
-   * decision, when task detail has reported them. Absent means this task is
-   * not a pull-request review with a published PR, so no merge control is
-   * offered — the PR is never inferred from the task's title or branch.
-   */
-  reviewState?: {
-    taskId: string;
-    reviewContext: TaskReviewContext | null;
-    humanReviewDecision: HumanReviewDecision | null;
-  } | null;
   onBack(): boolean;
   onAdvanceTaskStage(): void;
-  /**
-   * Deliver this operator's merge authorization for the reviewed head. Called
-   * only after they confirm the exact sentence shown to them.
-   */
-  onQueueReviewedPrForMerge?(
-    decision: HumanReviewDecisionRequest,
-    summary: string
-  ): Promise<{ status: "delivered" } | { status: "failed"; message: string }>;
   onCloseTask(): void;
   onResolveTaskFileMentions(
     mentions: readonly TaskFileMentionInput[]
@@ -255,10 +233,8 @@ export function TaskScreen({
   desktopSupportsAttachments = false,
   terminalInputUnavailableReason = "terminal_detached",
   pendingTaskAction = null,
-  reviewState = null,
   onBack,
   onAdvanceTaskStage,
-  onQueueReviewedPrForMerge,
   onCloseTask,
   onResolveTaskFileMentions,
   onReadTaskFile,
@@ -569,7 +545,6 @@ export function TaskScreen({
    * server. A ref rather than state: it must gate the very next press, and a
    * render cannot be relied on to have happened in between.
    */
-  const mergeAuthorizationInFlightRef = useRef(false);
   // The composer is one multiline TextInput between a one-line minimum and a
   // five-line maximum, scrolling itself past that. Height is never set from
   // state, so nothing here measures content, defers a stale measurement, or
@@ -765,90 +740,6 @@ export function TaskScreen({
     taskCreationPhase === "idle" &&
     taskPreviewRouteAvailable &&
     previewPorts.length > 0;
-  /**
-   * The review identity for *this* task, at the head currently on screen.
-   *
-   * A decision recorded against an older head is deliberately not treated as
-   * covering this one: the pull request moved, and what the reviewer
-   * authorized is no longer what would be merged.
-   */
-  const activeReviewContext =
-    reviewState && reviewState.taskId === task.id
-      ? reviewState.reviewContext
-      : null;
-  const decisionForCurrentHead =
-    activeReviewContext &&
-    reviewState?.humanReviewDecision &&
-    reviewState.humanReviewDecision.headSha.toLowerCase() ===
-      activeReviewContext.headSha.toLowerCase()
-      ? reviewState.humanReviewDecision
-      : null;
-  const queueForMergeAvailable =
-    taskCreationPhase === "idle" &&
-    Boolean(onQueueReviewedPrForMerge) &&
-    activeReviewContext !== null &&
-    // Already delivered is done. `pending` and `uncertain` both mean the
-    // outcome is unknown and need a person to reconcile the merge session,
-    // not a second copy of the request.
-    (!decisionForCurrentHead || decisionForCurrentHead.deliveryStatus === "failed");
-
-  const confirmQueueForMerge = () => {
-    const context = activeReviewContext;
-    if (!context || !onQueueReviewedPrForMerge) {
-      return;
-    }
-    // A second press while the first is still in flight would record nothing
-    // new but would ask the server to deliver the same decision twice, and the
-    // merge master reads a duplicate as a second person authorizing the merge.
-    // The action menu has no pending state of its own — `isTaskActionPending`
-    // covers stage actions only — so the guard lives here.
-    if (mergeAuthorizationInFlightRef.current) {
-      return;
-    }
-    const actionText = `I reviewed ${context.prUrl} at ${context.headSha} and authorize the merge agent to merge it into ${context.baseRef} when safe.`;
-    const overlap =
-      context.relatedPrUrls && context.relatedPrUrls.length > 0
-        ? `\n\nOverlaps or stacks with: ${context.relatedPrUrls.join(", ")}.`
-        : "";
-    Alert.alert(
-      "Authorize merge",
-      `${actionText}\n\nThis does not submit a GitHub review, change labels, or close this review task.${overlap}`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Authorize",
-          onPress: () => {
-            if (mergeAuthorizationInFlightRef.current) {
-              return;
-            }
-            mergeAuthorizationInFlightRef.current = true;
-            void onQueueReviewedPrForMerge(
-              {
-                reviewContextVersion: context.version,
-                headSha: context.headSha,
-                actionText
-              },
-              `Human-reviewed ${context.prUrl}`
-            )
-              .then((result) => {
-                Alert.alert(
-                  result.status === "delivered"
-                    ? "Request delivered"
-                    : "Not delivered",
-                  result.status === "delivered"
-                    ? "The merge agent has your authorization. It decides when it is safe to merge."
-                    : result.message
-                );
-              })
-              .finally(() => {
-                mergeAuthorizationInFlightRef.current = false;
-              });
-          }
-        }
-      ]
-    );
-  };
-
   const openTaskActionMenu = () => {
     if (isTaskActionPending) {
       return;
@@ -857,7 +748,6 @@ export function TaskScreen({
       {
         mentionedFilesLabel: mentionedFilesActionLabel(activeMentionedFiles),
         ...(previewAvailable ? { previewAvailable: true } : {}),
-        ...(queueForMergeAvailable ? { queueForMergeAvailable: true } : {}),
         ...(taskCreationPhase !== "idle" ? { taskCreation: true } : {})
       },
       (action: TaskAction) => {
@@ -877,9 +767,6 @@ export function TaskScreen({
             break;
           case "view-diff":
             setDiffModalTaskId(task.id);
-            break;
-          case "queue-for-merge":
-            confirmQueueForMerge();
             break;
           case "advance-stage":
             onAdvanceTaskStage();

@@ -52,6 +52,7 @@ fn bundled_catalog_parses_and_declares_all_tools() {
             "kanna_create_task",
             "kanna_signal_agent",
             "kanna_signal_merge_handoff",
+            "kanna_queue_reviewed_pr",
             "kanna_send_task_input",
             "kanna_send_task_raw_input",
             "kanna_close_task",
@@ -622,6 +623,15 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "message": "MERGE task-1 -> main: ready"
             }),
+        ),
+        (
+            "kanna_queue_reviewed_pr",
+            json!({ "task_id": "review-1", "review_context_version": 4,
+                "head_sha": "abc", "instruction": "Queue this PR." }),
+            Method::Post,
+            ResponseKind::Json,
+            "/v1/tasks/review-1/actions/queue-reviewed-pr",
+            json!({ "reviewContextVersion": 4, "headSha": "abc", "instruction": "Queue this PR." }),
         ),
         (
             "kanna_signal_merge_handoff",
@@ -2617,4 +2627,49 @@ fn diagnostic_maps_to_a_body_field_on_subscribe_and_read_but_a_query_param_on_un
         "diagnostic must reach unsubscribe as a query parameter: {}",
         unsubscribe.path
     );
+}
+
+#[test]
+fn human_queue_tool_is_distinct_from_ordinary_policy_handoff() {
+    let catalog = bundled_catalog();
+    let policy = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_signal_merge_handoff")
+        .unwrap();
+    assert_eq!(
+        policy
+            .params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "machine_id",
+            "task_id",
+            "branch",
+            "target",
+            "pr_url",
+            "summary"
+        ]
+    );
+    let relay = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.name == "kanna_queue_reviewed_pr")
+        .unwrap();
+    for name in [
+        "task_id",
+        "review_context_version",
+        "head_sha",
+        "instruction",
+    ] {
+        assert!(relay
+            .params
+            .iter()
+            .any(|param| param.name == name && param.required));
+    }
+    assert!(!relay
+        .params
+        .iter()
+        .any(|param| param.name == "origin" || param.name == "device_provenance"));
 }

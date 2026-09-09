@@ -52,9 +52,13 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   repository and uses the ordinary singleton signal path to send the supplied
   task, PR, head, base, and summary. It does not interpret stage results,
   compare branch names with saved metadata, or attest approval eligibility.
-- **Human-reviewed merge authorization**: the same route, with a
-  `humanReviewDecision` body field the agent tool catalog deliberately does not
-  expose — only the desktop and mobile "Queue for merge" controls send it. Here
+- **Human-reviewed merge authorization**: `kanna_queue_reviewed_pr` calls
+  `/v1/tasks/{task_id}/actions/queue-reviewed-pr` with the exact reviewed head,
+  context version and verbatim operator instruction. It shares the existing
+  human-decision path; the retained `signal-merge-handoff` decision branch
+  still works. The conversation route declares `operator-relayed`, with the
+  observed latest stage-run id as corroboration, not verified human presence.
+  No desktop/mobile queue buttons remain. Here
   the server *does* bind the request: it derives the head and base from the
   task's stored `task_review_context` rather than from the caller, refuses a
   decision whose context version or head SHA has moved, and records an

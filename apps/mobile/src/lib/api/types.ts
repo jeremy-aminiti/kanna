@@ -450,30 +450,6 @@ export interface HumanReviewDecision {
   ownerDesktopId?: string | null;
 }
 
-/**
- * One operator's merge authorization, as the control collects it.
- *
- * It carries no pull-request identity of its own — the server derives that
- * from the task's stored review context — so a caller cannot confirm one PR
- * and queue another. What it does carry is what the operator was looking at,
- * which is how a decision taken against a head that has since moved is
- * refused instead of applied.
- */
-export interface HumanReviewDecisionRequest {
-  reviewContextVersion: number;
-  headSha: string;
-  actionText: string;
-}
-
-/** What the merge singleton answered when a human decision was handed to it. */
-export interface MergeHandoffSignalResponse {
-  /** The merge singleton task the request went to. */
-  taskId: string;
-  created: boolean;
-  /** The desktop whose lifecycle owns that merge task — not always this one. */
-  ownerDesktopId?: string | null;
-}
-
 export interface TaskDetail extends TaskSummary {
   workflowName?: string | null;
   stageTransition?: string | null;

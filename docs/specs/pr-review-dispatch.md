@@ -275,24 +275,29 @@ Three shapes were considered:
   It also contradicts triage's explicit contract — it does not join or
   aggregate — and it makes shipping depend on a dispatcher staying alive, which
   a closed triage session or an independently created review does not have.
-- **(b) The child tells the merge singleton directly.** Simpler, and it works
-  without triage. But it puts merge-signalling capability inside the one
-  session whose design point is that it has none, and turns "did the human seem
-  happy?" into an approval gate evaluated by an agent reading conversation.
-- **(c) The operator's own action in the desktop or mobile UI.** **Chosen.**
-  The agents brief, explain, and publish the PR's identity; a person presses a
-  control, and Kanna records their decision. Neither agent gains authority,
-  neither needs to be alive, and the record says a person decided.
+- **(b) The child relays an explicit instruction directly. Chosen after the
+  owner's 2026-09-09 correction.** The child carries a verbatim queue instruction
+  through a dedicated, head/version-pinned decision tool, not an inferred
+  verdict through the ordinary policy handoff. This works without triage and
+  records the honest declared origin `operator-relayed`.
+- **(c) A desktop/mobile queue button. Rejected by the owner.** The earlier UI
+  entry point required a control they do not want. Its durable decision and
+  delivery substrate stays; its buttons and action plumbing are removed.
 
 ### What the gesture is
 
-A **Queue for merge** control on the review task — a button in the desktop
-task panel, `Queue for Merge` in mobile's task action menu. It shows the pull
-request, the exact commit being authorized, any overlap or stack warnings
-triage found, and the sentence being confirmed:
+The operator tells the review agent to queue this reviewed PR in their live
+or resumed session. The agent calls `kanna_queue_reviewed_pr` once with
+`task_id`, `review_context_version`, `head_sha`, the operator's verbatim
+`instruction`, and an optional summary. It checks that the context still names
+the PR and commit the human reviewed. No confirmation round-trip: report the
+PR, exact head and outcome after acting. "Looks good", agreement, completion,
+idle, and the agent's verdict are never a queue instruction. There is no
+transcript or composer classifier and no fabricated `task_input` row.
 
-> I reviewed `<url>` at `<sha>` and authorize the merge agent to merge it into
-> `<base>` when safe.
+Desktop/mobile queue buttons and action plumbing are removed. Read-only review
+context and decision projections remain. Queueing needs the review conversation;
+`kanna_resume_task` recovers a stopped session, without a living triage parent.
 
 Advancing the stage is deliberately *not* this gesture. Advancing means "I am
 done looking", which on these workflows closes the task; making it also mean
@@ -316,11 +321,11 @@ claim:
   PR: it forks from `pull/<n>/head` into a local `pr/<n>` ref, so its branch and
   its fork point are both unmergeable local names, and a fork PR has no
   `origin/<headRefName>` at all. Refreshing it bumps a version.
-- **`human_review_decision`** — the authority. Created only by the UI control,
-  immutable, and unique per `(task, reviewed head)`, so a double click or a
+- **`human_review_decision`** — the authority. Recorded for the explicit instruction,
+  immutable, and unique per `(task, reviewed head)`, so a duplicate call or a
   retried request resolves to the same decision instead of a second
   authorization. It records the PR, the head and base it was taken against, the
-  exact confirmed sentence, the machine, and the time. Delivery outcome lives
+  verbatim instruction, the machine, and the time. Delivery outcome lives
   beside it, never inside it, so a redelivery never rewrites what was decided.
 
 The server refuses the request when the context version or head SHA the
@@ -330,9 +335,9 @@ not a decision inherited onto a commit nobody saw.
 
 ### What the merge master is told
 
-The existing `kanna_signal_merge_handoff` delivery surface, with the head and
+The catalog tool uses the existing human-decision delivery path, with the head and
 base derived server-side from the stored context rather than from the caller —
-so a request cannot name one PR in the confirmation and another on the wire.
+so a request cannot name one PR in the instruction and another on the wire.
 Under the compact `MERGE` line it carries `HUMAN-REVIEW-DECISION`,
 `HUMAN-AUTHORIZATION`, and optional `PRODUCING-TASK`, `TRIAGE-RANK` and
 `RELATED-PR` lines, which is what lets a merge master on another machine
@@ -355,13 +360,17 @@ Stated plainly, because it is the point:
   Close, a label, a generic `MERGE` message, or an agent reporting that its
   human seemed happy is not one, and the merge agent must read the durable
   record rather than infer or manufacture one.
-- The `operator` origin is **declared and unverified**, the same model
-  `task_input`'s source and `RequestRevisionRequest.origin` already use. Hiding
-  the field from the tool catalog is a product and audit boundary, not
-  isolation: a local agent runs as the same OS user and can reach the API. What
-  the row proves is that this decision, with this text, was recorded at this
-  time against this exact head. Resistance to a hostile same-user process would
-  need a separate human-presence mechanism and is not claimed here.
+- The conversation path stamps `operator-relayed`: an agent declares that the
+  operator explicitly instructed queueing and quotes their words. The server
+  stores `deviceProvenance: {channel: "agent-session", observedStageRunId}`
+  from the review task's latest run (null if absent). It does not authenticate
+  the caller as that run or prove human presence. The retained direct API
+  stamps `operator`. Both use the existing declared, unverified trust model;
+  no new authentication root or schema migration is introduced. Direct TUI
+  speech is never fabricated into the input ledger.
+- Delivered, pending and uncertain decisions refuse another conversation call;
+  a strict ledger failure after daemon acknowledgment is uncertain, never safe
+  to resend. The agent reports refusals without retrying or using another path.
 - This authorizes **queueing only**. It submits no GitHub approving review,
   takes nothing out of draft, and changes no labels — `kn:wip`, `kn:pr-ready`
   and `kn:claimed` stay repository workflow metadata, never approval evidence.

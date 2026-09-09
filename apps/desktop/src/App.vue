@@ -623,7 +623,6 @@ const modalLayerController = {
         :cloud-task="mainPanelIsCloudTask"
         :cloud-terminal-ref="mainPanelCloudTerminalRef"
         :request-revision="store.requestRevision"
-        :queue-reviewed-pr-for-merge="store.queueReviewedPrForMerge"
         @close-task="closeSelectedWorkspaceTask"
         @back="store.selectedItemId = null"
       />

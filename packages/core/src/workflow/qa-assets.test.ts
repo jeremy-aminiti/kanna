@@ -750,23 +750,27 @@ describe("QA workflow assets", () => {
     expect(scopeAnswer).not.toContain("docs/task-specs/");
   });
 
-  it("keeps the human's merge authorization out of the PR review agents' hands", () => {
+  it("permits explicit conversation relay without inferred approval", () => {
     const reviewer = readRepoPhrases(".kanna/agents/pr-reviewer/AGENT.md");
     const triage = readRepoPhrases(".kanna/agents/pr-triage/AGENT.md");
     const mergeAgent = readRepoPhrases(".kanna/agents/merge/AGENT.md");
 
-    // The whole point of this path: a person is the reviewer, and neither
-    // agent may carry their verdict to the merge queue. Relaying a decision is
-    // not a smaller version of holding the authority — it is holding it.
+    // Only the explicit queue instruction may be relayed; an agent verdict is never authority.
     for (const [name, body] of [
       ["pr-reviewer", reviewer],
       ["pr-triage", triage],
     ] as const) {
-      expect(body, name).toContain("Queue for merge");
+      expect(body, name).toContain("kanna_queue_reviewed_pr");
+      expect(body, name).not.toContain("Queue for merge");
       expect(body, name).toContain("kanna_signal_merge_handoff");
     }
     expect(reviewer).toContain("Do not approve or merge anything, ever");
-    expect(reviewer).toContain("do not treat agreement with your brief");
+    expect(reviewer).toContain("Never infer authorization");
+    expect(reviewer).toContain("quote their instruction verbatim");
+    expect(reviewer).toContain("Do not ask for another confirmation");
+    expect(reviewer).toContain("operator-relayed");
+    expect(reviewer).toContain("never fabricate one");
+    expect(reviewer).toContain("never retried automatically");
     expect(triage).toContain("Do not queue anything for merge");
     expect(triage).toContain("not** join, aggregate, or auto-close");
 

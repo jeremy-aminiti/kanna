@@ -439,10 +439,13 @@ two review paths and only the product one — `single-reviewer`,
 merge singleton. On the human-assisted path (`pr-review` dispatching
 `pr-review-single`) the *person* is the reviewer, and both agents are
 deliberately denied merge authority: `pr-reviewer` may not approve or merge,
-`pr-triage` may not join or aggregate. So the route to the merge queue is
-neither of them relaying a verdict — it is the operator's own **Queue for
-merge** control in desktop and mobile, which posts `humanReviewDecision` to
-`signal-merge-handoff`, a field absent from the tool catalog and `kanna-cli`.
+`pr-triage` may not join or aggregate. The operator explicitly tells the review
+agent to queue this PR; it calls `kanna_queue_reviewed_pr` once with the verbatim
+instruction and the exact reviewed head/context version. Agreement with a brief,
+completion, idle, and agent verdicts never authorize a call. The tool shares the
+existing decision/delivery path; plain `kanna_signal_merge_handoff` remains an
+ordinary agent policy request and creates no human decision. There are no queue
+buttons in desktop or mobile; their read-only decision projections remain.
 Two records back it: `task_review_context` is *candidate information about the
 forge* an agent publishes (which PR, which head commit — a review child forks
 from `pull/<n>/head` into a local `pr/<n>` ref and so names nothing mergeable),
@@ -450,9 +453,14 @@ and `human_review_decision` is the authority — immutable, unique per
 `(task, reviewed head)`, refused when the head or context version has moved.
 Advancing the stage is not this gesture and never becomes it: advancing means
 "done looking", and these workflows gain no `approve` post because its
-close-time backstop would make ordinary cleanup ship code. The `operator`
-origin is declared and unverified, exactly like `task_input`'s source; the
-decision authorizes queueing only and produces no GitHub approval or label
+close-time backstop would make ordinary cleanup ship code. The conversation
+route records `operator-relayed`, a declared and unverified origin, plus the
+verbatim instruction and the server-observed latest stage-run id as
+corroboration, not caller authentication. The retained direct API records
+`operator`. Never fabricate a `task_input` row for direct TUI speech. Duplicate,
+pending and uncertain delivery are not re-sent; a post-PTY ledger failure is
+uncertain too. A stopped review session must be resumed to continue queueing.
+The decision authorizes queueing only and produces no GitHub approval or label
 change. See `docs/kanna-server-boundary.md` and
 `docs/specs/pr-review-dispatch.md`.
 

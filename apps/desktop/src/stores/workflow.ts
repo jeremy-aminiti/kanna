@@ -14,10 +14,6 @@ export interface WorkflowApi {
   advanceStage: (taskId: string, options?: AdvanceStageOptions) => Promise<AdvanceStageResult>;
   requestRevision: (taskId: string, options: RequestRevisionOptions) => Promise<boolean>;
   rerunStage: (taskId: string) => Promise<void>;
-  queueReviewedPrForMerge: (
-    taskId: string,
-    options: QueueReviewedPrOptions,
-  ) => Promise<QueueReviewedPrResult>;
 }
 
 export type AdvanceStageResult = "advanced" | "ignored" | "failed";
@@ -28,26 +24,6 @@ export interface RequestRevisionOptions {
   prompt: string;
   metadata?: Record<string, unknown>;
 }
-
-/**
- * One operator's merge authorization for one reviewed pull request.
- *
- * `reviewContextVersion` and `headSha` are what they were *looking at* when
- * they confirmed. The server refuses the request if either has moved, so a PR
- * that changed under the reviewer needs a fresh read rather than inheriting a
- * decision taken on a commit nobody saw.
- */
-export interface QueueReviewedPrOptions {
-  reviewContextVersion: number;
-  headSha: string;
-  /** The exact sentence shown in the confirmation, stored verbatim. */
-  actionText: string;
-  summary: string;
-}
-
-export type QueueReviewedPrResult =
-  | { status: "delivered"; mergeTaskId: string; ownerDesktopId?: string | null }
-  | { status: "failed"; message: string };
 
 export function createWorkflowApi(context: StoreContext): WorkflowApi {
   const revisionRequestsInFlight = new Set<string>();
@@ -420,61 +396,11 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
     }
   }
 
-  /**
-   * Ask the repository's merge singleton to merge a pull request this operator
-   * has reviewed and authorized.
-   *
-   * This is the *human's* route to the merge queue, and it exists because the
-   * review agents deliberately have none: `pr-reviewer` may not approve or
-   * merge, and `pr-triage` may not aggregate verdicts. Relaying the decision
-   * through either would hand them the authority they are denied, so the
-   * gesture lives here, in a control only a person can press, and the server
-   * records it as an immutable decision pinned to the reviewed commit.
-   *
-   * It authorizes queueing only. It submits no GitHub review, changes no
-   * labels, and does not close the review task — finishing the read and
-   * authorizing the merge are separate acts.
-   */
-  async function queueReviewedPrForMerge(
-    taskId: string,
-    options: QueueReviewedPrOptions,
-  ): Promise<QueueReviewedPrResult> {
-    try {
-      const response = await postDesktopTaskAction(taskId, "signal-merge-handoff", {
-        summary: options.summary,
-        humanReviewDecision: {
-          reviewContextVersion: options.reviewContextVersion,
-          headSha: options.headSha,
-          actionText: options.actionText,
-        },
-      });
-      if (!response.ok) {
-        return { status: "failed", message: await response.text() };
-      }
-      const result = await response.json() as {
-        taskId: string;
-        ownerDesktopId?: string | null;
-      };
-      return {
-        status: "delivered",
-        mergeTaskId: result.taskId,
-        ownerDesktopId: result.ownerDesktopId ?? null,
-      };
-    } catch (error) {
-      console.error("[store] queueReviewedPrForMerge: server action failed:", error);
-      return {
-        status: "failed",
-        message: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
   return {
     loadWorkflow,
     loadAgent,
     advanceStage,
     requestRevision,
     rerunStage,
-    queueReviewedPrForMerge,
   };
 }
