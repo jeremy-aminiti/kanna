@@ -1031,9 +1031,134 @@ async fn merge_handoff_route_sends_an_ordinary_repo_policy_request() {
         vec![b"MERGE feature/head -> main [TASK task-source] [PR https://github.com/acme/repo/pull/51]: Ready for repository policy".to_vec()]
     );
 
+    // A same-machine singleton takes the local delivery path rather than the
+    // relay HTTP path. It must still leave the same durable instruction trail
+    // before the source task can emit `task.merge_signaled`.
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(db.count_task_inputs("task-merge").unwrap(), 1);
+    assert_eq!(
+        db.list_task_inputs("task-merge", 10).unwrap()[0].message,
+        "MERGE feature/head -> main [TASK task-source] [PR https://github.com/acme/repo/pull/51]: Ready for repository policy"
+    );
+    assert_eq!(merge_signal_event_count(&db, "task-source"), 1);
+    drop(db);
+
     let _ = std::fs::remove_file(socket_path);
     let _ = std::fs::remove_dir_all(daemon_dir);
     let _ = std::fs::remove_file(config.db_path);
+}
+
+#[tokio::test]
+async fn merge_handoff_does_not_signal_when_the_local_singleton_rejects_the_write() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, ErrorCode, Event as DaemonEvent};
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    let unique = format!("refused-merge-signal-{}", unique_test_suffix());
+    let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let daemon_server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+        assert!(matches!(
+            command,
+            DaemonCommand::SubmitInput { ref session_id, .. } if session_id == "merge-session"
+        ));
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::Error {
+                        code: Some(ErrorCode::WriteFailed),
+                        message: "merge master PTY refused the handoff".to_string(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let config = merge_test_config(&unique, &daemon_dir);
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo("repo-1", "Repo One").unwrap();
+    seed_approvable_source(&db, "task-source", "approve-source", 52);
+    db.insert_test_pipeline_item(
+        "task-merge",
+        "repo-1",
+        "Merge master",
+        Some("Merge Master"),
+        "in progress",
+        "2026-08-04T00:00:01Z",
+    )
+    .unwrap();
+    db.insert_stage_run(crate::db::NewStageRun {
+        id: "run-merge",
+        task_id: "task-merge",
+        stage: "in progress",
+        kind: "main",
+        agent: Some("merge"),
+        agent_provider: Some("codex"),
+        model: None,
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("merge-session"),
+        provider_session_id: None,
+        cwd: None,
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    drop(db);
+
+    let response = super::router(Arc::new(super::AppState::new(config.clone())))
+        .oneshot(
+            Request::post("/v1/tasks/task-source/actions/signal-merge-handoff")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "branch": "feature/refused",
+                        "target": "main",
+                        "summary": "This must not be recorded as handed off"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    daemon_server.await.unwrap();
+    let db = Db::open(&config.db_path).unwrap();
+    assert_eq!(db.count_task_inputs("task-merge").unwrap(), 0);
+    assert!(db.task_merge_signaled_at("task-source").unwrap().is_none());
+    assert_eq!(merge_signal_event_count(&db, "task-source"), 0);
+    drop(db);
+
+    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_dir_all(daemon_dir);
+    let _ = std::fs::remove_file(config.db_path);
+}
+
+fn merge_signal_event_count(db: &Db, task_id: &str) -> usize {
+    let head = db.latest_task_event_seq().unwrap();
+    db.list_task_events(
+        &crate::db::TaskEventScope::Tasks(vec![task_id.to_string()]),
+        0,
+        head,
+        200,
+    )
+    .unwrap()
+    .into_iter()
+    .filter(|event| event.event_type == "task.merge_signaled")
+    .count()
 }
 
 #[tokio::test]

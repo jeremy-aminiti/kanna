@@ -1,7 +1,7 @@
 use super::lan_trust::PrivilegedTaskAccess;
 use super::state::{db_write_error, AppState};
 use crate::config::Config;
-use crate::db::{Db, MergeSignalSource};
+use crate::db::{Db, MergeSignalSource, TaskInputSource};
 use crate::task_creator::{PrepareTaskError, SingletonAgentOverrides};
 use axum::extract::State;
 use axum::Json;
@@ -1047,6 +1047,39 @@ async fn signal_local_singleton(
             }
         });
     }
+    // Remote singletons receive this request through `/v1/tasks/{id}/input`,
+    // which appends the durable instruction record after the daemon accepts
+    // it. Keep the local shortcut on that same contract. In particular, the
+    // caller that records `task.merge_signaled` must not be told the handoff
+    // succeeded when the merge master's later workspace could not learn it
+    // from `task_input`.
+    let db_path = state.config.db_path.clone();
+    let task_id = running.task_id.clone();
+    let record_message = super::task_input::task_input_message(message).to_string();
+    tokio::task::spawn_blocking(move || {
+        let db = Db::open(&db_path)?;
+        db.record_task_input(&task_id, TaskInputSource::Unspecified, &record_message)
+    })
+    .await
+    .map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "terminal input reached singleton task {}, but recording it failed: {error}",
+                running.task_id
+            ),
+        )
+    })?
+    .map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "terminal input reached singleton task {}, but recording it failed: {error}",
+                running.task_id
+            ),
+        )
+    })?;
+    state.publish_state_changed(StateChangeScope::Tasks);
     Ok(SignalAgentResponse {
         task_id: running.task_id,
         created: false,
