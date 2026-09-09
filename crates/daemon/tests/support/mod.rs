@@ -2,3 +2,4 @@
 #![allow(dead_code)]
 
 pub mod previous_daemon;
+pub mod test_paths;

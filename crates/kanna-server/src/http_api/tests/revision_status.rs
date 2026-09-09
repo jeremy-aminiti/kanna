@@ -85,7 +85,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-branch-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-revision-branch");
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
@@ -125,7 +125,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         .unwrap()
         .success());
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-revision-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-revision-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -307,7 +307,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
     use tokio::sync::mpsc;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-loop-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-revision-loop");
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
     let pipeline_def = serde_json::json!({
@@ -383,7 +383,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         .success());
     super::publish_test_origin_main(&repo_root);
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-revision-loop-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-revision-loop-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -645,7 +645,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
     use tokio::net::UnixListener;
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-title-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-revision-title");
     init_test_git_repo(&repo_root);
     let kanna_dir = repo_root.join(".kanna");
     std::fs::create_dir_all(kanna_dir.join("workflows")).unwrap();
@@ -701,7 +701,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         .unwrap()
         .success());
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-revision-daemon-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-revision-daemon");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -931,7 +931,7 @@ fn setup_revision_budget_fixture_with_spent_rounds(
     spent_rounds: i64,
 ) -> RevisionBudgetFixture {
     let unique = format!("{label}-{}", super::unique_test_suffix());
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-revision-budget-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-revision-budget");
     init_test_git_repo(&repo_root);
     std::fs::write(
         repo_root.join(".kanna/workflows/budget.json"),
@@ -971,7 +971,7 @@ fn setup_revision_budget_fixture_with_spent_rounds(
         .unwrap()
         .success());
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-revision-budget-d-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-revision-budget-d");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);
@@ -1705,7 +1705,7 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
     const COMMIT_SUMMARY: &str = "committed 2 files for review";
 
     let unique = super::unique_test_suffix();
-    let repo_root = std::env::temp_dir().join(format!("kanna-http-prev-main-{unique}"));
+    let repo_root = crate::test_paths::unique_test_path("kanna-http-prev-main");
     init_test_git_repo(&repo_root);
     std::fs::create_dir_all(repo_root.join(".kanna/agents/implement")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/reviewer")).unwrap();
@@ -1774,7 +1774,7 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
         .unwrap()
         .success());
 
-    let daemon_dir = std::env::temp_dir().join(format!("kanna-http-prev-main-d-{unique}"));
+    let daemon_dir = crate::test_paths::unique_test_path("kanna-http-prev-main-d");
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);

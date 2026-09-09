@@ -1,6 +1,5 @@
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const releaseMocks = vi.hoisted(() => ({
@@ -22,6 +21,7 @@ vi.mock("../src/runtime/release", async (importOriginal) => {
 import { nodeCommandRunner } from "../src/runtime/process";
 import { loadReleaseEnvironment } from "../src/runtime/release-env";
 import { getTaskDefinition } from "../src/tasks/registry";
+import { kdTestScratchDir } from "./test-paths";
 
 interface Fixture {
   primary: string;
@@ -31,7 +31,7 @@ interface Fixture {
 }
 
 async function createFixture(): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), "kanna-release-tasks-"));
+  const root = await kdTestScratchDir("kanna-release-tasks-");
   const primary = join(root, "repo");
   const worktree = join(primary, ".kanna-worktrees", "task-123");
   const home = join(root, "home");

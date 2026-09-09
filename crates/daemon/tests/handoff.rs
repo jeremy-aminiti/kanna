@@ -754,12 +754,10 @@ fn request_snapshot(conn: &mut ClientConn, id: &str) -> SnapshotPayload {
     }
 }
 
+/// Under this process's test root: a test that panics or is killed before its
+/// `cleanup` runs leaves a tree the next run reclaims.
 fn test_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "kanna-handoff-test-{}-{}",
-        name,
-        std::process::id()
-    ))
+    support::test_paths::unique_test_path(&format!("kanna-handoff-test-{name}"))
 }
 
 fn cleanup(dir: &PathBuf) {

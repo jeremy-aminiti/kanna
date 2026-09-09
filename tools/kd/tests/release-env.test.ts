@@ -1,29 +1,20 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  stat,
-  symlink,
-  writeFile
-} from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import {
   loadReleaseEnvironment,
   writeMachineNotarizationSelectors
 } from "../src/runtime/release-env";
+import { kdTestScratchDir } from "./test-paths";
 
 async function createFixture(): Promise<{
   root: string;
   home: string;
   globalEnvPath: string;
 }> {
-  const root = await mkdtemp(join(tmpdir(), "kanna-release-env-"));
+  const root = await kdTestScratchDir("kanna-release-env-");
   const home = join(root, "home");
   const globalEnvPath = join(home, ".kanna", ".env.release.local");
   await mkdir(join(home, ".kanna"), { recursive: true });

@@ -38,6 +38,12 @@ export interface MobileOtaContext {
   runner: CommandRunner;
   request?: MobileOtaHttpRequest;
   validateOtaCertificate?: typeof validateMobileOtaCertificate;
+  /**
+   * Where a publish or rollback stages what it uploads. Defaults to the OS
+   * temp directory; a test points it at a fixture so it can prove the command
+   * left nothing behind.
+   */
+  scratchDir?: string;
 }
 
 export interface MobileOtaHttpRequestInput {
@@ -272,101 +278,112 @@ export async function executeMobileOtaPublishWithContext(
   }
   const runtimeVersion = await resolveMobileRuntimeVersion(context.repoRoot, kdEnvironmentName);
 
-  if (input.rollbackTo) {
-    const pointer = await writePointerFile({ updateId: input.rollbackTo, runtimeVersion });
-    const pointerObject = `ota/ios/${runtimeVersion}/channels/${identity.otaChannel}.json`;
+  // Everything the command stages for upload sits under one root that this
+  // call owns, so the root is gone when the call returns, however it returns.
+  // Each helper used to mkdtemp its own root in the shared temp directory and
+  // hand back a path inside it, which nothing reclaimed: every real publish
+  // and rollback left one behind.
+  const scratch = await mkdtemp(join(context.scratchDir ?? tmpdir(), "kanna-ota-"));
+  try {
+    if (input.rollbackTo) {
+      const pointer = await writePointerFile({ scratch, updateId: input.rollbackTo, runtimeVersion });
+      const pointerObject = `ota/ios/${runtimeVersion}/channels/${identity.otaChannel}.json`;
+      if (input.dryRun !== true) {
+        await mustRun(context.runner, "gcloud", [
+          "storage",
+          "cp",
+          pointer.path,
+          `gs://${identity.otaBucket}/${pointerObject}`,
+        ], context.repoRoot, context.env);
+      }
+      return {
+        ok: true,
+        message: (await observeMobileDevices(context, environment, identity.otaChannel, runtimeVersion, input.rollbackTo)).detail + "\n" + formatRollbackMessage({
+          dryRun: input.dryRun === true,
+          bucket: identity.otaBucket,
+          channel: identity.otaChannel,
+          runtimeVersion,
+          updateId: input.rollbackTo,
+          pointerObject,
+          relayManifestUrl: identity.relayUrl.replace(/^ws/, "http") + "/ota/manifest",
+        }),
+        data: { updateId: input.rollbackTo, runtimeVersion, channel: identity.otaChannel, pointerObject },
+      };
+    }
+
+    const distDir = join(context.repoRoot, "apps/mobile/dist");
+    await rm(distDir, { recursive: true, force: true });
+    const exportCommand = buildExpoExportCommand(context.repoRoot, environment, distDir);
+    await mustRun(
+      context.runner,
+      exportCommand.command,
+      exportCommand.args,
+      exportCommand.cwd ?? context.repoRoot,
+      { ...context.env, ...exportCommand.env }
+    );
+
+    const expoConfigBytes = await readExpoPublicConfig(
+      context.repoRoot,
+      environment,
+      context.runner,
+      context.env
+    );
+    const staged = await stageOtaUpdate({ scratch, distDir, expoConfigBytes, source });
+    const plan = await buildMobileOtaPublishPlan({
+      repoRoot: context.repoRoot,
+      environment,
+      distDir,
+      updateId: staged.updateId,
+      dryRun: input.dryRun === true,
+      source,
+    });
+    const pointer = await writePointerFile({
+      scratch,
+      updateId: plan.updateId,
+      runtimeVersion: plan.runtimeVersion,
+      source,
+    });
+
     if (input.dryRun !== true) {
+      const exists = await context.runner.run("gcloud", [
+        "storage",
+        "ls",
+        `gs://${plan.bucket}/${plan.updateObjectPrefix}/metadata.json`,
+      ], { cwd: context.repoRoot, env: context.env });
+      if (exists.exitCode !== 0) {
+        await mustRun(context.runner, "gcloud", [
+          "storage",
+          "rsync",
+          "--recursive",
+          staged.path,
+          `gs://${plan.bucket}/${plan.updateObjectPrefix}`,
+        ], context.repoRoot, context.env);
+      }
       await mustRun(context.runner, "gcloud", [
         "storage",
         "cp",
         pointer.path,
-        `gs://${identity.otaBucket}/${pointerObject}`,
+        `gs://${plan.bucket}/${plan.pointerObject}`,
       ], context.repoRoot, context.env);
     }
+
+    const devices = await observeMobileDevices(context, environment, plan.channel, plan.runtimeVersion, plan.updateId);
     return {
       ok: true,
-      message: (await observeMobileDevices(context, environment, identity.otaChannel, runtimeVersion, input.rollbackTo)).detail + "\n" + formatRollbackMessage({
-        dryRun: input.dryRun === true,
-        bucket: identity.otaBucket,
-        channel: identity.otaChannel,
-        runtimeVersion,
-        updateId: input.rollbackTo,
-        pointerObject,
-        relayManifestUrl: identity.relayUrl.replace(/^ws/, "http") + "/ota/manifest",
-      }),
-      data: { updateId: input.rollbackTo, runtimeVersion, channel: identity.otaChannel, pointerObject },
+      message: `${formatPublishMessage(plan)}\n${devices.detail}`,
+      data: {
+        updateId: plan.updateId,
+        runtimeVersion: plan.runtimeVersion,
+        channel: plan.channel,
+        bucket: plan.bucket,
+        dryRun: plan.dryRun,
+        devices,
+        source,
+      },
     };
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
   }
-
-  const distDir = join(context.repoRoot, "apps/mobile/dist");
-  await rm(distDir, { recursive: true, force: true });
-  const exportCommand = buildExpoExportCommand(context.repoRoot, environment, distDir);
-  await mustRun(
-    context.runner,
-    exportCommand.command,
-    exportCommand.args,
-    exportCommand.cwd ?? context.repoRoot,
-    { ...context.env, ...exportCommand.env }
-  );
-
-  const expoConfigBytes = await readExpoPublicConfig(
-    context.repoRoot,
-    environment,
-    context.runner,
-    context.env
-  );
-  const staged = await stageOtaUpdate({ distDir, expoConfigBytes, source });
-  const plan = await buildMobileOtaPublishPlan({
-    repoRoot: context.repoRoot,
-    environment,
-    distDir,
-    updateId: staged.updateId,
-    dryRun: input.dryRun === true,
-    source,
-  });
-  const pointer = await writePointerFile({
-    updateId: plan.updateId,
-    runtimeVersion: plan.runtimeVersion,
-    source,
-  });
-
-  if (input.dryRun !== true) {
-    const exists = await context.runner.run("gcloud", [
-      "storage",
-      "ls",
-      `gs://${plan.bucket}/${plan.updateObjectPrefix}/metadata.json`,
-    ], { cwd: context.repoRoot, env: context.env });
-    if (exists.exitCode !== 0) {
-      await mustRun(context.runner, "gcloud", [
-        "storage",
-        "rsync",
-        "--recursive",
-        staged.path,
-        `gs://${plan.bucket}/${plan.updateObjectPrefix}`,
-      ], context.repoRoot, context.env);
-    }
-    await mustRun(context.runner, "gcloud", [
-      "storage",
-      "cp",
-      pointer.path,
-      `gs://${plan.bucket}/${plan.pointerObject}`,
-    ], context.repoRoot, context.env);
-  }
-
-  const devices = await observeMobileDevices(context, environment, plan.channel, plan.runtimeVersion, plan.updateId);
-  return {
-    ok: true,
-    message: `${formatPublishMessage(plan)}\n${devices.detail}`,
-    data: {
-      updateId: plan.updateId,
-      runtimeVersion: plan.runtimeVersion,
-      channel: plan.channel,
-      bucket: plan.bucket,
-      dryRun: plan.dryRun,
-      devices,
-      source,
-    },
-  };
 }
 
 export async function executeMobileOtaStatusWithContext(
@@ -996,14 +1013,15 @@ async function readExpoPublicConfig(
   return Buffer.from(result.stdout);
 }
 
+/** Lays the update out under the caller's scratch root, which the caller removes. */
 async function stageOtaUpdate(input: {
+  scratch: string;
   distDir: string;
   expoConfigBytes: Buffer;
   source: ResolvedSourceRef;
 }): Promise<{ path: string; updateId: string }> {
   const stagedMetadata = await buildStagedExpoMetadata(input.distDir);
-  const stageRoot = await mkdtemp(join(tmpdir(), "kanna-ota-stage-"));
-  const output = join(stageRoot, stagedMetadata.updateId);
+  const output = join(input.scratch, stagedMetadata.updateId);
   await mkdir(join(output, "bundles"), { recursive: true });
   await mkdir(join(output, "assets"), { recursive: true });
 
@@ -1077,13 +1095,14 @@ async function buildStagedExpoMetadata(distDir: string): Promise<StagedExpoMetad
   };
 }
 
+/** Writes the channel pointer under the caller's scratch root, which the caller removes. */
 async function writePointerFile(input: {
+  scratch: string;
   updateId: string;
   runtimeVersion: string;
   source?: ResolvedSourceRef;
 }): Promise<{ path: string }> {
-  const dir = await mkdtemp(join(tmpdir(), "kanna-ota-pointer-"));
-  const path = join(dir, "channel.json");
+  const path = join(input.scratch, "channel.json");
   const pointer: OtaChannelPointer = {
     currentUpdateId: input.updateId,
     createdAt: new Date().toISOString(),
