@@ -137,6 +137,16 @@ static COMPANION_SERIALIZE_TEST_GATES: OnceLock<
 static COMPANION_CHANGED_SCAN_COUNTS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
 
 #[cfg(test)]
+struct CompanionScanCompletion {
+    count: AtomicUsize,
+    completed: Notify,
+}
+
+#[cfg(test)]
+static COMPANION_SCAN_COMPLETIONS: OnceLock<Mutex<HashMap<String, Arc<CompanionScanCompletion>>>> =
+    OnceLock::new();
+
+#[cfg(test)]
 fn companion_scan_test_key(db_path: &str, task_id: &str) -> String {
     serde_json::to_string(&(db_path, task_id)).expect("companion scan test key must serialize")
 }
@@ -161,6 +171,49 @@ fn changed_companion_scan_count(db_path: &str, task_id: &str) -> usize {
         .get(&companion_scan_test_key(db_path, task_id))
         .copied()
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+fn record_companion_scan_completion(db_path: &str, task_id: &str) {
+    let key = companion_scan_test_key(db_path, task_id);
+    let completion = COMPANION_SCAN_COMPLETIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(key)
+        .or_insert_with(|| {
+            Arc::new(CompanionScanCompletion {
+                count: AtomicUsize::new(0),
+                completed: Notify::new(),
+            })
+        })
+        .clone();
+    completion.count.fetch_add(1, Ordering::AcqRel);
+    completion.completed.notify_waiters();
+}
+
+#[cfg(test)]
+async fn wait_for_companion_scan_completion(db_path: &str, task_id: &str, expected: usize) {
+    let key = companion_scan_test_key(db_path, task_id);
+    let completion = COMPANION_SCAN_COMPLETIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(key)
+        .or_insert_with(|| {
+            Arc::new(CompanionScanCompletion {
+                count: AtomicUsize::new(0),
+                completed: Notify::new(),
+            })
+        })
+        .clone();
+    loop {
+        let notified = completion.completed.notified();
+        if completion.count.load(Ordering::Acquire) >= expected {
+            return;
+        }
+        notified.await;
+    }
 }
 
 #[cfg(test)]
@@ -445,6 +498,7 @@ pub(super) struct CompanionResources {
     attachment_slots: Arc<Semaphore>,
     retained_bytes: Arc<AtomicUsize>,
     retained_available: Arc<Notify>,
+    retained_byte_limit: usize,
     pending_bytes: Arc<AtomicUsize>,
 }
 
@@ -458,7 +512,18 @@ impl Default for CompanionResources {
             attachment_slots: Arc::new(Semaphore::new(MAX_RELAY_COMPANION_ATTACHMENTS)),
             retained_bytes: Arc::new(AtomicUsize::new(0)),
             retained_available: Arc::new(Notify::new()),
+            retained_byte_limit: MAX_RELAY_COMPANION_RETAINED_BYTES,
             pending_bytes: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl CompanionResources {
+    fn with_retained_byte_limit(retained_byte_limit: usize) -> Self {
+        Self {
+            retained_byte_limit,
+            ..Self::default()
         }
     }
 }
@@ -504,7 +569,13 @@ struct RetainedCompanionFrame {
 impl RetainedCompanionFrame {
     #[cfg(test)]
     fn try_new(frame: ServerFrame, total_retained_bytes: &Arc<AtomicUsize>) -> Option<Arc<Self>> {
-        Self::try_new_with_wakeup(frame, None, total_retained_bytes, None)
+        Self::try_new_with_wakeup(
+            frame,
+            None,
+            total_retained_bytes,
+            None,
+            MAX_RELAY_COMPANION_RETAINED_BYTES,
+        )
     }
 
     fn try_new_with_wakeup(
@@ -512,14 +583,10 @@ impl RetainedCompanionFrame {
         snapshot_includes_assets: Option<bool>,
         total_retained_bytes: &Arc<AtomicUsize>,
         retained_available: Option<Arc<Notify>>,
+        retained_byte_limit: usize,
     ) -> Option<Arc<Self>> {
         let retained_bytes = companion_frame_retained_bytes(&frame);
-        reserve_relay_bytes(
-            total_retained_bytes,
-            retained_bytes,
-            MAX_RELAY_COMPANION_RETAINED_BYTES,
-        )
-        .then(|| {
+        reserve_relay_bytes(total_retained_bytes, retained_bytes, retained_byte_limit).then(|| {
             Arc::new(Self {
                 frame: Arc::new(frame),
                 snapshot_includes_assets,
@@ -592,6 +659,7 @@ impl CompanionResources {
             CompanionScanRetention {
                 retained_bytes: Arc::clone(&self.retained_bytes),
                 retained_available: Arc::clone(&self.retained_available),
+                retained_byte_limit: self.retained_byte_limit,
             },
         );
         CompanionScanSubscription {
@@ -3951,6 +4019,7 @@ async fn stream_companion(
 struct CompanionScanRetention {
     retained_bytes: Arc<AtomicUsize>,
     retained_available: Arc<Notify>,
+    retained_byte_limit: usize,
 }
 
 fn spawn_companion_scan_source(
@@ -3965,6 +4034,7 @@ fn spawn_companion_scan_source(
     let CompanionScanRetention {
         retained_bytes,
         retained_available,
+        retained_byte_limit,
     } = retention;
     tokio::spawn(async move {
         let mut published = PublishedCompanionState::Never;
@@ -3996,6 +4066,8 @@ fn spawn_companion_scan_source(
                     ))
                 }
             };
+            #[cfg(test)]
+            record_companion_scan_completion(&db_path, &task_id);
             let mode_changed = {
                 let current_demand = asset_demand.borrow_and_update();
                 (*current_demand > 0) != include_assets
@@ -4050,6 +4122,7 @@ fn spawn_companion_scan_source(
                             snapshot_includes_assets,
                             &retained_bytes,
                             Some(Arc::clone(&retained_available)),
+                            retained_byte_limit,
                         ) {
                             frames.send_replace(Some(frame));
                             published = next_state;
@@ -4068,6 +4141,7 @@ fn spawn_companion_scan_source(
                                 None,
                                 &retained_bytes,
                                 Some(Arc::clone(&retained_available)),
+                                retained_byte_limit,
                             ) {
                                 frames.send_replace(Some(error));
                             }
@@ -6844,6 +6918,26 @@ mod tests {
             }
         }
 
+        fn activate_admission_bundle(worktree: &std::path::Path, session_id: &str) {
+            let session = worktree.join(".superpowers/brainstorm").join(session_id);
+            std::fs::create_dir_all(session.join("state")).unwrap();
+            std::fs::create_dir_all(session.join("content")).unwrap();
+            std::fs::write(session.join("state/server-info"), b"{}").unwrap();
+            std::fs::write(
+                session.join("content/screen.html"),
+                b"<main>companion</main>",
+            )
+            .unwrap();
+            let asset = vec![0_u8; 1024];
+            for index in 0..4 {
+                std::fs::write(
+                    session.join("content").join(format!("asset-{index}.png")),
+                    &asset,
+                )
+                .unwrap();
+            }
+        }
+
         async fn serve(&self) -> String {
             serve_router(crate::http_api::router(Arc::new(AppState::new(
                 self.config.clone(),
@@ -7801,8 +7895,8 @@ mod tests {
     #[tokio::test]
     async fn assetful_companion_stream_skips_retained_assetless_snapshot_during_upgrade() {
         let fixture = KspCompanionFixture::new("stream-demand-upgrade");
-        KspCompanionFixture::activate_maximum_bundle(&fixture.worktree, "session-1");
-        let resources = CompanionResources::default();
+        KspCompanionFixture::activate_admission_bundle(&fixture.worktree, "session-1");
+        let resources = CompanionResources::with_retained_byte_limit(16 * 1024);
         let db_path = fixture.db_path.to_string_lossy().to_string();
         let mut assetless = resources.subscribe(db_path.clone(), "task-1".into(), false);
         tokio::time::timeout(Duration::from_secs(10), assetless.frames.changed())
@@ -7842,14 +7936,15 @@ mod tests {
         let fixture = KspCompanionFixture::new("retained-admission-retry");
         let second_worktree = fixture.add_task("task-2");
         let third_worktree = fixture.add_task("task-3");
-        KspCompanionFixture::activate_maximum_bundle(&fixture.worktree, "session-1");
-        KspCompanionFixture::activate_maximum_bundle(&second_worktree, "session-2");
-        KspCompanionFixture::activate_maximum_bundle(&third_worktree, "session-3");
+        KspCompanionFixture::activate_admission_bundle(&fixture.worktree, "session-1");
+        KspCompanionFixture::activate_admission_bundle(&second_worktree, "session-2");
+        KspCompanionFixture::activate_admission_bundle(&third_worktree, "session-3");
 
-        let resources = CompanionResources::default();
+        let resources = CompanionResources::with_retained_byte_limit(16 * 1024);
         let db_path = fixture.db_path.to_string_lossy().to_string();
         let mut subscriptions = Vec::new();
         let mut snapshots = 0;
+        let mut accepted_task_ids = Vec::new();
         let mut resource_errors = 0;
         let task_ids = ["task-1", "task-2", "task-3"];
         let mut rejected_index = None;
@@ -7865,7 +7960,10 @@ mod tests {
                 .as_deref()
                 .map(|frame| frame.frame.as_ref())
             {
-                Some(ServerFrame::CompanionSnapshot { .. }) => snapshots += 1,
+                Some(ServerFrame::CompanionSnapshot { .. }) => {
+                    snapshots += 1;
+                    accepted_task_ids.push(task_id);
+                }
                 Some(ServerFrame::CompanionError { code, .. })
                     if code == "companion_resource_limit" =>
                 {
@@ -7879,7 +7977,14 @@ mod tests {
         assert_eq!(snapshots, 2);
         assert_eq!(resource_errors, 1);
 
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        for task_id in accepted_task_ids {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                wait_for_companion_scan_completion(&db_path, task_id, 2),
+            )
+            .await
+            .expect("accepted source should finish its next scan cycle");
+        }
         for task_id in task_ids {
             assert_eq!(
                 changed_companion_scan_count(&db_path, task_id),
@@ -7925,11 +8030,11 @@ mod tests {
         let fixture = KspCompanionFixture::new("admission-demand-churn");
         let second_worktree = fixture.add_task("task-2");
         let third_worktree = fixture.add_task("task-3");
-        KspCompanionFixture::activate_maximum_bundle(&fixture.worktree, "session-1");
-        KspCompanionFixture::activate_maximum_bundle(&second_worktree, "session-2");
-        KspCompanionFixture::activate_maximum_bundle(&third_worktree, "session-3");
+        KspCompanionFixture::activate_admission_bundle(&fixture.worktree, "session-1");
+        KspCompanionFixture::activate_admission_bundle(&second_worktree, "session-2");
+        KspCompanionFixture::activate_admission_bundle(&third_worktree, "session-3");
 
-        let resources = CompanionResources::default();
+        let resources = CompanionResources::with_retained_byte_limit(16 * 1024);
         let db_path = fixture.db_path.to_string_lossy().to_string();
         let mut first = resources.subscribe(db_path.clone(), "task-1".into(), true);
         tokio::time::timeout(Duration::from_secs(10), first.frames.changed())
