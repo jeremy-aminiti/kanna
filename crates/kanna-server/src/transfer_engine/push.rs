@@ -189,6 +189,7 @@ pub async fn push_task(
         Err(Err(TerminalPush(reason))) => {
             report_terminal_push(state, work, request, &reason)?;
             log::error!("refused to push a task the source cannot ship: {reason}");
+            report_refusal_to_requester(state, request, &reason).await;
             Ok(())
         }
     }
@@ -232,6 +233,53 @@ pub(super) fn report_terminal_push(
     db.fail_outgoing_task_transfer(&transfer_id, reason)
         .map_err(|error| format!("db error: {error}"))?;
     Ok(())
+}
+
+/// Tells the machine that asked for this task that it is not coming.
+///
+/// A push scheduled by a *pull* is the one case where the operator watching for
+/// the task is on the other machine, and a refusal there is silent: the pull
+/// was answered synchronously with a request id minutes earlier, so nothing
+/// carries the outcome back. Without this the requester has no transfer record
+/// at all — `kanna_task_transfers` answers 404 and the UI shows nothing, which
+/// is what "it doesn't seem to be working" looked like on 2026-09-08.
+///
+/// Best effort, and deliberately not a failure of anything: the refusal is
+/// already durably recorded here, and an unreachable requester (or one running
+/// a build without this request) must not turn a refusal into retried work.
+pub(super) async fn report_refusal_to_requester(
+    state: &Arc<AppState>,
+    request: &Value,
+    reason: &str,
+) {
+    // Only a pull carries these: an operator's own push already reports its
+    // refusal on the machine that started it.
+    let (Some(requester_peer_id), Some(pull_request_id), Some(source_task_id)) = (
+        string_field(request, "requester_peer_id"),
+        string_field(request, "request_id"),
+        string_field(request, "source_task_id"),
+    ) else {
+        return;
+    };
+    let mut params = serde_json::json!({
+        "requesterPeerId": requester_peer_id,
+        "sourceTaskId": source_task_id,
+        "pullRequestId": pull_request_id,
+        "reason": reason,
+    });
+    if let Some(transport) = string_field(request, "transport") {
+        params["transport"] = Value::String(transport);
+    }
+    if let Err(error) = state
+        .transfer_sidecar()
+        .control("report-task-pull-refusal", params)
+        .await
+    {
+        log::error!(
+            "could not tell {requester_peer_id} that its pull of {source_task_id} was refused; \
+             that machine has no record of the attempt: {error}"
+        );
+    }
 }
 
 /// `Err(Ok(_))` is retriable; `Err(Err(_))` is terminal.

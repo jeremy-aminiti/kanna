@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 const TASK_TRANSFER_COLUMNS: &str = "SELECT id, direction, status, source_peer_id, target_peer_id,
             source_desktop_id, target_desktop_id, source_task_id,
             local_task_id, started_at, completed_at, error, payload_json,
-            claim_owner_token, claim_expires_at
+            claim_owner_token, claim_expires_at, dismissed_at
      FROM task_transfer";
 
 /// Mirrors `idx_task_transfer_active_outgoing_source` (migration
@@ -34,6 +34,7 @@ fn read_task_transfer(row: &rusqlite::Row<'_>) -> Result<TaskTransfer, rusqlite:
         payload_json: row.get(12)?,
         claim_owner_token: row.get(13)?,
         claim_expires_at: row.get(14)?,
+        dismissed_at: row.get(15)?,
     })
 }
 
@@ -79,6 +80,10 @@ pub struct TaskTransfer {
     pub payload_json: Option<String>,
     pub claim_owner_token: Option<String>,
     pub claim_expires_at: Option<String>,
+    /// When the operator acknowledged a `failed` transfer. Reporting stops
+    /// there: nothing else ever retires a failure, because the move that would
+    /// have replaced it is the one that did not happen.
+    pub dismissed_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -481,6 +486,24 @@ impl Db {
              WHERE id = ? AND direction = 'outgoing'
                AND status NOT IN ('completed', 'rejected', 'failed')",
             (reason, transfer_id),
+        )?;
+        Ok(rows_affected == 1)
+    }
+
+    /// The operator has read a failed transfer, so stop reporting it on the
+    /// task.
+    ///
+    /// Only a `failed` row can be dismissed: an in-flight transfer is the
+    /// current truth about the task and hiding it would leave the move
+    /// invisible. The row itself survives — `list_task_transfers` and
+    /// `kanna_task_transfers` still answer "where has this been?" with it —
+    /// because dismissal is about the marker, not about the record.
+    pub fn dismiss_failed_task_transfer(&self, transfer_id: &str) -> Result<bool, rusqlite::Error> {
+        let rows_affected = self.conn.execute(
+            "UPDATE task_transfer
+             SET dismissed_at = datetime('now')
+             WHERE id = ? AND status = 'failed' AND dismissed_at IS NULL",
+            [transfer_id],
         )?;
         Ok(rows_affected == 1)
     }

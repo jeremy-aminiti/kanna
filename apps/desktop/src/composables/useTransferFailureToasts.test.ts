@@ -1,6 +1,7 @@
 import { nextTick, ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
 
+import type { TransferAlert } from "../stores/state";
 import type { PipelineItem } from "../types/kanna";
 import { useTransferFailureToasts } from "./useTransferFailureToasts";
 
@@ -78,6 +79,61 @@ describe("useTransferFailureToasts", () => {
     ];
     await nextTick();
 
+    expect(toastError).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The 2026-09-08 report: a pull refused by the source told the machine that
+   * asked for it nothing at all. There is no task here to carry the failure —
+   * nothing arrived and nothing will — so it arrives as a transfer alert, and
+   * it has to reach the operator who started the move.
+   */
+  it("announces a pull the other machine refused, naming the task asked for", async () => {
+    const items = ref<PipelineItem[]>([]);
+    const alerts = ref<TransferAlert[]>([]);
+    const toastError = vi.fn();
+    useTransferFailureToasts(
+      items,
+      toastError,
+      () => "Task transfer failed",
+      alerts,
+      (taskId) => `The other machine will not send task ${taskId}`,
+    );
+
+    alerts.value = [
+      {
+        transferId: "refused-pull-peer-a-pull-1",
+        direction: "incoming",
+        sourceTaskId: "afed27d1",
+        sourcePeerId: "peer-a",
+        error: "task afed27d1 resumes codex session 5a2eb492 but its rollout could not be found",
+      },
+    ];
+    await nextTick();
+
+    expect(toastError).toHaveBeenCalledTimes(1);
+    expect(toastError.mock.calls[0][0]).toContain("afed27d1");
+    expect(toastError.mock.calls[0][0]).toContain("rollout could not be found");
+
+    // Every snapshot carries the alert until it is dismissed; it is news once.
+    alerts.value = [...alerts.value];
+    await nextTick();
+    expect(toastError).toHaveBeenCalledTimes(1);
+  });
+
+  it("says nothing about an alert the source gave no reason for", async () => {
+    const alerts = ref<TransferAlert[]>([
+      { transferId: "refused-pull-1", direction: "incoming", sourceTaskId: "t-1", error: "  " },
+    ]);
+    const toastError = vi.fn();
+    useTransferFailureToasts(
+      ref<PipelineItem[]>([]),
+      toastError,
+      () => "Task transfer failed",
+      alerts,
+      (taskId) => `The other machine will not send task ${taskId}`,
+    );
+    await nextTick();
     expect(toastError).not.toHaveBeenCalled();
   });
 });

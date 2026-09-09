@@ -237,7 +237,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "067_remove_input_hold_state");
+    assert_eq!(latest_migration, "068_task_transfer_dismissed_at");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -798,15 +798,9 @@ fn snapshot_reports_a_failed_transfer_but_prefers_one_still_in_flight() {
         "2026-08-06 00:00:00",
     )
     .expect("insert task");
-    db.insert_test_task_transfer_with_desktops(
-        "transfer-failed-outgoing",
-        "outgoing",
-        "failed",
-        Some("task-stranded"),
-        Some("desktop-a"),
-        Some("desktop-b"),
-    )
-    .expect("insert failed outgoing transfer");
+    // The completed move is recorded first: an *earlier* success says nothing
+    // about a failure that came after it, so this still pins "completed is
+    // never reported" without colliding with the retirement rule below.
     db.insert_test_task_transfer_with_desktops(
         "transfer-completed-outgoing",
         "outgoing",
@@ -816,14 +810,23 @@ fn snapshot_reports_a_failed_transfer_but_prefers_one_still_in_flight() {
         Some("desktop-b"),
     )
     .expect("insert completed outgoing transfer");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-failed-outgoing",
+        "outgoing",
+        "failed",
+        Some("task-stranded"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert failed outgoing transfer");
     for (id, started_at, completed_at) in [
         (
-            "transfer-failed-outgoing",
+            "transfer-completed-outgoing",
             "2026-08-06 00:01:00",
             Some("2026-08-06 00:02:00"),
         ),
         (
-            "transfer-completed-outgoing",
+            "transfer-failed-outgoing",
             "2026-08-06 00:03:00",
             Some("2026-08-06 00:04:00"),
         ),
@@ -867,6 +870,151 @@ fn snapshot_reports_a_failed_transfer_but_prefers_one_still_in_flight() {
     let item = &snapshot.entries[0].items[0];
     assert_eq!(item.transfer_id.as_deref(), Some("transfer-retry-outgoing"));
     assert_eq!(item.transfer_status.as_deref(), Some("streaming"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// The owner-reported stuck marker.
+///
+/// Nothing ever retired a transfer failure: the move that would have replaced
+/// it is the one that did not happen, so the task carried the red marker for
+/// the rest of its life with no way to see why or clear it. Two things retire
+/// one now — the operator reading it, and a later move of the same task
+/// succeeding.
+#[test]
+fn a_failed_transfer_stops_marking_its_task_once_dismissed_or_superseded() {
+    let path = Db::test_db_path("snapshot-dismissed-task-transfer");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Kanna").expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-stranded",
+        "repo-1",
+        "Transfer that broke",
+        None,
+        "in progress",
+        "2026-09-08 00:00:00",
+    )
+    .expect("insert task");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-failed",
+        "outgoing",
+        "failed",
+        Some("task-stranded"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert failed transfer");
+
+    let reported = |db: &Db| {
+        db.ui_snapshot().expect("snapshot").entries[0].items[0]
+            .transfer_status
+            .clone()
+    };
+    assert_eq!(reported(&db).as_deref(), Some("failed"));
+
+    // Dismissal only ever applies to a failure; an in-flight move is the
+    // current truth about the task and hiding it would lose the move.
+    assert!(db
+        .dismiss_failed_task_transfer("transfer-failed")
+        .expect("dismiss"));
+    assert!(
+        !db.dismiss_failed_task_transfer("transfer-failed")
+            .expect("repeat dismiss"),
+        "a repeat dismissal reports that it changed nothing"
+    );
+    assert_eq!(reported(&db), None);
+
+    // …and a later move that succeeded answers the failure on its own.
+    db.insert_test_pipeline_item(
+        "task-retried",
+        "repo-1",
+        "Transfer that broke, then worked",
+        None,
+        "in progress",
+        "2026-09-08 00:00:00",
+    )
+    .expect("insert retried task");
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-failed-import",
+        "incoming",
+        "failed",
+        Some("task-retried"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert failed import");
+    let failed_now = db.ui_snapshot().expect("snapshot").entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task-retried")
+        .and_then(|item| item.transfer_status.clone());
+    assert_eq!(failed_now.as_deref(), Some("failed"));
+
+    db.insert_test_task_transfer_with_desktops(
+        "transfer-completed-import",
+        "incoming",
+        "completed",
+        Some("task-retried"),
+        Some("desktop-a"),
+        Some("desktop-b"),
+    )
+    .expect("insert completed import");
+    let after_success = db.ui_snapshot().expect("snapshot").entries[0]
+        .items
+        .iter()
+        .find(|item| item.id == "task-retried")
+        .and_then(|item| item.transfer_status.clone());
+    assert_eq!(after_success, None);
+
+    let _ = std::fs::remove_file(path);
+}
+
+/// A pull the source refuses belongs to no task on the machine that asked for
+/// it — nothing arrived and nothing will — so it rides the snapshot on its
+/// own. Without this the requester's window had nothing at all to show.
+#[test]
+fn a_failed_transfer_with_no_local_task_is_reported_as_a_snapshot_alert() {
+    let path = Db::test_db_path("snapshot-transfer-alerts");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Kanna").expect("insert repo");
+    db.insert_task_transfer(&crate::db::NewTaskTransfer {
+        id: "refused-pull-peer-a-pull-1".into(),
+        direction: "incoming".into(),
+        status: "failed".into(),
+        source_peer_id: Some("peer-a".into()),
+        target_peer_id: None,
+        source_desktop_id: None,
+        target_desktop_id: None,
+        source_task_id: Some("afed27d1".into()),
+        local_task_id: None,
+        error: Some("its rollout could not be found under ~/.codex/sessions".into()),
+        payload_json: None,
+    })
+    .expect("insert refusal");
+
+    let alerts = db.ui_snapshot().expect("snapshot").transfer_alerts;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].source_task_id.as_deref(), Some("afed27d1"));
+    assert!(alerts[0]
+        .error
+        .as_deref()
+        .is_some_and(|reason| reason.contains("rollout could not be found")));
+
+    // The record survives dismissal — `list_task_transfers` still answers
+    // "where has this been?" — but it stops being news.
+    assert!(db
+        .dismiss_failed_task_transfer("refused-pull-peer-a-pull-1")
+        .expect("dismiss"));
+    assert!(db
+        .ui_snapshot()
+        .expect("snapshot")
+        .transfer_alerts
+        .is_empty());
+    assert_eq!(
+        db.list_task_transfers("afed27d1").expect("list").len(),
+        1,
+        "a dismissed refusal is still on the record"
+    );
 
     let _ = std::fs::remove_file(path);
 }

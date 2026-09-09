@@ -366,9 +366,12 @@ fn credential_status(id_token: &str, now_secs: i64) -> (String, Option<i64>, Opt
             "credential_expired".to_string(),
             Some(expires_at),
             Some(format!(
-                "the cloud credential the desktop pushed for this machine expires in {}s; the \
-                 signed-in desktop app refreshes it when it reconciles machines or a person \
-                 starts a transfer from the UI",
+                "the cloud credential *this* machine dials out with expires in {}s. It says \
+                 nothing about transfers arriving here, which are dialled with the other \
+                 machine's credential, so a pull that just landed does not make this route \
+                 usable. Only the signed-in desktop app can mint a new one, and it does so when \
+                 it reconciles machines or when a person starts a transfer from its UI — a \
+                 credential can therefore sit expired while that app is open and healthy",
                 expires_at - now_secs
             )),
         );

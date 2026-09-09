@@ -48,6 +48,12 @@ const emit = defineEmits<{
   (e: "rename-repo", repoId: string, name: string): void;
   (e: "hide-repo", repoId: string): void;
   (e: "rename-done"): void;
+  /**
+   * The operator has read a failed transfer. Nothing else ever retires one —
+   * the move that would have replaced it is the one that did not happen — so
+   * without this the task wears the marker for the rest of its life.
+   */
+  (e: "dismiss-transfer-failure", transferId: string): void;
 }>();
 
 interface DraggableChange<T> {
@@ -213,7 +219,13 @@ function itemTitle(item: SidebarTaskItem): string {
 
 function itemTooltip(item: SidebarTaskItem): string | undefined {
   const marker = transferMarker(item);
-  return marker ? `${itemTitle(item)} — ${marker.label}` : itemTitle(item);
+  if (!marker) return itemTitle(item);
+  // The reason belongs in the row's own tooltip, not only the glyph's: an
+  // operator hovering a task that will not move is asking why, and "Transfer
+  // failed" on its own is what left one unreadable for a day.
+  return [`${itemTitle(item)} — ${marker.label}`, marker.reason]
+    .filter((part): part is string => Boolean(part))
+    .join(": ");
 }
 
 function isRemoteTask(item: SidebarTaskItem): boolean {
@@ -240,6 +252,10 @@ interface TransferMarker {
   state: TransferDisplayState;
   glyph: string;
   label: string;
+  /** Why the move broke. Present for `failed`, when the engine recorded one. */
+  reason?: string;
+  /** The failed transfer the operator would be acknowledging. */
+  transferId?: string;
 }
 
 /**
@@ -261,6 +277,8 @@ const transferMarkers = computed<ReadonlyMap<string, TransferMarker>>(() => {
         state: "failed",
         glyph: "⇄✗",
         label: t("sidebar.transferFailedTaskTooltip"),
+        reason: item.transfer_error?.trim() || undefined,
+        transferId: item.transfer_id ?? undefined,
       });
     }
   }
@@ -269,6 +287,28 @@ const transferMarkers = computed<ReadonlyMap<string, TransferMarker>>(() => {
 
 function transferMarker(item: SidebarTaskItem): TransferMarker | undefined {
   return transferMarkers.value.get(item.slot_id);
+}
+
+/** The marker's own tooltip: the reason, when there is one. */
+function transferMarkerTitle(item: SidebarTaskItem): string | undefined {
+  const marker = transferMarker(item);
+  if (!marker) return undefined;
+  const detail = marker.reason ? `${marker.label}: ${marker.reason}` : marker.label;
+  return marker.state === "failed"
+    ? `${detail} — ${t("sidebar.dismissTransferFailure")}`
+    : detail;
+}
+
+/**
+ * Only a *failure* is dismissible, so only a failure swallows the click. A
+ * transfer still in flight keeps the marker inert and lets the click select
+ * the row it sits on, the same as any other part of the title.
+ */
+function onTransferMarkerClick(event: MouseEvent, item: SidebarTaskItem): void {
+  const marker = transferMarker(item);
+  if (marker?.state !== "failed" || !marker.transferId) return;
+  event.stopPropagation();
+  emit("dismiss-transfer-failure", marker.transferId);
 }
 
 function isReadyTask(item: SidebarTaskItem | null | undefined): item is ReadySidebarTaskItem {
@@ -794,7 +834,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     }"
                     :title="itemTooltip(row.item)"
                   >
-                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label" :title="transferMarkerTitle(row.item)" @click="onTransferMarkerClick($event, row.item)">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                   <button
                     v-if="canDetachSubtask(row)"
                     type="button"
@@ -903,7 +943,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                       }"
                       :title="itemTooltip(row.item)"
                     >
-                      <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                      <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label" :title="transferMarkerTitle(row.item)" @click="onTransferMarkerClick($event, row.item)">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                     <button
                       v-if="canDetachSubtask(row)"
                       type="button"
@@ -968,7 +1008,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                     }"
                     :title="itemTooltip(row.item)"
                   >
-                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
+                    <span v-if="transferMarker(row.item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(row.item)?.state}`" :aria-label="transferMarker(row.item)?.label" :title="transferMarkerTitle(row.item)" @click="onTransferMarkerClick($event, row.item)">{{ transferMarker(row.item)?.glyph }} </span><span v-if="isRemoteTask(row.item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(row.item) }}</span>
                   <span
                     v-if="row.item.task_id && blockerNames?.[row.item.task_id]"
                     class="blocked-by-text"
@@ -1029,7 +1069,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
                   }"
                   :title="itemTooltip(item)"
                 >
-                  <span v-if="transferMarker(item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(item)?.state}`" :aria-label="transferMarker(item)?.label">{{ transferMarker(item)?.glyph }} </span><span v-if="isRemoteTask(item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(item) }}</span>
+                  <span v-if="transferMarker(item)" class="transfer-task-marker" :class="`transfer-task-marker-${transferMarker(item)?.state}`" :aria-label="transferMarker(item)?.label" :title="transferMarkerTitle(item)" @click="onTransferMarkerClick($event, item)">{{ transferMarker(item)?.glyph }} </span><span v-if="isRemoteTask(item)" class="remote-task-marker" :aria-label="t('sidebar.remoteTaskTooltip')">&lt; </span>{{ itemTitle(item) }}</span>
               </div>
             </div>
           </template>
@@ -1373,6 +1413,8 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
 
 .transfer-task-marker-failed {
   color: var(--kn-danger);
+  /* Clicking it is how the operator retires it; say so on hover. */
+  cursor: pointer;
 }
 
 @keyframes transfer-marker-pulse {

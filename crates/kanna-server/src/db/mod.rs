@@ -139,6 +139,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "065_stage_run_provider_override",
     "066_durable_task_event_cursor_handles",
     "067_remove_input_hold_state",
+    "068_task_transfer_dismissed_at",
 ];
 
 #[derive(Debug, Serialize)]
@@ -358,10 +359,29 @@ pub struct SnapshotEntry {
     pub items: Vec<SnapshotPipelineItem>,
 }
 
+/// A failed transfer that belongs to no task on this machine.
+///
+/// Every other transfer failure is reported on the task it was moving, and the
+/// sidebar draws it there. A pull the source refuses has no such task: nothing
+/// arrived and nothing ever will, so without this the machine that *asked* for
+/// the move shows the operator nothing at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotTransferAlert {
+    pub transfer_id: String,
+    pub direction: String,
+    /// The task id on the machine that has it. There is no local one.
+    pub source_task_id: Option<String>,
+    pub source_peer_id: Option<String>,
+    pub error: Option<String>,
+    pub started_at: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiSnapshot {
     pub entries: Vec<SnapshotEntry>,
+    pub transfer_alerts: Vec<SnapshotTransferAlert>,
     pub repo_sidebar_order: HashMap<String, i64>,
     pub task_blockers: Vec<SnapshotTaskBlocker>,
     pub blocker_task_states: HashMap<String, SnapshotBlockerTaskState>,
@@ -2026,6 +2046,14 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )?;
         drop_column(conn, "pipeline_item", "input_blocked");
         Ok(())
+    })?;
+
+    // A failed transfer is reported on its task until something replaces it,
+    // and nothing ever does: the move never happened, so no later row outranks
+    // it and the task wears the failure marker for the rest of its life. This
+    // is the operator saying they have read it.
+    run_migration(conn, "068_task_transfer_dismissed_at", |conn| {
+        add_column(conn, "task_transfer", "dismissed_at", "TEXT")
     })?;
 
     Ok(())

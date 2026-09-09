@@ -179,6 +179,10 @@ struct TransferSummary {
     completed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// When the operator acknowledged this failure. The record stays; only the
+    /// marker on the task stops.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dismissed_at: Option<String>,
 }
 
 /// A transfer's status vocabulary is the engine's; this is the four-way answer
@@ -209,6 +213,7 @@ impl From<crate::db::TaskTransfer> for TransferSummary {
             started_at: transfer.started_at,
             completed_at: transfer.completed_at,
             error: transfer.error,
+            dismissed_at: transfer.dismissed_at,
         }
     }
 }
@@ -267,6 +272,14 @@ pub(super) struct PullTaskResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<String>,
     next_step: &'static str,
+}
+
+/// Whether this call is what marked the failure read. `false` for a repeat —
+/// the marker was already gone.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TransferDismissalResponse {
+    dismissed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -678,8 +691,29 @@ pub(super) async fn list_task_transfers(
     // consequences: `transfers: []` is documented as "nothing has arrived yet",
     // so an unresolved branch name answers a question about a real transfer with
     // a confident, wrong "no".
+    //
+    // A task that never arrived resolves to nothing here, and answering 404 is
+    // the worst possible reply: the machine that *asked* for a task is exactly
+    // where a refused pull has to be readable, and "no such task" is what the
+    // operator already knows. `list_task_transfers` matches `source_task_id`
+    // too, so the source's id still finds the refusal recorded against it.
     let task_id =
-        super::task_actions::resolve_task_id_for_mutation(&state, &task_or_branch_id).await?;
+        match super::task_actions::resolve_task_id_for_mutation(&state, &task_or_branch_id).await {
+            Ok(task_id) => task_id,
+            Err(unresolved) => {
+                let db = open_db(&state)?;
+                let transfers = db
+                    .list_task_transfers(task_or_branch_id.trim())
+                    .map_err(db_error)?;
+                if transfers.is_empty() {
+                    return Err(unresolved);
+                }
+                return Ok(Json(TaskTransfersResponse {
+                    task_id: task_or_branch_id.trim().to_string(),
+                    transfers: transfers.into_iter().map(TransferSummary::from).collect(),
+                }));
+            }
+        };
     let db = open_db(&state)?;
     let transfers = db
         .list_task_transfers(&task_id)
@@ -751,6 +785,44 @@ fn schedule_incoming_intent(
         )
         .map_err(|error| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, error))?;
     Ok(Json(TransferIntentResponse { scheduled }))
+}
+
+/// Acknowledge a failed transfer so it stops marking the task.
+///
+/// A failed transfer is reported on its task until something replaces it, and
+/// for a refusal nothing ever does: the move never happened, so no later row
+/// outranks it and the task carries the failure marker for the rest of its
+/// life. The record itself is untouched — `kanna_task_transfers` still answers
+/// "where has this been?" with it — because this is the operator saying they
+/// have read the reason, not that it never happened.
+pub(super) async fn dismiss_failed_transfer(
+    State(state): State<Arc<AppState>>,
+    Path(transfer_id): Path<String>,
+) -> Result<Json<TransferDismissalResponse>, (axum::http::StatusCode, String)> {
+    let db = open_db(&state)?;
+    let transfer = db
+        .get_task_transfer(&transfer_id)
+        .map_err(db_error)?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("transfer not found: {transfer_id}"),
+            )
+        })?;
+    if transfer.status != "failed" {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            format!(
+                "transfer {transfer_id} is {}, not failed; an in-flight move is the current truth \
+                 about its task and dismissing it would hide the move",
+                transfer.status
+            ),
+        ));
+    }
+    let dismissed = db
+        .dismiss_failed_task_transfer(&transfer_id)
+        .map_err(db_error)?;
+    Ok(Json(TransferDismissalResponse { dismissed }))
 }
 
 pub(super) async fn list_pending_incoming_transfers(

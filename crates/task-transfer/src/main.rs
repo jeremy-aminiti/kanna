@@ -715,6 +715,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     requester_peer_id: event.requester_peer_id,
                     source_task_id: event.source_task_id,
                 },
+                RuntimeEvent::TaskPullRefused(event) => SidecarEvent::TaskPullRefused {
+                    request_id: event.request_id,
+                    source_peer_id: event.source_peer_id,
+                    source_task_id: event.source_task_id,
+                    reason: event.reason,
+                },
                 RuntimeEvent::IncomingTransferRequest(event) => {
                     SidecarEvent::IncomingTransferRequest {
                         transfer_id: event.transfer_id,
@@ -1234,6 +1240,26 @@ async fn handle_request(
                 request_id,
                 pull_request_id,
             },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::ReportTaskPullRefusal {
+            request_id,
+            requester_peer_id,
+            source_task_id,
+            pull_request_id,
+            reason,
+            transport,
+        } => match runtime
+            .report_task_pull_refusal(
+                &requester_peer_id,
+                &source_task_id,
+                &pull_request_id,
+                &reason,
+                transport,
+            )
+            .await
+        {
+            Ok(()) => ControlResponse::ReportTaskPullRefusal { request_id },
             Err(error) => control_error(request_id, error),
         },
         ControlRequest::PrepareTransferCommit {

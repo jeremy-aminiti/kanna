@@ -560,6 +560,84 @@ async fn a_failed_transfer_reports_failed_with_its_reason() {
     );
 }
 
+/// The 2026-09-08 report, from the asking machine's side.
+///
+/// The Studio pulled a task, the MacBook refused it, and
+/// `GET /v1/tasks/afed27d1/transfers` here answered 404 — "no such task",
+/// which is exactly what the operator already knew. The refusal is recorded
+/// against the *source's* id, so that id has to answer even though nothing by
+/// that name ever arrived here.
+#[tokio::test]
+async fn a_refused_pull_is_readable_on_the_machine_that_asked_for_it() {
+    let app = test_router_with_tasks("desktop-refused-pull", &["task-local"]);
+
+    let read = |task_id: &'static str| {
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                Request::get(format!("/v1/tasks/{task_id}/transfers"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // Before the refusal is recorded, a task that lives on another machine is
+    // genuinely unknown here.
+    assert_eq!(read("afed27d1").await.status(), StatusCode::NOT_FOUND);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/transfers")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "transfer": {
+                            "id": "refused-pull-peer-mbp-pull-3",
+                            "direction": "incoming",
+                            "status": "failed",
+                            "source_peer_id": "peer-mbp",
+                            "target_peer_id": null,
+                            "source_desktop_id": null,
+                            "target_desktop_id": null,
+                            "source_task_id": "afed27d1",
+                            "local_task_id": null,
+                            "error": "task afed27d1 resumes codex session 5a2eb492 but its rollout could not be found under ~/.codex/sessions",
+                            "payload_json": null,
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = read("afed27d1").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = from_slice::<serde_json::Value>(&body).unwrap();
+    assert_eq!(body["taskId"], "afed27d1");
+    assert_eq!(body["transfers"][0]["state"], "failed");
+    assert_eq!(body["transfers"][0]["direction"], "incoming");
+    assert!(body["transfers"][0]["error"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("rollout could not be found")));
+
+    // A task id nothing was ever attempted for still answers 404: the fallback
+    // reports a real record, never invents one.
+    assert_eq!(
+        read("never-heard-of-it").await.status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
 /// A pull moves a task onto *this* machine, so it is expressed only by a
 /// process running on it — the same `DesktopLocalAccess` boundary the rest of
 /// the sidecar control plane keeps, and deliberately narrower than the push it

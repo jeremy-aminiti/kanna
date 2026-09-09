@@ -52,6 +52,7 @@ function flattenSnapshotItems(snapshot: KannaSnapshot): PipelineItem[] {
 export function createQueriesApi(context: StoreContext): QueriesApi {
   const baseSnapshot = ref<KannaSnapshot>({
     entries: [],
+    transferAlerts: [],
     taskBlockers: [],
     blockerTaskStates: {},
     worktreePaths: {},
@@ -93,6 +94,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
   function syncSnapshot(options: { authoritative?: boolean } = {}): void {
     context.state.repos.value = repos.value;
     context.state.items.value = items.value;
+    context.state.transferAlerts.value = [...(mergedSnapshot.value.transferAlerts ?? [])];
     context.state.taskBlockers.value = mergedSnapshot.value.taskBlockers;
     context.state.blockerTaskStates.value = { ...(mergedSnapshot.value.blockerTaskStates ?? {}) };
     context.state.worktreePaths.value = { ...mergedSnapshot.value.worktreePaths };

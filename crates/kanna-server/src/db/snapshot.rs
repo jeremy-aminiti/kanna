@@ -1,6 +1,6 @@
 use super::{
     Db, SnapshotBlockerTaskState, SnapshotEntry, SnapshotPipelineItem, SnapshotRepo,
-    SnapshotTaskBlocker, UiSnapshot,
+    SnapshotTaskBlocker, SnapshotTransferAlert, UiSnapshot,
 };
 use std::collections::HashMap;
 
@@ -16,6 +16,7 @@ impl Db {
 
         let snapshot = UiSnapshot {
             entries,
+            transfer_alerts: self.list_snapshot_transfer_alerts()?,
             repo_sidebar_order: self.list_repo_sidebar_order()?,
             task_blockers: self.list_snapshot_task_blockers()?,
             blocker_task_states: self.list_snapshot_blocker_task_states()?,
@@ -52,6 +53,33 @@ impl Db {
                 sort_order: row.get(8)?,
                 created_at: row.get(9)?,
                 last_opened_at: row.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Failed transfers with no task of their own to be reported on.
+    ///
+    /// Dismissal retires one here for the same reason it retires the marker on
+    /// a task: nothing else ever will, because the move that would have
+    /// replaced it is the one that did not happen.
+    fn list_snapshot_transfer_alerts(&self) -> Result<Vec<SnapshotTransferAlert>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, direction, source_task_id, source_peer_id, error, started_at
+             FROM task_transfer
+             WHERE status = 'failed'
+               AND local_task_id IS NULL
+               AND dismissed_at IS NULL
+             ORDER BY started_at DESC, rowid DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SnapshotTransferAlert {
+                transfer_id: row.get(0)?,
+                direction: row.get(1)?,
+                source_task_id: row.get(2)?,
+                source_peer_id: row.get(3)?,
+                error: row.get(4)?,
+                started_at: row.get(5)?,
             })
         })?;
         rows.collect()
@@ -147,6 +175,26 @@ impl Db {
                        'importing',
                        'awaiting_acknowledgment',
                        'failed'
+                     )
+                   )
+                 )
+                 -- The two ways a *failure* stops being news. Nothing else
+                 -- ever retires one: the move did not happen, so no later row
+                 -- replaces it, and the task wore the failure marker for the
+                 -- rest of its life. The operator has read it — or a later
+                 -- move of the same task succeeded, which a 'completed' row
+                 -- cannot say by outranking it here, because 'completed' is
+                 -- unreportable in its own right.
+                 AND (
+                   candidate.status <> 'failed'
+                   OR (
+                     candidate.dismissed_at IS NULL
+                     AND NOT EXISTS (
+                       SELECT 1
+                       FROM task_transfer superseding
+                       WHERE superseding.local_task_id = candidate.local_task_id
+                         AND superseding.status = 'completed'
+                         AND superseding.rowid > candidate.rowid
                      )
                    )
                  )

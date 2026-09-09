@@ -11,13 +11,17 @@ use super::daemon::{
 };
 use super::events::{
     IncomingTransferEvent, OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent,
-    PairingRequestedEvent, RuntimeError, RuntimeEvent, TaskPullRequestedEvent,
+    PairingRequestedEvent, RuntimeError, RuntimeEvent, TaskPullRefusedEvent,
+    TaskPullRequestedEvent,
 };
 use super::external_peers::{
     ensure_peer_is_trusted, ensure_peer_is_trusted_for_transport, external_key_is_trusted,
     find_peer, TransferTransport,
 };
-use super::pull::{prune_task_pull_requests, validate_source_task_id};
+use super::pull::{
+    prune_task_pull_requests, truncate_refusal_reason, validate_pull_request_id,
+    validate_source_task_id,
+};
 use super::replay_store::unix_ms;
 use super::state::{
     AuthenticatedPeerRequestReplay, ImportCommitReceipt, IncomingTransferReservation,
@@ -584,6 +588,75 @@ async fn handle_connection(
 
             Ok(PeerResponse::RequestTaskPull {
                 request_id: pull_request_id,
+            })
+        }
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => PeerResponse::Error {
+                request_id,
+                message: error.to_string(),
+            },
+        },
+        // A paired peer may report a refusal for a pull this machine never
+        // made: only the *source* keeps a pending-pull ledger, so there is
+        // nothing local to check the id against. The result is an inert row —
+        // a failed transfer with no local task — and the peer must still be
+        // paired and pass the sealed authentication below, which is the same
+        // bar as pushing a whole task here.
+        Ok(PeerRequest::ReportTaskPullRefused {
+            request_id,
+            source_peer_id,
+            sealed_payload,
+        }) => match async {
+            if source_peer_id == context.self_peer_id {
+                return Err(RuntimeError::Protocol(
+                    "cannot report a task pull refusal to this runtime".into(),
+                ));
+            }
+            let authenticated = authenticate_peer_request(
+                &context,
+                &source_peer_id,
+                Some(&sealed_payload),
+                "report_task_pull_refused",
+                &request_id,
+            )
+            .await?;
+            ensure_authenticated_argument(&authenticated, "source_peer_id", &source_peer_id)?;
+            ensure_authenticated_argument(
+                &authenticated,
+                "reserved_target_peer_id",
+                &context.self_peer_id,
+            )?;
+            let source_task_id =
+                authenticated_argument::<String>(&authenticated, "source_task_id")?;
+            validate_source_task_id(&source_task_id)?;
+            let pull_request_id =
+                authenticated_argument::<String>(&authenticated, "pull_request_id")?;
+            validate_pull_request_id(&pull_request_id)?;
+            // The reason is a peer's free text and it ends up in this
+            // machine's database and toasts, so it is bounded here rather
+            // than wherever it is finally rendered.
+            let reason = truncate_refusal_reason(authenticated_argument::<String>(
+                &authenticated,
+                "reason",
+            )?);
+
+            if context
+                .incoming_sender
+                .try_send(RuntimeEvent::TaskPullRefused(TaskPullRefusedEvent {
+                    request_id: pull_request_id,
+                    source_peer_id,
+                    source_task_id,
+                    reason,
+                }))
+                .is_err()
+            {
+                return Err(RuntimeError::IncomingEventChannelClosed);
+            }
+
+            Ok::<PeerResponse, RuntimeError>(PeerResponse::ReportTaskPullRefused {
+                request_id: request_id.clone(),
             })
         }
         .await

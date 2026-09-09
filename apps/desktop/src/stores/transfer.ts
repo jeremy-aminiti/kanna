@@ -1,5 +1,6 @@
 import {
   approveIncomingTaskTransfer,
+  dismissFailedTaskTransfer,
   pushTaskToPeer as requestTaskPush,
   rejectIncomingTaskTransfer,
 } from "../services/desktopServerClient";
@@ -40,6 +41,12 @@ export interface TransferApi {
   ) => Promise<void>;
   approveIncomingTransfer: (transferId: string) => Promise<void>;
   rejectIncomingTransfer: (transferId: string) => Promise<void>;
+  /**
+   * Acknowledge a failed transfer. Nothing else ever retires one — the move
+   * that would have replaced it is the one that did not happen — so without
+   * this the task carries its failure marker for the rest of its life.
+   */
+  dismissFailedTransfer: (transferId: string) => Promise<void>;
 }
 
 export function createTransferApi(): TransferApi {
@@ -52,6 +59,9 @@ export function createTransferApi(): TransferApi {
     },
     async rejectIncomingTransfer(transferId) {
       await rejectIncomingTaskTransfer(transferId);
+    },
+    async dismissFailedTransfer(transferId) {
+      await dismissFailedTaskTransfer(transferId);
     },
   };
 }

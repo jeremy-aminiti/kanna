@@ -298,7 +298,21 @@ useTransferFailureToasts(
   toRef(store, "items"),
   toast.error,
   () => t("toasts.transferFinalizationFailed"),
+  // A pull the other machine refuses has no task here to ride on, so it
+  // arrives as a transfer alert instead — the only news this machine gets
+  // about a move it started.
+  toRef(store, "transferAlerts"),
+  (taskId: string) => t("toasts.transferPullRefused", { taskId }),
 );
+
+async function dismissTransferFailure(transferId: string): Promise<void> {
+  try {
+    await store.dismissFailedTransfer(transferId);
+    await store.reloadSnapshot();
+  } catch (error) {
+    console.error("[App] dismissFailedTransfer failed:", error);
+  }
+}
 const appTaskTransfer = useAppTaskTransfer({
   store,
   toast,
@@ -564,6 +578,7 @@ const modalLayerController = {
         @hide-repo="store.hideRepo"
         @rename-repo="store.renameRepo"
         @reorder-repos="reorderSidebarRepos"
+        @dismiss-transfer-failure="dismissTransferFailure"
       />
       <div
         v-if="canResizeSidebar"
