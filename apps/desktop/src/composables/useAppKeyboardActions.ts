@@ -214,6 +214,10 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     },
     openInIDE: async () => {
       if (tabInFrontOwns(IDE_BOUND_BY_VIEW)) return;
+      if (selectedWorkspaceTask.value && !selectedWorkspaceTask.value.capabilities.canOpenShell) {
+        toast.warning(t("toasts.remoteTaskPathUnavailable"));
+        return;
+      }
       const item = store.currentItem;
       const repo = store.selectedRepo;
       if (!item?.branch || !repo) return;

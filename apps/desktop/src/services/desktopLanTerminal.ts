@@ -13,7 +13,7 @@ import type {
   ObserveDesktopRemoteCompanionOptions,
   RemoteTaskDirectoryListing,
 } from "./desktopRemoteTaskClient";
-import { parseTaskDiffContent, parseTaskDirectoryListing } from "./desktopRelayTerminal";
+import { parseTaskDiffContent, parseTaskDirectoryListing, parseTaskGraphContent } from "./desktopRelayTerminal";
 
 const companionGenerationProcessNonce = createCompanionGenerationProcessNonce();
 let companionGenerationCounter = 0;
@@ -474,6 +474,13 @@ export function createDesktopLanTerminalClient(): DesktopRemoteTaskViewClient {
         mode: options.request.mode,
       });
       return parseTaskDiffContent(response);
+    },
+    async readTaskGraph(options) {
+      const response = await invoke("read_transfer_peer_task_graph", {
+        peerId: options.desktopId,
+        taskId: options.taskId,
+      });
+      return parseTaskGraphContent(response);
     },
     async markTaskRead(options) {
       await invoke("mark_transfer_peer_task_read", {

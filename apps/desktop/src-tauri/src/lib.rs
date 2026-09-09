@@ -410,6 +410,7 @@ pub fn run() {
             commands::transfer::read_transfer_peer_task_file,
             commands::transfer::read_transfer_peer_task_directory,
             commands::transfer::read_transfer_peer_task_diff,
+            commands::transfer::read_transfer_peer_task_graph,
             commands::transfer::mark_transfer_peer_task_read,
             commands::transfer::start_peer_pairing,
             commands::transfer::accept_peer_pairing,

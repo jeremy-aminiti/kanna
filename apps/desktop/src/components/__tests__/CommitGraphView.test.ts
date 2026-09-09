@@ -63,6 +63,34 @@ describe("CommitGraphView", () => {
     document.body.innerHTML = "";
   });
 
+  it("loads a remote task graph without invoking local git against its worktree", async () => {
+    const remoteGraphLoader = vi.fn(async () => ({
+      taskId: "owner-task",
+      headCommit: "aaa1111111111111111111111111111111111111",
+      commits: [{
+        hash: "aaa1111111111111111111111111111111111111",
+        shortHash: "aaa1111",
+        message: "from the owning machine",
+        author: "Owner",
+        timestamp: 1710000000,
+        parents: [],
+        refs: ["main"],
+      }],
+    }));
+    invokeMock.mockRejectedValue(new Error("local git must not run"));
+
+    const wrapper = mount(CommitGraphView, {
+      props: { repoPath: "/remote/repo", worktreePath: "/remote/worktree", remoteGraphLoader },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(remoteGraphLoader).toHaveBeenCalledOnce();
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("from the owning machine");
+  });
+
   it("opens search with slash and focuses the input", async () => {
     invokeMock.mockResolvedValue(graphResult());
 

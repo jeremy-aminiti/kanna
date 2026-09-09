@@ -322,6 +322,13 @@ export function useAppModals({
     });
   }
 
+  async function readRemoteTaskGraph() {
+    const route = activeRemoteTaskRoute.value;
+    if (!route) throw new Error("Remote task route is unavailable.");
+    const client = await getRemoteTaskViewClient(route.transport);
+    return client.readTaskGraph({ desktopId: route.desktopId, taskId: route.taskId });
+  }
+
   onUnmounted(() => {
     void relayTaskViewClientPromise?.then((client) => client?.close());
     void lanTaskViewClientPromise?.then((client) => client.close());
@@ -536,6 +543,7 @@ export function useAppModals({
     listRemoteTaskDirectory,
     readRemoteTaskFile,
     readRemoteTaskDiff,
+    readRemoteTaskGraph,
     currentWorktreePath,
     activeRepoPath,
     activeWorktreePath,

@@ -715,6 +715,7 @@ function dismissCommandHint() {
           v-show="activeTabId === tab.id"
           :repo-path="scopeRepoPath"
           :worktree-path="taskWorktreePath"
+          :remote-graph-loader="views?.modals.activeTaskViewIsRemote.value ? views.modals.readRemoteTaskGraph : undefined"
           embedded
           :active="activeTabId === tab.id"
           @close="closeTab(tab.id)"

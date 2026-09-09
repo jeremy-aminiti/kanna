@@ -124,6 +124,11 @@ describe("createDesktopLanTerminalClient", () => {
         mergeBase: "abc123",
         patch: "diff --git a/src/a.ts b/src/a.ts",
         truncated: true,
+      })
+      .mockResolvedValueOnce({
+        taskId: "task-1",
+        headCommit: "abc123",
+        commits: [{ hash: "abc123", shortHash: "abc123", message: "owner", author: "Owner", timestamp: 1, parents: [], refs: ["main"] }],
       });
     const client = createDesktopLanTerminalClient();
 
@@ -146,6 +151,8 @@ describe("createDesktopLanTerminalClient", () => {
       taskId: "task-1",
       request: { scope: "branch", mode: "all" },
     })).resolves.toMatchObject({ truncated: true });
+    await expect(client.readTaskGraph({ desktopId: "peer-primary", taskId: "task-1" }))
+      .resolves.toMatchObject({ headCommit: "abc123" });
 
     expect(invoke).toHaveBeenNthCalledWith(1, "read_transfer_peer_task_directory", {
       peerId: "peer-primary",
@@ -168,6 +175,9 @@ describe("createDesktopLanTerminalClient", () => {
       taskId: "task-1",
       scope: "branch",
       mode: "all",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "read_transfer_peer_task_graph", {
+      peerId: "peer-primary", taskId: "task-1",
     });
   });
 

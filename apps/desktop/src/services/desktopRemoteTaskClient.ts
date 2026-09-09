@@ -105,6 +105,12 @@ export interface RemoteTaskDiffContent {
   truncated: boolean;
 }
 
+export interface RemoteTaskGraphContent {
+  taskId: string;
+  commits: import("../utils/commitGraph").GraphCommit[];
+  headCommit: string | null;
+}
+
 export interface DesktopRemoteTerminalClient {
   close(): void;
   observeTerminal(
@@ -131,4 +137,5 @@ export interface DesktopRemoteTaskViewClient extends DesktopRemoteTaskClient {
   readTaskDiff(
     options: RemoteTaskActionOptions & { request: RemoteTaskDiffRequest },
   ): Promise<RemoteTaskDiffContent>;
+  readTaskGraph(options: RemoteTaskActionOptions): Promise<RemoteTaskGraphContent>;
 }

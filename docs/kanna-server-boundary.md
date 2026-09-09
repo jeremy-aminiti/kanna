@@ -2414,6 +2414,16 @@ and a target whose resolved path leaves the worktree root is rejected, including
 symlink escapes. The surface is read-only: there are no write, delete, download,
 git, or search-in-files operations.
 
+### Remote task commit graph
+
+`GET /v1/tasks/{task_id}/graph` reads the commit graph from the task owner's
+current worktree and returns the task id, HEAD commit, and graph commits
+(parents, refs, author, timestamp, and summary). It has the same authenticated
+relay / paired-LAN access boundary as task files and diffs. Remote desktop
+clients must use this route rather than running a local git command with the
+owner's `worktreePath`; that path is machine-local. Mobile has no commit-graph
+surface today.
+
 ## Desktop View Commands
 
 `POST /v1/desktop/views/open` (`kanna_open_file`) asks whichever desktop windows
