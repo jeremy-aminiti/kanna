@@ -51,6 +51,7 @@ export interface TerminalSessionLifecycleController {
   dispose(): void
   redraw(): Promise<void>
   ensureConnected(): Promise<void>
+  activateVisibleViewer(): Promise<void>
 }
 
 export function createTerminalSessionLifecycle(params: {
@@ -68,6 +69,52 @@ export function createTerminalSessionLifecycle(params: {
 }): TerminalSessionLifecycleController {
   function getLiveTerminal(): Terminal | null {
     return getLiveTerminalFromState(params.state, params.terminal)
+  }
+
+  /**
+   * Geometry ownership is elected by the daemon, but a local terminal must
+   * explicitly report the foreground-focus edge that makes it eligible to
+   * take over. Registration and a measured resize are deliberately passive:
+   * a hidden tab, reconnect, or layout pass must not move another viewer's
+   * grid. The DOM checks keep synthetic focus from an occluded/zero-sized
+   * terminal from becoming that edge.
+   */
+  async function activateVisibleViewer(): Promise<void> {
+    const container = params.state.container
+    const terminal = getLiveTerminal()
+    const documentHidden = (document as Document & { visibilityState: string }).visibilityState === "hidden"
+    const hasVisibleSize = (element: HTMLElement) => {
+      const style = window.getComputedStyle(element)
+      return element.isConnected
+        && element.offsetWidth > 0
+        && element.offsetHeight > 0
+        && style.display !== "none"
+        && style.visibility !== "hidden"
+    }
+    if (
+      !params.state.attached
+      || params.state.paused
+      || params.state.disposed
+      || !container
+      || !hasVisibleSize(container)
+      || terminal === null
+      || terminal.cols <= 0
+      || terminal.rows <= 0
+      || documentHidden
+      || !document.hasFocus()
+    ) return
+
+    const client = await params.getTerminalStreamClient()
+    if (
+      params.state.paused
+      || params.state.disposed
+      || !params.state.attached
+      || !hasVisibleSize(container)
+      || (document as Document & { visibilityState: string }).visibilityState === "hidden"
+      || !document.hasFocus()
+    ) return
+    client.setTerminalViewerVisibility?.(params.sessionId, true)
+    client.activateTerminalViewer?.(params.sessionId)
   }
   const disposal = createTerminalDisposalController({
     sessionId: params.sessionId,
@@ -175,10 +222,10 @@ export function createTerminalSessionLifecycle(params: {
         const initialViewer = getLiveTerminal()
         if (initialViewer) {
           // Establish the owning local role on the same KSP control path
-          // before the attach can become interactive or emit a resize.
+          // before the attach can become interactive or emit a resize. This
+          // is passive: foreground focus is the only local takeover edge.
           client.registerTerminalViewer?.(params.sessionId, initialViewer.cols, initialViewer.rows)
           client.setTerminalViewerVisibility?.(params.sessionId, true)
-          client.activateTerminalViewer?.(params.sessionId)
         }
         client.attachTerminal(params.sessionId, {
           onSnapshot: (cols, rows, dataB64, agentProvider) => {
@@ -714,7 +761,6 @@ export function createTerminalSessionLifecycle(params: {
       const client = await params.getTerminalStreamClient()
       client.registerTerminalViewer(params.sessionId, cols, rows)
       client.setTerminalViewerVisibility?.(params.sessionId, true)
-      client.activateTerminalViewer?.(params.sessionId)
     } catch {
       params.state.attached = false
       await startListening()
@@ -734,5 +780,6 @@ export function createTerminalSessionLifecycle(params: {
     dispose,
     redraw,
     ensureConnected,
+    activateVisibleViewer,
   }
 }

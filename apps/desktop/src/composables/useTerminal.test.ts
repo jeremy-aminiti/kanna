@@ -610,6 +610,75 @@ describe("useTerminal", () => {
     wrapper.unmount();
   });
 
+  it("activates local geometry only from a focused, visible terminal", async () => {
+    const attachTerminal = vi.fn((taskId: string, handlers: TerminalStreamHandlers) => {
+      terminalStreamHandlers.set(taskId, handlers);
+      handlers.onSnapshot?.(80, 24, btoa("focused local terminal"));
+    });
+    const registerTerminalViewer = vi.fn();
+    const setTerminalViewerVisibility = vi.fn();
+    const activateTerminalViewer = vi.fn();
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal,
+      sendTermInput: vi.fn(),
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+      registerTerminalViewer,
+      setTerminalViewerVisibility,
+      activateTerminalViewer,
+    });
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        return useTerminal("session-1");
+      },
+      render() { return h("div"); },
+    });
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    document.body.appendChild(terminalElement);
+    wrapper.vm.init(terminalElement);
+    await wrapper.vm.startListening();
+
+    // Attach/registration, fitting, and reconnect checks are passive. They
+    // cannot replace a remote viewer's grid by themselves.
+    expect(activateTerminalViewer).not.toHaveBeenCalled();
+    await wrapper.vm.ensureConnected();
+    expect(activateTerminalViewer).not.toHaveBeenCalled();
+
+    terminalElement.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    await flushAsyncWork();
+    expect(setTerminalViewerVisibility).toHaveBeenLastCalledWith("session-1", true);
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(1);
+    expect(activateTerminalViewer).toHaveBeenLastCalledWith("session-1");
+
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    terminalElement.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    await flushAsyncWork();
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(1);
+
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    terminalElement.style.visibility = "hidden";
+    terminalElement.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    await flushAsyncWork();
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(1);
+
+    terminalElement.style.visibility = "visible";
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 0 });
+    terminalElement.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    await flushAsyncWork();
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(1);
+
+    terminalElement.remove();
+    wrapper.unmount();
+  });
+
   it("replaces snapshots even when the daemon-reported provider differs", async () => {
     const client = installKspStreamClient({
       onAttach: (_taskId, handlers) => {

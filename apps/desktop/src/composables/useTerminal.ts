@@ -133,6 +133,11 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       onNativeDropCleanupReady: (cleanup) => {
         state.cleanupNativeDropEvents = cleanup
       },
+      onTerminalFocus: () => {
+        void lifecycle.activateVisibleViewer().catch((error) => {
+          console.warn("[terminal] failed to activate focused viewer:", error)
+        })
+      },
       setTerminal: (term) => {
         terminal.value = term
       },

@@ -18,6 +18,10 @@ interface Dimensions {
   rows: number;
 }
 
+interface RenderedTerminal extends Dimensions {
+  markerRendered: boolean;
+}
+
 let fixtureRepoPath = "";
 let primaryRepoId = "";
 let ownerDesktopId = "";
@@ -74,16 +78,21 @@ async function ownerDimensions(taskId: string): Promise<Dimensions> {
 async function renderedDimensions(
   client: WebDriverClient,
   taskId: string,
-): Promise<Dimensions> {
-  const dimensions = await client.executeSync<Dimensions | null>(`
+): Promise<RenderedTerminal> {
+  const dimensions = await client.executeSync<RenderedTerminal | null>(`
     const hook = window.__KANNA_E2E__?.terminalBuffers;
     const remoteId = "remote:" + ${JSON.stringify(taskId)};
     const id = hook?.sessionIds?.().includes(remoteId) ? remoteId : ${JSON.stringify(taskId)};
     const cursor = hook?.cursor?.(id);
     const terminal = hook?.element?.(id);
     const rect = terminal?.getBoundingClientRect();
+    const rows = terminal?.querySelector?.(".xterm-rows")
+      ?? terminal?.closest?.(".xterm")?.querySelector?.(".xterm-rows");
+    const markerRendered = Array.from(rows?.children ?? []).some(
+      (row) => row.textContent?.includes("ACTIVE_VIEW:"),
+    );
     return cursor && rect && rect.width > 0 && rect.height > 0
-      ? { cols: cursor.columns, rows: cursor.rows }
+      ? { cols: cursor.columns, rows: cursor.rows, markerRendered }
       : null;
   `);
   if (!dimensions) throw new Error(`rendered dimensions unavailable for ${taskId}`);
@@ -104,6 +113,7 @@ async function waitForOwnerAndRenderer(
       ]);
       latest = { daemon, rendered };
       return daemon.cols === rendered.cols && daemon.rows === rendered.rows
+        && rendered.markerRendered
         && (!expected || (daemon.cols === expected.cols && daemon.rows === expected.rows));
     } catch (error) {
       latest = error instanceof Error ? error.message : String(error);

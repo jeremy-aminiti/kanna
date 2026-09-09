@@ -53,6 +53,7 @@ export function initializeTerminalView(params: {
   maybeReadClipboardImage: () => Promise<void>
   sendDroppedPaths: (paths: string[]) => void
   onNativeDropCleanupReady: (cleanup: () => void) => void
+  onTerminalFocus: () => void
   setTerminal: (term: Terminal) => void
 }): InitializedTerminalView {
   const term = new Terminal({
@@ -134,6 +135,11 @@ export function initializeTerminalView(params: {
   params.el.addEventListener("compositionstart", inputProducer.handleCompositionStart, true)
   params.el.addEventListener("compositionupdate", inputProducer.handleCompositionUpdate, true)
   params.el.addEventListener("compositionend", inputProducer.handleCompositionEnd, true)
+  // xterm focuses its helper textarea rather than the container itself; the
+  // bubbling focus edge is the local viewer's active-view signal. It carries
+  // no resize proposal, and the lifecycle rejects hidden/background/zero-size
+  // containers before sending the daemon's existing activation command.
+  params.el.addEventListener("focusin", params.onTerminalFocus)
   const cleanupContainerEvents = () => {
     cleanupDropEvents?.()
     for (const eventName of controlEvents) {
@@ -145,6 +151,7 @@ export function initializeTerminalView(params: {
     params.el.removeEventListener("compositionstart", inputProducer.handleCompositionStart, true)
     params.el.removeEventListener("compositionupdate", inputProducer.handleCompositionUpdate, true)
     params.el.removeEventListener("compositionend", inputProducer.handleCompositionEnd, true)
+    params.el.removeEventListener("focusin", params.onTerminalFocus)
   }
 
   if (params.el.offsetWidth > 0 && params.el.offsetHeight > 0) {
