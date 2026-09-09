@@ -53,6 +53,15 @@ Because Kanna is distributed as a signed macOS app, all dependencies must be
 vendored or statically linked (e.g. `git2` vendors libgit2 + OpenSSL) — never
 rely on Homebrew or other machine-local libraries.
 
+Because only this Bazel path compiles the desktop libraries and the x86_64
+sidecar variants, a Cargo `path = ...` dependency added without the matching
+BUILD.bazel wiring is invisible to `cargo` and to a normal build, and surfaces
+as an `unresolved import` partway into a release build. The guard for that is
+`tools/kd/tests/release-cargo-locks.test.ts`, which asserts Cargo/Bazel
+dependency parity by reading the BUILD files as text, so it runs in `./kd test
+all` without a Bazel install. Run it alone with `pnpm --dir tools/kd exec
+vitest run tests/release-cargo-locks.test.ts`.
+
 ### Shipping
 
 Start an operator-driven release with the **Ship** command-palette task. Its
