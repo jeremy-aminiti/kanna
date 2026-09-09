@@ -2,6 +2,24 @@
 
 Recorded 2026-09-09 from commit `006dc35a3ca0e14ef682850d122127723786b125` plus the verification additions in this task.
 
+## Current-head disposition (2026-09-09)
+
+The worktree is clean at `88e961be0dbb182cc8ee6a30225ed5075bffe078`.
+The production two-instance WebDriver case introduced in `ab418b56` is valid
+remote-projection evidence: it selects an owner task from the viewer, renders
+the owner graph, invokes the real viewer Open in IDE shortcut, and asserts the
+translated refusal. Its recorded result was **1/1 passed**. This evidence is
+not discounted because the case lives in `apps/desktop/tests/e2e` rather than
+`tests/remote-e2e`.
+
+`88e961be0` subsequently fixed preservation of the graph's `fromRef` mode, so
+the prior real UI pass does not by itself prove that current-head change. No
+mock-only refusal duplicate is required. The remaining focused proof is a
+current-head run of the existing real two-instance graph/refusal case, with
+its full stdout/stderr kept under `.tmp/` and its actual exit status written to
+an explicit `.tmp/` status file by the owning command. A detached handle that
+loses its result is not evidence of a pass.
+
 ## Focused passing checks
 
 - Real two-instance relay graph: `pnpm --dir tests/remote-e2e exec vitest run ... src/task-listing-actions.e2e.test.ts -t 'reads a remote task commit graph from the owning desktop'` exited 0: **1 passed, 7 skipped**. The test writes a commit in the additional desktop's task worktree and reads that task's `/v1/tasks/{id}/graph` through the first desktop's relay client.
@@ -12,6 +30,22 @@ Recorded 2026-09-09 from commit `006dc35a3ca0e14ef682850d122127723786b125` plus 
 
 ## Known incomplete checks
 
+- `./kd test all` has no current successful, retained-result run. The future
+  canonical run must likewise retain full output and an explicit exit-status
+  file under `.tmp/` before it is reported as passing.
+- Current-head canonical rerun (`CARGO_BUILD_JOBS=2 ./kd test all`) fixed the
+  branch-caused route-audit omission below and then failed only in the
+  independent `kanna-worker` default-database baseline: `config::tests::the_default_database_is_the_workers_own_under_its_data_dir` and
+  `unit::tests::the_unit_launches_against_the_resolved_database` received this
+  worktree's `build.kanna/kanna-wt-task-3726e419-7.db` instead of
+  `/srv/worker/kanna-worker.db`. The full output is retained at
+  `.tmp/kd-test-all-current-head-rerun.log`. This task does not modify the
+  worker default-DB implementation.
+- The first current-head canonical attempt found and the task fixed one
+  branch-caused failure: the new `GET /v1/tasks/{task_id}/graph` registration
+  was absent from the LAN-auth route audit manifest. The rerun passed the
+  server binary suite, including `every_registered_http_route_denies_unpaired_lan_by_default`
+  (**1,417 passed, 0 failed**).
 - The earlier full remote-E2E wrapper reported `terminal-flow.e2e.test.ts` exit 1, but its producer assertion was truncated. Its cause is **unknown**.
 - The unfiltered `task-listing-actions.e2e.test.ts` run exited 1 (5 failed, 3 passed): terminal `SCRIPT_READY` timeout; short-cursor format mismatch; relay task-events 404; singleton refusal text mismatch; and merge singleton 503. Their branch causality is **unknown**. No waiver is implied.
 - `pnpm exec tsc --noEmit` from repository root exited 1 because no root `tsconfig.json` was selected; it printed TypeScript help and is not a successful typecheck. An earlier Vue typecheck wrapper also failed before execution due to an incorrect redirection path.
