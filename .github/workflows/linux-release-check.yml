@@ -5,15 +5,21 @@ name: Linux Release Check
 #
 # The directive: the Intel Mac that was to run the native x86-64 Ubuntu 24.04
 # acceptance VM is in Japan and unavailable for at least a month, and nothing
-# may block on it. The substitute chosen here is the `ubuntu-24.04` hosted
-# runner itself. It is genuinely the supported floor's userspace, it has a real
-# systemd user manager, and its own kernel is not 6.8 — which is recorded with
-# the evidence rather than papered over. What it cannot supply is a
-# phone-reachable LAN, a human at a screen, and a clean machine (a hosted
-# runner is the opposite of one: it ships with Rust, Node and compilers
-# preinstalled). Those stay with the arm64 guest and with the Intel Mac when it
-# returns, and `docs/2026-09-09-linux-phase3-supported-distribution.md` says so
-# in the support matrix.
+# may block on it. The substitute chosen is the `ubuntu-24.04` hosted runner
+# itself — genuinely the supported floor's userspace, with a real systemd user
+# manager. What it cannot supply is a phone-reachable LAN, a human at a screen,
+# and a clean machine (a hosted runner is the opposite of one: it ships with
+# Rust, Node and compilers preinstalled), and its kernel is not 6.8. All of
+# that is recorded in the support matrix of
+# `docs/2026-09-09-linux-phase3-supported-distribution.md`.
+#
+# **This workflow builds and audits; it does not yet run the installed and
+# upgrade acceptance lane.** That lane needs two packages from two source
+# revisions to upgrade between, and wiring a second merge-base build has not
+# been done or exercised. It is follow-up item 2 in §7 of the evidence doc, and
+# the honest state is a build lane that works rather than an acceptance job
+# that cannot. Run the lane by hand meanwhile:
+# `./kd test linux-installed --old-artifact <deb> --new-artifact <deb>`.
 #
 # This workflow is deliberately independent of Pages deployment and holds no
 # signing or publishing credential. A Linux build failure must never be able to
@@ -21,17 +27,7 @@ name: Linux Release Check
 
 on:
   workflow_call:
-    inputs:
-      run-installed-acceptance:
-        description: Install the built package and run the two-version upgrade proof on the x86-64 runner.
-        type: boolean
-        default: true
   workflow_dispatch:
-    inputs:
-      run-installed-acceptance:
-        description: Install the built package and run the two-version upgrade proof on the x86-64 runner.
-        type: boolean
-        default: true
   pull_request:
     paths:
       - "packaging/linux/**"
@@ -109,10 +105,9 @@ jobs:
           echo "glibc=$(getconf GNU_LIBC_VERSION)"
           echo "arch=$(dpkg --print-architecture)"
 
-      # Two packages from two source revisions, because the acceptance lane's
-      # reason to exist is upgrading between them. The "old" build is the merge
-      # base, so the pair is a real version step rather than the same tree
-      # renamed.
+      # One package per architecture, from this revision. The installed and
+      # upgrade lane needs a second package built from another revision to
+      # upgrade between; that is deliberately not wired here yet (see the header).
       - name: Build the candidate package
         run: ./kd build linux-package --channel staging --architecture ${{ matrix.architecture }}
 
@@ -122,49 +117,3 @@ jobs:
           path: .build/linux-package/out/*.deb
           if-no-files-found: error
           retention-days: 14
-
-  installed-acceptance:
-    # x86-64 only. The arm64 runner can build, but the human-facing and
-    # LAN acceptance for arm64 belongs to the native guest, and running the
-    # lane twice here would imply coverage this host does not have.
-    needs: build
-    if: inputs.run-installed-acceptance
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: kanna-linux-x86_64
-          path: .build/linux-package/out
-
-      # The worker runs under a real `systemd --user` manager, which needs a
-      # login session for this user to exist. Lingering is what creates one on
-      # a machine nobody logs into.
-      - name: Ensure a user manager exists
-        run: |
-          sudo loginctl enable-linger "$USER"
-          systemctl --user is-system-running || true
-
-      - name: Installed and upgrade acceptance
-        run: |
-          set -eu
-          debs=(.build/linux-package/out/*.deb)
-          # A single package means there is nothing to upgrade *to*, and a lane
-          # that quietly ran the install half would report a pass for the gate
-          # this exists to cover.
-          if [ "${#debs[@]}" -lt 2 ]; then
-            echo "need two packages to prove an upgrade; found ${#debs[@]}" >&2
-            exit 1
-          fi
-          ./kd test linux-installed \
-            --old-artifact "${debs[0]}" \
-            --new-artifact "${debs[1]}" \
-            --channel staging

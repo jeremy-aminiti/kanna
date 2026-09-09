@@ -75,8 +75,14 @@ export function linuxPackageStagingDir(repoRoot: string, architecture: LinuxArch
  *
  * `kanna-worker` is built here alongside the six sidecars because it is
  * Kanna-owned: a package that expected the user to have one would not be an
- * installable product. The desktop binary comes last because it is the only
- * one that needs the sidecars staged first.
+ * installable product.
+ *
+ * The desktop binary comes last, and the **frontend build has to come before
+ * it**. `tauri-codegen` reads `frontendDist` at compile time and panics —
+ * "this path doesn't exist" — when `apps/desktop/dist` is absent, which it is
+ * on every fresh checkout and on both CI runners. The repo's own Rust lane
+ * orders it the same way for the same reason
+ * (`rust-test.ts`'s `frontend` step).
  */
 export function buildLinuxBinariesCommands(architecture: LinuxArchitecture): Array<[string, string[]]> {
   const target = rustTripleFor(architecture);
@@ -94,6 +100,7 @@ export function buildLinuxBinariesCommands(architecture: LinuxArchitecture): Arr
       ],
     ],
     ["cargo", ["build", "--release", "--target", target, "--manifest-path", "packages/terminal-recovery/Cargo.toml"]],
+    ["pnpm", ["--dir", "apps/desktop", "build"]],
     ["cargo", ["build", "--release", "--target", target, "-p", "kanna-desktop"]],
   ];
 }

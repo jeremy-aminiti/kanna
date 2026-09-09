@@ -143,6 +143,37 @@ describe("dependsFromAudit", () => {
   });
 });
 
+/**
+ * `Depends: a | b` is Debian alternation — *either* package satisfies it. Two
+ * distinct runtime libraries need two entries, or a machine that installed only
+ * one would satisfy apt and then fail in the loader on the other soname.
+ */
+describe("dependsFromAudit for artifacts needing two libraries from one exception", () => {
+  it("yields one package per soname, with no alternation", () => {
+    const audit = auditArtifacts(policy, "arm64", [
+      facts({
+        path: "/usr/lib/kanna/kanna-daemon",
+        needed: ["libc.so.6", "libc++.so.1", "libc++abi.so.1"],
+      }),
+    ]);
+    expect(audit.findings).toEqual([]);
+    const depends = dependsFromAudit(policy, audit);
+    expect(depends).toContain("libc++1");
+    expect(depends).toContain("libc++abi1");
+    for (const entry of depends) {
+      expect(entry, `${entry} uses Debian alternation`).not.toContain("|");
+    }
+    // Both are reported as still-live exceptions, individually.
+    expect(audit.conditionalUses.map((use) => use.package).sort()).toEqual(["libc++1", "libc++abi1"]);
+  });
+
+  it("declares no allowlist package as an alternation", () => {
+    for (const entry of policy.allowedRuntimeLibraries) {
+      expect(entry.package, `${entry.sonames.join(", ")} declares an alternation`).not.toContain("|");
+    }
+  });
+});
+
 describe("the runtime policy file", () => {
   it("declares both launch architectures with their Debian names", () => {
     expect(policy.architectures.x86_64.debianArchitecture).toBe("amd64");

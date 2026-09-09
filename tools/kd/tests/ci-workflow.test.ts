@@ -90,20 +90,46 @@ describe("the Linux release check", () => {
   });
 
   /**
-   * The whole reason the acceptance job exists. A run that found one package
-   * would exercise the install half and report a pass for the upgrade gate
-   * Phase 1 deferred to this phase.
+   * The lane builds and audits; it does not run installed acceptance. That
+   * needs a second package from another source revision to upgrade between,
+   * which is not wired here — follow-up item 2 in §7 of the evidence doc.
+   *
+   * Asserted rather than left implicit because the previous shape was worse
+   * than absent: a job gated on an input that is empty on `pull_request` and
+   * `push`, so it silently skipped there and, on the one trigger where it did
+   * run, always failed on its own two-package check. A workflow that promises
+   * acceptance it cannot perform is a false green.
    */
-  it("refuses to call a single-package run an upgrade proof", () => {
-    expect(workflow).toContain("./kd test linux-installed");
-    expect(workflow).toContain("--old-artifact");
-    expect(workflow).toContain("--new-artifact");
-    expect(workflow).toMatch(/need two packages to prove an upgrade/);
+  it("does not claim installed acceptance it does not perform", () => {
+    expect(workflow).not.toContain("installed-acceptance:");
+    // Checked on what the workflow *runs*: the header comment names the manual
+    // invocation on purpose, so a prose match would forbid documenting it.
+    const steps = workflow
+      .split("\n")
+      .filter((line) => /^\s*-?\s*(run|uses):/.test(line) || /^\s{8,}/.test(line))
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    expect(steps).not.toContain("kd test linux-installed");
+    expect(steps).not.toContain("loginctl enable-linger");
+    // And it does not describe a second build it never does.
+    expect(workflow).not.toMatch(/^\s*#.*merge base/im);
   });
 
-  /** Its own login session, or `systemctl --user` has no manager to talk to
-   *  and the worker cannot be started the way an operator starts it. */
-  it("gives the worker a real user manager", () => {
-    expect(workflow).toContain("loginctl enable-linger");
+  /** One build invocation per architecture, from this revision — which is
+   *  exactly what the job does, so the YAML and the behaviour agree. */
+  it("builds one package per architecture", () => {
+    const builds = workflow.match(/\.\/kd build linux-package/g) ?? [];
+    expect(builds).toHaveLength(1);
+    expect(workflow).toContain("--architecture ${{ matrix.architecture }}");
+    expect(workflow).toMatch(/if-no-files-found: error/);
+  });
+
+  /**
+   * No job may be gated on a `workflow_dispatch`/`workflow_call` input that is
+   * simply absent on `pull_request` and `push`. That is how the removed job
+   * came to be silently skipped on every trigger that mattered.
+   */
+  it("gates no job on an input the PR and push triggers do not supply", () => {
+    expect(workflow).not.toMatch(/if:\s*inputs\./);
   });
 });

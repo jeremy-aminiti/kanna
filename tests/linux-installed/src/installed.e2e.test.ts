@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createFixtureRepo, type FixtureRepo } from "@kanna/headless-worker/src/fixtureRepo.ts";
@@ -178,23 +178,40 @@ describe("the installed worker's lifecycle", () => {
 });
 
 describe("removal", () => {
-  it("keeps the executables until the package is removed, then keeps user data", async () => {
+  it("removes the package's own files and nothing else", async () => {
     requireHost();
+
+    /**
+     * A file under the running instance's data directory, written *before* the
+     * removal. This is the assertion that matters: `dpkg` must take away
+     * exactly the paths the package owns, and a maintainer script that reached
+     * into user state would destroy tasks nobody asked about.
+     *
+     * It is written before `worker.stop()` because stop tears the instance's
+     * directory down, so the marker has to outlive only the removal.
+     */
+    const dataDir = worker?.dataDir as string;
+    const marker = join(dataDir, "user-data-marker");
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(marker, "a task the operator cares about");
+
+    await worker?.systemctl(["stop", worker.unitName]).catch(() => undefined);
+    const removed = await run(
+      "sh",
+      ["-c", `sudo -n apt-get remove -y ${paths.packageName} || apt-get remove -y ${paths.packageName}`],
+      { ...process.env, DEBIAN_FRONTEND: "noninteractive" }
+    );
+    expect(removed.code, removed.stderr).toBe(0);
+
+    // Every package-owned executable is gone...
+    for (const name of INSTALLED_EXECUTABLES) {
+      expect(existsSync(paths.executable(name)), `${name} survived removal`).toBe(false);
+    }
+    // ...and the instance's own state is untouched.
+    expect(existsSync(marker), "removing the package deleted user data").toBe(true);
+    expect(readFileSync(marker, "utf8")).toBe("a task the operator cares about");
+
     await worker?.stop();
     worker = null;
-    const removed = await run("sh", ["-c", `sudo -n apt-get remove -y ${paths.packageName} || apt-get remove -y ${paths.packageName}`], {
-      ...process.env,
-      DEBIAN_FRONTEND: "noninteractive",
-    });
-    expect(removed.code, removed.stderr).toBe(0);
-    for (const name of INSTALLED_EXECUTABLES) {
-      expect(existsSync(paths.executable(name))).toBe(false);
-    }
-    // The user's data directory is not the package's to delete: removing it
-    // would make an uninstall destroy tasks nobody asked about.
-    const home = process.env.HOME ?? "";
-    expect(existsSync(join(home, ".local", "share", "build.kanna"))).toBe(
-      existsSync(join(home, ".local", "share", "build.kanna"))
-    );
   });
 });

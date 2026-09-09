@@ -119,10 +119,17 @@
     },
     {
       "sonames": [
-        "libc++.so.1",
+        "libc++.so.1"
+      ],
+      "package": "libc++1",
+      "conditional": true,
+      "reason": "MEASURED EXCEPTION, 2026-09-09, aarch64 Ubuntu 26.04: kanna-daemon, kanna-server, kanna-task-transfer and kanna-terminal-recovery link these dynamically, because libghostty-vt-sys's build script emits `cargo:rustc-link-lib=c++`. The preferred answer is a static link and it is demonstrably available -- the pinned Zig toolchain already produces libc++.a and libc++abi.a in its own cache -- so this entry is a bridge, not a decision. Every build reports which artifacts still use it. Named follow-up: patch the build script to `static=c++`/`static=c++abi` against the Zig-built archives, then move these sonames back to vendoredNotDeclared. Until then a package declaring them must also verify the supplying package exists on the SUPPORTED floor (Ubuntu 24.04), not only on the development VM."
+    },
+    {
+      "sonames": [
         "libc++abi.so.1"
       ],
-      "package": "libc++1 | libc++abi1",
+      "package": "libc++abi1",
       "conditional": true,
       "reason": "MEASURED EXCEPTION, 2026-09-09, aarch64 Ubuntu 26.04: kanna-daemon, kanna-server, kanna-task-transfer and kanna-terminal-recovery link these dynamically, because libghostty-vt-sys's build script emits `cargo:rustc-link-lib=c++`. The preferred answer is a static link and it is demonstrably available -- the pinned Zig toolchain already produces libc++.a and libc++abi.a in its own cache -- so this entry is a bridge, not a decision. Every build reports which artifacts still use it. Named follow-up: patch the build script to `static=c++`/`static=c++abi` against the Zig-built archives, then move these sonames back to vendoredNotDeclared. Until then a package declaring them must also verify the supplying package exists on the SUPPORTED floor (Ubuntu 24.04), not only on the development VM."
     }
