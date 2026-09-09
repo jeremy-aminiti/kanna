@@ -14,6 +14,7 @@
     "test:e2e:shell-visual": "pnpm exec tsx ./e2e/run.ts shell-visual",
     "test:e2e:cloud": "pnpm exec tsx ./e2e/run.ts cloud",
     "test:e2e:relay": "pnpm exec tsx ./e2e/run.ts relay",
+    "test:e2e:relay-terminal-control": "pnpm exec tsx ./e2e/run.ts relay-terminal-control",
     "test:e2e:hybrid": "pnpm exec tsx ./e2e/run.ts hybrid",
     "test:e2e:profile-disconnected": "pnpm exec tsx ./e2e/run.ts profile-disconnected",
     "test:e2e:preflight": "pnpm exec tsx ./e2e/preflight.ts",

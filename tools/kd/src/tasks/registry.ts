@@ -381,6 +381,7 @@ const remoteE2eInputSchema = z.object({
   dev: z.boolean().default(true),
   staging: z.boolean().default(false),
   mobileRelay: z.boolean().default(false),
+  mobileRelayTerminalControl: z.boolean().default(false),
   desktopPairing: z.boolean().default(false),
   ifChanged: z.boolean().default(false)
 });
@@ -3481,6 +3482,7 @@ export const taskDefinitions = [
         options: {
           staging: parsed.staging,
           mobileRelay: parsed.mobileRelay,
+          mobileRelayTerminalControl: parsed.mobileRelayTerminalControl,
           desktopPairing: parsed.desktopPairing,
           ifChanged: parsed.ifChanged
         }

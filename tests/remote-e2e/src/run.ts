@@ -9,12 +9,14 @@ import { remoteHarnessSpecFiles, remoteHarnessVitestArgs } from "./vitestArgs";
 const args = process.argv.slice(2);
 const staging = args.includes("--staging");
 const mobileRelay = args.includes("--mobile-relay");
+const mobileRelayTerminalControl = args.includes("--mobile-relay-terminal-control");
 const desktopPairing = args.includes("--desktop-pairing");
 const dev = args.includes("--dev") || !staging;
 const supportedArgs = new Set([
   "--dev",
   "--staging",
   "--mobile-relay",
+  "--mobile-relay-terminal-control",
   "--desktop-pairing"
 ]);
 
@@ -51,8 +53,8 @@ if (!mobileRelay && !desktopPairing) {
   }
 }
 
-if (mobileRelay) {
-  await runCommand("pnpm", ["--dir", "apps/mobile", "run", "test:e2e:relay"], {
+if (mobileRelay || mobileRelayTerminalControl) {
+  await runCommand("pnpm", ["--dir", "apps/mobile", "run", mobileRelayTerminalControl ? "test:e2e:relay-terminal-control" : "test:e2e:relay"], {
     cwd: fileURLToPath(new URL("../../..", import.meta.url)),
     env: {
       ...process.env,

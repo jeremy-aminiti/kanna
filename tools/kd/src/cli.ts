@@ -420,16 +420,18 @@ function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
     dev: false,
     staging: false,
     mobileRelay: false,
+    mobileRelayTerminalControl: false,
     desktopPairing: false,
     ifChanged: false
   }, {
     "--mobile-relay": "mobileRelay",
+    "--mobile-relay-terminal-control": "mobileRelayTerminalControl",
     "--desktop-pairing": "desktopPairing",
     "--if-changed": "ifChanged"
   });
   const unsupportedFlags = Object.entries(input)
     .filter(([key, value]) =>
-      !["dev", "staging", "mobileRelay", "desktopPairing", "ifChanged"].includes(key) &&
+      !["dev", "staging", "mobileRelay", "mobileRelayTerminalControl", "desktopPairing", "ifChanged"].includes(key) &&
       value === true
     )
     .map(([key]) => key);
@@ -448,6 +450,7 @@ function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
       dev: input.staging !== true,
       staging: input.staging === true,
       mobileRelay: input.mobileRelay === true,
+      mobileRelayTerminalControl: input.mobileRelayTerminalControl === true,
       desktopPairing: input.desktopPairing === true,
       ifChanged: input.ifChanged === true
     }

@@ -382,7 +382,12 @@ async function main(): Promise<void> {
         credentials: relayHarness.credentials, fixture: relayHarness.fixture,
         observeAuthoritativeTerminalGeometry: relayHarness.observeAuthoritativeTerminalGeometry,
         restoreDesktopTerminalControl: relayHarness.restoreDesktopTerminalControl,
-        captureScreenshot: async () => {},
+        async captureScreenshot(name) {
+          if (!simulatorDevice) return;
+          const dir = join(projectRoot, "../..", "docs/task-screenshots/5c82e022-screenshots");
+          await mkdir(dir, { recursive: true });
+          await execFileAsync("xcrun", ["simctl", "io", simulatorDevice.udid, "screenshot", join(dir, `${name}.png`)]);
+        },
       });
     } else if (mode === "relay" && relayHarness) {
       await runRelayTaskFlow(driver, {
