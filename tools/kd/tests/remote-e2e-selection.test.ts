@@ -159,6 +159,14 @@ describe("kd test remote-e2e --if-changed", () => {
     });
   });
 
+  it("selects the focused mobile terminal-control relay lane", () => {
+    expect(buildRemoteE2eLaneArgs({
+      staging: false, mobileRelay: false, mobileRelayTerminalControl: true, desktopPairing: false,
+    })).toEqual([
+      "--dir", "tests/remote-e2e", "exec", "tsx", "src/run.ts", "--dev", "--mobile-relay-terminal-control",
+    ]);
+  });
+
   it("keeps the extra Layer C and Layer D lanes when a trigger path changed", async () => {
     const calls: RecordedCall[] = [];
     const options = { ...DEV_LANE_OPTIONS, mobileRelay: true, desktopPairing: true };
