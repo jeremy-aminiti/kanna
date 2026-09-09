@@ -124,6 +124,22 @@ describe("the Linux release check", () => {
     expect(workflow).toMatch(/if-no-files-found: error/);
   });
 
+  it("installs the pinned Zig toolchain before building", () => {
+    expect(workflow).toContain("zig_platform: x86_64-linux");
+    expect(workflow).toContain(
+      "zig_sha256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"
+    );
+    expect(workflow).toContain("zig_platform: aarch64-linux");
+    expect(workflow).toContain(
+      "zig_sha256: 958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f"
+    );
+    expect(workflow).toContain("sha256sum --check --strict -");
+    expect(workflow).toContain('>> "$GITHUB_PATH"');
+    expect(workflow.indexOf("- name: Install Zig 0.15.2")).toBeLessThan(
+      workflow.indexOf("- name: Build the candidate package")
+    );
+  });
+
   /**
    * No job may be gated on a `workflow_dispatch`/`workflow_call` input that is
    * simply absent on `pull_request` and `push`. That is how the removed job

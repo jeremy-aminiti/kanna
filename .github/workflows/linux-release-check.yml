@@ -67,8 +67,12 @@ jobs:
         include:
           - architecture: x86_64
             runner: ubuntu-24.04
+            zig_platform: x86_64-linux
+            zig_sha256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
           - architecture: arm64
             runner: ubuntu-24.04-arm
+            zig_platform: aarch64-linux
+            zig_sha256: 958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
@@ -104,6 +108,19 @@ jobs:
           echo "kernel=$(uname -r)"
           echo "glibc=$(getconf GNU_LIBC_VERSION)"
           echo "arch=$(dpkg --print-architecture)"
+
+      - name: Install Zig 0.15.2
+        env:
+          ZIG_PLATFORM: ${{ matrix.zig_platform }}
+          ZIG_SHA256: ${{ matrix.zig_sha256 }}
+        run: |
+          archive="zig-${ZIG_PLATFORM}-0.15.2.tar.xz"
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/$archive" \
+            "https://ziglang.org/download/0.15.2/$archive"
+          echo "$ZIG_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict -
+          tar --extract --file "$RUNNER_TEMP/$archive" --directory "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-${ZIG_PLATFORM}-0.15.2" >> "$GITHUB_PATH"
 
       # One package per architecture, from this revision. The installed and
       # upgrade lane needs a second package built from another revision to
