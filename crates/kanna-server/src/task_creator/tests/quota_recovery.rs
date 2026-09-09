@@ -59,6 +59,22 @@ fn astra_rejection(session_id: &str) -> kanna_daemon::protocol::Event {
 /// incident's workflow does, and a task parked at that stage with a *running*
 /// run on the leading candidate — exactly the state the refusal arrives in.
 fn init_quota_fixture(label: &str, config: &Config) -> (std::path::PathBuf, Db) {
+    init_quota_fixture_with_candidates(label, config, true)
+}
+
+/// The same fixture with the stage naming **no** `agent_provider` — the shape
+/// every built-in workflow but `plan-build-review` actually has
+/// (`single-reviewer`, `no-review`, `specialized-reviewers`, …). This is the
+/// common case, and the one a refusal used to strand permanently.
+fn init_quota_fixture_without_candidates(label: &str, config: &Config) -> (std::path::PathBuf, Db) {
+    init_quota_fixture_with_candidates(label, config, false)
+}
+
+fn init_quota_fixture_with_candidates(
+    label: &str,
+    config: &Config,
+    candidates: bool,
+) -> (std::path::PathBuf, Db) {
     let repo_root = init_git_repo(label);
     std::fs::create_dir_all(repo_root.join(".kanna/workflows")).unwrap();
     std::fs::create_dir_all(repo_root.join(".kanna/agents/review")).unwrap();
@@ -71,11 +87,18 @@ fn init_quota_fixture(label: &str, config: &Config) -> (std::path::PathBuf, Db) 
       "name": "review",
       "policy": { "transition": "manual" },
       "agent": "review",
-      "prompt": "Review $BRANCH",
-      "agent_provider": ["claude-fable-hi", "codex-astra-lo"]
+      "prompt": "Review $BRANCH"PROVIDERS
     }
   ]
-}"#,
+}"#
+        .replace(
+            "PROVIDERS",
+            if candidates {
+                ",\n      \"agent_provider\": [\"claude-fable-hi\", \"codex-astra-lo\"]"
+            } else {
+                ""
+            },
+        ),
     )
     .unwrap();
     std::fs::write(
@@ -597,14 +620,20 @@ async fn an_explicit_provider_override_is_never_walked_around() {
         "the override's provider is not replaced behind the caller's back"
     );
 
-    // And the rerun surfaces the refusal rather than repeating it.
-    let error = match prepare_rerun_stage_for_api(&db, &config, TASK_ID) {
-        Ok(_) => panic!("a rerun on a refused, pinned provider must be refused"),
-        Err(error) => error,
-    };
-    assert!(
-        error.contains("explicit provider override") && error.contains("spent quota"),
-        "the rerun names the refusal as the reason: {error}"
+    // The *automatic* path leaves the override alone. A deliberate rerun still
+    // runs, reproducing that override — which is what the parked action
+    // promises, and the only thing `kanna_rerun_stage` can do, since it takes
+    // no provider argument.
+    let rerun = prepare_rerun_stage_for_api(&db, &config, TASK_ID)
+        .expect("a deliberate rerun is never refused for a past refusal");
+    assert_eq!(rerun.agent_provider, "claude");
+    assert_eq!(
+        rerun
+            .provider_override
+            .as_ref()
+            .map(|o| o.provider.as_str()),
+        Some("claude"),
+        "the rerun reproduces the caller's override rather than walking around it"
     );
 }
 
@@ -653,10 +682,12 @@ async fn a_rerun_after_a_refusal_does_not_respawn_the_refused_provider() {
     );
 }
 
-/// With no other candidate to walk to, a rerun must refuse and say why rather
-/// than ask the exhausted provider again.
+/// With no un-refused candidate left, a rerun still runs — on the recorded
+/// provider. Refusing here is what disabled recovery forever: nothing ages a
+/// rejection row out, so the operator the parked action tells to "wait for the
+/// allowance to reset and rerun" could never do it.
 #[tokio::test]
-async fn a_rerun_with_no_remaining_candidate_is_refused_with_the_refusal_as_the_reason() {
+async fn a_rerun_with_no_remaining_candidate_runs_the_recorded_provider() {
     let config = test_config("quota-rerun-exhausted");
     let (repo_root, db) = init_quota_fixture("quota-rerun-exhausted", &config);
     insert_running_review_run(
@@ -686,20 +717,79 @@ async fn a_rerun_with_no_remaining_candidate_is_refused_with_the_refusal_as_the_
         .unwrap();
     }
 
-    let error = match prepare_rerun_stage_for_api(&db, &config, TASK_ID) {
-        Ok(_) => panic!("a rerun with nothing left to try must be refused"),
-        Err(error) => error,
-    };
-    assert!(
-        error.contains("spent quota") && error.contains("claude, codex"),
-        "the refusal names what has been refused: {error}"
+    let rerun = prepare_rerun_stage_for_api(&db, &config, TASK_ID)
+        .expect("a deliberate rerun is never refused for a past refusal");
+    assert_eq!(
+        rerun.agent_provider, "codex",
+        "with nothing un-refused to prefer, the rerun reproduces the recorded run"
     );
+    assert_eq!(rerun.model.as_deref(), Some("astra"));
+    assert_eq!(rerun.effort.as_deref(), Some("low"));
 }
 
-/// A resume reopens the recorded provider's own conversation, so it cannot
-/// walk anywhere. It is refused, and points at the operation that can.
+/// The gate is keyed to the refused run, so it stops applying once the
+/// operator has acted: the rerun's own new run carries no rejection, and the
+/// next rerun reproduces it without consulting the stage's history at all.
 #[tokio::test]
-async fn a_resume_of_a_refused_provider_is_refused_and_points_at_the_rerun() {
+async fn a_second_rerun_is_not_gated_by_the_first_runs_refusal() {
+    let config = test_config("quota-rerun-twice");
+    let (repo_root, db) = init_quota_fixture("quota-rerun-twice", &config);
+    insert_running_review_run(
+        &db,
+        &repo_root,
+        "run-review",
+        "claude",
+        Some("fable"),
+        Some("high"),
+    );
+    db.record_provider_rejection(crate::db::NewProviderRejection {
+        task_id: TASK_ID,
+        stage_run_id: "run-review",
+        stage: "review",
+        provider: "claude",
+        model: Some("fable"),
+        effort: Some("high"),
+        source: crate::db::QuotaRejectionSource::Pty,
+        rule_id: "claude/notice/quota-rejection",
+        matched_text: "You've reached your Fable limit.",
+        scope: Some("Fable"),
+        cli_version: Some("2.1.266"),
+        recovery: crate::db::QuotaRecovery::ParkedWorkObserved,
+        replacement_run_id: None,
+    })
+    .unwrap();
+
+    // The refused run is the latest, so this rerun walks around it.
+    let first = prepare_rerun_stage_for_api(&db, &config, TASK_ID).unwrap();
+    assert_eq!(first.agent_provider, "codex");
+
+    // The rerun's own run is now the latest and was never refused, so the
+    // stage's rejection history no longer steers anything.
+    db.finish_stage_run("run-review", "cancelled", None, None)
+        .unwrap();
+    insert_running_review_run(
+        &db,
+        &repo_root,
+        "run-review-2",
+        "claude",
+        Some("fable"),
+        Some("high"),
+    );
+
+    let second = prepare_rerun_stage_for_api(&db, &config, TASK_ID)
+        .expect("a run that was never refused reruns normally");
+    assert_eq!(
+        second.agent_provider, "claude",
+        "a rejection against an older run must not steer this one"
+    );
+    assert_eq!(second.model.as_deref(), Some("fable"));
+}
+
+/// A resume reopens the recorded provider's own conversation. A past refusal
+/// does not refuse it: reopening once the allowance has reset is exactly what
+/// the `parked-work-observed` action tells the operator to do.
+#[tokio::test]
+async fn a_resume_after_a_refusal_reopens_the_recorded_conversation() {
     let config = test_config("quota-resume");
     let (repo_root, db) = init_quota_fixture("quota-resume", &config);
     insert_running_review_run(
@@ -729,14 +819,102 @@ async fn a_resume_of_a_refused_provider_is_refused_and_points_at_the_rerun() {
     })
     .unwrap();
 
-    let error = match prepare_resume_task_for_api(&db, &config, TASK_ID) {
-        Ok(_) => panic!("a resume onto a refused allowance must be refused"),
-        Err(error) => error,
-    };
-    assert!(
-        error.contains("spent quota") && error.contains("Rerun the stage instead"),
-        "the resume explains itself and names the operation that works: {error}"
+    let resumed = prepare_resume_task_for_api(&db, &config, TASK_ID)
+        .expect("a refusal must not disable resume for the rest of the stage");
+    assert_eq!(
+        resumed.agent_provider, "claude",
+        "a resume continues the recorded provider's own conversation"
     );
+}
+
+/// The common case, and the regression this revision fixes: a workflow whose
+/// stage names no `agent_provider` at all — `single-reviewer` and every other
+/// built-in but `plan-build-review`. The refusal parks
+/// `parked-no-candidate-list`, and both operations the parked action names
+/// must then actually work. They used to be refused for the rest of the task's
+/// life at that stage, because the gate was keyed to the stage name and
+/// nothing ages a rejection row out.
+#[tokio::test]
+async fn a_stage_with_no_candidates_parks_and_still_reruns_and_resumes() {
+    let config = test_config("quota-no-candidates");
+    let (repo_root, db) = init_quota_fixture_without_candidates("quota-no-candidates", &config);
+    insert_running_review_run(
+        &db,
+        &repo_root,
+        "run-review",
+        "claude",
+        Some("fable"),
+        Some("high"),
+    );
+    let state = crate::http_api::AppState::new(config.clone());
+    let replacements = state.session_replacements();
+
+    let fake_daemon = spawn_fake_daemon_expecting_no_recovery(
+        config.daemon_dir.clone(),
+        fable_rejection(TASK_ID),
+    )
+    .await;
+    run_watcher(&state, &replacements).await;
+    fake_daemon.await.unwrap();
+
+    let parked = events_of(&db, "task.provider_quota_parked");
+    assert_eq!(parked.len(), 1);
+    assert_eq!(parked[0]["reason"], "parked-no-candidate-list");
+    assert_eq!(
+        db.list_stage_runs_for_task(TASK_ID).unwrap().len(),
+        1,
+        "there was no candidate to fall back to, so nothing was spawned"
+    );
+
+    // What the parked action promises: rerun the stage, and it runs.
+    let rerun = prepare_rerun_stage_for_api(&db, &config, TASK_ID)
+        .expect("a parked task must have a working recovery through rerun");
+    assert_eq!(
+        rerun.agent_provider, "claude",
+        "with no candidate list there is nothing to prefer; the rerun reproduces the run"
+    );
+
+    // And resume, once the session has ended, reopens the same conversation.
+    db.finish_stage_run("run-review", "failed", Some("session ended"), None)
+        .unwrap();
+    let resumed = prepare_resume_task_for_api(&db, &config, TASK_ID)
+        .expect("a parked task must have a working recovery through resume");
+    assert_eq!(resumed.agent_provider, "claude");
+}
+
+/// The parked-action sentences are operator instructions, so they must name
+/// operations that exist and read as prose. Both failed once: one told the
+/// operator to "rerun the stage with a different provider override" when
+/// `kanna_rerun_stage` takes only a task id, and a sibling literal shipped
+/// with runs of spaces where `\` line continuations were intended.
+#[test]
+fn parked_actions_name_real_operations_and_are_not_garbled() {
+    use crate::db::QuotaRecovery;
+
+    for recovery in [
+        QuotaRecovery::ParkedNoCandidates,
+        QuotaRecovery::ParkedNoCandidateList,
+        QuotaRecovery::ParkedWorkObserved,
+        QuotaRecovery::ParkedOverrideBinding,
+        QuotaRecovery::ParkedFallbackFailed,
+        QuotaRecovery::ParkedConcurrentMutation,
+    ] {
+        let action = crate::http_api::parked_action_for_tests(recovery);
+        assert!(
+            !action.trim().is_empty(),
+            "{recovery:?} parks the task, so it owes the operator an action"
+        );
+        assert!(
+            !action.contains("  "),
+            "{recovery:?} action has a collapsed line continuation: {action:?}"
+        );
+        assert!(
+            !action.contains("provider override once")
+                && !action.contains("with a different provider override"),
+            "{recovery:?} action tells the operator to pass an override kanna_rerun_stage \
+             does not accept: {action:?}"
+        );
+    }
 }
 
 /// The same refusal announced twice — a re-adopted session, a reconnecting

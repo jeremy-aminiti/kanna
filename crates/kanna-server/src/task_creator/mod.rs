@@ -681,41 +681,50 @@ pub(crate) fn prepare_rerun_stage_for_api(
         .transpose()
         .map_err(|error| format!("db error: {error}"))?
         .unwrap_or(false);
-    // The one thing a rerun must *not* reproduce is a provider that positively
-    // refused this stage. Feeding that stamp back in as an explicit override
-    // is exactly what re-spawned task 6b4a48af onto an exhausted Fable
-    // allowance twice. When the stage names an ordered candidate list, the
-    // rerun re-resolves through it with every refused provider dropped; when
-    // it does not, there is nothing to re-resolve to and the rerun is refused
-    // with the refusal as the reason, rather than repeating it.
-    let rejected_providers = db
-        .providers_rejected_at_stage(task_id, &stage_name)
-        .map_err(|e| format!("db error: {}", e))?;
-    let reproduces_rejected_provider = !superseded
-        && previous_run.as_ref().is_some_and(|run| {
+    // A rerun must not *silently* reproduce a provider that just refused this
+    // run — feeding that stamp back in as an explicit override is what
+    // re-spawned task 6b4a48af onto an exhausted Fable allowance twice. So
+    // when the run being reproduced is the one that was refused, the rerun
+    // prefers a candidate the stage names that has not been refused here.
+    //
+    // The gate is keyed to *that run*, never to "any provider ever refused at
+    // this stage name". The stage-name form has no time bound and no link to
+    // the run, so a refusal under it would disable rerun for the rest of the
+    // task's life at that stage — and every built-in workflow but
+    // `plan-build-review` names no candidates at all, so those tasks would
+    // have no recovery whatsoever. Keyed to the run, the gate stops applying
+    // the moment the operator acts, because a rerun produces a new run.
+    //
+    // And it never refuses. A rerun is somebody deliberately asking for this
+    // stage again, with the refusal already on task detail in front of them;
+    // waiting for the allowance to reset and rerunning is the documented
+    // recovery, so it has to work. With no un-refused candidate to prefer, the
+    // rerun proceeds on the recorded provider. Only the *automatic* fallback
+    // in `http_api/quota_recovery.rs` is bounded, which is the only place an
+    // unbounded retry would be a spin rather than a decision.
+    //
+    // An explicit single-provider override is excluded from the walk entirely:
+    // it is a caller's decision about which provider runs this stage, a rerun
+    // reproduces it, and only a workflow replacement supersedes it.
+    let reproduces_refused_run = !superseded
+        && previous_run
+            .as_ref()
+            .is_none_or(|run| run.provider_override.is_none())
+        && match previous_run.as_ref().and_then(|run| {
             run.agent_provider
                 .as_deref()
-                .is_some_and(|provider| rejected_providers.iter().any(|name| name == provider))
-        });
-    // An explicit single-provider override is a caller's decision about which
-    // provider runs this stage, and quota recovery does not overrule one — not
-    // automatically, and not by quietly re-pointing a rerun either. The
-    // refusal is surfaced as the reason instead.
-    if reproduces_rejected_provider {
-        if let Some(pinned) = previous_run
-            .as_ref()
-            .and_then(|run| run.provider_override.as_ref())
-        {
-            return Err(format!(
-                "this stage is pinned to {} by an explicit provider override, and {} refused it \
-                 for spent quota. Kanna does not overrule an override: rerun with a different \
-                 provider override, or wait for the allowance to reset.",
-                pinned.provider, pinned.provider,
-            ));
-        }
-    }
-    let unrejected_candidate = if reproduces_rejected_provider {
-        let candidate = current_stage
+                .map(|provider| (run.id.as_str(), provider))
+        }) {
+            Some((run_id, provider)) => db
+                .stage_run_was_quota_refused(task_id, run_id, provider)
+                .map_err(|error| format!("db error: {error}"))?,
+            None => false,
+        };
+    let unrejected_candidate = if reproduces_refused_run {
+        let rejected_providers = db
+            .providers_rejected_at_stage(task_id, &stage_name)
+            .map_err(|e| format!("db error: {}", e))?;
+        current_stage
             .agent_provider
             .as_deref()
             .unwrap_or_default()
@@ -725,24 +734,16 @@ pub(crate) fn prepare_rerun_stage_for_api(
                 !rejected_providers
                     .iter()
                     .any(|name| name == selector.provider.as_str())
-            });
-        let Some(candidate) = candidate else {
-            let refused = rejected_providers.join(", ");
-            return Err(format!(
-                "this stage's recorded provider refused it for spent quota and the stage names no \
-                 other candidate, so rerunning would ask the same exhausted provider again \
-                 (refused: {refused}). Wait for the allowance to reset, or re-point the stage at \
-                 another provider first."
-            ));
-        };
-        Some(SpawnAgentOverrides {
-            provider: Some(candidate.provider.as_str().to_string()),
-            model: candidate.model,
-            effort: candidate.effort,
-        })
+            })
+            .map(|candidate| SpawnAgentOverrides {
+                provider: Some(candidate.provider.as_str().to_string()),
+                model: candidate.model,
+                effort: candidate.effort,
+            })
     } else {
         None
     };
+    let walked_around_refusal = unrejected_candidate.is_some();
     let overrides = match (unrejected_candidate, previous_run.as_ref()) {
         (Some(candidate), _) => candidate,
         (None, Some(_)) if superseded => SpawnAgentOverrides::default(),
@@ -760,7 +761,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
     // record keeps naming whoever picked this stage's model. A rerun that
     // walked around a refusal reproduces nothing, so it records no override:
     // the engine chose that provider, not a caller.
-    let provider_override = if reproduces_rejected_provider {
+    let provider_override = if walked_around_refusal {
         None
     } else {
         previous_run

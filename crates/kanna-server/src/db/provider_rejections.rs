@@ -204,12 +204,42 @@ impl Db {
         rows.collect()
     }
 
+    /// Whether *this* stage run is the one a provider refused.
+    ///
+    /// Run-scoped on purpose. `providers_rejected_at_stage` answers a
+    /// different question — "which candidates has this stage already burned" —
+    /// and it is only ever true-er with time, so gating a caller-initiated
+    /// operation on it would refuse that operation for the rest of the task's
+    /// life at that stage. The run is the thing that was actually refused, and
+    /// a rerun produces a new one, so a gate keyed here stops applying as soon
+    /// as the operator has acted.
+    pub fn stage_run_was_quota_refused(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        provider: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM task_provider_rejection
+                 WHERE task_id = ?1 AND stage_run_id = ?2 AND provider = ?3 LIMIT 1",
+                params![task_id, run_id, provider],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|found| found.is_some())
+    }
+
     /// The providers already rejected at one stage of one task.
     ///
     /// This is what preserves the workflow's *original ordered intent* across
-    /// the provider stamp: a rerun re-resolves the stage's candidate list and
-    /// skips whatever is named here, instead of reproducing the run that was
-    /// refused.
+    /// the provider stamp: the automatic fallback tries each candidate at most
+    /// once by skipping whatever is named here, and a rerun of a refused run
+    /// prefers a candidate that is not.
+    ///
+    /// **Never a gate on its own.** It has no time bound and no link to any
+    /// particular run, so refusing an operation because this list is non-empty
+    /// refuses it forever.
     pub fn providers_rejected_at_stage(
         &self,
         task_id: &str,

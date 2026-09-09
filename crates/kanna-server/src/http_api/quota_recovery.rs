@@ -503,18 +503,28 @@ fn announce(
     Ok(())
 }
 
+/// The parked-action sentence, for the test that pins them to operations that
+/// exist. Operator instructions are a contract like any other surface.
+#[cfg(test)]
+pub(crate) fn parked_action_for_tests(recovery: QuotaRecovery) -> &'static str {
+    parked_action(recovery)
+}
+
 /// What a person can actually do, in words, for each way of parking.
 fn parked_action(recovery: QuotaRecovery) -> &'static str {
     match recovery {
         QuotaRecovery::FallbackStarted => "",
         QuotaRecovery::ParkedNoCandidates => {
-            "Every provider this stage names has refused a turn here. Wait for the allowance to \
-             reset and rerun the stage, or re-point the stage at another provider and rerun it."
+            "Every provider this stage names has refused a turn here. Wait for an allowance to \
+             reset, then rerun the stage with kanna_rerun_stage: it prefers a candidate that has \
+             not been refused, and runs the recorded provider when none is left. To move the task \
+             sooner, re-point the stage with kanna_replace_task_workflow and rerun it."
         }
         QuotaRecovery::ParkedNoCandidateList => {
             "This stage names no ordered provider candidates, so there was nothing to fall back \
-             to. Wait for the allowance to reset and rerun the stage, or give the stage a \
-             candidate list."
+             to. Wait for the allowance to reset, then rerun the stage with kanna_rerun_stage: it \
+             runs on the recorded provider. To move the task sooner, give the stage a candidate \
+             list with kanna_replace_task_workflow and rerun it."
         }
         QuotaRecovery::ParkedWorkObserved => {
             "The refused attempt had already changed its workspace, so Kanna did not replace it. \
@@ -522,9 +532,11 @@ fn parked_action(recovery: QuotaRecovery) -> &'static str {
              deliberately."
         }
         QuotaRecovery::ParkedOverrideBinding => {
-            "This run was started from an explicit provider override, which Kanna does not \
-             overrule. Rerun the stage with a different provider override once the allowance \
-             resets."
+            "This run was started from an explicit provider override, which automatic recovery \
+             does not overrule. Wait for the allowance to reset, then rerun the stage with \
+             kanna_rerun_stage: it reproduces that override. To run this stage on another \
+             provider, re-point it with kanna_replace_task_workflow, which supersedes the \
+             override, and rerun it."
         }
         QuotaRecovery::ParkedFallbackFailed => {
             "The next candidate could not be started. The refused attempt's workspace is intact; \

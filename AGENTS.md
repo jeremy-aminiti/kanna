@@ -519,11 +519,20 @@ provider's sentence before the replacement spawns, so a refusal is never
 finished as a success; the workspace is never reset, forked or recreated; and an
 explicit single-provider override is binding in both directions. Anything else
 parks the task in one actionable state (`task.provider_quota_parked`, plus
-`providerRejection` on task detail) with no retry loop. `rerun_stage` re-resolves
-the stage's candidate list around a recorded refusal and is refused, naming it,
-when nothing is left; `resume` cannot walk anywhere and is refused outright.
-None of this disturbs the `agentProviders` / `config.local.json` / frontmatter
-precedence chain. See `docs/specs/provider-quota-recovery.md`.
+`providerRejection` on task detail) with no retry loop. **Only the automatic
+fallback is bounded**: `rerun_stage` prefers a candidate the stage names that
+has not been refused, otherwise proceeds on the recorded provider, and
+reproduces an explicit provider override rather than walking around it; and
+`resume` reopens that provider's own conversation — neither is ever refused for
+a past refusal, because a caller asking again with the rejection in front of
+them is a decision, and waiting for the allowance to reset and rerunning is the
+recovery. The gate is keyed to the refused `stage_run`, never to the stage
+name, which has no time bound and would disable both operations for the rest of
+the task's life at that stage. To move a parked task sooner, re-point the stage
+with `kanna_replace_task_workflow` and rerun; `kanna_rerun_stage` takes no
+provider argument. None of this disturbs the `agentProviders` /
+`config.local.json` / frontmatter precedence chain. See
+`docs/specs/provider-quota-recovery.md`.
 
 **A scheduled transfer is not a moved task.** Moving a task between machines is
 a first-class agent surface — `kanna_push_task` / `kanna_pull_task` /

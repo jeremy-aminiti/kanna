@@ -192,20 +192,39 @@ what unread already means; nothing new is invented for quota.
 The recorded provider is fed back in as an explicit override on a rerun, which
 is what re-spawned `6b4a48af` onto an exhausted allowance twice.
 
-- **`rerun_stage`** re-resolves the stage's candidate list with every refused
-  provider dropped. With nothing left to walk to, it is **refused** and names
-  the refusal as the reason rather than repeating it. A rerun that walked
-  around a refusal records no `provider_override`.
-- **An explicit override stays binding.** When the refused provider was pinned
-  by one, the rerun is refused rather than quietly re-pointed: quota recovery
-  does not overrule a caller's decision, in either direction.
-- **`resume`** reopens the recorded provider's *own* conversation, so it cannot
-  walk anywhere — re-pointing it would be a fresh session wearing a resume's
-  name. It is refused, and points at `rerun_stage`.
+**A rerun and a resume are deliberate requests, and a past refusal never
+refuses one.** This is the line between them and the automatic fallback: the
+fallback is bounded because an unbounded automatic retry is a spin, while a
+person asking for this stage again — with `providerRejection` on task detail in
+front of them — is a decision. Waiting for an allowance to reset and rerunning
+is the documented recovery, so it has to work.
 
-A refusal is remembered for the stage occupancy it happened in. Once the
-allowance resets, a rerun still prefers the un-refused candidate; the escape is
-an explicit provider override, or re-pointing the stage.
+- **`rerun_stage`** prefers a candidate the stage names that has not been
+  refused here. With none left un-refused — and with a stage that names no
+  candidates at all, which is every built-in workflow but `plan-build-review` —
+  it proceeds on the recorded provider. A run started from an explicit
+  single-provider override is excluded from the walk entirely — the rerun
+  reproduces that override, because it is a caller's decision and only a
+  workflow replacement supersedes it. A rerun that walked around a refusal
+  records no `provider_override`.
+- **`resume`** reopens the recorded provider's *own* conversation and cannot
+  walk anywhere; re-pointing it would be a fresh session wearing a resume's
+  name. A refusal does not block it, because reopening that conversation once
+  the allowance has reset is exactly what the `parked-work-observed` action
+  tells the operator to do.
+
+**The gate is keyed to the refused `stage_run`, never to the stage name.** The
+stage-name form — "any provider ever refused at this stage" — has no time bound
+and no link to the run being rerun, so a refusal under it disables rerun and
+resume for the rest of the task's life at that stage. Keyed to the run, it
+stops applying the moment the operator acts, because a rerun produces a new
+run.
+
+To move a parked task onto a different provider before its allowance resets,
+re-point the stage with `kanna_replace_task_workflow` and rerun: a workflow
+replacement supersedes the recorded run's execution binding, including an
+explicit provider override. `kanna_rerun_stage` itself takes no provider
+argument, so no operator-facing message may suggest passing one.
 
 This does **not** disturb the `agentProviders` / `config.local.json` /
 frontmatter precedence chain: recovery walks the stage's *own* pinned candidate

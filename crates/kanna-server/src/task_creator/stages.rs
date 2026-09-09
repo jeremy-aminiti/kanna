@@ -999,22 +999,16 @@ fn prepare_stage_restart(
                     run.status, task_id
                 ));
             }
-            // A resume continues *this run's* conversation, so unlike a rerun
-            // it cannot walk to another candidate — re-pointing it would be a
-            // fresh session wearing a resume's name. When the provider that
-            // held that conversation refused this stage for spent quota, the
-            // honest answer is to refuse and say so, rather than reopen a
-            // transcript on an allowance that is gone.
-            if let Some(provider) = run.agent_provider.as_deref() {
-                let refused = db
-                    .providers_rejected_at_stage(task_id, &run.stage)
-                    .map_err(|error| format!("db error: {error}"))?;
-                if refused.iter().any(|name| name == provider) {
-                    return Err(format!(
-                        "{provider} refused this stage for spent quota, and a resume must reopen                          that same provider's conversation. Rerun the stage instead — it                          re-resolves the stage's candidate list around the refusal — or wait for                          the allowance to reset."
-                    ));
-                }
-            }
+            // A quota refusal recorded against this run is deliberately *not*
+            // a reason to refuse the resume. A resume reopens that run's own
+            // conversation, which is exactly what an operator wants once the
+            // allowance has reset, and it is what the parked action for an
+            // attempt that had already changed its workspace tells them to do.
+            // Gating it on the refusal — worse, on every provider ever refused
+            // at this stage name — disabled resume for the rest of the task's
+            // life at that stage, on workflows that name no candidates at all.
+            // The refusal is on task detail as `providerRejection`; the
+            // decision to reopen it belongs to whoever is reading that.
         }
         // The rejected attempt is deliberately still `running` here: the
         // replacement is prepared before anything is written, so a failed
