@@ -111,7 +111,8 @@ pub(crate) use tasks::create_task_in_process;
 pub(crate) use task_input::{
     handle_task_terminal_state, mark_task_session_interrupted,
     mark_task_session_interrupted_for_recovery, restore_task_run_for_live_session,
-    try_submit_task_input, TaskInputError, SESSION_INTERRUPTION_FEEDBACK,
+    try_submit_task_input, try_submit_task_input_if_session, TaskInputError,
+    SESSION_INTERRUPTION_FEEDBACK,
 };
 
 #[cfg(test)]
