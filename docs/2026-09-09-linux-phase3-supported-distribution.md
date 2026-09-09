@@ -372,9 +372,10 @@ One cosmetic observation, left alone deliberately because it is outside this
 revision's scope: in the unknown state the fixed hint and the backend `detail`
 say nearly the same thing twice. It reads as redundant rather than wrong.
 
-## 7b. The one gate failure, and where its fix lives
+## 7b. The one gate failure, its cause, and the fix carried from main
 
-`./kd test all` on this branch stops in the `rust` lane on exactly one test:
+Before the fix below was applied, `./kd test all` on this branch stopped in the
+`rust` lane on exactly one test:
 `terminal_watcher::tests::watcher_applies_attached_busy_as_working` in
 `kanna-server` (`terminal_watcher.rs:1898`, `left: Some("unread")` /
 `right: Some("working")`).
@@ -385,17 +386,27 @@ It is not this branch's. It reproduces byte-identically at the branch base
 busy runtime frame keep `unread` activity, updated the adjacent spurious-idle
 test, and missed this one, which still seeded `unread` and asserted `working`.
 
-**The fix is already on `origin/main`: `fefec7071`**, "test(server): seed the
+**The fix is on `origin/main`: `fefec7071`**, "test(server): seed the
 attached-busy watcher test as idle, not unread" — a one-line change to the
-test's seed (`update_pipeline_item_activity("task-child", "idle")`), test-only,
-in a file this branch does not modify.
+test's seed (`update_pipeline_item_activity("task-child", "idle")`), plus the
+comment explaining it. Test-only.
 
-It is deliberately **not** cherry-picked, rebased or merged here. The review
-asked that it not be, importing an unrelated main commit would widen this PR's
-diff for no functional reason, and the gate is under a capacity hold anyway so
-there is nothing to make green right now. Any base that contains `fefec7071`
-runs this lane clean; that is the reconciliation, and it needs no change on this
-branch.
+**That exact change is applied on this branch**, on manager direction: recording
+the attribution alone would have left the next required gate deterministically
+red, so the causally necessary one-line baseline fix is carried here rather than
+waiting for a rebase. The changed lines are byte-identical to `fefec7071`'s —
+verified by diffing the two patches' content lines — and nothing else in
+`kanna-server` is touched. This is not adjacent subsystem cleanup: it is the
+single seed value whose staleness causes the failure.
+
+Attribution: the fix is `fefec7071`'s, authored on `main`. When this branch
+merges, the two changes are the same edit and resolve trivially; if a rebase
+lands `fefec7071` first, this hunk simply disappears.
+
+The root cause is worth keeping visible because it is a class of bug, not an
+accident: a contract change (`unread` survives a busy frame) updated one test
+that encoded the old contract and missed its neighbour. The seed, not the
+assertion, was the stale part.
 
 ## 8. E2E coverage note
 
