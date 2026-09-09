@@ -26,6 +26,13 @@ const TASK_COMPOSER_PLACEHOLDER = "Reply…";
 // Deliberately longer than the five-line cap, so a composer that kept growing
 // with its content fails the height assertion instead of quietly filling the
 // screen.
+const TASK_COMPOSER_FIVE_LINE_DRAFT = [
+  "First relay line.",
+  "Second relay line.",
+  "Third relay line.",
+  "Fourth relay line.",
+  "Fifth relay line."
+].join("\n");
 const TASK_COMPOSER_MULTILINE_DRAFT = [
   "First relay line.",
   "Second relay line.",
@@ -810,12 +817,30 @@ export async function verifyRelayComposerResetJourney(
     | "isKeyboardShown"
     | "waitUntil"
   >,
+  actions: { captureScreenshot(name: string): Promise<void> },
 ): Promise<void> {
   const input = await ui.getTaskInput();
   await input.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
   const initialHeight = (await input.getSize()).height;
 
+  // Exactly the cap: five lines is the tallest the composer may render.
   await input.click();
+  await input.setValue(TASK_COMPOSER_FIVE_LINE_DRAFT);
+  let fiveLineHeight = initialHeight;
+  await ui.waitUntil(
+    async () => {
+      fiveLineHeight = (await input.getSize()).height;
+      return fiveLineHeight > initialHeight && await ui.isKeyboardShown();
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: "Expected the composer to grow to five lines",
+    },
+  );
+  await actions.captureScreenshot("05-composer-five-lines");
+
+  // A sixth line and beyond scrolls inside the input rather than growing it.
   await input.setValue(TASK_COMPOSER_MULTILINE_DRAFT);
 
   let expandedHeight = initialHeight;
@@ -841,6 +866,14 @@ export async function verifyRelayComposerResetJourney(
         `${TASK_COMPOSER_MAX_RENDERED_HEIGHT}pt); it rendered ${expandedHeight}pt`,
     );
   }
+
+  if (expandedHeight > fiveLineHeight) {
+    throw new Error(
+      `Expected a draft past the cap to scroll inside the input, not grow it: ` +
+        `five lines rendered ${fiveLineHeight}pt, eight lines ${expandedHeight}pt`,
+    );
+  }
+  await actions.captureScreenshot("06-composer-past-cap-scrolling");
 
   const send = await ui.getTaskSendButton();
   await send.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
@@ -898,8 +931,10 @@ export async function verifyRelayComposerResetJourney(
     );
   }
 
+  await actions.captureScreenshot("07-composer-after-send-one-line");
   process.stdout.write(
-    `[mobile-e2e] composer reset passed: one line ${initialHeight}pt, grown to ` +
+    `[mobile-e2e] composer reset passed: one line ${initialHeight}pt, five lines ` +
+      `${fiveLineHeight}pt, past the cap ${expandedHeight}pt, grown to ` +
       `${expandedHeight}pt within the ${TASK_COMPOSER_MAX_RENDERED_HEIGHT}pt cap, ` +
       `back to ${lastResetHeight}pt after Send\n`,
   );
@@ -2339,7 +2374,9 @@ export async function runRelayTaskFlow(
     verifyComposerReset: async () => {
       await openRelayFixtureTask(ui, options.fixture.taskId);
       await waitForTaskTerminalLive(ui);
-      await verifyRelayComposerResetJourney(ui);
+      await verifyRelayComposerResetJourney(ui, {
+        captureScreenshot: options.captureScreenshot,
+      });
       await closeTaskForJourney();
     },
     // On iPad this input follows the sidebar's alternate-task -> fixture-task

@@ -679,11 +679,13 @@ describe("relay composer reset journey", () => {
   function createComposerResetUi({
     dismissKeyboard = true,
     expandedHeight = 82,
+    growsPastCap = false,
     noticeAfterSend = false,
     resetHeight = true,
   }: {
     dismissKeyboard?: boolean;
     expandedHeight?: number;
+    growsPastCap?: boolean;
     noticeAfterSend?: boolean;
     resetHeight?: boolean;
   } = {}) {
@@ -701,7 +703,11 @@ describe("relay composer reset journey", () => {
       getSize: vi.fn(async () => ({ height: composerHeight, width: 240 })),
       setValue: vi.fn(async (value: string) => {
         composerValue = value;
-        composerHeight = expandedHeight;
+        // A real composer stops at the cap: the eight-line draft renders no
+        // taller than the five-line one unless the cap is broken.
+        const linesPastFive = Math.max(0, value.split("\n").length - 5);
+        composerHeight =
+          expandedHeight + (growsPastCap ? linesPastFive * 20 : 0);
       }),
       waitForDisplayed: vi.fn(async () => undefined),
     };
@@ -731,13 +737,15 @@ describe("relay composer reset journey", () => {
       }),
     };
 
-    return { input, send, ui };
+    const actions = { captureScreenshot: vi.fn(async () => undefined) };
+
+    return { actions, input, send, ui };
   }
 
   it("observes multiline native growth, then Send resets height and hides the keyboard", async () => {
-    const { input, send, ui } = createComposerResetUi();
+    const { actions, input, send, ui } = createComposerResetUi();
 
-    await verifyRelayComposerResetJourney(ui as never);
+    await verifyRelayComposerResetJourney(ui as never, actions);
 
     expect(input.click).toHaveBeenCalledOnce();
     expect(input.setValue).toHaveBeenCalledWith(multilineDraft);
@@ -747,34 +755,54 @@ describe("relay composer reset journey", () => {
   });
 
   it("fails when a successful send still raises a notice", async () => {
-    const { ui } = createComposerResetUi({ noticeAfterSend: true });
+    const { actions, ui } = createComposerResetUi({ noticeAfterSend: true });
 
     await expect(
-      verifyRelayComposerResetJourney(ui as never),
+      verifyRelayComposerResetJourney(ui as never, actions),
     ).rejects.toThrow(/no delivery notice after a successful send/i);
   });
 
   it("fails when the composer grows past its five-line cap", async () => {
-    const { ui } = createComposerResetUi({ expandedHeight: 260 });
+    const { actions, ui } = createComposerResetUi({ expandedHeight: 260 });
 
     await expect(
-      verifyRelayComposerResetJourney(ui as never),
+      verifyRelayComposerResetJourney(ui as never, actions),
     ).rejects.toThrow(/stop growing at five lines/i);
   });
 
-  it("fails when Send leaves the cleared native input expanded", async () => {
-    const { ui } = createComposerResetUi({ resetHeight: false });
+  it("fails when a draft past the cap grows the input instead of scrolling", async () => {
+    const { actions, ui } = createComposerResetUi({ growsPastCap: true });
 
     await expect(
-      verifyRelayComposerResetJourney(ui as never),
+      verifyRelayComposerResetJourney(ui as never, actions),
+    ).rejects.toThrow(/scroll inside the input, not grow it/i);
+  });
+
+  it("captures the composer states it verifies", async () => {
+    const { actions, ui } = createComposerResetUi();
+
+    await verifyRelayComposerResetJourney(ui as never, actions);
+
+    expect(actions.captureScreenshot.mock.calls.map(([name]) => name)).toEqual([
+      "05-composer-five-lines",
+      "06-composer-past-cap-scrolling",
+      "07-composer-after-send-one-line",
+    ]);
+  });
+
+  it("fails when Send leaves the cleared native input expanded", async () => {
+    const { actions, ui } = createComposerResetUi({ resetHeight: false });
+
+    await expect(
+      verifyRelayComposerResetJourney(ui as never, actions),
     ).rejects.toThrow(/clear, return to one-line height, and hide the keyboard/i);
   });
 
   it("fails when Send leaves the software keyboard shown", async () => {
-    const { ui } = createComposerResetUi({ dismissKeyboard: false });
+    const { actions, ui } = createComposerResetUi({ dismissKeyboard: false });
 
     await expect(
-      verifyRelayComposerResetJourney(ui as never),
+      verifyRelayComposerResetJourney(ui as never, actions),
     ).rejects.toThrow(/clear, return to one-line height, and hide the keyboard/i);
   });
 });
