@@ -2054,11 +2054,15 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 8,
     left: 0,
-    marginBottom: 8,
+    // Clears the floating "Take terminal control" button, which sits 112pt up
+    // from the bottom of the terminal. The notice this replaced was drawn
+    // straight through that button, leaving both unreadable.
+    marginBottom: 36,
     paddingHorizontal: 12,
     paddingVertical: 10,
     position: "absolute",
-    right: 0
+    right: 0,
+    zIndex: 4
   },
   inputFailureToastText: {
     color: "#FFD9D2",
