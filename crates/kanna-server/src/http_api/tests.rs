@@ -311,6 +311,7 @@ mod core_routes;
 mod create_task;
 mod e2e_sql_routes;
 mod input;
+mod machine_stats_routes;
 mod raw_input;
 mod recent_workflows;
 mod relay_dispatch;

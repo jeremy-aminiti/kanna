@@ -495,6 +495,7 @@ async fn machine_stats_route_returns_sane_local_native_stats() {
         .await
         .unwrap();
     let stats: serde_json::Value = from_slice(&body).unwrap();
+    println!("MACHINE_STATS_SAMPLE={stats}");
     let machine = &stats["machines"][0];
     assert_eq!(machine["machineId"], "desktop-stats");
     assert!(machine["cpuCoreCount"].as_u64().unwrap() >= 1);
@@ -503,6 +504,22 @@ async fn machine_stats_route_returns_sane_local_native_stats() {
     assert!(machine["loadAverages"]["one"].as_f64().unwrap() >= 0.0);
     assert!(machine["heavyProcesses"]["rustc"].is_number());
     assert_eq!(machine["busyTaskCount"], 1);
+    assert!(machine["cpu"]["sampleWindowMs"].as_u64().unwrap() >= 500);
+    let busy = machine["cpu"]["busyPercent"].as_f64().unwrap();
+    let idle = machine["cpu"]["idlePercent"].as_f64().unwrap();
+    assert!((0.0..=100.0).contains(&busy));
+    assert!((0.0..=100.0).contains(&idle));
+    assert!(machine["logicalCoreCount"].as_u64().unwrap() >= 1);
+    assert!(machine["sampledAt"].is_u64());
+    assert!(machine["memory"]["swapUsedBytes"].is_u64());
+    assert!(
+        machine["processes"]["topProcesses"]
+            .as_array()
+            .unwrap()
+            .len()
+            <= 10
+    );
+
     assert_eq!(stats["machineErrors"], serde_json::json!([]));
 }
 
@@ -601,6 +618,15 @@ async fn machine_stats_route_keeps_successful_siblings_when_another_times_out() 
         .unwrap()
         .iter()
         .any(|machine| machine["machineId"] == "desktop-remote"));
+    let old = stats["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["machineId"] == "desktop-remote")
+        .unwrap();
+    assert!(old.get("cpu").is_none(), "older peer must not become idle");
+    assert!(old.get("sampledAt").is_none());
+    assert!(old.get("processes").is_none());
     assert_eq!(stats["machineErrors"][0]["machineId"], "desktop-hung");
     assert_eq!(
         stats["machineErrors"][0]["error"],

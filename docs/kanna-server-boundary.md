@@ -879,19 +879,122 @@ checks reachable siblings and, when the id exists elsewhere, returns an error
 that names the owning machine and tells MCP callers to repeat
 `kanna_get_task` with that `machine_id`, rather than returning a bare 404.
 
-`GET /v1/machine-stats` (`kanna_machine_stats`) is the read-only capacity
-snapshot for task managers. It returns `machines` with one row for the local
-desktop and each currently reachable sibling: 1/5/15-minute load averages,
-physical CPU core count (logical count as a fallback), memory total, used,
-free, and available bytes, macOS memory pressure when the kernel exposes it,
-counts for `rustc`, `cargo`, Bazel, Vitest, `xcodebuild`, and Node test-runner
-processes, and the number of open tasks whose durable `runtimeState` is
-`busy`. Process and memory inspection uses native system APIs and does not
-spawn shell probes. Sibling requests use `localOnly=true` to prevent recursive
-aggregation. An unreachable, incompatible, or malformed sibling contributes a
-`machineErrors` row instead of failing or silently presenting partial capacity
-as complete. These values are observational; the endpoint performs no
-scheduling or reservation.
+`GET /v1/machine-stats` (`kanna_machine_stats`, `kanna-cli machine stats`) is
+an observational resource snapshot, not a scheduler or a safe-to-start quota.
+The server owns native collection; MCP and CLI relay the same JSON. Existing
+load, memory, `cpuCoreCount`, `heavyProcessCount`/`heavyProcesses`, and
+`busyTaskCount` fields remain compatible. New fields are optional for old peers:
+**absent means unknown, never a healthy zero**.
+
+- `cpu`: a real two-point CPU-counter sample. `busyPercent` is user + system,
+  `userPercent` includes nice time, and `systemPercent` includes Linux IRQ and
+  softirq time. Percentages use **0–100 for the whole machine**, independently
+  of core count. macOS uses `host_statistics(HOST_CPU_LOAD_INFO)`;
+  busy + idle = 100. Linux uses `/proc/stat`; busy + idle + `ioWaitPercent` +
+  `stealPercent` = 100. Guest counters already belong to user/nice and are not
+  counted twice. I/O wait and stolen VM time are not available execution
+  capacity. CPU counters are OS accounting estimates, not throughput or
+  frequency measurements. No first-read utilization is published: a fresh
+  request establishes a baseline, waits 500 ms, then samples. A zero delta,
+  reset/wrap (including decreasing Linux iowait), topology change, failed
+  counter, or elapsed window outside 500–5000 ms omits `cpu` and records why.
+- `loadAverages` remains 1/5/15-minute OS load, not a percent. Linux load includes
+  runnable and uninterruptible tasks; neither low load nor zero recognized
+  builds establishes idle CPU. `physicalCoreCount` counts physical cores and
+  `logicalCoreCount` counts online logical CPUs visible to the host counters.
+  The legacy `cpuCoreCount` remains physical-first, falling back to the server's
+  available parallelism (then 1); new counts have no invented fallback. SMT,
+  Apple performance/efficiency cores, frequency, thermal limits, CPU affinity,
+  and container quotas mean these counts are not interchangeable capacity units.
+  Linux readings describe the visible host/proc namespace, not a cgroup quota.
+- `processes.topProcesses`: union of the five highest sampled CPU and five
+  highest resident-memory consumers, deduplicated by PID, ordered by CPU, at
+  most ten rows. Includes WindowServer, VMs, shells, services and other non-build
+  consumers. Each row has `pid`, `parentPid`, a bounded native `name`,
+  `cpuPercent`, `sampleWindowMs`, and `residentBytes`. **Process 100% means one
+  logical CPU**, so 424% is about 4.24 logical CPUs, not 424% of the machine.
+  Each process uses its own elapsed monotonic interval and PID/start identity.
+  A missing baseline or counter reset yields null CPU/window, not idle. RSS is
+  resident physical memory (macOS `pti_resident_size`, Linux stat RSS pages),
+  includes shared pages, excludes swapped-out pages and is not additive.
+  Processes born after enumeration or gone before the second read are not
+  fully represented; protected/kernel processes may deny counters. Do not sum
+  process CPU or RSS to reconstruct aggregate CPU/memory. The summary reports
+  observed, sampled and unavailable counts and truncation (8192 inspected PIDs;
+  when truncated, observed count is a lower bound). Process errors explicitly
+  mean partial coverage. Arguments are inspected privately only for recognized
+  Node-family runners, never returned; no environment is collected.
+- Legacy `heavyProcessCount`/`heavyProcesses` are **recognized build/test
+  process counts**, not a count of all heavy consumers or a utilization metric.
+  Categories remain rustc, cargo, bazel/bazelisk, vitest, xcodebuild, and Node
+  tests (Jest, Mocha, Ava, Tap, Playwright test, `--test`). Direct named runners,
+  nodejs and Bun wrappers are recognized too. Wrapper titles, truncated process
+  names, inaccessible argv, build tools outside this list and exited processes
+  can be missed; zero only means no recognized tools were observed.
+  `busyTaskCount` still counts open durable tasks whose runtime state is busy;
+  it is neither host utilization nor a count of active child processes.
+
+`sampledAt` is the source machine's snapshot completion time in Unix
+milliseconds; `collectionWindowMs` is total monotonic collection duration.
+`cpu.sampleStartedAt`/`cpu.sampledAt` are wall-clock timestamps enclosing its
+counter pair, and `cpu.sampleWindowMs` is the actual monotonic elapsed interval,
+not the requested sleep. Process samples overlap that pair but include their
+own scan offsets. Memory/storage/load are point reads during collection, not an
+atomic system snapshot. `cacheAgeMs` is monotonic age since collection completion
+at the source when it answered; cache hits are at most two seconds old. Relay
+transit adds age. Compare timestamps with awareness of machine clock skew;
+there is no guarantee that sibling windows coincide or capacity remains free.
+
+Collection runs on a blocking worker, never an async request thread. Concurrent
+requests share one collector and its two-second cache, including failures. A
+local request waits at most two seconds; timing out or disconnecting does not
+release worker ownership or start another collector while the old one is still
+running. There is no periodic sampling process. Native OS/filesystem calls may
+outlive that request deadline; at most one collector is retained by the server.
+No shell tools or build-machine runtime dependencies are required.
+
+Memory fields are bytes, with `source` and `collectionErrors` describing their
+availability. `freeBytes` is unused memory; `availableBytes` estimates reclaimable
+headroom and is the more useful value for assessing memory demand, but does not
+promise it can all be allocated. On Linux these are `/proc/meminfo` MemFree and
+MemAvailable, with used = total − available. macOS preserves sysinfo 0.33's
+legacy definitions in checked native reads: free = (free pages − speculative)
+× page size; used = (active + wired + compressor + speculative) × page size;
+available = max(0, free + inactive + purgeable − compressor) × page size.
+These estimates are **not complementary partitions**; total − used need not
+match available. `compressedBytes` on macOS is physical compressor occupancy,
+not the uncompressed size of stored pages; it is already included in used.
+`swapTotalBytes`/`swapUsedBytes` show occupied swap capacity (not swap rates).
+macOS `pressure` is the kernel's normal/warning/critical category, which describes
+memory only, not CPU. Linux does not fabricate a categorical pressure or a
+system-wide compressed-byte figure; absent counters and unsupported metrics
+are explained in memory `collectionErrors`.
+
+`storage` probes at most 16 visible repo roots, their conventional `.build` and
+`.tmp` paths, and the server's OS-temp path. These are locations, not a claim to
+resolve arbitrary build configuration or every task's external cache. For a
+missing path it reports the nearest existing ancestor as `measuredPath`; errors
+and the repository cap are explicit. One row per filesystem device contains its
+role/path associations: duplicate repo/build/temp volumes are not counted
+again. `availableBytes` is statvfs space available to an unprivileged caller,
+`freeBytes` also includes reserved space, and `readOnly` is explicit. APFS volumes
+can share container space even across different device ids, so **do not sum
+rows** or assume purgeable space, quotas, sparse allocations, and snapshots
+behave identically to `df`. Storage inspection does not walk repositories.
+
+Sibling calls use `localOnly=true`, a three-second listing deadline and parallel
+three-second per-peer deadlines, capped at 16 peers. The envelope has one row
+per successful machine, plus `machineErrors` for failed local collection,
+unreachable/incompatible/malformed peers, peer-reported collection errors and
+omitted peers. A failed local collector does not discard successful siblings.
+Per-metric failures appear in the machine's `collectionErrors` or memory errors;
+missing fields in an old server response remain missing through aggregation.
+Responses bound process rows, path associations and diagnostic strings. The
+existing loopback/browser-credential, paired-LAN and authenticated-relay
+boundaries apply unchanged.
+
+Native semantics references: [Linux proc counters](https://www.kernel.org/doc/html/latest/filesystems/proc.html)
+and [Apple task accounting](https://github.com/apple-oss-distributions/xnu/blob/main/doc/observability/recount.md).
 
 Repository singleton signals use that authenticated desktop-routing boundary
 before local creation. A repository row with `remote_url_hash` is identified

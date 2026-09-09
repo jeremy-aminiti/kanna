@@ -304,7 +304,7 @@ describe("QA workflow assets", () => {
     );
     expect(agent.prompt).toContain("this sees sessions, not build processes");
     expect(agent.prompt).toContain("`kanna_task_logs` tail");
-    expect(agent.prompt).toContain("roughly two concurrent full gates per machine");
+    expect(agent.prompt).toContain("zero recognized tools never means idle CPU");
     expect(agent.prompt).toContain("unknown capacity, never idle capacity");
     expect(agent.prompt).toContain(
       "Put an explicit pause-heavy-verification directive in the creation prompt"
