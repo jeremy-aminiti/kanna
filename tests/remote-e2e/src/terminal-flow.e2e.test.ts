@@ -147,6 +147,90 @@ describe("remote task terminal flow E2E", () => {
     }
   }, 120_000);
 
+  it("paces real PTY mailbox delivery through bursts, full backlog and urgent failure", async () => {
+    const worker = await createScriptedTask(harness, { displayName: "Timed event worker", agentProvider: "claude" });
+    const blocker = await createScriptedTask(harness, { displayName: "Timed prerequisite", agentProvider: "claude" });
+    const inputTraceFile = join(harness.paths.root, "timed-subscription-input");
+    const manager = await createScriptedTask(harness, { displayName: "Timed manager", continuousOutput: false, inputTraceFile });
+    await pinSingleStageWorkflow(harness, worker.taskId);
+    await pinSingleStageWorkflow(harness, manager.taskId);
+    interface EventRow { seq: number | null; type: string; taskId: string }
+    interface Mailbox {
+      id: string; batchId: number; wakeState: string;
+      pending: { events: EventRow[]; cursor: string } | null;
+    }
+    const local = async <T,>(path: string, body: unknown): Promise<T> => {
+      const response = await localProcessFetch(`${harness.lanBaseUrl}${path}`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      expect(response.ok, text).toBe(true);
+      return JSON.parse(text) as T;
+    };
+    // Producers cross the real relay; subscription control stays desktop-local.
+    const toggle = async (blocked: boolean): Promise<void> => {
+      await harness.client.invokeDesktop({ desktopId: harness.desktopId, method: "POST",
+        path: `/v1/tasks/${worker.taskId}/actions/${blocked ? "block" : "unblock"}`,
+        body: blocked ? { blockerTaskIds: [blocker.taskId] } : {},
+      });
+    };
+    const initial = await local<Mailbox>("/v1/event-subscriptions", {
+      taskId: manager.taskId, taskIds: [worker.taskId], localOnly: true, delivery: "input",
+    });
+    const path = `/v1/event-subscriptions/${initial.id}/read`;
+    const read = () => local<Mailbox>(path, {});
+    const ack = (batch: number) => local<Mailbox>(path, { acknowledgeBatchId: batch });
+    const pages: Mailbox[] = [];
+    try {
+      if (initial.pending) await ack(initial.batchId);
+      await toggle(true);
+      await toggle(false);
+      await toggle(true);
+      await expect.poll(async () => (await read()).wakeState, { timeout: 30_000 }).toBe("notified");
+      const first = await read();
+      pages.push(first);
+      // An unacked page cannot be replaced, even after urgent attention arrives.
+      // Produce more than capacity through durable blocker writes, not an event
+      // insertion shortcut. Real transport load may split the initial burst.
+      for (let index = 0; index < 102; index += 1) await toggle(index % 2 === 1);
+      await harness.client.invokeDesktop({ desktopId: harness.desktopId, method: "POST",
+        path: `/v1/tasks/${worker.taskId}/actions/complete-stage`, body: {
+          runId: await currentRunId(worker.taskId), status: "failure", summary: "scripted urgent timing failure",
+        },
+      });
+      expect((await read()).pending).toEqual(first.pending);
+      await ack(first.batchId);
+      for (let index = 0; index < 6; index += 1) {
+        await expect.poll(async () => (await read()).wakeState, { timeout: 30_000 }).toBe("notified");
+        const page = await read();
+        pages.push(page);
+        const hasFailure = page.pending?.events.some((event) => event.type === "run.finished");
+        await ack(page.batchId);
+        if (hasFailure) break;
+      }
+      const events = pages.flatMap((page) => page.pending?.events ?? []);
+      expect(events.filter((event) => event.type === "task.blocked" || event.type === "task.unblocked")).toHaveLength(105);
+      expect(events.some((event) => event.type === "run.finished")).toBe(true);
+      expect(pages.some((page) => page.pending?.events.length === 100)).toBe(true);
+      const sequences = events.flatMap((event) => event.seq === null ? [] : [event.seq]);
+      expect(new Set(sequences).size).toBe(sequences.length);
+      expect(sequences).toEqual([...sequences].sort((left, right) => left - right));
+      await expect.poll(async () => {
+        try {
+          return (await readFile(inputTraceFile, "utf8")).split("\0")
+            .filter((line) => line.includes(`[Kanna supervisor] Event subscription ${initial.id}`)).length;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+          throw error;
+        }
+      }, { timeout: 15_000 }).toBe(pages.length);
+      // Exact admission timing is measured at the server adapter-call boundary
+      // in paused-clock Rust fixtures, not inferred from a busy PTY's read time.
+    } finally {
+      await local(`/v1/event-subscriptions/${initial.id}/unsubscribe`, {});
+    }
+  }, 240_000);
+
   async function currentRunId(taskId: string): Promise<string> {
     const detail = await harness.client.invokeDesktop({
       desktopId: harness.desktopId,

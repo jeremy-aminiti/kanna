@@ -106,7 +106,8 @@ fn connect(source: &Arc<AppState>, peer: Arc<AppState>) -> RelayFixture {
 // Bounded scheduling with a paused Tokio clock. Advancing one millisecond
 // lets peer handlers and observers settle without sleeping for 240 real seconds.
 async fn until(mut condition: impl FnMut() -> bool) {
-    for _ in 0..1_000 {
+    // Includes the adopted 1s ordinary quiet window plus scheduler turns.
+    for _ in 0..2_000 {
         if condition() {
             return;
         }
@@ -411,10 +412,13 @@ async fn subscription_busy_peer_pause_and_same_id_recovery_preserve_checkpoint()
     assert_eq!(resumed["active"], true);
     assert!(resumed["error"].is_null());
     let recovered = watch.page().await;
-    assert_eq!(
-        event_pairs(recovered.pending.as_ref().unwrap()),
-        vec![("pending-peer-child".into(), "task.pr_created".into())]
-    );
+    let mut delivered = event_pairs(batch);
+    delivered.extend(event_pairs(recovered.pending.as_ref().unwrap()));
+    delivered.sort();
+    assert_eq!(delivered, vec![
+        ("pending-local-child".into(), "task.pr_created".into()),
+        ("pending-peer-child".into(), "task.pr_created".into()),
+    ], "an urgent peer fault may return before the local PR is observed; recovery must retain both facts");
     assert!(recovered
         .pending
         .as_ref()
@@ -425,4 +429,106 @@ async fn subscription_busy_peer_pause_and_same_id_recovery_preserve_checkpoint()
     assert_eq!(watch.relay.counts.admitted.load(Ordering::SeqCst), 1);
     assert_eq!(watch.relay.counts.busy.load(Ordering::SeqCst), 1);
     assert_eq!(watch.relay.counts.abandoned.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn ordinary_quiet_deadlines_and_notification_storms_keep_the_remote_leg() {
+    let (watch, _) = WatchFixture::new(false).await;
+    for pr in [401, 402] {
+        Db::open(&watch.source.config().db_path)
+            .unwrap()
+            .update_pipeline_item_pr(
+                "pending-local-child",
+                Some(pr),
+                &format!("https://example.test/pull/{pr}"),
+            )
+            .unwrap();
+        notifications(&watch.source).await;
+        let page = watch.page().await;
+        assert_eq!(watch.relay.counts.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(watch.relay.counts.abandoned.load(Ordering::SeqCst), 0);
+        watch.ack(&page).await;
+    }
+    Db::open(&watch.source.config().db_path)
+        .unwrap()
+        .update_pipeline_item_pr(
+            "pending-local-child",
+            Some(403),
+            "https://example.test/pull/403",
+        )
+        .unwrap();
+    notifications(&watch.source).await;
+    Db::open(&watch.peer.config().db_path)
+        .unwrap()
+        .append_task_event(
+            "pending-peer-child",
+            crate::db::TaskEventKind::LifecycleFailed,
+            json!({"error":"remote failure"}),
+        )
+        .unwrap();
+    let urgent = watch.page().await;
+    let pairs = event_pairs(urgent.pending.as_ref().unwrap());
+    assert!(pairs.contains(&("pending-peer-child".into(), "task.lifecycle_failed".into())));
+    assert_eq!(watch.relay.counts.abandoned.load(Ordering::SeqCst), 0);
+    assert_eq!(watch.relay.counts.busy.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn initial_discovery_fault_pins_local_tail_before_recovery() {
+    let state = test_state_with_seed("subscription-discovery", "Discovery", seed_orchestration);
+    state.set_desktop_routing_available(true);
+    let mut requests = state.take_desktop_relay_requests().unwrap();
+    let relay = tokio::spawn(async move {
+        let mut first = true;
+        while let Some(request) = requests.recv().await {
+            match request {
+                DesktopRelayRequest::ListActive { response, .. } => {
+                    let result = if first {
+                        first = false;
+                        Err("discovery unavailable".into())
+                    } else {
+                        Ok(vec![])
+                    };
+                    let _ = response.send(result);
+                }
+                DesktopRelayRequest::PublishTaskSnapshot { response, .. } => {
+                    let _ = response.send(Ok(()));
+                }
+                _ => panic!("unexpected discovery fixture request"),
+            }
+        }
+    });
+    let query = json!({"taskIds":"child-a,child-b", "from":"now",
+        "includeCurrentActivity":false, "timeoutSecs":240, "limit":100});
+    let started = tokio::time::Instant::now();
+    let fault =
+        super::super::super::task_events::wait_subscription_events(state.clone(), query.clone())
+            .await
+            .unwrap();
+    assert_eq!(
+        tokio::time::Instant::now(),
+        started,
+        "known fault must not await a silent leg"
+    );
+    assert_eq!(fault["machineErrors"].as_array().unwrap().len(), 1);
+    assert_eq!(fault["events"], json!([]));
+    let db = Db::open(&state.config().db_path).unwrap();
+    db.append_task_event(
+        "child-b",
+        crate::db::TaskEventKind::AwaitingInput,
+        json!({}),
+    )
+    .unwrap();
+    let mut resumed = query;
+    resumed["cursor"] = fault["cursor"].clone();
+    let page = super::super::super::task_events::wait_subscription_events(state, resumed)
+        .await
+        .unwrap();
+    assert_eq!(
+        event_pairs(&page),
+        vec![("child-b".into(), "task.awaiting_input".into())]
+    );
+    assert_eq!(page["machineErrors"], json!([]));
+    relay.abort();
+    let _ = relay.await;
 }

@@ -154,6 +154,9 @@ pub(super) struct TaskEventsQuery {
     /// peers can ignore it; the collecting server also selects their rows.
     #[serde(default)]
     orchestration_notifications: bool,
+    /// Set only by the owning subscription call, never from peer wire input.
+    #[serde(skip)]
+    subscription_timing: bool,
 }
 
 fn include_current_state_by_default() -> bool {
@@ -1435,6 +1438,7 @@ async fn wait_local_task_events(
     } else {
         deadline
     };
+    let mut timing = super::subscription_timing::Collection::default();
     let min_events = kanna_tool_catalog::clamp_task_event_min_events(query.min_events, limit);
     let debounce = hold_duration(query.debounce_ms);
     // Collected across re-reads, not per read: a batched wait returns one
@@ -1496,19 +1500,29 @@ async fn wait_local_task_events(
             collected_has_more |= batch.has_more;
         }
         let read_events = !batch.events.is_empty();
+        if query.subscription_timing {
+            timing.observe(&batch.events, tokio::time::Instant::now());
+            #[cfg(test)]
+            super::subscription_timing::observed(&state, batch.events.len());
+        }
         collected.append(&mut batch.events);
         if read_events && debounce_deadline.is_none() && !debounce.is_zero() {
             debounce_deadline = Some((tokio::time::Instant::now() + debounce).min(deadline));
         }
         let now = tokio::time::Instant::now();
         let hold_until = hold_deadline(debounce_deadline, interval_deadline);
-        if kanna_tool_catalog::task_event_batch_is_complete(
-            collected.len(),
-            collected_has_more,
-            limit,
-            min_events,
-            hold_elapsed(hold_until, now),
-        ) {
+        let batch_complete = if query.subscription_timing {
+            timing.ready(collected.len(), limit, deadline, now)
+        } else {
+            kanna_tool_catalog::task_event_batch_is_complete(
+                collected.len(),
+                collected_has_more,
+                limit,
+                min_events,
+                hold_elapsed(hold_until, now),
+            )
+        };
+        if batch_complete {
             return Ok(Json(json!({
                 "waitOutcome": "events",
                 "cursor": output_cursor,
@@ -1563,9 +1577,13 @@ async fn wait_local_task_events(
         cursor = parse_cursor(Some(&batch.cursor))?;
         // A batch already at `min_events` is only waiting out its hold window;
         // anything short of it waits for the full timeout.
-        let wake_deadline = match hold_until {
-            Some(hold_until) if collected.len() >= min_events => hold_until,
-            _ => deadline,
+        let wake_deadline = if query.subscription_timing {
+            timing.deadline(deadline)
+        } else {
+            match hold_until {
+                Some(hold_until) if collected.len() >= min_events => hold_until,
+                _ => deadline,
+            }
         };
         let _ = tokio::time::timeout(
             (wake_deadline.max(now) - now).min(Duration::from_secs(WAIT_RECHECK_SECS)),
@@ -2266,6 +2284,29 @@ async fn wait_aggregate_task_events(
         session.filters = filters;
         session.orchestration_notifications = query.orchestration_notifications;
     }
+    // A discovery fault may seal a subscription page before any leg starts.
+    // Pin the local from-now boundary here so acknowledgement/recovery cannot
+    // move it past facts appended while that fault page was pending. A native
+    // cursor leaves the initial settled scan unacknowledged, as on a local wait.
+    if query.subscription_timing
+        && session.from_now
+        && !session
+            .cursor
+            .cursors_by_machine
+            .contains_key(&local_machine_id)
+        && !session.pending_machines.contains(&local_machine_id)
+    {
+        let db = Db::open(&state.config().db_path).map_err(db_error)?;
+        let head = db.latest_task_event_seq().map_err(db_error)?;
+        let native_cursor = match &session.cursor.scope {
+            AggregateScope::Children { parent_task_id } => encode_v3_cursor(parent_task_id, head)?,
+            _ => head.to_string(),
+        };
+        session.cursor.cursors_by_machine.insert(
+            local_machine_id.clone(),
+            encode_machine_cursor(&native_cursor)?,
+        );
+    }
     let mut machine_errors = Vec::new();
     let mut active_machines = HashSet::from([local_machine_id.clone()]);
     match state.list_active_relay_desktops().await {
@@ -2319,11 +2360,15 @@ async fn wait_aggregate_task_events(
     // every leg together — the same place the timeout is enforced. A leg that
     // has already answered is simply re-armed while the batch is still filling,
     // which is how a burst split across machines still returns as one response.
+    let mut timing = super::subscription_timing::Collection::default();
     let min_events = kanna_tool_catalog::clamp_task_event_min_events(query.min_events, limit);
     let debounce = hold_duration(query.debounce_ms);
     let mut debounce_deadline: Option<tokio::time::Instant> = None;
     let interval_deadline = interval_hold_deadline(query.min_interval_ms, deadline);
     loop {
+        if query.subscription_timing && !machine_errors.is_empty() {
+            break;
+        }
         let remaining_secs = if timeout_secs == 0 {
             0
         } else {
@@ -2354,9 +2399,13 @@ async fn wait_aggregate_task_events(
 
         // A batch already holding `min_events` is only waiting out its hold
         // window; anything short of it waits for the whole timeout.
-        let join_deadline = match hold_deadline(debounce_deadline, interval_deadline) {
-            Some(hold_until) if events.len() >= min_events => hold_until,
-            _ => deadline,
+        let join_deadline = if query.subscription_timing {
+            timing.deadline(deadline)
+        } else {
+            match hold_deadline(debounce_deadline, interval_deadline) {
+                Some(hold_until) if events.len() >= min_events => hold_until,
+                _ => deadline,
+            }
         };
         let joined = if timeout_secs == 0 {
             tokio::time::timeout_at(zero_timeout_deadline, session.pending.join_next())
@@ -2378,6 +2427,7 @@ async fn wait_aggregate_task_events(
         })?;
         let completed_machine_id = completion.machine_id.clone();
         completed_machines.insert(completed_machine_id.clone());
+        let before_count = events.len();
         let completion_had_events = apply_aggregate_completion(
             &mut session,
             completion,
@@ -2387,17 +2437,26 @@ async fn wait_aggregate_task_events(
             &mut has_more,
             limit,
         )?;
+        if query.subscription_timing {
+            timing.observe(&events[before_count..], tokio::time::Instant::now());
+            #[cfg(test)]
+            super::subscription_timing::observed(&state, events.len() - before_count);
+        }
         if completion_had_events && debounce_deadline.is_none() && !debounce.is_zero() {
             debounce_deadline = Some((tokio::time::Instant::now() + debounce).min(deadline));
         }
         let now = tokio::time::Instant::now();
-        let batch_complete = kanna_tool_catalog::task_event_batch_is_complete(
-            events.len(),
-            has_more,
-            limit,
-            min_events,
-            hold_elapsed(hold_deadline(debounce_deadline, interval_deadline), now),
-        );
+        let batch_complete = if query.subscription_timing {
+            timing.ready(events.len(), limit, deadline, now) || !machine_errors.is_empty()
+        } else {
+            kanna_tool_catalog::task_event_batch_is_complete(
+                events.len(),
+                has_more,
+                limit,
+                min_events,
+                hold_elapsed(hold_deadline(debounce_deadline, interval_deadline), now),
+            )
+        };
         // Re-arm the leg that just answered whenever this wait is still
         // filling its batch. Without events that is the existing behaviour;
         // with `minEvents` or `debounceMs` it is also what lets a machine's
@@ -2442,16 +2501,20 @@ async fn wait_aggregate_task_events(
     // deadline is complete by the time the response is built, and a window
     // that closed short of `min_events` reports `timeout` with whatever
     // accumulated, exactly like the single-machine wait.
-    let batch_complete = kanna_tool_catalog::task_event_batch_is_complete(
-        events.len(),
-        has_more,
-        limit,
-        min_events,
-        hold_elapsed(
-            hold_deadline(debounce_deadline, interval_deadline),
-            tokio::time::Instant::now(),
-        ),
-    );
+    let batch_complete = if query.subscription_timing {
+        timing.ready(events.len(), limit, deadline, tokio::time::Instant::now())
+    } else {
+        kanna_tool_catalog::task_event_batch_is_complete(
+            events.len(),
+            has_more,
+            limit,
+            min_events,
+            hold_elapsed(
+                hold_deadline(debounce_deadline, interval_deadline),
+                tokio::time::Instant::now(),
+            ),
+        )
+    };
     let wait_outcome = if batch_complete {
         "events"
     } else if !machine_errors.is_empty() {
@@ -2496,6 +2559,7 @@ pub(super) async fn wait_subscription_events(
     let mut query: TaskEventsQuery =
         serde_json::from_value(query).map_err(|error| format!("invalid event scope: {error}"))?;
     query.orchestration_notifications = true;
+    query.subscription_timing = true;
     wait_events_in_process(state, query, true, false)
         .await
         .map(|Json(value)| value)
@@ -2559,6 +2623,9 @@ async fn wait_events_in_process(
             // Preserve native numeric/p3 cursors when this server has never had
             // a relay route. The explicit error makes the incompleteness visible
             // without forcing every single-machine caller into a composite cursor.
+            if query.subscription_timing {
+                query.timeout_secs = Some(0);
+            }
             let Json(mut response) =
                 wait_local_task_events(Arc::clone(&state), query, false).await?;
             if let Some(response) = response.as_object_mut() {

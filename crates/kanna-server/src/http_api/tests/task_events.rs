@@ -19,6 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
 mod subscription_remote;
+mod subscription_timing;
 
 fn seed_orchestration(db: &Db) {
     db.insert_test_repo("repo-events", "Events Repo")

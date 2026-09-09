@@ -99,6 +99,13 @@ pub struct AppState {
     #[cfg(test)]
     pub(super) task_creator: Option<TestTaskCreator>,
     #[cfg(test)]
+    pub(super) subscription_test_events:
+        Option<mpsc::UnboundedSender<super::subscription_timing::TestEvent>>,
+    #[cfg(test)]
+    pub(super) subscription_proxy_executable: Option<String>,
+    #[cfg(test)]
+    pub(super) subscription_delivery_barrier: Option<Arc<tokio::sync::Semaphore>>,
+    #[cfg(test)]
     pub(super) merge_agent_runner: Option<TestMergeAgentRunner>,
     #[cfg(test)]
     pub(super) task_input_sender: Option<TestTaskInputSender>,
@@ -447,6 +454,12 @@ impl AppState {
             state_changes: broadcast::channel(256).0,
             #[cfg(test)]
             task_creator: None,
+            #[cfg(test)]
+            subscription_test_events: None,
+            #[cfg(test)]
+            subscription_proxy_executable: None,
+            #[cfg(test)]
+            subscription_delivery_barrier: None,
             #[cfg(test)]
             merge_agent_runner: None,
             #[cfg(test)]

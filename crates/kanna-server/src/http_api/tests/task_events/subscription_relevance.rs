@@ -130,11 +130,11 @@ async fn excluded_events_neither_fill_batch_nor_start_its_debounce() {
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(2)).await;
     assert!(!wait.is_finished(), "noise cannot fill an actionable batch");
-    db.append_task_event("child-a", TaskEventKind::AwaitingInput, json!({}))
+    db.append_task_event("child-a", TaskEventKind::PrCreated, json!({}))
         .unwrap();
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(200)).await;
-    db.append_task_event("child-b", TaskEventKind::ProviderQuotaParked, json!({}))
+    db.append_task_event("child-b", TaskEventKind::TaskClosed, json!({}))
         .unwrap();
     tokio::task::yield_now().await;
     assert!(

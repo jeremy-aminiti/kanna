@@ -2594,6 +2594,48 @@ batch. Filtered initial snapshots still advance the existing settled-scan cursor
 acknowledgement does not alter human read state. No cursor format, relay protocol,
 mailbox backpressure or delivery retry contract changes.
 
+The owning subscription collector also applies one internal timing policy:
+**1000ms trailing quiet**, **5000ms maximum collection hold** from the first
+relevant observation, and **5000ms minimum between adapter-call admissions**.
+These are manager-adopted engineering defaults, not owner-specified values or
+measured tuning. Capacity remains 100, minimum one. Quiet resets only on relevant
+observations; the collection closes at the earliest of last observation + 1s,
+first observation + 5s, or the existing receiver deadline. Full pages seal early.
+Failed run/main/post facts, lifecycle/teardown/merge-handoff failures, provider
+parking, confirmed input requests, watch/machine errors and unknown attention
+seal urgently. Urgency skips quiet debounce, never admission pacing, FIFO cursors,
+immutable pending pages, matching acknowledgement or adapter/run safety.
+
+The minimum admission interval applies to both adapters, including full pages and
+notification-triggered retries that provably delivered nothing. There are no
+accumulated burst credits: admissions are at least 5s apart (12/minute sustained).
+No adapter wake accompanies the immediately observed bootstrap. Timing is selected
+only by `wait_subscription_events` at the top-level collector, not by the wire
+relevance flag; peer legs and public native/MCP waits keep their existing timing.
+Collectors return normally at quiet, cap, capacity or fault boundaries to retain
+unfinished aggregate legs. Known observation faults do not wait for silent healthy
+peers. Admission cooldown uses a lifecycle-owned deadline wait and reloads the row
+before reserving `sending` with CAS; an acknowledgement before reservation cancels
+that scheduled wake. A transient transport failure still requires a notification
+before retry: cooldown expiry is not a generic retry loop.
+
+The JSON record adds optional-on-read `wakeAdmitted`, preserved through ack and
+protected against stale delivery writes. Live timing is monotonic and survives
+same-id pause/recovery; service/process recovery conservatively rearms at most one
+5s cooldown, including legacy rows. No persisted wall time can cause a burst or an
+indefinite wait. A recovered `sending` page remains uncertain, without resubmission.
+Older servers may ignore this additive hint: mailbox/cursor compatibility survives,
+but enforcing temporal pacing requires the new owning server.
+
+These are conditional scheduler-delay bounds **after observation in the current
+collecting page**, assuming healthy execution and available acknowledgement:
+ordinary collection adds at most 5s; an observed urgent page is eligible immediately
+if the admission slot is free, otherwise after its remaining cooldown (at most 5s).
+They are not universal event-creation-to-wake bounds. An unacknowledged page, older
+backlog, unavailable transport or stalled server can delay observation/delivery;
+a busy harness may consume admitted output later. No urgent page overtakes those
+facts or replaces an unacknowledged page.
+
 The durable `event_subscription` row binds to the manager's current run,
 stage, and branch. Stage replacement or closure stops the worker. One pending
 page bounds the mailbox; later events stay in the feed until it is acknowledged.

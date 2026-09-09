@@ -49,3 +49,42 @@ this task does not import that independent instruction change.
 The separately observed false `awaiting_input` from a quoted fixture belongs to
 terminal prompt detection. This task deliberately retains confirmed question
 events and makes no speech/transcript classification changes.
+
+## Adopted timing addition (implementation, verification still held)
+
+Manager input following consultation `a064daa6` adopted this addition to the same
+work item: 1000ms trailing quiet, maximum 5000ms collection hold, and minimum 5000ms
+between adapter-call admissions. These are engineering defaults adopted by the
+manager, not owner-supplied numbers. The previous relevance-only prohibition on
+new timers does not govern the explicitly authorized timing addition.
+
+The internal collector policy is selected only at the owning wait, never from
+peer wire parameters. Admission remains before the shared sending CAS; its
+monotonic clock and additive `wakeAdmitted` recovery hint survive acknowledgement
+and prevent burst credits. Normal collector returns preserve pending peer legs.
+The pinned `step` collection lifetime and retirement semantics remain unchanged.
+
+New paused-clock `task_events/subscription_timing.rs` fixtures drive the worker
+through real HTTP/DB waits, fenced daemon input and an isolated scripted Codex
+proxy executable. Test-only observation/admission channels establish scheduling
+barriers and measure adapter-call admission times, not model output-consumption
+time. Coverage includes trailing bursts, irrelevant noise, sustained cap, full
+pages, urgent cooldown, unacked backpressure, ack before scheduled delivery,
+retirement and restart with an older JSON record. The semaphore-backed remote
+suite retains permit/recovery assertions and adds normal quiet returns plus
+remote urgency and initial discovery-fault cursor continuity. Its fault expectation now permits the local PR to arrive on
+recovery: the owning server must no longer await it before reporting a peer fault.
+
+`tests/remote-e2e/src/terminal-flow.e2e.test.ts` adds a real-process input-adapter
+case: producer requests through the relay, separate server/daemon/scripted PTYs,
+more than a full page of blocker changes, urgent failure, exact FIFO continuation
+and one engine submission per acknowledged page. Protocol proxy fixtures are not
+live Codex TUI E2E. Live native timing still needs authenticated shared app-server
+root-thread compatibility and operator verification. None of these new fixtures
+has run under the independent heavy hold; they supply no verification waiver.
+
+The Ship task `219c632b` owns the separately authorized MBP staging publish only
+after verified event-delivery work and predecessor merge, and manager release.
+This task performs no release operation. Required Rust/catalog checks and
+`./kd test all`, plus the separate unattended boundary E2E/release gate, remain
+pending capacity release and successful execution.
