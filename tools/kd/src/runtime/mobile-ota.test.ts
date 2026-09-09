@@ -1,5 +1,6 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -532,6 +533,77 @@ describe("kd mobile OTA", () => {
     expect(result.message).toContain("Dry run: mobile OTA rollback");
   });
 
+  describe("leaves no staging root behind", () => {
+    /**
+     * Every publish and rollback used to `mkdtemp` under the OS temp
+     * directory and abandon the root; the Mac Studio held 3,036 of them.
+     * The root is scoped to a fixture here because the real temp directory
+     * is shared with every other gate on the machine.
+     */
+    async function scratchFixture(): Promise<string> {
+      const scratchDir = await mkdtemp(join(tmpdir(), "kanna-kd-ota-scratch-"));
+      tempDirs.push(scratchDir);
+      return scratchDir;
+    }
+
+    const failingUpload = (args: string[]) =>
+      args[1] === "cp"
+        ? { exitCode: 1, stdout: "", stderr: "AccessDeniedException: 403" }
+        : { exitCode: 0, stdout: "", stderr: "" };
+
+    it("after a publish", async () => {
+      const repoRoot = await makeRepoFixture();
+      const scratchDir = await scratchFixture();
+
+      const result = await executeMobileOtaPublishWithContext(
+        { staging: true, production: false, dryRun: true },
+        { repoRoot, env: {}, runner: publishRunner(repoRoot), scratchDir }
+      );
+
+      expect(result.ok).toBe(true);
+      expect(await readdir(scratchDir)).toEqual([]);
+    });
+
+    it("after a publish whose upload fails", async () => {
+      const repoRoot = await makeRepoFixture();
+      const scratchDir = await scratchFixture();
+
+      await expect(
+        executeMobileOtaPublishWithContext(
+          { staging: true, production: false, dryRun: false },
+          { repoRoot, env: {}, runner: publishRunner(repoRoot, { onGcloud: failingUpload }), scratchDir }
+        )
+      ).rejects.toThrow("AccessDeniedException");
+      expect(await readdir(scratchDir)).toEqual([]);
+    });
+
+    it("after a rollback", async () => {
+      const repoRoot = await makeRepoFixture();
+      const scratchDir = await scratchFixture();
+
+      const result = await executeMobileOtaPublishWithContext(
+        { staging: true, production: false, dryRun: true, rollbackTo: "11111111-2222-3333-4444-555555555555" },
+        { repoRoot, env: {}, runner: publishRunner(repoRoot), scratchDir }
+      );
+
+      expect(result.ok).toBe(true);
+      expect(await readdir(scratchDir)).toEqual([]);
+    });
+
+    it("after a rollback whose pointer upload fails", async () => {
+      const repoRoot = await makeRepoFixture();
+      const scratchDir = await scratchFixture();
+
+      await expect(
+        executeMobileOtaPublishWithContext(
+          { staging: true, production: false, dryRun: false, rollbackTo: "11111111-2222-3333-4444-555555555555" },
+          { repoRoot, env: {}, runner: publishRunner(repoRoot, { onGcloud: failingUpload }), scratchDir }
+        )
+      ).rejects.toThrow("AccessDeniedException");
+      expect(await readdir(scratchDir)).toEqual([]);
+    });
+  });
+
   it("refuses to publish from a dirty git worktree", async () => {
     const repoRoot = await makeRepoFixture();
     const calls: Array<{ command: string; args: string[] }> = [];
@@ -574,12 +646,17 @@ describe("kd mobile OTA", () => {
   it("records the resolved source commit in the channel pointer and the update itself", async () => {
     const repoRoot = await makeRepoFixture();
     const uploads: Array<{ args: string[] }> = [];
+    // What gcloud would have sent, read while the staged files exist: the
+    // publish removes its staging root before it returns.
+    const uploaded = new Map<"source" | "pointer", string>();
     const runner = publishRunner(repoRoot, {
       commits: { HEAD: HEAD_COMMIT, "release/0.2": HEAD_COMMIT },
       onGcloud: (args) => {
         uploads.push({ args });
         // A missing metadata.json is what makes the publish upload the update.
         if (args[1] === "ls") return { exitCode: 1, stdout: "", stderr: "not found" };
+        if (args[1] === "rsync") uploaded.set("source", readFileSync(join(args[3], "kanna-source.json"), "utf8"));
+        if (args[1] === "cp") uploaded.set("pointer", readFileSync(args[2], "utf8"));
         return { exitCode: 0, stdout: "", stderr: "" };
       },
     });
@@ -594,11 +671,8 @@ describe("kd mobile OTA", () => {
       source: { ref: "release/0.2", commit: HEAD_COMMIT, shortCommit: SHORT_HEAD_COMMIT },
     });
 
-    const rsync = uploads.find((call) => call.args[1] === "rsync");
-    expect(rsync).toBeDefined();
-    const sourceRecord = JSON.parse(
-      await readFile(join(rsync?.args[3] ?? "", "kanna-source.json"), "utf8")
-    ) as Record<string, unknown>;
+    expect(uploads.some((call) => call.args[1] === "rsync")).toBe(true);
+    const sourceRecord = JSON.parse(uploaded.get("source") ?? "null") as Record<string, unknown>;
     expect(sourceRecord).toEqual({
       updateId: (result.data as { updateId: string }).updateId,
       ref: "release/0.2",
@@ -606,11 +680,8 @@ describe("kd mobile OTA", () => {
       shortCommit: SHORT_HEAD_COMMIT,
     });
 
-    const pointerUpload = uploads.find((call) => call.args[1] === "cp");
-    expect(pointerUpload).toBeDefined();
-    const pointer = JSON.parse(
-      await readFile(pointerUpload?.args[2] ?? "", "utf8")
-    ) as Record<string, unknown>;
+    expect(uploads.some((call) => call.args[1] === "cp")).toBe(true);
+    const pointer = JSON.parse(uploaded.get("pointer") ?? "null") as Record<string, unknown>;
     expect(pointer).toMatchObject({
       currentUpdateId: (result.data as { updateId: string }).updateId,
       runtimeVersion: "1.0.0",
