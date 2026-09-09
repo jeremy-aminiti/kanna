@@ -10,14 +10,16 @@
 //! task could be finalized at all. On 2026-08-06 that is exactly what happened:
 //! `[handoff] adopted session …` at 10:43, the signal refused at 13:43.
 //!
-//! Injected input has none of that constraint. `Command::SubmitInputIfSession`
-//! accepts a logical message for an adopted session while fencing it to the PTY
-//! process observed at attach. So finalization *asks* the agent to stop instead
-//! of signalling it:
+//! Injected input has none of that constraint.
+//! `Command::SubmitInputIfSessionIdle` accepts a lifecycle message for an
+//! adopted session while fencing it to the PTY process observed at attach and
+//! atomically requiring the daemon's current status to be positively idle. So
+//! finalization *asks* the agent to stop instead of signalling it:
 //!
 //! 1. wait for the current turn to reach an observed `Idle`;
 //! 2. inject a wrap-up message and wait for the daemon's delivery acknowledgement;
-//! 3. require the wrap-up to produce an observed `Busy` → settled-`Idle` cycle;
+//! 3. require the provider to emit this transfer's completion marker, then
+//!    reach settled `Idle` after an observed `Busy`;
 //! 4. inject the provider's quit command (`/exit`, `/quit` for Codex);
 //! 5. wait for the daemon `Exit`.
 //!
@@ -27,10 +29,11 @@
 //! staging shipped a truncated conversation (pinned by
 //! `tests/cli-contract/tests/live/codex-rollout-timing.test.ts`).
 //!
-//! The pre-injection idle boundary makes the post-injection lifecycle causal.
-//! A quiet composer is not completion: if the daemon never observes the wrap-up
-//! start (`Busy`) and then finish (`Idle`), finalization degrades and leaves the
-//! session alive rather than appending a quit command to an unsubmitted prompt.
+//! The marker is deliberately absent from the submitted bytes, so an echoed
+//! prompt or an unrelated `Busy` → `Idle` cycle cannot impersonate completion.
+//! A quiet composer is not completion: if the daemon never observes the marker
+//! and a settled idle state, finalization degrades and leaves the session alive
+//! rather than appending a quit command to an unsubmitted prompt.
 //! A pre-existing phase claim or uncertain delivery likewise never releases the
 //! quit.
 //!
@@ -43,8 +46,9 @@
 //! resume, reach `Idle`, quit on cue, and ship `cleanlyFinalized: true` with
 //! nothing anywhere saying a tool call had been approved.
 //!
-//! Preparation and quit both get that guarantee from observed idle boundaries.
-//! A session already parked when
+//! Preparation requires a positively observed idle status, and quit
+//! additionally requires the causal marker and settled-idle boundary. A
+//! session already parked when
 //! finalization starts degrades on the spot rather than waiting: nobody is
 //! going to answer that prompt — the operator is in the
 //! middle of pushing the task away from this machine — so waiting out the
@@ -70,7 +74,7 @@
 //!   destroy a live agent for a transfer that may still fail.
 
 use crate::db::{TaskEventKind, TransferWorkItem};
-use crate::http_api::{try_submit_task_input_if_session, AppState, TaskInputError};
+use crate::http_api::{try_submit_task_input_if_session_idle, AppState, TaskInputError};
 use kanna_agent_protocol::AgentProvider;
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
 use std::str::FromStr;
@@ -95,6 +99,31 @@ const WRAP_UP_MESSAGE: &str = "This task is being transferred to another machine
      Wrap up: finish the thought you are on, do not start any new work, and do not run any \
      further commands. Briefly state where you left off. Your conversation is being shipped \
      and will resume on the destination machine.";
+
+fn completion_nonce(work_id: &str) -> String {
+    // Stable FNV-1a is sufficient here: this is a correlation token, not an
+    // authentication secret. Keeping it short also prevents terminal wrapping
+    // from splitting the marker across redraw operations.
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in work_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn completion_marker(work_id: &str) -> String {
+    format!("KANNA_TRANSFER_READY_{}", completion_nonce(work_id))
+}
+
+fn wrap_up_message(work_id: &str) -> String {
+    let nonce = completion_nonce(work_id);
+    format!(
+        "{WRAP_UP_MESSAGE} After that preparation is complete, make your final line the token \
+         formed by joining KANNA_TRANSFER_READY and {nonce} with one underscore. Do not print \
+         anything after that token."
+    )
+}
 
 /// How long the source agent gets to finish its turn after the wrap-up.
 ///
@@ -267,10 +296,10 @@ async fn run_sequence(
         );
     };
 
-    // Put a causal boundary in front of preparation. If the transfer begins
-    // during an existing turn, an eventual Idle only proves that old turn
-    // finished; submitting preparation after it means the next Busy → Idle
-    // cycle belongs to work that began after this command.
+    // Put a readiness boundary in front of preparation. If the transfer begins
+    // during an existing turn, its eventual Idle only proves that old turn
+    // finished; preparation is submitted after it. `status_observed`
+    // distinguishes a real Idle verdict from an adopted session's bootstrap.
     let wrap_up_deadline = tokio::time::Instant::now() + WRAP_UP_TIMEOUT;
     match observer.wait_until_idle(wrap_up_deadline).await {
         IdleOutcome::Idle => {}
@@ -300,13 +329,16 @@ async fn run_sequence(
     }
 
     // 1. Submit preparation after the preceding turn is known to be over.
+    let preparation = wrap_up_message(&work.id);
+    let completion_marker = completion_marker(&work.id);
+    debug_assert!(!preparation.contains(&completion_marker));
     match inject(
         state,
         work,
         task_id,
         session_pid,
         WRAP_UP_PHASE,
-        WRAP_UP_MESSAGE,
+        &preparation,
     )
     .await
     {
@@ -346,17 +378,22 @@ async fn run_sequence(
         }
     }
 
-    // 2. Completion requires an observed turn, not an idle composer or silence.
-    // The pre-submission idle boundary above is what associates this next
-    // Busy → Idle cycle with work started after preparation was submitted.
+    // 2. Completion requires the provider's causal marker plus settled Idle,
+    // not an idle composer, silence, or an unrelated lifecycle edge. The exact
+    // marker is absent from `preparation`, so prompt echo cannot satisfy it.
     match observer
-        .wait_for_completed_turn(wrap_up_deadline, IDLE_EDGE_SETTLE)
+        .wait_for_completed_turn(
+            wrap_up_deadline,
+            IDLE_EDGE_SETTLE,
+            completion_marker.as_bytes(),
+        )
         .await
     {
         TurnOutcome::Complete => record_phase(state, task_id, "idle", None),
         TurnOutcome::Exited {
             killed: false,
-            started: true,
+            marker_seen: true,
+            ..
         } => {
             // The agent ended its own session while wrapping up. That is the
             // destination state, reached without the quit command.
@@ -365,15 +402,14 @@ async fn run_sequence(
         }
         TurnOutcome::Exited {
             killed: false,
-            started: false,
-        } => {
-            return degraded(
-                state,
-                task_id,
-                "the source agent exited before transfer preparation was observed starting"
-                    .to_string(),
-            )
-        }
+            marker_seen: false,
+            ..
+        } => return degraded(
+            state,
+            task_id,
+            "the source agent exited before emitting the transfer preparation completion marker"
+                .to_string(),
+        ),
         TurnOutcome::Exited { killed: true, .. } => {
             return degraded(
                 state,
@@ -385,6 +421,7 @@ async fn run_sequence(
         TurnOutcome::TimedOut {
             status,
             started: false,
+            ..
         } => {
             return degraded(
                 state,
@@ -398,6 +435,21 @@ async fn run_sequence(
         TurnOutcome::TimedOut {
             status,
             started: true,
+            marker_seen: false,
+        } => {
+            return degraded(
+                state,
+                task_id,
+                format!(
+                    "the source agent did not emit the transfer preparation completion marker within {}s (last status: {status:?}); no quit command was sent",
+                    WRAP_UP_TIMEOUT.as_secs(),
+                ),
+            );
+        }
+        TurnOutcome::TimedOut {
+            status,
+            started: true,
+            marker_seen: true,
         } => {
             let detail = wait_failure_detail(status);
             return degraded(
@@ -604,9 +656,11 @@ async fn inject(
             Ok(daemon) => daemon,
             Err(error) => return release(format!("daemon error: {error}")),
         };
-    // Keep the ordinary always-submit logical-input behavior, but fence this
-    // lifecycle command to the PTY incarnation the observer attached to.
-    match try_submit_task_input_if_session(&mut daemon, task_id, expected_pid, message).await {
+    // This is deliberately the finalization-only conditional input path:
+    // ordinary owner/manager messages remain always-submit, while lifecycle
+    // commands are fenced to both this PTY incarnation and current observed
+    // Idle at the daemon that owns its runtime state.
+    match try_submit_task_input_if_session_idle(&mut daemon, task_id, expected_pid, message).await {
         Ok(()) => Injected::Sent,
         Err(TaskInputError::SessionNotFound) => Injected::SessionGone,
         Err(TaskInputError::Uncertain(reason)) => {
@@ -630,11 +684,12 @@ enum TurnOutcome {
     Complete,
     Exited {
         killed: bool,
-        started: bool,
+        marker_seen: bool,
     },
     TimedOut {
         status: SessionStatus,
         started: bool,
+        marker_seen: bool,
     },
 }
 
@@ -652,13 +707,13 @@ enum ExitOutcome {
     TimedOut,
 }
 
-/// A read-only view of one session's daemon event stream.
+/// A read-only view of one session's ordered daemon fanout.
 ///
-/// Subscribed rather than polled — the daemon already publishes what this needs
-/// — and deliberately on its own connection: `send_command` reads a single line
-/// and takes it as the response, so issuing commands on a subscribed connection
-/// risks handing a pushed event back as a command result. Input goes out over
-/// short-lived connections of its own.
+/// `ObserveFinalization` is the atomic cutover that carries identity, PTY
+/// output and status for this exact session; the machine-wide `Subscribe`
+/// stream does not carry output and therefore cannot observe the causal marker.
+/// Input still goes out over short-lived connections of its own: issuing a
+/// command on this observed stream could mistake a pushed event for its reply.
 struct SessionObserver {
     reader: crate::daemon_client::DaemonClientReader,
     /// Held for the observer's whole life, and never written to after the
@@ -675,6 +730,7 @@ struct SessionObserver {
     _writer: crate::daemon_client::DaemonClientWriter,
     session_id: String,
     status: SessionStatus,
+    status_observed: bool,
     present: bool,
     pid: Option<u32>,
 }
@@ -685,15 +741,13 @@ impl SessionObserver {
             .await
             .map_err(|error| error.to_string())?;
         let (reader, mut writer) = client.into_split();
-        // Subscribe *then* list, both written before either answer is read: a
-        // status change between the snapshot and the stream would otherwise
-        // fall in the gap and be lost.
+        // Identity, runtime state, and output cutover come from one daemon
+        // session-lifecycle critical section. A separate List could pair a
+        // replacement's PID with the old session's fanout.
         writer
-            .send_one_way(&DaemonCommand::Subscribe)
-            .await
-            .map_err(|error| error.to_string())?;
-        writer
-            .send_one_way(&DaemonCommand::List)
+            .send_one_way(&DaemonCommand::ObserveFinalization {
+                session_id: session_id.to_string(),
+            })
             .await
             .map_err(|error| error.to_string())?;
 
@@ -702,54 +756,60 @@ impl SessionObserver {
             _writer: writer,
             session_id: session_id.to_string(),
             status: SessionStatus::Idle,
+            status_observed: false,
             present: false,
             pid: None,
         };
-        // Everything ahead of the session list is either the Subscribe ack or a
-        // pushed event; both are folded in before the list overwrites them.
-        let mut listed = false;
-        while !listed {
+        loop {
             match observer
                 .reader
                 .read_event()
                 .await
                 .map_err(|error| error.to_string())?
             {
-                DaemonEvent::SessionList { sessions } => {
-                    if let Some(session) = sessions
-                        .iter()
-                        .find(|session| session.session_id == observer.session_id)
-                    {
-                        observer.present = true;
-                        observer.status = session.status;
-                        observer.pid = Some(session.pid);
+                DaemonEvent::FinalizationObserved { session, .. } => {
+                    if session.session_id != observer.session_id {
+                        return Err(format!(
+                            "daemon observed the wrong finalization session: expected {}, got {}",
+                            observer.session_id, session.session_id
+                        ));
                     }
-                    listed = true;
+                    observer.present = true;
+                    observer.status = session.status;
+                    // Idle is the bootstrap enum value. Busy and Waiting
+                    // cannot be bootstrap even if an old payload omitted the
+                    // explicit observation bit.
+                    observer.status_observed =
+                        session.status_observed || session.status != SessionStatus::Idle;
+                    observer.pid = Some(session.pid);
+                    return Ok(observer);
                 }
+                DaemonEvent::Error {
+                    code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                    ..
+                } => return Ok(observer),
                 DaemonEvent::Error { message, .. } => {
-                    return Err(format!("daemon list error: {message}"))
+                    return Err(format!("daemon finalization observation error: {message}"))
                 }
                 other => {
                     observer.absorb(&other);
                 }
             }
         }
-        Ok(observer)
     }
 
     /// Folds a pushed event into the observer's view of the session, and
     /// reports whether the event was about this session at all.
     ///
-    /// The daemon's `Subscribe` stream is machine-wide — every session's status
-    /// changes and exits reach every subscriber — so "an event arrived" and
-    /// "this session did something" are different facts, and the settle window
-    /// below depends on the second one.
+    /// The per-session fanout should only carry this id; the check remains a
+    /// defensive boundary against a malformed or version-skewed peer.
     fn absorb(&mut self, event: &DaemonEvent) -> bool {
         match event {
             DaemonEvent::StatusChanged {
                 session_id, status, ..
             } if *session_id == self.session_id => {
                 self.status = *status;
+                self.status_observed = true;
                 self.present = true;
                 true
             }
@@ -765,7 +825,7 @@ impl SessionObserver {
     async fn wait_until_idle(&mut self, deadline: tokio::time::Instant) -> IdleOutcome {
         loop {
             let now = tokio::time::Instant::now();
-            if self.status == SessionStatus::Idle {
+            if self.status_observed && self.status == SessionStatus::Idle {
                 return IdleOutcome::Idle;
             }
             if now >= deadline {
@@ -800,13 +860,16 @@ impl SessionObserver {
         &mut self,
         deadline: tokio::time::Instant,
         idle_settle: Duration,
+        completion_marker: &[u8],
     ) -> TurnOutcome {
         let mut started = false;
+        let mut marker_seen = false;
         let mut idle_since: Option<tokio::time::Instant> = None;
+        let mut output_tail = Vec::with_capacity(completion_marker.len());
         loop {
             let now = tokio::time::Instant::now();
             if let Some(since) = idle_since {
-                if now >= since + idle_settle {
+                if started && marker_seen && now >= since + idle_settle {
                     return TurnOutcome::Complete;
                 }
             }
@@ -814,6 +877,7 @@ impl SessionObserver {
                 return TurnOutcome::TimedOut {
                     status: self.status,
                     started,
+                    marker_seen,
                 };
             }
             let wake = idle_since
@@ -836,7 +900,9 @@ impl SessionObserver {
                             status: SessionStatus::Idle,
                             ..
                         } if *session_id == self.session_id && started => {
-                            idle_since = Some(tokio::time::Instant::now());
+                            if marker_seen {
+                                idle_since = Some(tokio::time::Instant::now());
+                            }
                         }
                         DaemonEvent::StatusChanged { ref session_id, .. }
                             if *session_id == self.session_id =>
@@ -848,7 +914,35 @@ impl SessionObserver {
                             killed,
                             ..
                         } if *session_id == self.session_id => {
-                            return TurnOutcome::Exited { killed, started };
+                            return TurnOutcome::Exited {
+                                killed,
+                                marker_seen,
+                            };
+                        }
+                        DaemonEvent::Output {
+                            ref session_id,
+                            ref data,
+                        } if *session_id == self.session_id => {
+                            output_tail.extend_from_slice(data);
+                            marker_seen = marker_seen
+                                || output_tail
+                                    .windows(completion_marker.len())
+                                    .any(|window| window == completion_marker);
+
+                            // Output means the frame is still moving. Once the
+                            // marker has appeared, start (or restart) the quiet
+                            // idle settle window from this byte boundary.
+                            idle_since =
+                                if started && marker_seen && self.status == SessionStatus::Idle {
+                                    Some(tokio::time::Instant::now())
+                                } else {
+                                    None
+                                };
+
+                            let overlap = completion_marker.len().saturating_sub(1);
+                            if output_tail.len() > overlap {
+                                output_tail.drain(..output_tail.len() - overlap);
+                            }
                         }
                         _ => {}
                     }
@@ -857,6 +951,7 @@ impl SessionObserver {
                     return TurnOutcome::TimedOut {
                         status: self.status,
                         started,
+                        marker_seen,
                     }
                 }
                 Err(_) if idle_since.is_some() => continue,
@@ -864,6 +959,7 @@ impl SessionObserver {
                     return TurnOutcome::TimedOut {
                         status: self.status,
                         started,
+                        marker_seen,
                     }
                 }
             }
@@ -918,6 +1014,7 @@ mod tests {
         inputs: Vec<String>,
         /// How many inputs had arrived when `Idle` was published.
         inputs_at_idle: Vec<usize>,
+        lists: usize,
     }
 
     /// A scripted daemon over a real Unix socket.
@@ -946,7 +1043,11 @@ mod tests {
 
     impl FakeDaemon {
         fn start(label: &str, listed: Option<SessionStatus>) -> Self {
-            Self::start_refusing(label, listed, None)
+            Self::start_with_options(label, listed, true, None)
+        }
+
+        fn start_unobserved(label: &str, listed: Option<SessionStatus>) -> Self {
+            Self::start_with_options(label, listed, false, None)
         }
 
         /// A daemon that refuses every `SubmitInput` with one error code, so a
@@ -954,6 +1055,15 @@ mod tests {
         fn start_refusing(
             label: &str,
             listed: Option<SessionStatus>,
+            submit_refusal: Option<DaemonErrorCode>,
+        ) -> Self {
+            Self::start_with_options(label, listed, true, submit_refusal)
+        }
+
+        fn start_with_options(
+            label: &str,
+            listed: Option<SessionStatus>,
+            status_observed: bool,
             submit_refusal: Option<DaemonErrorCode>,
         ) -> Self {
             let dir = crate::test_paths::unique_test_dir(&format!("kanna-finalize-{label}"))
@@ -977,6 +1087,7 @@ mod tests {
                         Arc::clone(&accept_log),
                         accept_events.clone(),
                         listed,
+                        status_observed,
                         submit_refusal,
                     ));
                 }
@@ -1007,16 +1118,17 @@ mod tests {
         }
 
         fn status(&self, status: SessionStatus) {
-            self.status_of(SESSION, status);
-        }
-
-        /// The daemon publishes every session on the machine to every
-        /// subscriber, so a test can put another task's traffic on the wire.
-        fn status_of(&self, session_id: &str, status: SessionStatus) {
             self.publish(DaemonEvent::StatusChanged {
-                session_id: session_id.to_string(),
+                session_id: SESSION.to_string(),
                 status,
                 waiting_prompt_snippet: None,
+            });
+        }
+
+        fn output(&self, text: &str) {
+            self.publish(DaemonEvent::Output {
+                session_id: SESSION.to_string(),
+                data: text.as_bytes().to_vec(),
             });
         }
 
@@ -1041,6 +1153,10 @@ mod tests {
             self.log.lock().expect("log").inputs_at_idle.clone()
         }
 
+        fn list_count(&self) -> usize {
+            self.log.lock().expect("log").lists
+        }
+
         /// Blocks until `count` input writes have arrived, so a test never
         /// races the injection it is about to react to.
         async fn wait_for_inputs(&self, count: usize) {
@@ -1062,6 +1178,7 @@ mod tests {
         log: Arc<Mutex<DaemonLog>>,
         events: tokio::sync::broadcast::Sender<DaemonEvent>,
         listed: Option<SessionStatus>,
+        status_observed: bool,
         submit_refusal: Option<DaemonErrorCode>,
     ) {
         let (read_half, write_half) = stream.into_split();
@@ -1078,48 +1195,94 @@ mod tests {
                 break;
             };
             let response = match command {
-                DaemonCommand::Subscribe => {
-                    if subscription.is_none() {
-                        let mut stream = events.subscribe();
-                        let writer = Arc::clone(&writer);
-                        subscription = Some(tokio::spawn(async move {
-                            while let Ok(event) = stream.recv().await {
-                                let line = serde_json::to_string(&event).expect("event");
-                                let mut writer = writer.lock().await;
-                                if writer.write_all(line.as_bytes()).await.is_err()
-                                    || writer.write_all(b"\n").await.is_err()
-                                {
-                                    return;
+                DaemonCommand::ObserveFinalization { session_id } => {
+                    if listed.is_none() || session_id != SESSION {
+                        DaemonEvent::Error {
+                            code: Some(DaemonErrorCode::SessionNotFound),
+                            message: format!("session not found: {session_id}"),
+                        }
+                    } else {
+                        if subscription.is_none() {
+                            let mut stream = events.subscribe();
+                            let writer = Arc::clone(&writer);
+                            let observed_session = session_id.clone();
+                            subscription = Some(tokio::spawn(async move {
+                                while let Ok(event) = stream.recv().await {
+                                    let belongs_to_session = match &event {
+                                        DaemonEvent::Output { session_id, .. }
+                                        | DaemonEvent::Exit { session_id, .. }
+                                        | DaemonEvent::StatusChanged { session_id, .. } => {
+                                            *session_id == observed_session
+                                        }
+                                        _ => false,
+                                    };
+                                    if !belongs_to_session {
+                                        continue;
+                                    }
+                                    let line = serde_json::to_string(&event).expect("event");
+                                    let mut writer = writer.lock().await;
+                                    if writer.write_all(line.as_bytes()).await.is_err()
+                                        || writer.write_all(b"\n").await.is_err()
+                                    {
+                                        return;
+                                    }
                                 }
-                            }
-                        }));
+                            }));
+                        }
+                        DaemonEvent::FinalizationObserved {
+                            session: SessionInfo {
+                                session_id,
+                                pid: 4242,
+                                cwd: "/tmp".to_string(),
+                                state: SessionState::Active,
+                                idle_seconds: 0,
+                                status: listed.expect("listed session"),
+                                status_observed,
+                                kind: SessionKind::default(),
+                                composer_text: None,
+                                composer_attestation: Default::default(),
+                            },
+                            snapshot: kanna_daemon::protocol::TerminalSnapshot {
+                                version: 1,
+                                rows: 24,
+                                cols: 80,
+                                cursor_row: 0,
+                                cursor_col: 0,
+                                cursor_visible: true,
+                                saved_at: 0,
+                                sequence: 0,
+                                vt: String::new(),
+                            },
+                        }
                     }
-                    DaemonEvent::Ok
                 }
-                DaemonCommand::List => DaemonEvent::SessionList {
-                    sessions: listed
-                        .map(|status| SessionInfo {
-                            session_id: SESSION.to_string(),
-                            pid: 4242,
-                            cwd: "/tmp".to_string(),
-                            state: SessionState::Active,
-                            idle_seconds: 0,
-                            status,
-                            status_observed: true,
-                            kind: SessionKind::default(),
-                            composer_text: None,
-                            composer_attestation: Default::default(),
-                        })
-                        .into_iter()
-                        .collect(),
-                },
-                DaemonCommand::SubmitInputIfSession {
+                DaemonCommand::List => {
+                    log.lock().expect("log").lists += 1;
+                    DaemonEvent::SessionList {
+                        sessions: listed
+                            .map(|status| SessionInfo {
+                                session_id: SESSION.to_string(),
+                                pid: 4242,
+                                cwd: "/tmp".to_string(),
+                                state: SessionState::Active,
+                                idle_seconds: 0,
+                                status,
+                                status_observed,
+                                kind: SessionKind::default(),
+                                composer_text: None,
+                                composer_attestation: Default::default(),
+                            })
+                            .into_iter()
+                            .collect(),
+                    }
+                }
+                DaemonCommand::SubmitInputIfSessionIdle {
                     expected_pid, data, ..
                 } if expected_pid != 4242 => DaemonEvent::Error {
                     code: Some(DaemonErrorCode::SessionIncarnationMismatch),
                     message: "the fake session incarnation changed".to_string(),
                 },
-                DaemonCommand::SubmitInputIfSession { data, .. } => {
+                DaemonCommand::SubmitInputIfSessionIdle { data, .. } => {
                     let input = String::from_utf8_lossy(&data).into_owned();
                     log.lock().expect("log").attempts.push(input.clone());
                     match submit_refusal {
@@ -1248,6 +1411,7 @@ mod tests {
             daemon.inputs(),
         );
 
+        daemon.output(&completion_marker(&work_item().id));
         daemon.status(SessionStatus::Idle);
         daemon.wait_for_inputs(2).await;
         daemon.exit();
@@ -1263,6 +1427,10 @@ mod tests {
         assert!(
             inputs[0].contains("transferred to another machine"),
             "the first thing typed was not the wrap-up: {inputs:?}",
+        );
+        assert!(
+            !inputs[0].contains(&completion_marker(&work_item().id)),
+            "prompt echo could counterfeit the completion marker: {inputs:?}",
         );
         assert_eq!(
             inputs[1], "/exit",
@@ -1309,12 +1477,52 @@ mod tests {
         daemon.status(SessionStatus::Busy);
         daemon.status(SessionStatus::Idle);
         tokio::time::advance(IDLE_EDGE_SETTLE).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            daemon.inputs().len(),
+            1,
+            "an unrelated Busy-to-Idle cycle released /exit without the preparation marker",
+        );
+
+        daemon.output(&completion_marker(&work_item().id));
+        tokio::time::advance(IDLE_EDGE_SETTLE).await;
         daemon.wait_for_inputs(2).await;
         daemon.exit();
 
         let outcome = sequence.await.expect("sequence");
         assert!(outcome.cleanly_finalized(), "{outcome:?}");
         assert_eq!(daemon.inputs()[1], "/exit");
+    }
+
+    /// A marker-shaped output is causal, but it does not replace observing the
+    /// provider turn itself. This keeps stale or synthetic terminal output from
+    /// releasing quit while no preparation lifecycle was seen.
+    #[tokio::test(start_paused = true)]
+    async fn a_completion_marker_without_busy_does_not_release_quit() {
+        let daemon = FakeDaemon::start("marker-without-busy", Some(SessionStatus::Idle));
+        let state = state_for(&daemon, "desktop-finalize-marker-without-busy");
+
+        let sequence = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("claude"))
+                    .await
+            }
+        });
+
+        daemon.wait_for_inputs(1).await;
+        daemon.output(&completion_marker(&work_item().id));
+        tokio::time::advance(IDLE_EDGE_SETTLE).await;
+        tokio::task::yield_now().await;
+        assert_eq!(daemon.inputs().len(), 1, "marker alone released /exit");
+
+        daemon.status(SessionStatus::Busy);
+        daemon.status(SessionStatus::Idle);
+        tokio::time::advance(IDLE_EDGE_SETTLE).await;
+        daemon.wait_for_inputs(2).await;
+        daemon.exit();
+
+        assert!(sequence.await.expect("sequence").cleanly_finalized());
     }
 
     /// A wrap-up the daemon refused outright releases its phase claim: nothing
@@ -1342,6 +1550,36 @@ mod tests {
             db.claim_transfer_work_phase(&work_item().id, WRAP_UP_PHASE)
                 .expect("claim"),
             "nothing was written, so the claim must be available to a retry"
+        );
+    }
+
+    /// The daemon rechecks runtime state in the same critical section that
+    /// enqueues finalization input. If a prompt appears after the observer's
+    /// idle snapshot, the conditional command fails without writing either
+    /// preparation or its CR.
+    #[tokio::test]
+    async fn a_permission_edge_before_atomic_submission_writes_nothing() {
+        let daemon = FakeDaemon::start_refusing(
+            "permission-before-submit",
+            Some(SessionStatus::Idle),
+            Some(DaemonErrorCode::SessionNotIdle),
+        );
+        let state = state_for(&daemon, "desktop-finalize-permission-before-submit");
+
+        let outcome = run_sequence(&state, &work_item(), SESSION, Some("claude")).await;
+
+        assert!(!outcome.cleanly_finalized());
+        assert_eq!(daemon.attempts().len(), 1, "preparation was not attempted");
+        assert!(
+            daemon.inputs().is_empty(),
+            "the conditional refusal still wrote finalization input"
+        );
+        assert!(
+            open_db(&state)
+                .expect("db")
+                .claim_transfer_work_phase(&work_item().id, WRAP_UP_PHASE)
+                .expect("claim state"),
+            "a definite no-write refusal should remain retryable"
         );
     }
 
@@ -1476,6 +1714,7 @@ mod tests {
 
         daemon.wait_for_inputs(1).await;
         daemon.status(SessionStatus::Busy);
+        daemon.output(&completion_marker(&work_item().id));
         daemon.status(SessionStatus::Idle);
         daemon.wait_for_inputs(2).await;
         daemon.exit();
@@ -1588,6 +1827,55 @@ mod tests {
         assert!(
             matches!(outcome, IdleOutcome::TimedOut(SessionStatus::Waiting)),
             "a permission prompt was mistaken for a finished turn",
+        );
+    }
+
+    /// An adopted or older daemon can list the enum's bootstrap `Idle` before
+    /// its terminal classifier has produced any verdict. That value is not
+    /// permission to type; only a later observed status edge can release the
+    /// preparation path.
+    #[tokio::test]
+    async fn an_unobserved_bootstrap_idle_is_not_a_readiness_verdict() {
+        let daemon =
+            FakeDaemon::start_unobserved("unobserved-bootstrap-idle", Some(SessionStatus::Idle));
+        let mut observer = SessionObserver::attach(&daemon.dir, SESSION)
+            .await
+            .expect("attach observer");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                observer.wait_until_idle(deadline),
+            )
+            .await
+            .is_err(),
+            "the daemon's unobserved bootstrap Idle was treated as a verdict",
+        );
+
+        daemon.status(SessionStatus::Idle);
+        assert!(matches!(
+            observer.wait_until_idle(deadline).await,
+            IdleOutcome::Idle
+        ));
+    }
+
+    /// Identity and the event stream must come from one daemon handshake. A
+    /// separate List could race a same-id replacement and pair its PID with the
+    /// predecessor's already-registered fanout.
+    #[tokio::test]
+    async fn finalization_observation_does_not_fetch_identity_with_a_second_list() {
+        let daemon = FakeDaemon::start("atomic-finalization-observe", Some(SessionStatus::Idle));
+
+        let observer = SessionObserver::attach(&daemon.dir, SESSION)
+            .await
+            .expect("attach observer");
+
+        assert_eq!(observer.pid, Some(4242));
+        assert_eq!(
+            daemon.list_count(),
+            0,
+            "observer identity came from a replaceable List snapshot"
         );
     }
 

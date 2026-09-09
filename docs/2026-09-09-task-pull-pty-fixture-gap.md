@@ -11,9 +11,12 @@ harness. The boundaries remain separate:
 - `crates/kanna-server/src/transfer_engine/finalize.rs` exercises the shared
   push/pull finalizer through deterministic fake daemon connections. Those
   tests reproduce the legacy missing-Enter response, prove it cannot release a
-  quit, require a post-submission `Busy` → `Idle` lifecycle, and cover
-  preclaim/uncertain delivery, PID fencing, replacement/absence, provider
-  lookup, and quit suppression. They have no real child PTY.
+  quit, require a prompt-absent per-transfer completion marker plus settled
+  `Idle`, reject an unobserved bootstrap status and unrelated lifecycle edges,
+  and pin the finalization-only daemon-side idle condition that closes the
+  permission-prompt race. They also cover preclaim/uncertain delivery, atomic
+  observer identity, PID fencing, replacement/absence, provider lookup, and
+  quit suppression. They have no real child PTY.
 - `tests/cli-contract/tests/live/opencode-injected-input.test.ts` drives a real
   provider through the current one-buffer submission shape, waits for a
   provider-produced preparation response that cannot be confused with the
@@ -23,11 +26,10 @@ harness. The boundaries remain separate:
   a real finalizer→daemon→PTY chain or observe a distinct quit command after a
   preparation response.
 
-The concrete missing seam is that the server finalizer accepts an already-registered
-session id and daemon directory (`finalize.rs:176-219` and
-`http_api/task_input.rs:145-176`), while the real-daemon fixture must first
-drive the daemon's private `Spawn` registration and retain its observed PTY
-pid. The only existing real-daemon setup is the private test-local
+The concrete missing seam is that the server finalizer accepts an
+already-registered session id and daemon directory, while the real-daemon
+fixture must first drive the daemon's private `Spawn` registration and retain
+its observed PTY pid. The only existing real-daemon setup is the private test-local
 `DaemonHandle`/spawn protocol in `crates/daemon/tests/reconnect.rs`; it is not
 exported to the `kanna-server` test crate. Copying that setup alone would still
 need server `AppState`/DB task registration and the finalizer's transfer-work

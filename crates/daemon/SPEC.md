@@ -473,6 +473,20 @@ logical message and its Enter are one PTY write, so the acknowledgement means
 what a caller assumes it means. There is no held, parked, deferred or refused
 answer: a live session always takes the message, whatever is on its composer.
 
+Transfer lifecycle input is the narrow exception to unconditional acceptance,
+not a change to ordinary delivery. `SubmitInputIfSessionIdle` atomically
+requires the exact observed PTY incarnation to have a positively classified
+`Idle` runtime while enqueuing the same one-buffer logical message. It refuses
+`Busy`, `Waiting`, and unobserved bootstrap states without writing, preventing
+the preparation or quit CR from answering a permission prompt that appeared
+after the server's last status snapshot.
+
+`ObserveFinalization` supplies the matching read boundary. Under the session's
+lifecycle lock it registers the observer on that incarnation's fanout and
+queues one `FinalizationObserved` event containing the same session's PID,
+runtime verdict, and terminal snapshot. The server never combines a `List`
+from a replacement with output from the predecessor.
+
 Until 2026-09-08 the daemon did the opposite. It kept a delivery out of the PTY
 while a producer-declared draft was active, and withheld its Enter from a
 terminal that never settled; the text then sat unsent at a composer, the
