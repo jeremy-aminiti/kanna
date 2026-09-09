@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -12,6 +12,7 @@ import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/rese
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { callVueMethod, queryDb, tauriInvoke, setPreferencesOpen } from "../helpers/vue";
 import { localProcessFetch } from "@kanna/local-process-fetch";
+import { formatAppWindowTitle, type AppBuildInfo } from "../../../src/stores/windowTitle";
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
 const execFileAsync = promisify(execFile);
@@ -19,6 +20,30 @@ const execFileAsync = promisify(execFile);
 let fixtureRepoPath = "";
 let primaryRepoId = "";
 let ownerDesktopId = "";
+
+function expectedWorktreeIdentity(): { taskId: string; worktree: string } {
+  const worktree = basename(resolve(process.cwd(), "../.."));
+  const match = /^task-(.+?)(?:-\d+)?$/.exec(worktree);
+  if (!match?.[1]) {
+    throw new Error(`real remote E2E requires a task worktree title, got ${worktree}`);
+  }
+  return { taskId: match[1], worktree };
+}
+
+async function assertTaskSpecificDevWindow(client: typeof primary, label: string): Promise<void> {
+  const expectedIdentity = expectedWorktreeIdentity();
+  const buildInfo = await tauriInvoke(client, "get_app_build_info") as AppBuildInfo;
+  expect(buildInfo.taskId).toBe(expectedIdentity.taskId);
+  expect(buildInfo.worktree).toBe(expectedIdentity.worktree);
+
+  const expectedTitle = formatAppWindowTitle(buildInfo);
+  if (!expectedTitle) {
+    throw new Error(`${label} did not report a task-specific dev window title`);
+  }
+  const actualTitle = await client.getNativeWindowTitle();
+  expect(actualTitle).toBe(expectedTitle);
+  console.log(`[e2e] ${label} dev window: ${actualTitle}; webdriver=${client.getBaseUrl()}`);
+}
 
 async function setSetupState(client: typeof primary, key: string, value: unknown): Promise<void> {
   await client.executeSync(`
@@ -131,6 +156,8 @@ describe("remote task graph and local action refusal", () => {
   beforeAll(async () => {
     await primary.createSession();
     await secondary.createSession();
+    await assertTaskSpecificDevWindow(primary, "primary");
+    await assertTaskSpecificDevWindow(secondary, "secondary");
     await resetDatabase(primary);
     await resetDatabase(secondary);
     fixtureRepoPath = await createFixtureRepo("remote-task-graph-refusal");
