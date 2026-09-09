@@ -270,6 +270,8 @@ function validateTask(
     task.activityRevision,
     `${path}.activityRevision`,
   );
+  const runtimeState = optionalTaskRuntimeState(task.runtimeState, `${path}.runtimeState`);
+  const readState = optionalTaskReadState(task.readState, `${path}.readState`);
   const blockerRevision = optionalNonNegativeInteger(
     task.blockerRevision,
     `${path}.blockerRevision`,
@@ -303,6 +305,8 @@ function validateTask(
     displayName: nullableString(task.displayName, `${path}.displayName`, 512),
     stage: requiredString(task.stage, `${path}.stage`, 64),
     activity: requiredString(task.activity, `${path}.activity`, 32),
+    ...(runtimeState === undefined ? {} : { runtimeState }),
+    ...(readState === undefined ? {} : { readState }),
     ...(activityRevision === undefined ? {} : { activityRevision }),
     ...(blockerRevision === undefined ? {} : { blockerRevision }),
     transitionRevision,
@@ -1226,6 +1230,20 @@ function optionalNullableUnicodeString(
 ): string | null {
   if (value === undefined) return null;
   return nullableUnicodeString(value, field, maxLength);
+}
+
+function optionalTaskRuntimeState(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (value === "busy" || value === "waiting" || value === "idle" || value === "exited") {
+    return value;
+  }
+  throw new Error(`${field} must be busy, waiting, idle, or exited when present`);
+}
+
+function optionalTaskReadState(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (value === "read" || value === "unread") return value;
+  throw new Error(`${field} must be read or unread when present`);
 }
 
 // Missing on snapshots from older desktop publishers; treated as "no running post".

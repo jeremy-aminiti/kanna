@@ -1,5 +1,23 @@
 # Mobile Task Activity E2E Coverage
 
+## Simulator verification — 2026-09-09
+
+The relay Appium lane captured the list before any detail visit:
+
+- `docs/task-screenshots/12ae15f6-screenshots/busy-read-list.png` — busy-and-read rendered as Running.
+- `docs/task-screenshots/12ae15f6-screenshots/busy-unread-list.png` — busy-and-unread was distinguishable with unread attention while the list accessibility value remained `working, unread`.
+
+The ignored screenshots remain on disk and are not committed. This is JS-only; staging `runtimeVersion` remains `2.2.3`.
+
+The relay Appium discriminator now establishes both busy-and-read
+(`activity: working`, `runtimeState: busy`, `readState: read`) and
+busy-and-unread (`activity: unread`, `runtimeState: busy`, `readState: unread`)
+before any detail navigation. For each list-row assertion, the harness captures
+the owner-server task and its Firestore publication at that same transition,
+requires matching `activity`, `runtimeState`, `readState`, and
+`activityRevision`, and requires that revision to be present. The rendered row
+is `working` for busy-and-read and `working, unread` for busy-and-unread.
+
 The relay Appium lane seeds a cloud task with `status: active` and
 `activity: working`, then PATCHes only the Firestore `activity` field. The app's
 live Firestore listener must update the existing rendered task card through

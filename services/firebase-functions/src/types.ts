@@ -7,6 +7,8 @@ export const emulatorPorts = {
 } as const;
 
 export type CloudTaskActivity = "idle" | "working" | "unread";
+export type CloudTaskRuntimeState = "busy" | "waiting" | "idle" | "exited";
+export type CloudTaskReadState = "read" | "unread";
 export type CloudTaskStatus =
   | "active"
   | "blocked"
@@ -31,6 +33,8 @@ export interface CloudTaskSnapshot {
   displayName: string | null;
   stage: string;
   activity: CloudTaskActivity;
+  runtimeState?: CloudTaskRuntimeState;
+  readState?: CloudTaskReadState;
   activityRevision?: number;
   blockerRevision?: number;
   transitionRevision?: string | null;

@@ -7,7 +7,12 @@ import {
   type Firestore,
 } from "firebase/firestore";
 import type { AgentProvider } from "@kanna/agent-protocol";
-import type { TaskActivity, TaskSummary } from "../api/types";
+import type {
+  TaskActivity,
+  TaskReadState,
+  TaskRuntimeState,
+  TaskSummary,
+} from "../api/types";
 import { parseAgentProviderInventory } from "../api/agentProviders";
 import { buildCloudTaskId } from "../api/taskIdentity";
 import { canonicalRepoIdForHash } from "../api/repoIdentity";
@@ -24,6 +29,8 @@ export interface CloudTaskSnapshot {
   displayName?: string | null;
   stage: string;
   activity?: string | null;
+  runtimeState?: string | null;
+  readState?: string | null;
   activityRevision?: number;
   status?: string;
   repo: { cloudRepoId: string; name: string; remoteUrlHash?: string | null };
@@ -258,6 +265,8 @@ function parseCloudTaskSnapshot(value: unknown): CloudTaskSnapshot {
     displayName: optionalNullableString(value.displayName),
     stage: requiredString(value.stage, "stage"),
     activity: optionalNullableString(value.activity),
+    runtimeState: optionalNullableString(value.runtimeState),
+    readState: optionalNullableString(value.readState),
     activityRevision: optionalNonNegativeInteger(value.activityRevision),
     status: optionalString(value.status),
     repo: {
@@ -359,6 +368,8 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     agentProvider: snapshot.agent?.provider ?? null,
     agentType: normalizeAgentType(snapshot.agent?.type),
     activity: normalizeTaskActivity(snapshot.activity),
+    runtimeState: normalizeTaskRuntimeState(snapshot.runtimeState),
+    readState: normalizeTaskReadState(snapshot.readState),
     ...(snapshot.activityRevision === undefined
       ? {}
       : { activityRevision: snapshot.activityRevision }),
@@ -376,6 +387,16 @@ export function mapCloudTaskSnapshot(snapshot: CloudTaskSnapshot): CloudTaskSumm
     ownerLocalTaskId: snapshot.ownerLocalTaskId,
     ownerOnline: false,
   };
+}
+
+function normalizeTaskRuntimeState(value: string | null | undefined): TaskRuntimeState | null {
+  return value === "busy" || value === "waiting" || value === "idle" || value === "exited"
+    ? value
+    : null;
+}
+
+function normalizeTaskReadState(value: string | null | undefined): TaskReadState | null {
+  return value === "read" || value === "unread" ? value : null;
 }
 
 function mapCloudDesktopRecord(
