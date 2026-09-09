@@ -176,6 +176,16 @@ export function TerminalWebViewComponent({
   const [renderedOutputEpoch, setRenderedOutputEpoch] = useState<number | null>(
     null
   );
+  // Whether a grid has ever been painted for this task in this document.
+  //
+  // The loading overlay answers "is there anything to look at?", never "is the
+  // transport live?". A reconnect swaps the buffer underneath an already
+  // painted grid — the server replays the gap, or replaces the whole grid in
+  // one injected write — so re-raising the spinner for it would blink the
+  // reader out of content that stayed correct and readable throughout. Only a
+  // genuinely blank surface (a task switch, a reloaded document) earns it back.
+  const [hasRenderedTerminalContent, setHasRenderedTerminalContent] =
+    useState(false);
   const [terminalInspection, setTerminalInspection] =
     useState<TerminalInspection | null>(null);
   const [terminalSelection, setTerminalSelection] = useState("");
@@ -376,6 +386,8 @@ export function TerminalWebViewComponent({
       setSelectionCopyError(null);
       setSelectionCopyPending(false);
       previousTaskIdRef.current = taskId;
+      setHasRenderedTerminalContent(false);
+      setRenderedOutputEpoch(null);
       const sourceSnapshot = terminalOutputSource?.getSnapshot();
       const initialSnapshot =
         sourceSnapshot?.taskId === taskId
@@ -590,6 +602,7 @@ export function TerminalWebViewComponent({
         payload.contentRevision === activeOutputEpochRef.current
       ) {
         setRenderedOutputEpoch(payload.contentRevision);
+        setHasRenderedTerminalContent(true);
       }
       return;
     }
@@ -619,8 +632,17 @@ export function TerminalWebViewComponent({
     );
   };
 
-  const isTerminalContentReady =
-    status === "live" && renderedOutputEpoch === outputEpoch;
+  const isTerminalContentReady = hasRenderedTerminalContent;
+  // Every raise of the overlay, counted so an E2E can hold a reconnect to at
+  // most one. A hidden->shown transition is the whole event; the count only
+  // moves when the reader would actually see a new spinner.
+  const loadingIndicationCountRef = useRef(0);
+  const [loadingIndicationCount, setLoadingIndicationCount] = useState(0);
+  useEffect(() => {
+    if (isTerminalContentReady) return;
+    loadingIndicationCountRef.current += 1;
+    setLoadingIndicationCount(loadingIndicationCountRef.current);
+  }, [isTerminalContentReady]);
 
   const clearTerminalSelection = () => {
     selectionContextRef.current.version += 1;
@@ -687,6 +709,16 @@ export function TerminalWebViewComponent({
         </Text>
       ) : null}
       {ENABLE_E2E_TERMINAL_INSPECTION ? (
+        <Text
+          accessibilityLabel={`terminal-loading-indications:${loadingIndicationCount}`}
+          pointerEvents="none"
+          style={styles.e2eTerminalInspection}
+          testID={MOBILE_E2E_IDS.terminalLoadingIndications}
+        >
+          {`terminal-loading-indications:${loadingIndicationCount}`}
+        </Text>
+      ) : null}
+      {ENABLE_E2E_TERMINAL_INSPECTION ? (
         <Pressable
           accessibilityLabel="Scroll terminal to top for E2E inspection"
           onPress={() => webViewRef.current?.injectJavaScript(
@@ -729,6 +761,7 @@ export function TerminalWebViewComponent({
         onLoadStart={() => {
           bridgeReadyRef.current = false;
           setRenderedOutputEpoch(null);
+          setHasRenderedTerminalContent(false);
           selectionContextRef.current.version += 1;
           selectionContextRef.current.copyPending = false;
           setTerminalSelection("");

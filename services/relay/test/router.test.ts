@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { WebSocket } from "ws";
 import {
   attachDesktopTunnel,
@@ -7,6 +7,7 @@ import {
   routeMessage,
   setPhoneConnection,
   setServerConnection,
+  TUNNEL_KEEPALIVE_INTERVAL_MS,
 } from "../src/router.js";
 
 const MIB = 1024 * 1024;
@@ -26,6 +27,11 @@ class FakeSocket extends EventEmitter {
   readonly closeCalls: Array<{ code?: number; reason?: string }> = [];
   pauseCalls = 0;
   resumeCalls = 0;
+  pingCalls = 0;
+
+  ping(): void {
+    this.pingCalls += 1;
+  }
 
   send(
     data: unknown,
@@ -91,6 +97,65 @@ function connectedTunnel(): {
   peer.sent.length = 0;
   return { source, peer };
 }
+
+describe("relay tunnel keepalive", () => {
+  it("pings both legs of an idle tunnel so no NAT can evict it", () => {
+    vi.useFakeTimers();
+    try {
+      const { source, peer } = connectedTunnel();
+
+      // An idle terminal stream carries no bytes at all: the desktop's own
+      // 30s keepalive is on its control socket, and a phone cannot originate a
+      // ping. Without this the mapping dies and the phone redials.
+      expect(source.pingCalls).toBe(0);
+      expect(peer.pingCalls).toBe(0);
+
+      vi.advanceTimersByTime(TUNNEL_KEEPALIVE_INTERVAL_MS);
+      expect(source.pingCalls).toBe(1);
+      expect(peer.pingCalls).toBe(1);
+
+      vi.advanceTimersByTime(TUNNEL_KEEPALIVE_INTERVAL_MS * 2);
+      expect(source.pingCalls).toBe(3);
+      expect(peer.pingCalls).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops pinging once the tunnel closes", () => {
+    vi.useFakeTimers();
+    try {
+      const { source, peer } = connectedTunnel();
+      vi.advanceTimersByTime(TUNNEL_KEEPALIVE_INTERVAL_MS);
+      expect(source.pingCalls).toBe(1);
+
+      source.close(1000, "gone");
+      vi.advanceTimersByTime(TUNNEL_KEEPALIVE_INTERVAL_MS * 3);
+
+      expect(source.pingCalls).toBe(1);
+      expect(peer.pingCalls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops pinging a pair torn down for backpressure", () => {
+    vi.useFakeTimers();
+    try {
+      const { source, peer } = connectedTunnel();
+      peer.bufferedAmount = MAX_TUNNEL_BUFFERED_BYTES - 2;
+      forwardTunnelData(source as unknown as WebSocket, Buffer.from("abc"), false);
+      expect(peer.closeCalls).toHaveLength(1);
+
+      vi.advanceTimersByTime(TUNNEL_KEEPALIVE_INTERVAL_MS * 3);
+
+      expect(source.pingCalls).toBe(0);
+      expect(peer.pingCalls).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("relay tunnel flow control", () => {
   it("forwards a text RawData buffer without making a complete-frame string copy", () => {

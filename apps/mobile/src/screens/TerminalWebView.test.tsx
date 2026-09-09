@@ -1437,8 +1437,10 @@ describe("TerminalWebView", () => {
     ).toBeNull();
   });
 
-  it("ignores stale render acknowledgements and becomes pending again for reconnect snapshots", async () => {
+  it("keeps the rendered grid visible across a reconnect snapshot", async () => {
+    process.env.EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED = "1";
     const initialWebView = await renderTerminalWebView({ outputEpoch: 3 });
+    runEffects();
     (initialWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
       nativeEvent: {
         data: JSON.stringify({
@@ -1452,11 +1454,27 @@ describe("TerminalWebView", () => {
       findByAccessibilityLabel(lastTree, "Loading terminal content")
     ).toBeNull();
 
-    const reconnectWebView = await renderTerminalWebView({ outputEpoch: 4 });
+    // A reconnect replaces the buffer under a grid the reader can still read.
+    // Raising the spinner for it blinks them out of content that never went
+    // away, once per redial on a link that redials every few seconds.
+    await renderTerminalWebView({ outputEpoch: 4 });
+    runEffects();
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).toBeNull();
+    // One raise, for the first paint — not a second for the reconnect.
+    expect(
+      findByAccessibilityLabel(lastTree, "terminal-loading-indications:1")
+    ).not.toBeNull();
+  });
+
+  it("ignores stale render acknowledgements before the first grid renders", async () => {
+    const webView = await renderTerminalWebView({ outputEpoch: 4 });
     expect(
       findByAccessibilityLabel(lastTree, "Loading terminal content")
     ).not.toBeNull();
-    (reconnectWebView.props.onMessage as (event: WebViewMessageEvent) => void)({
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
       nativeEvent: {
         data: JSON.stringify({
           type: "terminal-content-ready",
@@ -1468,6 +1486,19 @@ describe("TerminalWebView", () => {
     expect(
       findByAccessibilityLabel(lastTree, "Loading terminal content")
     ).not.toBeNull();
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-content-ready",
+          contentRevision: 4
+        })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({ outputEpoch: 4 });
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).toBeNull();
   });
 
   it("finishes empty snapshots and does not return to loading for live output in the same epoch", async () => {

@@ -376,3 +376,38 @@ coverage needs the test-only synthetic terminal-session fixture path above
 (spawn an arbitrary command such as a scripted alt-screen TUI under a
 task's daemon session id); once that exists, the smoke can assert the
 drag-to-PTY loop end to end without any agent CLI.
+
+## Terminal reconnect quiet-through (induced tunnel drop)
+
+`runRelayTaskFlow`'s PTY revisit journey runs
+`verifyRelayPtyTunnelDropIsInvisible` after the daemon-resync stability check.
+The harness's `dropRelayTunnels()` stops and restarts the real relay process,
+so every tunnel through it dies while the desktop, the daemon and the task
+survive — the same transport loss a desktop server log shows as a run of
+`Dialing relay tunnel … / Relay tunnel … closed` pairs. The only thing under
+test is what the phone does about a redial.
+
+The journey asserts three things:
+
+- **The connecting state is not shown for a sub-threshold gap.** The reconnect
+  badge is sampled in the first moments of the outage, while the relay is still
+  down and inside `TERMINAL_RECONNECT_GRACE_MS`, and must not exist. Sampling
+  after the restart would measure a process boot rather than a redial.
+- **The grid is never taken away.** Twelve samples across the outage and the
+  redial each require a rendered document with the same `documentInstanceId`
+  and the authoritative column count, and no loading overlay.
+- **One reconnect raises at most one loading indication.** `TerminalWebView`
+  publishes a hidden `mobile.terminal-loading-indications` counter under
+  `EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED`; it is read before the drop and
+  after the redial and may move by at most one. In practice it does not move at
+  all, because the overlay answers "is there a grid to look at?" rather than
+  "is the transport live?".
+
+The grace window itself is timing, not transport, so it is pinned in unit
+tests rather than here: `src/screens/terminalReconnectPresentation.test.ts`
+covers the pure derivation, and `src/screens/TaskScreen.test.tsx` drives the
+timer with fake clocks to prove a graced gap presents as live and an
+outlasting one raises the badge *over* a retained grid rather than replacing
+it with a skeleton. `src/state/sessionStore.test.ts` pins that re-attaching the
+same task keeps the rendered grid and its epoch, while a different task still
+clears them.

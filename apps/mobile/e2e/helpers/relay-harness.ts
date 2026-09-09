@@ -144,6 +144,7 @@ interface RemoteHarness {
     relay: number;
   };
   restartDaemon(): Promise<void>;
+  startRelay(): Promise<void>;
   restartServerWithIdentity(identity: {
     desktopId: string;
     desktopSecret?: string | null;
@@ -269,6 +270,7 @@ export interface MobileRelayHarness {
   lanOnlyTask: ScriptedTask;
   localTask: ScriptedTask;
   createPairingSession(): Promise<HarnessPairingSession>;
+  dropRelayTunnels(whileDown: () => Promise<void>): Promise<void>;
   emitFilePreviewLinks(): Promise<void>;
   expirePairingSession(): Promise<void>;
   prepareTaskUnreadForMarkRead(): Promise<void>;
@@ -698,6 +700,24 @@ export async function startMobileRelayHarness(
           terminalFixture.expectedRows
         );
         terminalEvents?.takeControl();
+      },
+      async dropRelayTunnels(whileDown) {
+        // Take the relay down and bring it straight back. Every tunnel through
+        // it dies with it — the same transport loss the owner's server log
+        // showed seventeen times in six minutes — while the desktop, the
+        // daemon and the task all survive, so the only thing under test is
+        // what the phone does about a redial.
+        //
+        // `whileDown` runs in the first moments of the outage, which is the
+        // only place a caller can observe a gap that is genuinely shorter than
+        // the client's reconnect grace: once the relay is being restarted the
+        // elapsed time is a process boot, not a redial.
+        await harness.stopRelay();
+        try {
+          await whileDown();
+        } finally {
+          await harness.startRelay();
+        }
       },
       async resyncTerminalConnection() {
         // Replace the daemon beneath the live KSP subscription. This forces

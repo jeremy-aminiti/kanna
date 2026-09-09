@@ -1112,6 +1112,41 @@ describe("createSessionStore", () => {
     expect(terminalText(store)).toBe("");
   });
 
+  it("keeps the rendered grid when the same task re-attaches", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "authoritative", 132, 43);
+    const epoch = store.getState().taskTerminalOutputEpoch;
+
+    store.beginTaskTerminal("task-1", "");
+
+    // The reader keeps looking at correct content while the attachment is
+    // rebuilt underneath; the epoch stays put so nothing is re-seeded.
+    expect(store.getState()).toMatchObject({
+      taskTerminalStatus: "connecting",
+      taskTerminalCols: 132,
+      taskTerminalRows: 43,
+      taskTerminalOutputEpoch: epoch
+    });
+    expect(terminalText(store)).toBe("authoritative\n");
+  });
+
+  it("clears the grid when a different task takes the terminal", () => {
+    const store = createSessionStore();
+    store.beginTaskTerminal("task-1", "");
+    store.replaceTaskTerminalSnapshot("task-1", "authoritative", 132, 43);
+
+    store.beginTaskTerminal("task-2", "");
+
+    expect(store.getState()).toMatchObject({
+      taskTerminalTaskId: "task-2",
+      taskTerminalStatus: "connecting",
+      taskTerminalCols: null,
+      taskTerminalRows: null
+    });
+    expect(terminalText(store)).toBe("");
+  });
+
   it("keeps a snapshot larger than the live-output cap", () => {
     const store = createSessionStore();
     store.beginTaskTerminal("task-1", "");
