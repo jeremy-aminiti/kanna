@@ -433,7 +433,6 @@ export class WebDriverClient {
     }
     return title;
   }
-
   async screenshot(path?: string): Promise<string> {
     const res = await this.get(`/session/${this.sid}/screenshot`);
     const b64: string = res.value;
