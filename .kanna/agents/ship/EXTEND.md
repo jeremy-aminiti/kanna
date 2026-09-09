@@ -38,6 +38,46 @@ After `./kd release status`, select only the authorized operation:
 
 For plain ships, choose `--major`, `--minor`, or `--patch` when an explicit override is required. A bare main staging ship continues an active unpromoted main RC; otherwise it starts the next minor series from the production floor. Release-branch RCs derive their version from `release/X.Y`, ignore bump flags, and require `--branch release/X.Y` from a Kanna `task-*` worktree whose `HEAD` is exactly the branch's remote tip. Production-series patch RCs belong on that release branch.
 
+## Linux (`--platform linux`)
+
+Linux ships on its own channel pair, `desktop-linux-staging` / `desktop-linux`,
+with `linux-vX.Y.Z[-staging.N]` tags, `release/linux/X.Y` series branches and
+its own soak window in `release-policy.json`. Nothing about a Linux operation
+touches the macOS channels, and a Linux failure is never a reason to change
+anything on them.
+
+**Linux is not releasable yet, and you must not treat it as if it were.** The
+Bazel release graph is still Darwin-only, so the only way to produce a `.deb`
+today is `./kd build linux-package`, which uses Cargo and is explicitly a
+prototype path. Its artifacts must never be published. Refuse any Linux publish
+or promotion request and report this, with
+`docs/2026-09-09-linux-phase3-supported-distribution.md` §7 as the reason.
+
+When it is releasable, these rules hold and none is optional:
+
+- **Both architectures or nothing.** `release-policy.json` declares
+  `linux.requiredArchitectures`. Every required architecture must build, pass
+  its dependency audit and pass installed acceptance at the *same* version and
+  source revision before a publish. A missing artifact fails the publish; never
+  publish what did build, and never fill a gap with an older artifact of that
+  architecture.
+- **The audit is a gate, not a report.** `./kd build linux-package` refuses a
+  package whose artifact closure is not in `packaging/linux/runtime-policy.json`.
+  `--allow-audit-findings` exists for local iteration and marks the result
+  `auditOverridden`; an artifact built that way is unpublishable, and adding an
+  entry to the policy to get past a finding is a change to the dependency
+  contract that needs review, not a workaround.
+- **The signing key is the apt archive's, not the updater's**, and it lives on
+  the owner's trusted release host under the same custody rules. Builders never
+  receive it, and CI never holds it. Do not export it, copy it, or sign
+  anywhere else.
+- **`InRelease` is the commit point.** Pool artifacts and indexes upload first;
+  the signature goes last, after every advertised artifact's checksum has been
+  verified against storage. An interrupted publish is recovered by re-running,
+  never by hand-editing an index.
+- **Production publication and promotion stay named-human operations**, exactly
+  as on macOS.
+
 ## Preflight
 
 Release credentials — the Developer ID certificate, the Tauri updater private key, and the notarization Keychain profile in `~/.kanna/.env.release.local` — exist only on the owner's MacBook Pro. Ship tasks must run there; on any other machine the preflight below fails at the first credential check and no amount of retrying fixes it. If you are not on that machine, report it as the blocker and stop rather than working around it.

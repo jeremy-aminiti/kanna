@@ -1,0 +1,170 @@
+name: Linux Release Check
+
+# The Linux release build, its dependency audit, and — under the 2026-09-09
+# owner directive — the x86-64 installed-acceptance host.
+#
+# The directive: the Intel Mac that was to run the native x86-64 Ubuntu 24.04
+# acceptance VM is in Japan and unavailable for at least a month, and nothing
+# may block on it. The substitute chosen here is the `ubuntu-24.04` hosted
+# runner itself. It is genuinely the supported floor's userspace, it has a real
+# systemd user manager, and its own kernel is not 6.8 — which is recorded with
+# the evidence rather than papered over. What it cannot supply is a
+# phone-reachable LAN, a human at a screen, and a clean machine (a hosted
+# runner is the opposite of one: it ships with Rust, Node and compilers
+# preinstalled). Those stay with the arm64 guest and with the Intel Mac when it
+# returns, and `docs/2026-09-09-linux-phase3-supported-distribution.md` says so
+# in the support matrix.
+#
+# This workflow is deliberately independent of Pages deployment and holds no
+# signing or publishing credential. A Linux build failure must never be able to
+# block a macOS ship or a schema publish.
+
+on:
+  workflow_call:
+    inputs:
+      run-installed-acceptance:
+        description: Install the built package and run the two-version upgrade proof on the x86-64 runner.
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      run-installed-acceptance:
+        description: Install the built package and run the two-version upgrade proof on the x86-64 runner.
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - "packaging/linux/**"
+      - "tests/linux-installed/**"
+      - "crates/**"
+      - "apps/desktop/src-tauri/**"
+      - "tools/kd/src/runtime/linux-*.ts"
+      - "tools/kd/src/runtime/release-platform.ts"
+      - ".github/workflows/linux-release-check.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "packaging/linux/**"
+      - "tests/linux-installed/**"
+      - ".github/workflows/linux-release-check.yml"
+
+# Read-only. This lane builds and tests; it does not publish, and it must not be
+# able to.
+permissions:
+  contents: read
+
+concurrency:
+  # Its own group, so a Linux run never queues behind or cancels the Pages
+  # deployment.
+  group: linux-release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Both required architectures, each built natively. Cross-compiling the
+    # other would leave the linkage — which is what the audit is about —
+    # untested on the machine it has to run on.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # A hosted runner advertises limited storage and a full Rust release
+      # build of this workspace is large. Reclaiming the preinstalled toolchains
+      # this lane does not use is disposable runner data, never anything the
+      # build produces.
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Install build and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            build-essential pkg-config dpkg-dev
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Record the build host
+        run: |
+          . /etc/os-release && echo "distribution=$PRETTY_NAME"
+          echo "kernel=$(uname -r)"
+          echo "glibc=$(getconf GNU_LIBC_VERSION)"
+          echo "arch=$(dpkg --print-architecture)"
+
+      # Two packages from two source revisions, because the acceptance lane's
+      # reason to exist is upgrading between them. The "old" build is the merge
+      # base, so the pair is a real version step rather than the same tree
+      # renamed.
+      - name: Build the candidate package
+        run: ./kd build linux-package --channel staging --architecture ${{ matrix.architecture }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kanna-linux-${{ matrix.architecture }}
+          path: .build/linux-package/out/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  installed-acceptance:
+    # x86-64 only. The arm64 runner can build, but the human-facing and
+    # LAN acceptance for arm64 belongs to the native guest, and running the
+    # lane twice here would imply coverage this host does not have.
+    needs: build
+    if: inputs.run-installed-acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: kanna-linux-x86_64
+          path: .build/linux-package/out
+
+      # The worker runs under a real `systemd --user` manager, which needs a
+      # login session for this user to exist. Lingering is what creates one on
+      # a machine nobody logs into.
+      - name: Ensure a user manager exists
+        run: |
+          sudo loginctl enable-linger "$USER"
+          systemctl --user is-system-running || true
+
+      - name: Installed and upgrade acceptance
+        run: |
+          set -eu
+          debs=(.build/linux-package/out/*.deb)
+          # A single package means there is nothing to upgrade *to*, and a lane
+          # that quietly ran the install half would report a pass for the gate
+          # this exists to cover.
+          if [ "${#debs[@]}" -lt 2 ]; then
+            echo "need two packages to prove an upgrade; found ${#debs[@]}" >&2
+            exit 1
+          fi
+          ./kd test linux-installed \
+            --old-artifact "${debs[0]}" \
+            --new-artifact "${debs[1]}" \
+            --channel staging

@@ -9,11 +9,19 @@ on:
       - ".github/workflows/config-schema-pages.yml"
       - "tools/kd/**"
   workflow_dispatch:
+    inputs:
+      action:
+        description: What to run. The default publishes the schema; `linux-build` runs the Linux release check instead and deploys nothing.
+        type: choice
+        default: publish-schema
+        options:
+          - publish-schema
+          - linux-build
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+# Deliberately empty at the top level. The Pages write and OIDC permissions
+# belong to the job that deploys and nowhere else, so a Linux build dispatched
+# through this workflow cannot hold them.
+permissions: {}
 
 concurrency:
   group: config-schema-pages
@@ -21,6 +29,13 @@ concurrency:
 
 jobs:
   deploy:
+    # Never for a Linux build: that dispatch borrows this workflow's manual
+    # entry point, not its deployment.
+    if: github.event_name != 'workflow_dispatch' || inputs.action == 'publish-schema'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -43,3 +58,14 @@ jobs:
           path: .build/pages-schema
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  linux-build:
+    # The actual build lives in its own reusable workflow with its own
+    # triggers and its own read-only permissions; this is only a manual entry
+    # point into it. Keeping the two apart is what stops a Linux build failure
+    # from touching the schema publish, which is continuous deployment of a
+    # public contract.
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'linux-build'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/linux-release-check.yml

@@ -4,13 +4,23 @@ Date: 2026-09-07
 
 Source task: `869376a8`
 
-Status: Phase 0 complete (2026-09-07, task `81ab28f1`). The ARM64 Linux VM
-exists, all six pinned sidecars build and the daemon binary runs on it, and the
-identity, PTY, and launcher spikes have been measured. Phases 1–3 remain
-researched recommendation. Measured results now supersede the assumptions they
-replace; see
-[platform baseline](../2026-09-07-linux-phase0-platform-baseline.md) and
-[identity/PTY/launcher spikes](../2026-09-07-linux-identity-pty-launcher-spike.md).
+Status: Phases 0-2 complete; Phase 3 **partial**. The ARM64 Linux VM exists, the
+sidecars build, the identity/PTY/launcher spikes are measured (Phase 0), the
+headless worker is implemented and gated (Phase 1), and the Tauri GUI builds,
+paints under WebKitGTK and answers WebDriver (Phase 2). Phase 3 (task
+`13573eac`) has landed the packaging contract, the measured dependency policy
+and its audit, the installed/upgrade acceptance lane, the Linux release channel
+design, the apt archive, the package-manager update UI and the CI build lane —
+but the Bazel Linux release graph, a real built package, any executed
+installed-acceptance run, the apt signing key, and Phase 2's remaining E2E gaps
+are **not** delivered. Read
+[Phase 3 evidence](../2026-09-09-linux-phase3-supported-distribution.md) §7
+before treating any part of Linux as releasable. Measured results supersede the
+assumptions they replace; see
+[platform baseline](../2026-09-07-linux-phase0-platform-baseline.md),
+[identity/PTY/launcher spikes](../2026-09-07-linux-identity-pty-launcher-spike.md),
+[headless worker](../2026-09-08-linux-phase1-headless-worker.md) and
+[GUI preview](../2026-09-09-linux-phase2-gui-preview.md).
 
 ## Context and recommendation
 
@@ -544,6 +554,12 @@ startup and authorization only, and nothing else in the system knows it exists.
 2. Which distro/version, kernel baseline, CPU architectures, and display
    environments are supported? Start with one ARM64 VM baseline for local
    development; explicitly schedule x86-64 CI and release validation.
+   **Decided in Phase 3 and recorded as policy.** Ubuntu 24.04 LTS
+   (glibc 2.39, kernel 6.8), x86-64 *and* arm64 both required for a publish
+   (`release-policy.json` `linux.requiredArchitectures`), GNOME/Wayland
+   primary with X11/XWayland running but not performance-certified, software
+   rendering usable and GPU optional. The floor itself is **not yet verified**:
+   all measurement to date is on 26.04.1 aarch64.
    **Evidence now in hand.** The development baseline is Ubuntu 26.04.1 aarch64,
    kernel 7.0.0-31, glibc 2.43. The *artifacts* built there need glibc ≥ 2.39
    (measured from their versioned symbols), so they would run on Ubuntu 24.04
@@ -552,6 +568,13 @@ startup and authorization only, and nothing else in the system knows it exists.
    Phase 1.
 3. Does the vendoring rule permit declared OS/runtime libraries? Are agent
    CLIs and repository toolchains user-managed prerequisites?
+   **Decided in Phase 3.** Yes, but only through an enumerated, reviewed
+   allowlist that an artifact audit enforces —
+   `packaging/linux/runtime-policy.json`, with `Depends` derived from the
+   measured closure rather than written by hand. Agent CLIs and repository
+   toolchains stay user-managed, exactly as on macOS. Two conditional
+   exceptions carry their evidence and a named follow-up: OpenSSL, and
+   `libc++`/`libc++abi`, which are still linked dynamically.
    **Evidence now in hand.** The measured runtime dependency set is
    `libc++1` + `libc++abi1` (from the pinned Zig/Ghostty link, in four of six
    sidecars, and *not* present on a base Ubuntu image) and `libssl3t64` (from
