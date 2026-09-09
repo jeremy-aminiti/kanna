@@ -214,6 +214,39 @@ predicted (`02-app-startup.png`).
   not chased: it is a reconnect path with no repo selected, and nothing
   indicates it is Linux-specific.
 
+### 3.3.5 Instance isolation and the loopback boundary, sampled on Linux
+
+Two things the plan wanted verified before anything else is built on them, and
+both hold on the real Linux listener rather than in a harness.
+
+**The preview instance owns its own everything.** `kanna-desktop` (pid 4791)
+spawns `kanna-daemon` and `kanna-server` as its own direct children from the
+instance's `.build/`, against `kanna-wt-kanna-p2.db`, with its daemon directory
+inside the checkout and its server state under
+`~/.local/share/build.kanna/Kanna/servers/kanna-wt-kanna-p2/`. Its listeners are
+the task's own ports (server 48220, transfer 4555, dev 1520, WebDriver 4545).
+Nothing is shared with Phase 1's worker, and no trust check was touched.
+
+`task-events.token` — the local control credential — is `0600`. `server.toml`
+next to it is `0664` and contains `desktop_secret`; that is the pre-existing
+cross-platform credential-storage follow-up the plan already named, and it is
+confirmed to reproduce on Linux rather than being a Linux-only defect.
+
+**The loopback-authority model behaves.** Against the real listener, with no
+mock in the path:
+
+| request to `/v1/tasks` | result |
+| --- | --- |
+| local process, no browser headers | admitted (405, wrong method — the route was reached) |
+| `Origin: http://evil.example`, no credential | **403**, "browser requests must present this desktop's local control credential or a paired device secret" |
+| `Sec-Fetch-Site: cross-site`, no credential | **403**, same |
+| `Host: attacker.example` (DNS rebinding shape) | **403** |
+| `Origin` + `Authorization: Bearer <local control token>` | admitted (405) |
+
+This is a sample, not M5: it does not touch WebSocket first-frame auth, `no-cors`
+mutation, pairing, or the real WebKitGTK request shapes. It does establish that
+`lan_trust.rs` classifies correctly on Linux, which is what M5 builds on.
+
 ### 3.4 Composited-window screenshots are not available unattended on this VM
 
 GNOME 45+ refuses `org.gnome.Shell.Screenshot` to unsandboxed callers
