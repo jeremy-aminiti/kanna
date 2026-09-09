@@ -30,11 +30,18 @@ pub struct Options {
 
 impl Options {
     pub fn parse(args: &[String]) -> Result<Self, String> {
+        Self::parse_with_inherited_db_path(args, std::env::var_os("KANNA_DB_PATH"))
+    }
+
+    pub(crate) fn parse_with_inherited_db_path(
+        args: &[String],
+        inherited_db_path: Option<std::ffi::OsString>,
+    ) -> Result<Self, String> {
         let mut data_dir: Option<PathBuf> = None;
         let mut lan_port = None;
         let mut transfer_port = None;
         let mut unit_path = None;
-        let mut db_path = std::env::var_os("KANNA_DB_PATH")
+        let mut db_path = inherited_db_path
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty());
 
@@ -460,8 +467,11 @@ mod tests {
     /// file without anything noticing.
     #[test]
     fn the_default_database_is_the_workers_own_under_its_data_dir() {
-        let parsed = Options::parse(&["--data-dir".to_string(), "/srv/worker".to_string()])
-            .expect("options should parse");
+        let parsed = Options::parse_with_inherited_db_path(
+            &["--data-dir".to_string(), "/srv/worker".to_string()],
+            None,
+        )
+        .expect("options should parse");
         assert_eq!(
             parsed.db_path(),
             PathBuf::from("/srv/worker/kanna-worker.db")
