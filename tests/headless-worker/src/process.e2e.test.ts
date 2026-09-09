@@ -338,6 +338,52 @@ describe("the generated systemd unit", () => {
   });
 });
 
+describe("a worker started with no --db-path", () => {
+  /**
+   * The documented `kanna-worker run --data-dir ...` names no database, and
+   * the default used to be the desktop's guarded file
+   * (`~/.local/share/build.kanna/kanna-v2.db`), which `kanna-server` refuses
+   * to every process the desktop did not authorize. So the plain command
+   * failed at `Config::load` on every machine, and this lane never saw it
+   * because every case here passed `--db-path`.
+   *
+   * A worker is its own instance: its default database is its own, under
+   * `--data-dir`, and the guard has nothing to say about it. The worker is
+   * deliberately *not* handed the desktop's authorization.
+   */
+  it("serves against its own database under --data-dir", async () => {
+    const instance = await isolatedInstance();
+    const args = runArgs(instance).filter(
+      (part, index, all) => part !== "--db-path" && all[index - 1] !== "--db-path",
+    );
+    expect(args).not.toContain("--db-path");
+    const supervisor = await startSupervisor(instance, { args });
+
+    const [serverPid] = await listenersOnPort(instance.lanPort);
+    expect(serverPid, `no server is listening\n${supervisor.output()}`).toBeDefined();
+    expect(
+      await ownerStatusAnswers(instance.lanPort),
+      `the server must answer /v1/status\n${supervisor.output()}`,
+    ).not.toBeNull();
+
+    const ownDb = join(instance.dataDir, "kanna-worker.db");
+    expect(existsSync(ownDb), `${ownDb} must be the database the worker created`).toBe(true);
+    const open = await openFiles(serverPid!);
+    expect(open, "the worker's own database must be the one opened").toContain(
+      await realpath(ownDb),
+    );
+    const resolvedRoot = await realpath(instance.root);
+    expect(
+      open.filter((path) => path.endsWith(".db") && !path.startsWith(resolvedRoot)),
+      "no database outside this instance may be opened",
+    ).toEqual([]);
+    expect(
+      supervisor.output(),
+      "the worker must not be authorized as the desktop, nor refused as one",
+    ).not.toMatch(/KANNA_DESKTOP_DB_ACCESS|REFUSED/);
+  });
+});
+
 describe("server.toml", () => {
   /**
    * It carries `desktop_secret`. Under the default 022 umask the worker was

@@ -127,10 +127,11 @@ export class Worker {
       "run",
       "--data-dir",
       dataDir,
-      // An explicit database, always. macOS resolves application data from
-      // `~/Library/Application Support` and ignores XDG entirely, so without
-      // this the lane would open (and write to) the developer's real Kanna
-      // database.
+      // The gate names its database so the fixture owns it explicitly. A
+      // worker's default is its own file under `--data-dir` -- never the
+      // desktop's, which the guard refuses to every process but the desktop
+      // -- and `process.e2e.test.ts` proves that default with no `--db-path`
+      // at all.
       "--db-path",
       dbPath,
       "--lan-port",

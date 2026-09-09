@@ -49,6 +49,13 @@ USAGE:
     kanna-worker install-unit [--data-dir DIR] [--unit-path PATH]
     kanna-worker print-unit [--data-dir DIR]
 
+OPTIONS:
+    --data-dir DIR  Where this worker keeps its state. Defaults to the daemon
+                    directory this checkout would use.
+    --db-path FILE  The worker's database. Defaults to kanna-worker.db under
+                    --data-dir. A worker is its own Kanna instance: naming the
+                    desktop app's database is refused, never authorized.
+
 COMMANDS:
     run            Supervise the daemon and the server until stopped.
                    SIGHUP  spawns a replacement daemon (sessions hand off).

@@ -31,6 +31,11 @@ pub const STAGING_DESKTOP_BUNDLE_IDENTIFIER: &str = "build.kanna.staging";
 pub const LEGACY_DESKTOP_BUNDLE_IDENTIFIER: &str = "com.kanna.app";
 pub const PRODUCT_APP_SUPPORT_DIR: &str = "Kanna";
 pub const DEFAULT_DB_NAME: &str = "kanna-v2.db";
+/// The database a headless worker owns by default, beside its other state
+/// under its data directory. It is named differently from the desktop's on
+/// purpose: a worker is a separate instance, and its default must never
+/// resolve to a path the desktop database guard protects.
+pub const WORKER_DB_NAME: &str = "kanna-worker.db";
 pub const PRODUCTION_RELAY_URL: &str = "wss://relay.kanna.build";
 pub const STAGING_RELAY_URL: &str = "wss://relay-staging.kanna.build";
 pub const PRODUCTION_FIREBASE_PROJECT_ID: &str = "kanna-build";
@@ -343,6 +348,10 @@ pub fn preferred_desktop_db_path_for_candidates(canonical: PathBuf, legacy: Path
     }
 
     canonical
+}
+
+pub fn worker_db_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(WORKER_DB_NAME)
 }
 
 pub fn default_transfer_root_for_home(home: &Path) -> PathBuf {

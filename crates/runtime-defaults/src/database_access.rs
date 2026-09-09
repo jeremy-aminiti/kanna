@@ -94,6 +94,20 @@ pub fn production_database_paths() -> Result<Vec<PathBuf>, String> {
     Ok(production_database_paths_for_home(&account_home()?))
 }
 
+/// The protected desktop database `path` names, if it names one, resolved the
+/// same way [`check`] resolves it (symlinks, hard links and parent aliases
+/// included). A launcher that must never open the desktop's database at all
+/// asks this before it writes the path anywhere. Answering never authorizes
+/// access.
+pub fn protected_desktop_database(path: &Path) -> Result<Option<PathBuf>, String> {
+    let protected = production_database_paths()?;
+    let resolved = protected
+        .iter()
+        .map(|production| resolve_existing_ancestor(production))
+        .collect::<Result<Vec<_>, _>>()?;
+    protected_match(path, &protected, &resolved)
+}
+
 /// The same set for an explicit home, so the derivation can be exercised
 /// without the account the tests are running as.
 pub fn production_database_paths_for_home(home: &Path) -> Vec<PathBuf> {
@@ -136,6 +150,30 @@ fn check_resolved(
                 .into(),
         );
     }
+    if protected_match(path, protected, resolved_protected)?.is_none() {
+        return Ok(());
+    }
+    if isolated {
+        return Err(format!(
+            "REFUSED: isolated/test/worktree process cannot access desktop production database {} (including legacy paths). Supply an isolated database path; XDG_DATA_HOME does not isolate macOS.",
+            path.display()
+        ));
+    }
+    if !desktop {
+        return Err(format!(
+            "REFUSED: opening desktop production database {} requires deliberate {DESKTOP_ACCESS_ENV}=desktop authorization. Supply an isolated database path for tests; XDG_DATA_HOME does not isolate macOS.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Which of `protected` `path` names, by resolved path or by inode.
+fn protected_match(
+    path: &Path,
+    protected: &[PathBuf],
+    resolved_protected: &[PathBuf],
+) -> Result<Option<PathBuf>, String> {
     let resolved = resolve_existing_ancestor(path)?;
     // One stat for the caller, not one per protected path: this runs before
     // every database open. `None` means there is no file yet, so no alias of
@@ -147,23 +185,11 @@ fn check_resolved(
                 && resolved
                     .to_string_lossy()
                     .eq_ignore_ascii_case(&canonical_production.to_string_lossy()));
-        if !same_path && !matches!(identity, Some(id) if Some(id) == file_identity(production)) {
-            continue;
-        }
-        if isolated {
-            return Err(format!(
-                "REFUSED: isolated/test/worktree process cannot access desktop production database {} (including legacy paths). Supply an isolated database path; XDG_DATA_HOME does not isolate macOS.",
-                path.display()
-            ));
-        }
-        if !desktop {
-            return Err(format!(
-                "REFUSED: opening desktop production database {} requires deliberate {DESKTOP_ACCESS_ENV}=desktop authorization. Supply an isolated database path for tests; XDG_DATA_HOME does not isolate macOS.",
-                path.display()
-            ));
+        if same_path || matches!(identity, Some(id) if Some(id) == file_identity(production)) {
+            return Ok(Some(production.clone()));
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Resolve existing ancestors too: a fresh installation has no database yet,
@@ -277,16 +303,23 @@ fn account_home() -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
-    /// A root no other test can be handed. The clock alone does not guarantee
-    /// that: `create_dir_all` succeeds on a directory that already exists, so
-    /// two tests starting within one tick would silently share a root and see
-    /// each other's files.
+    /// A root owned by exactly one test invocation. The test harness runs
+    /// these tests on parallel threads, and `SystemTime` is not fine enough
+    /// to tell two of them apart -- two fixtures minted in the same clock
+    /// tick shared a root, and whichever finished first removed the other's.
+    /// A process-wide counter makes every root distinct regardless of the
+    /// clock; the pid and timestamp keep it distinct across processes.
     fn fixture() -> (PathBuf, PathBuf) {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "kanna-db-access-{}-{}",
+            "kanna-db-access-{}-{}-{}",
             std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
@@ -465,6 +498,53 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read(&production).unwrap(), b"owner data");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_launcher_can_ask_which_desktop_database_a_path_names() {
+        let (root, production) = fixture();
+        let protected = vec![production.clone()];
+        let resolved = protected
+            .iter()
+            .map(|path| resolve_existing_ancestor(path))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // The fixture creates `root` and nothing under it, so the proof that
+        // asking creates nothing is the listing staying identical, not the
+        // absence of a directory nobody would have created anyway.
+        let listing = |dir: &Path| -> Vec<std::ffi::OsString> {
+            let mut names: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing(&root);
+        assert!(before.is_empty(), "the fixture root starts empty");
+
+        assert_eq!(
+            protected_match(&production, &protected, &resolved).unwrap(),
+            Some(production.clone())
+        );
+        assert_eq!(
+            protected_match(&root.join("worker/kanna-worker.db"), &protected, &resolved).unwrap(),
+            None
+        );
+        for real in production_database_paths().unwrap() {
+            assert_eq!(protected_desktop_database(&real).unwrap(), Some(real));
+        }
+        assert_eq!(
+            protected_desktop_database(&root.join("own.db")).unwrap(),
+            None
+        );
+
+        assert_eq!(
+            listing(&root),
+            before,
+            "asking must not create the production parent, the database, or anything else"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

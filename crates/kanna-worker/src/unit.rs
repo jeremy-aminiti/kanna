@@ -5,11 +5,12 @@
 //! parented by it rather than by `systemd --user` (see the crate docs).
 //!
 //! The unit must also carry the *resolved* database. `Options` picks it from
-//! `--db-path`, then `KANNA_DB_PATH`, then the machine's canonical desktop
-//! database — and a unit that dropped that choice would install an isolated
-//! worker which quietly starts against the canonical database on its next
-//! boot, which is the one database an isolated instance must never touch.
-//! Whatever `install-unit` resolved is written into `ExecStart`.
+//! `--db-path`, then `KANNA_DB_PATH`, then the worker's own database under
+//! its data directory — and a unit that dropped that choice would install a
+//! worker which quietly came back up against a different database on its
+//! next boot. Whatever `install-unit` resolved is written into `ExecStart`,
+//! and a name that resolves to the desktop's guarded database never gets
+//! this far: `Options::parse` refuses it.
 //!
 //! Two settings are load-bearing:
 //!
@@ -131,7 +132,7 @@ mod tests {
         let unit = render_with(
             "/opt/kanna/bin/kanna-worker",
             "/home/tester/.local/share/Kanna",
-            "/home/tester/.local/share/build.kanna/kanna-v2.db",
+            "/home/tester/.local/share/Kanna/kanna-worker.db",
             48120,
             48130,
             "/opt/toolchain/bin:/usr/bin",
@@ -144,7 +145,7 @@ mod tests {
         assert!(unit.contains("Environment=PATH=/opt/toolchain/bin:/usr/bin\n"));
         assert!(unit.contains(
             "ExecStart=/opt/kanna/bin/kanna-worker run --data-dir /home/tester/.local/share/Kanna \
-             --db-path /home/tester/.local/share/build.kanna/kanna-v2.db \
+             --db-path /home/tester/.local/share/Kanna/kanna-worker.db \
              --lan-port 48120 --transfer-port 48130\n"
         ));
         assert!(unit.contains("ExecReload=/bin/kill -HUP $MAINPID\n"));
@@ -152,12 +153,28 @@ mod tests {
     }
 
     /// An installed unit must start against the database the install
-    /// resolved. Both ways of choosing one are covered, because the
+    /// resolved. All three ways of choosing one are covered, because the
     /// environment-selected case is the one an isolated `kd`-style instance
-    /// actually uses -- and dropping it would send that worker to the
-    /// machine's canonical desktop database on its next boot.
+    /// actually uses -- and dropping it would send that worker to a
+    /// different database on its next boot.
     #[test]
     fn the_unit_launches_against_the_resolved_database() {
+        let by_default = Options::parse(&["--data-dir".to_string(), "/srv/worker".to_string()])
+            .expect("options should parse");
+        assert_eq!(
+            by_default.db_path(),
+            PathBuf::from("/srv/worker/kanna-worker.db")
+        );
+        assert!(render_with(
+            "/opt/kanna/bin/kanna-worker",
+            "/srv/worker",
+            &by_default.db_path().to_string_lossy(),
+            48120,
+            48130,
+            "/usr/bin",
+        )
+        .contains("--db-path /srv/worker/kanna-worker.db "));
+
         let explicit = Options::parse(&[
             "--data-dir".to_string(),
             "/srv/worker".to_string(),

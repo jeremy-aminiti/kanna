@@ -567,8 +567,10 @@ export GHOSTTY_SOURCE_DIR=$HOME/.cache/ghostty-src
 cargo build -p kanna-worker -p kanna-daemon -p kanna-server -p kanna-cli
 # --lan-port because 48120 is the desktop app's: a worker refuses a port
 # another Kanna instance already serves rather than stopping it.
-.build/debug/kanna-worker run --data-dir ~/.local/share/Kanna \
-  --db-path ~/.local/share/build.kanna/kanna-v2.db --lan-port 48140
+# No --db-path: the worker is its own instance and uses its own
+# ~/.local/share/Kanna/kanna-worker.db. Naming the desktop app's database
+# (~/.local/share/build.kanna/kanna-v2.db) is refused, not authorized.
+.build/debug/kanna-worker run --data-dir ~/.local/share/Kanna --lan-port 48140
 .build/debug/kanna-worker print-unit     # inspect the systemd --user unit
 .build/debug/kanna-worker install-unit   # write it, then follow the printed steps
 ```
