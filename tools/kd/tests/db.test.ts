@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
-import { assertNotProductionDb, deleteSqliteDb, seedSqliteDb, resetSqliteDb } from "../src/runtime/db";
+import { assertNotProductionDb, deleteSqliteDb, protectedBundleIdentifiers, seedSqliteDb, resetSqliteDb } from "../src/runtime/db";
 
 describe("dev database safety", () => {
   it("refuses production database names and paths", () => {
@@ -84,6 +84,23 @@ describe("dev database safety", () => {
     expect(() => deleteSqliteDb(alias)).toThrow("production database");
     expect(readFileSync(production, "utf8")).toBe("owner data");
     rmSync(dir, { recursive: true });
+  });
+  // kd's alias check and the Rust guard protect the same databases from two
+  // languages. Reading the constants keeps a renamed identifier — or a new
+  // desktop environment — from being protected on one side only.
+  it("mirrors the Rust guard's protected bundle identifiers", () => {
+    const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
+    const guard = readFileSync(resolve(repoRoot, "crates/runtime-defaults/src/database_access.rs"), "utf8");
+    const lib = readFileSync(resolve(repoRoot, "crates/runtime-defaults/src/lib.rs"), "utf8");
+    const declared = guard.match(/pub const PROTECTED_BUNDLE_IDENTIFIERS[^=]*=\s*\[([^\]]*)\]/)?.[1];
+    expect(declared, "the Rust guard must declare PROTECTED_BUNDLE_IDENTIFIERS").toBeDefined();
+    const rust = [...declared!.matchAll(/crate::([A-Z0-9_]+)/g)].map(([, name]) => {
+      const value = lib.match(new RegExp(`pub const ${name}: &str = "([^"]+)"`))?.[1];
+      expect(value, `${name} must be a string constant in runtime-defaults`).toBeDefined();
+      return value!;
+    });
+    expect(rust.length).toBeGreaterThan(0);
+    expect([...protectedBundleIdentifiers].sort()).toEqual([...rust].sort());
   });
   it("resolves symlink parents before interpreting dot-dot", () => {
     const dir = mkdtempSync(join(tmpdir(), "kd-db-parent-alias-"));

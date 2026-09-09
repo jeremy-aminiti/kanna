@@ -19,6 +19,12 @@ export interface DevDbTarget {
 }
 
 const productionDbName = "kanna-v2.db";
+// Every bundle identifier whose default database is a real desktop database:
+// the shipped app, the staging desktop — an owner's daily driver — and the
+// pre-rename identifier. Mirrors
+// `kanna_runtime_defaults::database_access::PROTECTED_BUNDLE_IDENTIFIERS`, held
+// in step with it by a contract test.
+export const protectedBundleIdentifiers = ["build.kanna", "build.kanna.staging", "com.kanna.app"];
 
 function resolvedDatabasePath(path: string, depth = 0): string {
   if (depth > 128) throw new Error("REFUSED: database path has too many symbolic links or ancestors.");
@@ -57,7 +63,7 @@ export function assertNotProductionDb(target: DevDbTarget): void {
   const home = userInfo().homedir;
   const productionAlias = identity !== undefined &&
     [join(home, "Library", "Application Support"), join(home, ".local", "share")].some(root =>
-      ["build.kanna", "com.kanna.app"].some(bundle =>
+      protectedBundleIdentifiers.some(bundle =>
         fileIdentity(join(root, bundle, productionDbName)) === identity));
   if (target.dbName === productionDbName || basename(path).toLowerCase() === productionDbName || productionAlias) {
     throw new Error(

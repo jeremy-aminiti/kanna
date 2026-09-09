@@ -1262,25 +1262,32 @@ fn escape_toml_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The staging desktop's database is guarded exactly like the shipped
+    /// app's, so this environment is what keeps `Kanna Staging.app` -- an
+    /// owner's daily driver -- able to open its own database. The
+    /// authorization is unconditional here, with no bundle-identifier branch
+    /// that a staging build could fall the wrong side of.
     #[test]
     fn mobile_server_spawn_authorizes_the_desktop_database() {
-        let env: std::collections::HashMap<_, _> = super::server_spawn_env(
-            std::path::Path::new("/desktop/server.toml"),
-            std::path::Path::new("/Applications/Kanna.app/Contents/MacOS/Kanna"),
-            vec![("KANNA_TRANSFER_PEER_ID".into(), "peer".into())],
-        )
-        .into_iter()
-        .collect();
-        assert_eq!(
-            env[kanna_runtime_defaults::database_access::DESKTOP_ACCESS_ENV],
-            "desktop"
-        );
-        assert_eq!(env["KANNA_SERVER_CONFIG"], "/desktop/server.toml");
-        assert_eq!(
-            env["KANNA_DESKTOP_EXECUTABLE"],
-            "/Applications/Kanna.app/Contents/MacOS/Kanna"
-        );
-        assert_eq!(env["KANNA_TRANSFER_PEER_ID"], "peer");
+        for executable in [
+            "/Applications/Kanna.app/Contents/MacOS/Kanna",
+            "/Applications/Kanna Staging.app/Contents/MacOS/Kanna Staging",
+        ] {
+            let env: std::collections::HashMap<_, _> = super::server_spawn_env(
+                std::path::Path::new("/desktop/server.toml"),
+                std::path::Path::new(executable),
+                vec![("KANNA_TRANSFER_PEER_ID".into(), "peer".into())],
+            )
+            .into_iter()
+            .collect();
+            assert_eq!(
+                env[kanna_runtime_defaults::database_access::DESKTOP_ACCESS_ENV],
+                "desktop"
+            );
+            assert_eq!(env["KANNA_SERVER_CONFIG"], "/desktop/server.toml");
+            assert_eq!(env["KANNA_DESKTOP_EXECUTABLE"], executable);
+            assert_eq!(env["KANNA_TRANSFER_PEER_ID"], "peer");
+        }
     }
 
     use super::cloud_env::relay_url;
