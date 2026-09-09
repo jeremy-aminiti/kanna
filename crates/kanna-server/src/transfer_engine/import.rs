@@ -309,7 +309,7 @@ async fn run_import(
         // resume it must not be imported: minting a fresh session here is what
         // silently left the conversation behind on the source machine.
         session::assert_importable(
-            transfer_id,
+            &transfer_id,
             payload.task.agent_type.as_deref(),
             Some(payload.task.agent_provider.as_str()),
             payload.task.resume_session_id.as_deref(),
@@ -713,10 +713,12 @@ async fn import_verified_task_bundle(
         source_base_ref.to_string(),
         expected_base.to_string(),
     );
+    let transfer_id = transfer_id.to_string();
     super::run_blocking("transfer task bundle import", move || {
         super::git::import_task_bundle_refs(
             &repo_path,
             &fetched,
+            transfer_id,
             &source_ref,
             &expected_head,
             &source_base_ref,

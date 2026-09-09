@@ -199,6 +199,7 @@ pub fn import_task_bundle_ref(
 pub fn import_task_bundle_refs(
     repo_path: &Path,
     bundle_path: &Path,
+    transfer_id: &str,
     source_head_ref: &str,
     expected_head_oid: &str,
     source_base_ref: &str,
@@ -208,7 +209,13 @@ pub fn import_task_bundle_refs(
         .ok_or_else(|| format!("invalid source head ref in task bundle: {source_head_ref}"))?;
     let source_base_ref = normalize_ref(Some(source_base_ref))
         .ok_or_else(|| format!("invalid source base ref in task bundle: {source_base_ref}"))?;
-    let transfer_root = format!("refs/kanna/transfers/{expected_head_oid}");
+    let safe_transfer = transfer_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
+    if !safe_transfer || transfer_id.is_empty() {
+        return Err("invalid transfer id for private refs".into());
+    }
+    let transfer_root = format!("refs/kanna/transfers/{transfer_id}/{expected_head_oid}");
     let head_ref = format!("{transfer_root}/head");
     let base_ref = format!("{transfer_root}/base");
     let bundle_path = bundle_path
