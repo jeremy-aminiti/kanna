@@ -204,7 +204,12 @@ export function useAppUpdate(readPackageStatus: ReadPackageStatus = readPackageS
       status.value = "idle";
       return;
     }
+    applyPackageStatus(result);
+  }
 
+  /** The status-to-UI mapping, kept separate so the dev-only injector below
+   *  drives the same code a real check does rather than a copy of it. */
+  function applyPackageStatus(result: LinuxPackageStatus): void {
     packageStatus.value = result;
     updateVersion.value = result.candidateVersion;
     if (result.updateAvailable && dismissedVersion.value === result.candidateVersion) {
@@ -365,6 +370,25 @@ export function useAppUpdate(readPackageStatus: ReadPackageStatus = readPackageS
     await relaunch();
   }
 
+  /**
+   * Render a package-manager state in the real app, for visual verification.
+   *
+   * The states are otherwise unreachable in a dev run: `ensureEnabled()`
+   * returns false for `MODE === "development"` (and again for a worktree
+   * instance) before any package check happens, so a Linux dev build shows
+   * nothing no matter what dpkg and apt say. Same guard and same purpose as
+   * `__e2eInjectUpdate` above, and it feeds the real `applyPackageStatus`, so
+   * what gets rendered is the mapping the product uses.
+   */
+  function __e2eInjectPackageStatus(result: LinuxPackageStatus) {
+    if (!import.meta.env.DEV || !window.__KANNA_E2E__) {
+      throw new Error("E2E package-status injection is only available in dev E2E runs.");
+    }
+    packageManaged = true;
+    windowFocused.value = true;
+    applyPackageStatus(result);
+  }
+
   function __e2eInjectUpdate(options: E2eUpdateInjectionOptions) {
     if (!import.meta.env.DEV || !window.__KANNA_E2E__) {
       throw new Error("E2E updater injection is only available in dev E2E runs.");
@@ -441,6 +465,7 @@ export function useAppUpdate(readPackageStatus: ReadPackageStatus = readPackageS
     install,
     restartNow,
     __e2eInjectUpdate,
+    __e2eInjectPackageStatus,
     dispose,
   };
 }
