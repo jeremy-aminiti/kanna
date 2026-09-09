@@ -54,7 +54,7 @@ import { runShellVisualSmoke } from "./specs/smoke/shell-visual.e2e";
 import { runTabReselectionSmoke } from "./specs/smoke/tab-reselection.e2e";
 import { runCloudTaskFlow } from "./specs/cloud/cloud-task-flow.e2e";
 import { runHybridTaskFlow } from "./specs/hybrid/hybrid-task-flow.e2e";
-import { runRelayTaskFlow } from "./specs/relay/relay-task-flow.e2e";
+import { runRelayTaskFlow, runRelayTerminalControlJourney } from "./specs/relay/relay-task-flow.e2e";
 import { startMobileRelayHarness } from "./helpers/relay-harness";
 
 export const smokeSpecPaths = [
@@ -75,7 +75,7 @@ export const supportedSmokeModes = [
   "shell-visual",
   "profile-disconnected",
   "cloud",
-  "relay",
+  "relay", "relay-terminal-control",
   "hybrid"
 ] as const;
 
@@ -192,7 +192,7 @@ async function main(): Promise<void> {
     throw new Error(`Unsupported mobile E2E mode: ${mode}`);
   }
   if (
-    (mode === "relay" || mode === "hybrid" || mode === "profile-disconnected") &&
+    (mode === "relay" || mode === "relay-terminal-control" || mode === "hybrid" || mode === "profile-disconnected") &&
     !process.env.KANNA_E2E_DESKTOP_SERVER_URL
   ) {
     process.env.KANNA_E2E_DESKTOP_SERVER_URL = "http://127.0.0.1:1";
@@ -298,12 +298,13 @@ async function main(): Promise<void> {
     }
     if (
       mode === "relay" ||
+      mode === "relay-terminal-control" ||
       mode === "hybrid" ||
       mode === "profile-disconnected" ||
       mode === "search-focus"
     ) {
       relayHarness = await startMobileRelayHarness({
-        mode: mode === "relay" ? "relay" : "hybrid"
+        mode: (mode === "relay" || mode === "relay-terminal-control") ? "relay" : "hybrid"
       });
     }
 
@@ -314,7 +315,7 @@ async function main(): Promise<void> {
           mode === "search-focus") &&
         relayHarness
           ? relayHarness.hybridEnv
-          : mode === "relay" && relayHarness
+          : (mode === "relay" || mode === "relay-terminal-control") && relayHarness
           ? relayHarness.env
           :
         mode === "cloud"
@@ -375,6 +376,13 @@ async function main(): Promise<void> {
         setLanHttpEnabled: relayHarness.setLanHttpEnabled,
         waitForAppReady: (readySelector) =>
           waitForExpoAppReady(driver!, readySelector)
+      });
+    } else if (mode === "relay-terminal-control" && relayHarness) {
+      await runRelayTerminalControlJourney(driver, {
+        credentials: relayHarness.credentials, fixture: relayHarness.fixture,
+        observeAuthoritativeTerminalGeometry: relayHarness.observeAuthoritativeTerminalGeometry,
+        restoreDesktopTerminalControl: relayHarness.restoreDesktopTerminalControl,
+        captureScreenshot: async () => {},
       });
     } else if (mode === "relay" && relayHarness) {
       await runRelayTaskFlow(driver, {

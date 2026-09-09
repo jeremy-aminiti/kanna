@@ -2449,3 +2449,26 @@ export async function runRelayTaskFlow(
       ),
   });
 }
+
+/** Focused real-boundary journey for terminal active-view geometry ownership. */
+export async function runRelayTerminalControlJourney(
+  driver: Browser,
+  options: Pick<RelayTaskFlowOptions, "credentials" | "fixture" | "observeAuthoritativeTerminalGeometry" | "restoreDesktopTerminalControl" | "captureScreenshot">,
+): Promise<void> {
+  const ui = createRelayUi(driver);
+  await dismissSavePasswordPrompt(driver);
+  const appShell = await driver.$(selectors.appShell);
+  await appShell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await returnToTaskListShell(ui);
+  if (!(await isTaskVisible(ui, options.fixture.taskId))) {
+    await signInToRelay(driver, ui, options.credentials);
+  }
+  await ensureTaskListVisible(ui);
+  await openRelayFixtureTask(ui, options.fixture.taskId);
+  await waitForTaskTerminalLive(ui);
+  await verifyRelayMobileTerminalControlJourney(driver, ui, options.fixture, {
+    captureScreenshot: options.captureScreenshot,
+    observeAuthoritativeTerminalGeometry: options.observeAuthoritativeTerminalGeometry,
+    restoreDesktopTerminalControl: options.restoreDesktopTerminalControl,
+  });
+}
