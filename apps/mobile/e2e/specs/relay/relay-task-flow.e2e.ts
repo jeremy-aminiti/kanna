@@ -344,7 +344,9 @@ function createRelayQuickReplyPersistenceJourney(
 ): RelayQuickReplyPersistenceJourney {
   const openEditor = async () => {
     await openRelayProfileSheet(ui);
-    const quickRepliesButton = await driver.$("~Open Quick Replies");
+    const quickRepliesButton = await driver.$(
+      selectors.accountQuickRepliesButton,
+    );
     await quickRepliesButton.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
     await ui.waitUntil(
       async () => await quickRepliesButton.isEnabled().catch(() => false),
