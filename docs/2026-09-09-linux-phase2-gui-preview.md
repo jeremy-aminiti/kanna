@@ -247,6 +247,62 @@ This is a sample, not M5: it does not touch WebSocket first-frame auth, `no-cors
 mutation, pairing, or the real WebKitGTK request shapes. It does establish that
 `lan_trust.rs` classifies correctly on Linux, which is what M5 builds on.
 
+### 3.3.6 M4: the Linux keymap, and what it costs
+
+§3.3.3 reproduced the defect; this is the fix. It is a keymap, not a glyph
+substitution, because the obvious substitution is the dangerous one.
+
+Mapping ⌘ to Ctrl would have handed the app every `Ctrl+<letter>` a terminal
+owns: `Ctrl+C` (SIGINT), `Ctrl+D` (EOF), `Ctrl+Z`, `Ctrl+W`, and the rest of
+readline — in an app whose main content *is* agent terminals. So:
+
+| macOS | Linux | why |
+| --- | --- | --- |
+| `⌘X` | `Ctrl+Shift+X` | the GNOME Terminal convention, for this exact reason |
+| `⇧⌘X` | `Ctrl+Alt+X` | its `Ctrl+Shift` form is taken by the line above |
+| `⌃-`, `⌃⇧-` | unchanged | punctuation, not readline |
+| `⌥⌘↑/↓` (task nav) | `Alt+↑/↓` | `Ctrl+Alt+Arrow` is GNOME's workspace switcher |
+| `⇧⌘↑/↓` (repo nav) | `Ctrl+Shift+↑/↓` | same reason; the ⌘ tier never used arrows |
+| `⇧⌘⌫` | `Ctrl+Shift+Backspace` | `Ctrl+Alt+Backspace` is the X-server-zap chord |
+| `⌥⌘P` | `Ctrl+Alt+Shift+P` | `Ctrl+Alt+P` belongs to the command palette |
+| terminal copy/paste `⌘C`/`⌘V` | `Ctrl+Shift+C`/`Ctrl+Shift+V` | plain `Ctrl+C` is SIGINT |
+
+`shortcutPlatform.ts` holds the mapping and its named exceptions, and
+`shortcutPlatform.test.ts` enforces the rules rather than the table: no Linux
+binding may be a plain `Ctrl+<letter>`, no two may share a chord, and none may
+sit on a GNOME-reserved arrow chord. Two of those tests failed on their first
+run — repo navigation was on the workspace switcher — which is the point of
+writing them as rules.
+
+**The native GTK menu was the more dangerous half.** `CmdOrControl+W` on the
+Close item resolves to `Ctrl+W` on Linux, and a GTK accelerator wins *before*
+the keystroke reaches the webview, so no JavaScript can give it back. The
+predefined Edit items are worse: they install `Ctrl+C`/`Ctrl+X`/`Ctrl+V`/`Ctrl+A`,
+which would have made `Ctrl+C` open a menu instead of interrupting whatever the
+agent is running. `menu_accelerators.rs` moves the Linux menu to the shifted
+forms and drops the Edit accelerators entirely there; the webview already
+provides editing in text fields. macOS is pinned unchanged by its own test.
+
+Hints and dispatch now come from one place, so the shortcuts modal, the command
+palette, the sidebar and main-panel empty states, and the task-search
+placeholder all say what a Linux keyboard can actually press
+(`06-linux-shortcuts.png`). Two rendering details that only a real run exposes:
+the hint for `["_", "-"]` read `Ctrl+Shift+_`, a key nobody has, and the search
+placeholder had `⌘F` baked into three locale files.
+
+Clipboard **image** paste also worked on Linux for the first time.
+`read_clipboard_image_png` returned `Ok(None)` unconditionally off macOS, and
+`arboard`/`image` were macOS-only dependencies. Linux now shares the same
+implementation: `arboard` links an X11 backend, so nothing shells out to
+`xclip` or `wl-paste`, and on GNOME that is also the working path — Xwayland
+bridges the selection, while the wlroots protocol `arboard`'s Wayland backend
+needs is one mutter does not implement.
+
+**Not done in M4**, and not claimed: IME and dead-key composition, native file
+drops with spaces and Unicode, file dialogs, external file/URL opening, and
+window minimize/fullscreen/focus-return. Those need the console session, and
+interaction feel needs the human gate regardless.
+
 ### 3.4 Composited-window screenshots are not available unattended on this VM
 
 GNOME 45+ refuses `org.gnome.Shell.Screenshot` to unsandboxed callers

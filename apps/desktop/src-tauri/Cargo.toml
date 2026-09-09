@@ -53,8 +53,14 @@ reqwest = { version = "0.12", default-features = false, features = ["cookies", "
 tokio = { version = "1", features = ["test-util"] }
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+# Clipboard image reads. Linux shares the macOS implementation -- `arboard`
+# links an X11 backend, so nothing shells out to `xclip` or `wl-paste`, and on
+# GNOME that is the path that actually works (Xwayland bridges the selection;
+# mutter does not implement the wlroots protocol `wayland-data-control` needs).
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"

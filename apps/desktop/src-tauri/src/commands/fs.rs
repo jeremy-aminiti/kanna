@@ -560,7 +560,19 @@ pub struct ClipboardImagePayload {
     pub height: usize,
 }
 
-#[cfg(target_os = "macos")]
+/// Read an image off the system clipboard, as PNG.
+///
+/// Linux shares macOS's implementation rather than getting one of its own.
+/// `arboard` already links an X11 backend (`x11rb`) — no `xclip` or `wl-paste`
+/// at runtime, which is what the vendoring rule requires — and on GNOME that
+/// is also the *working* path: Xwayland bridges the selection to the Wayland
+/// compositor, while the wlroots `zwlr_data_control_manager_v1` protocol that
+/// `arboard`'s Wayland backend needs is one mutter does not implement. So the
+/// extra feature would add a dependency and change nothing here.
+///
+/// Before this, Linux returned `Ok(None)` unconditionally: pasting an image
+/// into an agent terminal silently did nothing.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tauri::command]
 pub fn read_clipboard_image_png() -> Result<Option<ClipboardImagePayload>, String> {
     let mut clipboard =
@@ -588,7 +600,7 @@ pub fn read_clipboard_image_png() -> Result<Option<ClipboardImagePayload>, Strin
     }))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[tauri::command]
 pub fn read_clipboard_image_png() -> Result<Option<ClipboardImagePayload>, String> {
     Ok(None)

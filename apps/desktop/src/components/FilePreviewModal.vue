@@ -19,6 +19,7 @@ import { macOsTextInputAttrs } from "../utils/textInput";
 import { getSyntaxLanguageForPath } from "../utils/syntaxLanguage";
 import { getShikiTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
+import { metaOrControlHint } from "../composables/shortcutPlatform";
 import {
   DEFAULT_MARKDOWN_PREVIEW_MODE,
   type MarkdownPreviewMode,
@@ -83,7 +84,7 @@ const searchInputRef = ref<HTMLInputElement | null>(null);
 const showLineNumbers = ref(false);
 const fileContextShortcuts: ContextShortcut[] = [
   { label: t('filePreview.shortcutSearch'), display: "/", groupKey: "shortcuts.groupSearch" },
-  { label: t('filePreview.shortcutSearchAlt'), display: "⌘F", groupKey: "shortcuts.groupSearch" },
+  { label: t('filePreview.shortcutSearchAlt'), display: metaOrControlHint("f"), groupKey: "shortcuts.groupSearch" },
   { label: t('filePreview.shortcutNextPrevMatch'), display: "n / N", groupKey: "shortcuts.groupSearch" },
   { label: t('filePreview.shortcutLineUpDown'), display: "j / k", groupKey: "shortcuts.groupNavigation" },
   { label: t('filePreview.shortcutPageUpDown'), display: "f / b", groupKey: "shortcuts.groupNavigation" },

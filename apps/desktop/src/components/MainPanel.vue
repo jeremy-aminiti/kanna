@@ -33,6 +33,7 @@ import { AGENT_TAB_ID, type MainTab } from "../composables/useMainTabs";
 import type { MainTabViewsController } from "./MainPanel.types";
 import type { BranchInclude, DiffScope, DiffScrollPositions } from "../composables/useAppModals";
 import type { MarkdownPreviewMode } from "../stores/markdownPreviewMode";
+import { shortcutHint, shortcutHintKeys } from "../composables/useKeyboardShortcuts";
 import CloudTerminalCache, {
   type CloudTerminalCacheEntry,
 } from "./CloudTerminalCache.vue";
@@ -778,14 +779,14 @@ function dismissCommandHint() {
             </section>
           </div>
           <p class="setup-hint">
-            {{ $t('mainPanel.agentInstallHint', { shellShortcut: '⇧⌘J' }) }}
+            {{ $t('mainPanel.agentInstallHint', { shellShortcut: shortcutHint('openShellRepoRoot') }) }}
           </p>
-          <p class="empty-hint">{{ $t('mainPanel.noReposHint', { shortcut: '⌘I' }) }}</p>
+          <p class="empty-hint">{{ $t('mainPanel.noReposHint', { shortcut: shortcutHint('createRepo') }) }}</p>
         </div>
       </template>
       <template v-else>
         <p class="empty-title">{{ $t('mainPanel.noTaskSelected') }}</p>
-        <p class="empty-hint">{{ $t('mainPanel.noTaskHint', { shortcut: '⇧⌘N' }) }}</p>
+        <p class="empty-hint">{{ $t('mainPanel.noTaskHint', { shortcut: shortcutHint('newTask') }) }}</p>
       </template>
     </div>
     <div
@@ -798,7 +799,7 @@ function dismissCommandHint() {
           {{ $t('mainPanel.commandHintPrefix') }}
         </span>
         <span class="command-hint-shortcut">
-          <kbd>⌘</kbd><kbd>/</kbd>
+          <kbd v-for="key in shortcutHintKeys('showShortcuts')" :key="key">{{ key }}</kbd>
         </span>
         <span class="command-hint-text">
           {{ $t('mainPanel.commandHintSuffix') }}

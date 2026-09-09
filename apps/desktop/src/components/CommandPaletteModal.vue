@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { shortcuts, type ActionName } from "../composables/useKeyboardShortcuts";
+import { bindingsFor, shortcuts, type ActionName } from "../composables/useKeyboardShortcuts";
+import { resolveShortcutPlatform, shortcutModifierTokens } from "../composables/shortcutPlatform";
 import { useModalZIndex } from "../composables/useModalZIndex";
+
+const shortcutPlatform = resolveShortcutPlatform();
+const paletteBindings = bindingsFor(shortcutPlatform);
 import { macOsTextInputAttrs } from "../utils/textInput";
 
 const { t } = useI18n();
@@ -47,9 +51,17 @@ interface UnifiedCommand {
   execute: () => void;
 }
 
-/** Split a shortcut display string like "⇧⌘P" into individual keys ["⇧", "⌘", "P"] */
+/**
+ * Split a shortcut hint into individual keys: "⇧⌘P" on macOS, "Ctrl+Alt+P" on
+ * Linux. The modifier vocabulary comes from the platform layer rather than a
+ * literal list here, so a hint can never be split by the wrong platform's
+ * spelling.
+ */
 function splitKeys(display: string): string[] {
-  const modifiers = ["⇧", "⌘", "⌥", "⌃"];
+  const modifiers = shortcutModifierTokens(shortcutPlatform);
+  if (shortcutPlatform !== "mac") {
+    return display.split("+").filter(Boolean);
+  }
   const keys: string[] = [];
   let rest = display;
   while (rest.length) {
@@ -80,7 +92,7 @@ const allCommands = computed<UnifiedCommand[]>(() => {
     .map((s) => ({
       id: `shortcut-${s.action}`,
       label: t(s.labelKey),
-      shortcut: s.display,
+      shortcut: paletteBindings.get(s.action)?.display ?? s.display,
       execute: () => emit("execute", s.action),
     }));
 

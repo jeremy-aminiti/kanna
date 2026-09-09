@@ -11,6 +11,15 @@ globalThis.localStorage = win.localStorage;
 // @ts-ignore — use happy-dom's Event so dispatchEvent instanceof check passes
 globalThis.Event = win.Event;
 
+// This suite's keyboard expectations are macOS's: ⌘ bindings and ⌘ glyphs, the
+// platform the app shipped on first. Say so rather than inheriting whatever
+// happy-dom reports, which would silently switch every shortcut assertion to
+// the Linux mapping. That mapping has its own explicit coverage in
+// `shortcutPlatform.test.ts`, which asks for each platform by name.
+for (const nav of [globalThis.navigator, win.navigator]) {
+  if (nav) Object.defineProperty(nav, "platform", { value: "MacIntel", configurable: true });
+}
+
 import {
   setDesktopServerClientHandlersForTests,
   setDesktopSnapshotFetcherForTests,

@@ -13,6 +13,7 @@ import { debugLog } from "../utils/debugLog";
 import DiffContentPane from "./DiffContentPane.vue";
 import DiffToolbar from "./DiffToolbar.vue";
 import DiffSearchBar from "./DiffSearchBar.vue";
+import { metaOrControlHint } from "../composables/shortcutPlatform";
 import type {
   RemoteTaskDiffContent,
   RemoteTaskDiffRequest,
@@ -24,7 +25,7 @@ const diffTheme = computed(() => getDiffTheme(effectiveCodeTheme.value));
 
 registerContextShortcuts("diff", [
   { label: t('diffView.shortcutSearch'), display: "/", groupKey: "shortcuts.groupSearch" },
-  { label: t('diffView.shortcutSearchAlt'), display: "⌘F", groupKey: "shortcuts.groupSearch" },
+  { label: t('diffView.shortcutSearchAlt'), display: metaOrControlHint("f"), groupKey: "shortcuts.groupSearch" },
   { label: t('diffView.shortcutNextPrevMatch'), display: "n / N", groupKey: "shortcuts.groupSearch" },
   { label: t('diffView.shortcutLineUpDown'), display: "j / k", groupKey: "shortcuts.groupNavigation" },
   { label: t('diffView.shortcutPageUpDown'), display: "f / b", groupKey: "shortcuts.groupNavigation" },

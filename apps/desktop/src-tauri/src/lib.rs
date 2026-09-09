@@ -6,6 +6,7 @@ mod daemon_lifecycle;
 mod dev_url;
 mod macos;
 mod menu;
+mod menu_accelerators;
 mod subprocess_env;
 mod transfer_identity;
 mod transfer_sidecar;
@@ -172,41 +173,49 @@ pub fn run() {
                 .quit()
                 .build()?;
             let new_window_item = MenuItemBuilder::with_id(MENU_ID_NEW_WINDOW, "New Window")
-                .accelerator("CmdOrControl+N")
+                .accelerator(menu_accelerators::new_window())
                 .build(app)?;
             // ⌘W closes the tab in front and falls through to the window when
             // there is none, so the item is "Close" rather than "Close Window".
             let close_window_item = MenuItemBuilder::with_id(MENU_ID_CLOSE_WINDOW, "Close")
-                .accelerator("CmdOrControl+W")
+                .accelerator(menu_accelerators::close())
                 .build(app)?;
             let file_submenu = SubmenuBuilder::new(app, "File")
                 .item(&new_window_item)
                 .separator()
                 .item(&close_window_item)
                 .build()?;
-            let edit_submenu = SubmenuBuilder::new(app, "Edit")
-                .undo()
-                .redo()
-                .separator()
-                .cut()
-                .copy()
-                .paste()
-                .select_all()
-                .build()?;
+            // The predefined Edit items carry accelerators of their own. On
+            // Linux those are Ctrl+X/C/V/A, which a native GTK accelerator
+            // claims before the webview sees them — and Ctrl+C belongs to the
+            // agent session, not to a copy command. See `menu_accelerators`.
+            let edit_submenu = if menu_accelerators::edit_items_take_accelerators() {
+                SubmenuBuilder::new(app, "Edit")
+                    .undo()
+                    .redo()
+                    .separator()
+                    .cut()
+                    .copy()
+                    .paste()
+                    .select_all()
+                    .build()?
+            } else {
+                SubmenuBuilder::new(app, "Edit").build()?
+            };
             let view_submenu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
             let previous_task_item =
                 MenuItemBuilder::with_id(MENU_ID_NAVIGATE_TASK_UP, "Previous Task")
-                    .accelerator("CmdOrControl+Alt+ArrowUp")
+                    .accelerator(menu_accelerators::navigate_task_up())
                     .build(app)?;
             let next_task_item = MenuItemBuilder::with_id(MENU_ID_NAVIGATE_TASK_DOWN, "Next Task")
-                .accelerator("CmdOrControl+Alt+ArrowDown")
+                .accelerator(menu_accelerators::navigate_task_down())
                 .build(app)?;
             let previous_repo_item =
                 MenuItemBuilder::with_id(MENU_ID_NAVIGATE_REPO_UP, "Previous Repo")
-                    .accelerator("CmdOrControl+Shift+ArrowUp")
+                    .accelerator(menu_accelerators::navigate_repo_up())
                     .build(app)?;
             let next_repo_item = MenuItemBuilder::with_id(MENU_ID_NAVIGATE_REPO_DOWN, "Next Repo")
-                .accelerator("CmdOrControl+Shift+ArrowDown")
+                .accelerator(menu_accelerators::navigate_repo_down())
                 .build(app)?;
             let navigate_submenu = SubmenuBuilder::new(app, "Navigate")
                 .item(&previous_task_item)
