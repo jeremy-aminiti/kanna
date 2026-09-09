@@ -15,7 +15,8 @@ use super::control;
 use super::finalize;
 use super::payload::{
     self, OutgoingTransferPayload, RepoAcquisitionMode, TransferBundlePayload,
-    TransferFinalizationState, TransferRepoPayload, TransferTaskPayload,
+    TransferFinalizationState, TransferInputLedgerPayload, TransferRepoPayload,
+    TransferTaskPayload,
 };
 use super::session;
 use crate::db::{Db, TransferWorkItem};
@@ -409,44 +410,22 @@ async fn stage_and_commit(
     target_desktop_id: Option<&str>,
 ) -> Result<(), String> {
     let transfer_id = preflight.transfer_id.as_str();
-    let remote_url = if preflight.target_has_repo {
-        None
-    } else {
-        let repo_path = repo_path.to_path_buf();
-        super::run_blocking("transfer remote url", move || {
-            Ok(super::git::remote_url(&repo_path))
-        })
-        .await?
-    };
-
-    let mut bundle = None;
-    if !preflight.target_has_repo && remote_url.is_none() {
-        let bundle_path = session::bundle_staging_path(&staging_dir(), transfer_id);
-        let ref_name = {
-            let (repo_path, bundle_path, branch, base_ref) = (
-                repo_path.to_path_buf(),
-                bundle_path.clone(),
-                source.item.branch.clone(),
-                source.item.base_ref.clone(),
-            );
-            super::run_blocking("transfer bundle create", move || {
-                super::git::create_bundle(
-                    &repo_path,
-                    &bundle_path,
-                    branch.as_deref(),
-                    base_ref.as_deref(),
-                )
-            })
-            .await?
-        };
-        let artifact_id = session::artifact_id(transfer_id, "repo-bundle");
-        control::stage_artifact(state, transfer_id, &artifact_id, &bundle_path, true).await?;
-        bundle = Some(TransferBundlePayload {
-            artifact_id,
-            filename: format!("{transfer_id}.bundle"),
-            ref_name,
-        });
-    }
+    let repo_path_for_remote = repo_path.to_path_buf();
+    let remote_url = super::run_blocking("transfer remote url", move || {
+        Ok(super::git::remote_url(&repo_path_for_remote)
+            .filter(|url| super::git::is_credential_free_clone_source(url)))
+    })
+    .await?;
+    let (bundle, head_oid) =
+        stage_repository_bundle(state, source, repo_path, transfer_id, "repo-bundle").await?;
+    let input_ledger = stage_task_input_ledger(
+        state,
+        source,
+        transfer_id,
+        &preflight.source_peer_id,
+        "inputs",
+    )
+    .await?;
 
     let staged = stage_session_artifacts(state, source, transfer_id).await?;
     let payload = build_payload(
@@ -458,7 +437,9 @@ async fn stage_and_commit(
         source_desktop_id,
         target_desktop_id,
         remote_url.as_deref(),
-        bundle,
+        Some(bundle),
+        Some(head_oid),
+        Some(input_ledger),
         staged,
         TransferFinalizationState::clean(),
         // The push's payload is a placeholder the finalization rewrites; the
@@ -497,6 +478,85 @@ async fn stage_and_commit(
     }
 
     control::commit(state, transfer_id, &encoded).await
+}
+
+async fn stage_repository_bundle(
+    state: &Arc<AppState>,
+    source: &SourceTask,
+    repo_path: &Path,
+    transfer_id: &str,
+    artifact_suffix: &str,
+) -> Result<(TransferBundlePayload, String), String> {
+    let source_ref = source
+        .item
+        .branch
+        .as_deref()
+        .or(source.item.base_ref.as_deref())
+        .ok_or_else(|| "transferred task has no committed source ref to bundle".to_string())?;
+    let bundle_path = session::bundle_staging_path(&staging_dir(), transfer_id);
+    let (ref_name, head_oid) = {
+        let (repo_path, bundle_path, branch, base_ref, source_ref) = (
+            repo_path.to_path_buf(),
+            bundle_path.clone(),
+            source.item.branch.clone(),
+            source.item.base_ref.clone(),
+            source_ref.to_string(),
+        );
+        super::run_blocking("transfer bundle create", move || {
+            let ref_name = super::git::create_bundle(
+                &repo_path,
+                &bundle_path,
+                branch.as_deref(),
+                base_ref.as_deref(),
+            )?
+            .ok_or_else(|| "transferred task bundle did not name its source ref".to_string())?;
+            let head_oid = super::git::commit_oid(&repo_path, &source_ref)?;
+            Ok((ref_name, head_oid))
+        })
+        .await?
+    };
+    let artifact_id = session::artifact_id(transfer_id, artifact_suffix);
+    control::stage_artifact(state, transfer_id, &artifact_id, &bundle_path, true).await?;
+    Ok((
+        TransferBundlePayload {
+            artifact_id,
+            filename: format!("{transfer_id}.bundle"),
+            ref_name: Some(ref_name),
+        },
+        head_oid,
+    ))
+}
+
+async fn stage_task_input_ledger(
+    state: &Arc<AppState>,
+    source: &SourceTask,
+    transfer_id: &str,
+    source_peer_id: &str,
+    artifact_suffix: &str,
+) -> Result<TransferInputLedgerPayload, String> {
+    let records = state
+        .transfer_work()
+        .open_db()?
+        .list_all_task_inputs(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let encoded = payload::encode_task_input_ledger(&records, source_peer_id, &source.item.id)?;
+    let sha256 = payload::sha256_hex(&encoded);
+    let count = records.len() as u64;
+    let ledger_path = session::input_ledger_staging_path(&staging_dir(), transfer_id);
+    let write_path = ledger_path.clone();
+    super::run_blocking("transfer input ledger staging", move || {
+        std::fs::write(&write_path, encoded)
+            .map_err(|error| format!("failed to stage task input ledger: {error}"))
+    })
+    .await?;
+    let artifact_id = session::artifact_id(transfer_id, artifact_suffix);
+    control::stage_artifact(state, transfer_id, &artifact_id, &ledger_path, true).await?;
+    Ok(TransferInputLedgerPayload {
+        artifact_id,
+        filename: payload::TASK_INPUT_LEDGER_FILENAME.to_string(),
+        sha256,
+        count,
+    })
 }
 
 /// What a push will ship, plus the session it promises.
@@ -561,11 +621,13 @@ async fn build_payload(
     target_desktop_id: Option<&str>,
     remote_url: Option<&str>,
     bundle: Option<TransferBundlePayload>,
+    head_oid: Option<String>,
+    input_ledger: Option<TransferInputLedgerPayload>,
     staged: StagedSessionArtifacts,
     finalization: TransferFinalizationState,
     recovery: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
 ) -> Result<OutgoingTransferPayload, String> {
-    let mode = payload::choose_repo_acquisition_mode(remote_url, preflight.target_has_repo);
+    let mode = RepoAcquisitionMode::TaskBundle;
     // `pipeline` is the legacy storage column name for the task's workflow.
     let workflow_name = source
         .item
@@ -599,6 +661,7 @@ async fn build_payload(
                 .clone()
                 .unwrap_or_else(|| "in progress".into()),
             branch: source.item.branch.clone(),
+            head_oid,
             workflow: workflow_name.clone(),
             legacy_pipeline: workflow_name,
             display_name: source.item.display_name.clone(),
@@ -620,10 +683,9 @@ async fn build_payload(
             path: Some(repo.path.clone()),
             name: Some(repo.name.clone()),
             default_branch: repo.default_branch.clone(),
-            bundle: (mode == RepoAcquisitionMode::BundleRepo)
-                .then_some(bundle)
-                .flatten(),
+            bundle,
         },
+        input_ledger,
         // Finalization photographs the terminal before it types the quit
         // command; there is nothing left to photograph afterwards. Only a path
         // that never ran the sequence — a headless session, or a push that has
@@ -827,16 +889,37 @@ async fn run_finalization(
         staged.session_id.as_deref(),
         refreshed.session.provider.as_deref(),
     )?;
-    let remote_url = if existing.repo.mode == RepoAcquisitionMode::ReuseLocal {
-        None
-    } else {
-        let repo_path = std::path::PathBuf::from(&repo.path);
-        super::run_blocking("transfer remote url", move || {
-            Ok(super::git::remote_url(&repo_path))
-        })
-        .await?
-        .or(existing.repo.remote_url.clone())
-    };
+    let repo_path = std::path::PathBuf::from(&repo.path);
+    let repo_path_for_remote = repo_path.clone();
+    let remote_url = super::run_blocking("transfer remote url", move || {
+        Ok(super::git::remote_url(&repo_path_for_remote)
+            .filter(|url| super::git::is_credential_free_clone_source(url)))
+    })
+    .await?
+    .or(existing.repo.remote_url.clone());
+    // Rebuild both integrity artifacts after the source session has stopped.
+    // Their distinct ids leave the pre-finalization placeholders intact until
+    // the sidecar cleans the whole transfer, while the finalized payload can
+    // name only the post-finalization bytes.
+    let (bundle, head_oid) = stage_repository_bundle(
+        state,
+        &refreshed,
+        &repo_path,
+        transfer_id,
+        "repo-bundle-final",
+    )
+    .await?;
+    let input_ledger = stage_task_input_ledger(
+        state,
+        &refreshed,
+        transfer_id,
+        transfer
+            .source_peer_id
+            .as_deref()
+            .unwrap_or(&existing.task.source_peer_id),
+        "inputs-final",
+    )
+    .await?;
     let finalization = match finalization_outcome.degraded_reason {
         Some(reason) => TransferFinalizationState::degraded(reason),
         None => TransferFinalizationState::clean(),
@@ -866,7 +949,9 @@ async fn run_finalization(
             .as_deref()
             .or(existing.target_desktop_id.as_deref()),
         remote_url.as_deref(),
-        existing.repo.bundle.clone(),
+        Some(bundle),
+        Some(head_oid),
+        Some(input_ledger),
         staged,
         finalization,
         finalization_outcome.recovery_snapshot,

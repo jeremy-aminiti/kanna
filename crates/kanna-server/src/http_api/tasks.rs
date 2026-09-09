@@ -843,17 +843,14 @@ pub(super) async fn put_task(
     create_task_with_requested_id(state, payload, Some(task_id)).await
 }
 
-/// Creates a task from inside the process, through the same creator the route
-/// serves.
-///
-/// The transfer engine's import path uses this so a transferred task gets the
-/// repo-config setup, worktree fork, `resumeSessionId` wiring, recovery
-/// snapshot and import banner every other task gets — the renderer used to
-/// reach the same code by calling `POST /v1/tasks` over loopback.
-pub(crate) async fn create_task_in_process(
+/// Transfer-only creation entry point. Historical inputs are persisted after
+/// the task/worktree preparation transaction and before the daemon spawn, so
+/// the resumed agent can read its complete directive record on its first turn.
+pub(crate) async fn create_transferred_task_in_process(
     state: Arc<AppState>,
     payload: crate::mobile_api::CreateTaskRequest,
     requested_task_id: String,
+    inputs: Vec<crate::db::ImportedTaskInput>,
 ) -> Result<crate::mobile_api::CreateTaskResponse, (axum::http::StatusCode, String)> {
     validate_requested_task_id(&requested_task_id)?;
     let _flight = state
@@ -864,7 +861,7 @@ pub(crate) async fn create_task_in_process(
                 format!("task creation already in progress: {requested_task_id}"),
             )
         })?;
-    create_task_with_requested_id(state, payload, Some(requested_task_id))
+    create_task_with_requested_id_and_inputs(state, payload, Some(requested_task_id), inputs)
         .await
         .map(|Json(response)| response)
 }
@@ -873,6 +870,15 @@ pub(super) async fn create_task_with_requested_id(
     state: Arc<AppState>,
     payload: crate::mobile_api::CreateTaskRequest,
     requested_task_id: Option<String>,
+) -> Result<Json<crate::mobile_api::CreateTaskResponse>, (axum::http::StatusCode, String)> {
+    create_task_with_requested_id_and_inputs(state, payload, requested_task_id, Vec::new()).await
+}
+
+async fn create_task_with_requested_id_and_inputs(
+    state: Arc<AppState>,
+    payload: crate::mobile_api::CreateTaskRequest,
+    requested_task_id: Option<String>,
+    imported_inputs: Vec<crate::db::ImportedTaskInput>,
 ) -> Result<Json<crate::mobile_api::CreateTaskResponse>, (axum::http::StatusCode, String)> {
     if let Some(task_id) = requested_task_id.as_deref() {
         validate_requested_task_id(task_id)?;
@@ -933,8 +939,10 @@ pub(super) async fn create_task_with_requested_id(
             resolved_blocker_ids: Vec<String>,
         },
     }
+    let imported_inputs = Arc::new(imported_inputs);
     let outcome = {
         let state = Arc::clone(&state);
+        let imported_inputs = Arc::clone(&imported_inputs);
         super::blocking::run_handler_blocking("task create prepare", move || {
             if let Some(task_id) = requested_task_id.as_deref() {
                 let db = Db::open(&state.config.db_path).map_err(|e| {
@@ -946,6 +954,8 @@ pub(super) async fn create_task_with_requested_id(
                 if let Some(existing) =
                     existing_create_task_response(&db, task_id, &payload.repo_id, &payload.prompt)?
                 {
+                    db.import_task_inputs(task_id, &imported_inputs)
+                        .map_err(|error| db_write_error("could not import task inputs", error))?;
                     let existing_is_open = db
                         .get_pipeline_item(task_id)
                         .map_err(|e| db_write_error("db error", e))?
@@ -1116,6 +1126,29 @@ pub(super) async fn create_task_with_requested_id(
                     }
                 }
             };
+            if !imported_inputs.is_empty() {
+                let db = Db::open(&state.config.db_path).map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {e}"),
+                    )
+                })?;
+                if let Err(error) = db.import_task_inputs(
+                    crate::task_creator::prepared_task_id(&prepared),
+                    &imported_inputs,
+                ) {
+                    let reason = format!("could not import task inputs: {error}");
+                    let rollback =
+                        crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                    return Err((
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        match rollback {
+                            Ok(()) => reason,
+                            Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                        },
+                    ));
+                }
+            }
             if !resolved_blocker_ids.is_empty() || review_context.is_some() {
                 let db = Db::open(&state.config.db_path).map_err(|e| {
                     (

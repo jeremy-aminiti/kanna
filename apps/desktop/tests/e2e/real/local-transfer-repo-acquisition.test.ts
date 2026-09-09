@@ -1,13 +1,16 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { realpath } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { cleanupWorktrees, importTestRepo, resetDatabase } from "../helpers/reset";
 import { pauseForSlowMode } from "../helpers/slowMode";
 import { createPrimaryAndSecondaryClients } from "../helpers/twoInstance";
 import { pairWithPeerThroughUi, pushSelectedTaskToPeerThroughUi } from "../helpers/transferFlow";
-import { callVueMethod, queryDb, tauriInvoke } from "../helpers/vue";
+import { callVueMethod, execDb, queryDb, tauriInvoke } from "../helpers/vue";
 
 interface TransferPeer {
   peer_id?: string;
@@ -40,6 +43,7 @@ interface VueCallError {
 }
 
 let testRepoPath = "";
+const execFileAsync = promisify(execFile);
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
 
@@ -132,7 +136,15 @@ async function deleteSessionIfRunning(client: { deleteSession(): Promise<void> }
 async function createSourceTask(repoId: string, repoPath: string, prompt: string): Promise<string> {
   // Direct task creation is setup-only: the product has no UI path for creating an inert
   // transfer fixture task without also launching a real agent session.
-  const createResult = await callVueMethod(primary, "store.createItem", repoId, repoPath, prompt, "agent");
+  const createResult = await callVueMethod(
+    primary,
+    "store.createItem",
+    repoId,
+    repoPath,
+    prompt,
+    "agent",
+    { workflowName: "single-reviewer", agentProvider: "codex" },
+  );
   if (isVueCallError(createResult)) {
     throw new Error(createResult.__error);
   }
@@ -186,13 +198,69 @@ describe("local transfer repo acquisition", () => {
     await deleteSessionIfRunning(secondary);
   });
 
-  it("reuses an existing matching repo on secondary before importing a transfer", async () => {
+  it("imports unpublished multi-stage work and delivered inputs into an existing independent clone", async () => {
     testRepoPath = await createFixtureRepo("local-transfer-reuse-local");
     const repoId = await importTestRepo(primary, testRepoPath, "local-transfer-reuse-primary");
-    await importTestRepo(secondary, testRepoPath, "local-transfer-reuse-secondary");
+    const originPath = join(
+      dirname(testRepoPath),
+      `${basename(testRepoPath)}-origin.git`,
+    );
+    const secondaryRepoPath = join(dirname(testRepoPath), "secondary-existing-clone");
+    await execFileAsync("git", ["clone", originPath, secondaryRepoPath]);
+    await importTestRepo(secondary, secondaryRepoPath, "local-transfer-reuse-secondary");
     await pauseForSlowMode("reuse-local fixture imported into both instances");
 
     const sourceTaskId = await createSourceTask(repoId, testRepoPath, "Reuse repo on destination");
+    const sourceRows = (await queryDb(
+      primary,
+      `SELECT pipeline_item.branch, worktree.path
+         FROM pipeline_item
+         JOIN worktree ON worktree.pipeline_item_id = pipeline_item.id
+        WHERE pipeline_item.id = ?
+        ORDER BY worktree.created_at DESC
+        LIMIT 1`,
+      [sourceTaskId],
+    )) as Array<{ branch: string; path: string }>;
+    const source = sourceRows[0];
+    if (!source) throw new Error("source task has no worktree");
+
+    await writeFile(join(source.path, "stage-one.txt"), "unpublished stage one\n");
+    await execFileAsync("git", ["add", "stage-one.txt"], { cwd: source.path });
+    await execFileAsync("git", ["commit", "-m", "test: unpublished in-progress work"], {
+      cwd: source.path,
+    });
+    await writeFile(join(source.path, "stage-two.txt"), "unpublished review work\n");
+    await execFileAsync("git", ["add", "stage-two.txt"], { cwd: source.path });
+    await execFileAsync("git", ["commit", "-m", "test: unpublished review work"], {
+      cwd: source.path,
+    });
+    const { stdout: headOutput } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+      cwd: source.path,
+    });
+    const sourceHead = headOutput.trim();
+    await expect(
+      execFileAsync("git", ["cat-file", "-e", `${sourceHead}^{commit}`], {
+        cwd: secondaryRepoPath,
+      }),
+    ).rejects.toThrow();
+
+    // These are the rows produced by successful logical deliveries. Seeding
+    // them directly keeps this repository-acquisition boundary independent of
+    // the separate PTY submission/finalization fixture.
+    await execDb(
+      primary,
+      `INSERT INTO task_input (task_id, run_id, stage, source, message, delivered_at)
+       VALUES (?, NULL, 'in progress', 'operator', ?, '2026-09-09 10:00:00'),
+              (?, NULL, 'review', 'manager', ?, '2026-09-09 10:00:01')`,
+      [
+        sourceTaskId,
+        "Preserve the unpublished implementation exactly.",
+        sourceTaskId,
+        "Review the second-stage commit as the current tip.",
+      ],
+    );
+    await execDb(primary, "UPDATE pipeline_item SET stage = 'review' WHERE id = ?", [sourceTaskId]);
+
     const incomingTransfer = await pushAndApproveTransfer(sourceTaskId);
     expect(incomingTransfer.local_task_id).toBeTruthy();
 
@@ -204,15 +272,84 @@ describe("local transfer repo acquisition", () => {
         WHERE pipeline_item.id = ?`,
       [incomingTransfer.local_task_id],
     )) as RepoRow[];
-    expect(await realpath(repoRows[0]!.path)).toBe(await realpath(testRepoPath));
+    expect(await realpath(repoRows[0]!.path)).toBe(await realpath(secondaryRepoPath));
+
+    const destinationRows = (await queryDb(
+      secondary,
+      `SELECT pipeline_item.branch, pipeline_item.stage, worktree.path
+         FROM pipeline_item
+         JOIN worktree ON worktree.pipeline_item_id = pipeline_item.id
+        WHERE pipeline_item.id = ?
+        ORDER BY worktree.created_at DESC
+        LIMIT 1`,
+      [incomingTransfer.local_task_id],
+    )) as Array<{ branch: string; stage: string; path: string }>;
+    expect(destinationRows[0]?.stage).toBe("review");
+    const { stdout: destinationHeadOutput } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+      cwd: destinationRows[0]!.path,
+    });
+    expect(destinationHeadOutput.trim()).toBe(sourceHead);
+    const { stdout: historyOutput } = await execFileAsync("git", ["log", "-2", "--format=%s"], {
+      cwd: destinationRows[0]!.path,
+    });
+    expect(historyOutput).toContain("test: unpublished in-progress work");
+    expect(historyOutput).toContain("test: unpublished review work");
+
+    const importedInputs = await queryDb(
+      secondary,
+      `SELECT source, stage, message, delivered_at, origin_peer_id, origin_task_id,
+              origin_input_id, origin_run_id
+         FROM task_input
+        WHERE task_id = ?
+        ORDER BY id`,
+      [incomingTransfer.local_task_id],
+    );
+    expect(importedInputs).toEqual([
+      expect.objectContaining({
+        source: "operator",
+        stage: "in progress",
+        message: "Preserve the unpublished implementation exactly.",
+        delivered_at: "2026-09-09 10:00:00",
+        origin_peer_id: "peer-primary",
+        origin_task_id: sourceTaskId,
+        origin_input_id: expect.any(Number),
+        origin_run_id: null,
+      }),
+      expect.objectContaining({
+        source: "manager",
+        stage: "review",
+        message: "Review the second-stage commit as the current tip.",
+        delivered_at: "2026-09-09 10:00:01",
+        origin_peer_id: "peer-primary",
+        origin_task_id: sourceTaskId,
+        origin_input_id: expect.any(Number),
+        origin_run_id: null,
+      }),
+    ]);
 
     const outgoingTransfer = await waitForLatestTransfer(primary, "outgoing", sourceTaskId, "completed");
     expect(outgoingTransfer.status).toBe("completed");
+    const outgoingPayload = JSON.parse(outgoingTransfer.payload_json ?? "{}") as {
+      task?: { head_oid?: string };
+      repo?: { mode?: string };
+      input_ledger?: { count?: number };
+    };
+    expect(outgoingPayload).toMatchObject({
+      task: { head_oid: sourceHead },
+      repo: { mode: "task-bundle" },
+      input_ledger: { count: 2 },
+    });
 
     await waitForPrimaryTaskClosed(sourceTaskId);
+    const { stdout: retainedBranchHead } = await execFileAsync(
+      "git",
+      ["rev-parse", `refs/heads/${source.branch}`],
+      { cwd: testRepoPath },
+    );
+    expect(retainedBranchHead.trim()).toBe(sourceHead);
   });
 
-  it("clones the repo into ~/.kanna/repos on secondary before importing a clone-remote transfer", async () => {
+  it("restores a task bundle into ~/.kanna/repos when secondary has no matching repo", async () => {
     testRepoPath = await createFixtureRepo("local-transfer-clone-remote");
     const repoId = await importTestRepo(primary, testRepoPath, "local-transfer-clone-remote");
     await pauseForSlowMode("clone-remote fixture imported into primary");
@@ -240,7 +377,7 @@ describe("local transfer repo acquisition", () => {
       repo?: { mode?: string; remote_url?: string | null };
     };
     expect(outgoingPayload.repo).toMatchObject({
-      mode: "clone-remote",
+      mode: "task-bundle",
     });
     expect(typeof outgoingPayload.repo?.remote_url).toBe("string");
 
@@ -276,7 +413,7 @@ describe("local transfer repo acquisition", () => {
       };
     };
     expect(outgoingPayload.repo).toMatchObject({
-      mode: "bundle-repo",
+      mode: "task-bundle",
     });
     expect(outgoingPayload.repo?.bundle?.artifact_id).toBeTruthy();
     expect(outgoingPayload.repo?.bundle?.filename).toContain(".bundle");

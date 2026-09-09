@@ -309,9 +309,15 @@ impl Db {
                 stage TEXT,
                 source TEXT NOT NULL,
                 message TEXT NOT NULL,
-                delivered_at TEXT NOT NULL DEFAULT (datetime('now'))
+                delivered_at TEXT NOT NULL DEFAULT (datetime('now')),
+                origin_peer_id TEXT,
+                origin_task_id TEXT,
+                origin_input_id INTEGER,
+                origin_run_id TEXT
             );
             CREATE INDEX idx_task_input_task_id ON task_input(task_id, id);
+            CREATE UNIQUE INDEX idx_task_input_transfer_origin
+            ON task_input(task_id, origin_peer_id, origin_task_id, origin_input_id);
 
             CREATE TABLE task_transfer (
                 id TEXT PRIMARY KEY,

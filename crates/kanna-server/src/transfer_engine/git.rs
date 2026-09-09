@@ -75,7 +75,7 @@ pub fn remote_url(repo_path: &Path) -> Option<String> {
 /// is an option, and one containing `..` addresses a ref this transfer has no
 /// business naming. Everything that survives is `refs/`-prefixed, which also
 /// makes a leading dash unrepresentable.
-fn normalize_ref(reference: Option<&str>) -> Option<String> {
+pub(super) fn normalize_ref(reference: Option<&str>) -> Option<String> {
     let reference = reference?.trim();
     if reference.is_empty() {
         return None;
@@ -93,6 +93,75 @@ fn normalize_ref(reference: Option<&str>) -> Option<String> {
             byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b'+')
         });
     safe.then_some(normalized)
+}
+
+pub fn commit_oid(repo_path: &Path, reference: &str) -> Result<String, String> {
+    let reference = normalize_ref(Some(reference))
+        .ok_or_else(|| format!("invalid git ref for transferred task: {reference}"))?;
+    let commit = format!("{reference}^{{commit}}");
+    let oid = git(repo_path, &["rev-parse", "--verify", &commit])?;
+    if matches!(oid.len(), 40 | 64)
+        && oid
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(oid)
+    } else {
+        Err(format!("git returned an invalid object id for {reference}"))
+    }
+}
+
+/// Fetches the source task ref into a transfer-private namespace and proves it
+/// resolves to the exact commit named by the finalized payload. Existing
+/// branches are never overwritten.
+pub fn import_task_bundle_ref(
+    repo_path: &Path,
+    bundle_path: &Path,
+    source_ref: &str,
+    expected_oid: &str,
+) -> Result<String, String> {
+    let source_ref = normalize_ref(Some(source_ref))
+        .ok_or_else(|| format!("invalid source ref in task bundle: {source_ref}"))?;
+    let transfer_ref = format!("refs/kanna/transfers/{expected_oid}");
+    let bundle_path = bundle_path
+        .to_str()
+        .ok_or_else(|| "bundle path is not valid unicode".to_string())?;
+    let refspec = format!("{source_ref}:{transfer_ref}");
+    git(repo_path, &["fetch", bundle_path, &refspec])?;
+    let imported = git(
+        repo_path,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("{transfer_ref}^{{commit}}"),
+        ],
+    )?;
+    if imported != expected_oid {
+        return Err(format!(
+            "transferred task head mismatch: expected {expected_oid}, imported {imported}"
+        ));
+    }
+    Ok(transfer_ref)
+}
+
+pub fn commit_is_ancestor(
+    repo_path: &Path,
+    ancestor_oid: &str,
+    descendant_ref: &str,
+) -> Result<bool, String> {
+    let status = Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor_oid, descendant_ref])
+        .current_dir(repo_path)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .status()
+        .map_err(|error| format!("failed to run git merge-base: {error}"))?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err("git merge-base failed while verifying transferred task history".into()),
+    }
 }
 
 /// Whether a peer-supplied clone URL is one this machine will hand to git.
@@ -148,23 +217,37 @@ fn is_safe_clone_url(url: &str) -> bool {
 /// Bundles the refs a transferred task needs when the destination has neither
 /// the repository nor a remote it can clone from.
 ///
-/// The task's own branch is the only ref that must cross; its base ref is the
-/// fallback for a task that has not branched yet. `--all` is the last resort
-/// rather than the default — bundling a whole repository over a relay for one
-/// task is not something to do by accident.
+/// The task branch and its diff base cross together. The branch history carries
+/// the base objects, but a review on a newly restored repository also needs the
+/// base *name* to resolve for diffs. `--all` is the last resort rather than the
+/// default — bundling a whole repository over a relay for one task is not
+/// something to do by accident.
 pub fn create_bundle(
     repo_path: &Path,
     bundle_path: &Path,
     branch: Option<&str>,
     base_ref: Option<&str>,
 ) -> Result<Option<String>, String> {
-    let ref_name = normalize_ref(branch).or_else(|| normalize_ref(base_ref));
+    let ref_name = normalize_ref(branch).or_else(|| {
+        base_ref.and_then(|base_ref| {
+            crate::git_refs::resolve_base_ref(repo_path, base_ref)
+                .map(|resolved| resolved.reference)
+        })
+    });
     let bundle_path = bundle_path
         .to_str()
         .ok_or_else(|| "bundle path is not valid unicode".to_string())?;
     match &ref_name {
         Some(reference) => {
-            git(repo_path, &["bundle", "create", bundle_path, reference])?;
+            let base_reference = base_ref
+                .and_then(|base_ref| crate::git_refs::resolve_base_ref(repo_path, base_ref))
+                .map(|resolved| resolved.reference)
+                .filter(|base| base != reference);
+            let mut arguments = vec!["bundle", "create", bundle_path, reference.as_str()];
+            if let Some(base_reference) = base_reference.as_deref() {
+                arguments.push(base_reference);
+            }
+            git(repo_path, &arguments)?;
         }
         None => {
             git(repo_path, &["bundle", "create", bundle_path, "--all"])?;
@@ -454,6 +537,79 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(destination.join("file.txt")).expect("restored file"),
             "task contents",
+        );
+    }
+
+    #[test]
+    fn a_task_bundle_imports_unpublished_multi_commit_history_into_an_existing_clone() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("source");
+        let origin = temp.path().join("origin.git");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir_all(&source).expect("source dir");
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            git(&source, &args).expect("init source");
+        }
+        std::fs::write(source.join("base.txt"), b"base").expect("base file");
+        git(&source, &["add", "base.txt"]).expect("add base");
+        git(&source, &["commit", "-m", "base"]).expect("commit base");
+        git(
+            temp.path(),
+            &["init", "--bare", origin.to_str().expect("origin path")],
+        )
+        .expect("bare origin");
+        git(
+            &source,
+            &[
+                "remote",
+                "add",
+                "origin",
+                origin.to_str().expect("origin path"),
+            ],
+        )
+        .expect("add origin");
+        git(&source, &["push", "origin", "main"]).expect("push main");
+        git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"])
+            .expect("point bare HEAD at main");
+        clone_remote(origin.to_str().expect("origin path"), &destination)
+            .expect("destination clone");
+
+        git(&source, &["checkout", "-b", "task-source"]).expect("task branch");
+        for (file, body, message) in [
+            ("stage-one.txt", "one", "in progress commit"),
+            ("stage-two.txt", "two", "review commit"),
+        ] {
+            std::fs::write(source.join(file), body).expect("task file");
+            git(&source, &["add", file]).expect("add task file");
+            git(&source, &["commit", "-m", message]).expect("task commit");
+        }
+        let expected = commit_oid(&source, "task-source").expect("source head");
+        assert!(commit_oid(&destination, "task-source").is_err());
+
+        let bundle = temp.path().join("task.bundle");
+        let source_ref = create_bundle(&source, &bundle, Some("task-source"), Some("origin/main"))
+            .expect("create bundle")
+            .expect("bundle ref");
+        let imported = import_task_bundle_ref(&destination, &bundle, &source_ref, &expected)
+            .expect("import task ref");
+
+        assert_eq!(
+            git(
+                &destination,
+                &["rev-parse", "--verify", &format!("{imported}^{{commit}}")],
+            )
+            .expect("imported head"),
+            expected,
+        );
+        assert!(commit_is_ancestor(&destination, &expected, &imported).expect("history proof"));
+        assert_ne!(
+            git(&destination, &["rev-parse", "refs/heads/main"]).expect("destination main"),
+            expected,
+            "the import must add the task history without substituting or rewriting main",
         );
     }
 

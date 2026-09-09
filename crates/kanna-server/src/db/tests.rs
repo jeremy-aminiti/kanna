@@ -229,7 +229,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "072_human_review_decision");
+    assert_eq!(latest_migration, "073_transferred_task_input_provenance");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -4064,6 +4064,53 @@ fn task_inputs_read_back_in_delivery_order_with_every_source() {
             .collect::<Vec<_>>(),
         vec!["third", "TASK child-1 DONE [success]: Child"]
     );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn transferred_task_inputs_keep_origin_and_are_idempotent() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-destination",
+        "repo-1",
+        "Transferred task",
+        Some("Transferred task"),
+        "review",
+        "2026-09-09 04:00:00",
+    )
+    .expect("task");
+    let inputs = vec![super::ImportedTaskInput {
+        stage: Some("in progress".into()),
+        source: "operator".into(),
+        message: "keep the compact interaction".into(),
+        delivered_at: "2026-09-08 23:59:00".into(),
+        origin: super::TaskInputOrigin {
+            peer_id: "peer-studio".into(),
+            task_id: "task-source".into(),
+            input_id: 41,
+            run_id: Some("run-source".into()),
+        },
+    }];
+
+    db.import_task_inputs("task-destination", &inputs)
+        .expect("first import");
+    db.import_task_inputs("task-destination", &inputs)
+        .expect("retry import");
+
+    let imported = db
+        .list_all_task_inputs("task-destination")
+        .expect("read imported inputs");
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0].run_id, None);
+    assert_eq!(imported[0].stage.as_deref(), Some("in progress"));
+    assert_eq!(imported[0].source, "operator");
+    assert_eq!(imported[0].message, "keep the compact interaction");
+    assert_eq!(imported[0].delivered_at, "2026-09-08 23:59:00");
+    assert_eq!(imported[0].origin.as_ref(), Some(&inputs[0].origin));
 
     drop(db);
     let _ = std::fs::remove_file(path);

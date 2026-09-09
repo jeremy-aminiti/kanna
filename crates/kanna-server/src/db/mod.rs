@@ -68,7 +68,9 @@ pub use task_events::{
     appended as task_event_appended, TaskEvent, TaskEventFilters, TaskEventKind, TaskEventScope,
 };
 #[allow(unused_imports)]
-pub use task_inputs::{RawInputWriteRecord, TaskInputRecord, TaskInputSource};
+pub use task_inputs::{
+    ImportedTaskInput, RawInputWriteRecord, TaskInputOrigin, TaskInputRecord, TaskInputSource,
+};
 #[allow(unused_imports)]
 pub use transfer_work::{TransferWorkItem, MAX_TRANSFER_WORK_ATTEMPTS};
 pub use transfers::{
@@ -156,6 +158,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "070_provider_quota_rejection_log",
     "071_event_subscriptions",
     "072_human_review_decision",
+    "073_transferred_task_input_provenance",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2186,6 +2189,17 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         "072_human_review_decision",
         create_human_review_schema,
     )?;
+
+    run_migration(conn, "073_transferred_task_input_provenance", |conn| {
+        add_column(conn, "task_input", "origin_peer_id", "TEXT")?;
+        add_column(conn, "task_input", "origin_task_id", "TEXT")?;
+        add_column(conn, "task_input", "origin_input_id", "INTEGER")?;
+        add_column(conn, "task_input", "origin_run_id", "TEXT")?;
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_input_transfer_origin
+             ON task_input(task_id, origin_peer_id, origin_task_id, origin_input_id);",
+        )
+    })?;
 
     Ok(())
 }
