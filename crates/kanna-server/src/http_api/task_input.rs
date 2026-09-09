@@ -21,6 +21,11 @@ pub(crate) const SESSION_INTERRUPTION_FEEDBACK: &str =
 #[serde(rename_all = "camelCase")]
 pub(super) struct TaskInputRequest {
     input: String,
+    /// Server-to-server merge handoffs require an acknowledged ledger write
+    /// as well as the PTY acknowledgement. Ordinary caller input deliberately
+    /// retains its best-effort post-delivery record behavior.
+    #[serde(default)]
+    strict_recording: bool,
     /// Who is speaking, declared by the caller: `operator` or `manager`.
     /// Omitted means `unspecified`, which is what desktop, mobile, and CLI
     /// deliveries record. The server cannot verify the claim — it only records
@@ -226,6 +231,64 @@ pub(super) async fn send_task_input(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
     Json(payload): Json<TaskInputRequest>,
+) -> Result<Response, TaskInputHttpError> {
+    let strict_recording = payload.strict_recording;
+    send_task_input_impl(state, task_id, payload, strict_recording).await
+}
+
+/// Deliver server-originated speech through the same live-session discovery,
+/// PID fence, logical-input boundary, and durable ledger as `/tasks/{id}/input`.
+///
+/// Singleton signals must not use a stage run's historical session id directly:
+/// a daemon handoff or stage replacement can leave that id naming a retired PTY.
+pub(crate) async fn deliver_server_task_input(
+    state: Arc<AppState>,
+    task_id: String,
+    input: String,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    deliver_server_task_input_with_recording(state, task_id, input, false).await
+}
+
+/// Deliver server-originated input whose durable ledger is part of the
+/// success contract. Merge handoffs use this: a source task cannot claim it
+/// signaled the merge master unless the merge master has the durable record.
+pub(crate) async fn deliver_server_task_input_strict(
+    state: Arc<AppState>,
+    task_id: String,
+    input: String,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    deliver_server_task_input_with_recording(state, task_id, input, true).await
+}
+
+async fn deliver_server_task_input_with_recording(
+    state: Arc<AppState>,
+    task_id: String,
+    input: String,
+    strict_recording: bool,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    match send_task_input_impl(
+        state,
+        task_id,
+        TaskInputRequest {
+            input,
+            strict_recording: false,
+            source: None,
+            attachment: None,
+        },
+        strict_recording,
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err((status, Json(failure))) => Err((status, failure.message)),
+    }
+}
+
+async fn send_task_input_impl(
+    state: Arc<AppState>,
+    task_id: String,
+    payload: TaskInputRequest,
+    strict_recording: bool,
 ) -> Result<Response, TaskInputHttpError> {
     #[cfg(test)]
     if let Some(task_input_sender) = state.task_input_sender.clone() {
@@ -444,12 +507,39 @@ pub(super) async fn send_task_input(
     })
     .await;
     match recorded {
-        Ok(Ok(_)) => {}
+        Ok(Ok(Some(_))) => {}
+        Ok(Ok(None)) if strict_recording => {
+            return Err(task_input_http_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "task_input_record_failed",
+                format!("terminal input reached task {task_id}, but its durable record could not be written"),
+                None,
+            ));
+        }
+        Ok(Ok(None)) => {}
         Ok(Err(error)) => {
-            log::error!("task input reached task {task_id}, but its durable record failed: {error}")
+            log::error!(
+                "task input reached task {task_id}, but its durable record failed: {error}"
+            );
+            if strict_recording {
+                return Err(task_input_http_error(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "task_input_record_failed",
+                    format!("terminal input reached task {task_id}, but its durable record failed: {error}"),
+                    None,
+                ));
+            }
         }
         Err(error) => {
-            log::error!("task input reached task {task_id}, but the record worker failed: {error}")
+            log::error!("task input reached task {task_id}, but the record worker failed: {error}");
+            if strict_recording {
+                return Err(task_input_http_error(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "task_input_record_failed",
+                    format!("terminal input reached task {task_id}, but the durable record worker failed: {error}"),
+                    None,
+                ));
+            }
         }
     }
     state.publish_state_changed(StateChangeScope::Tasks);

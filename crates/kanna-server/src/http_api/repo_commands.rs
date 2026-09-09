@@ -75,6 +75,7 @@ pub(super) async fn run_repo_command(
             agent.to_string(),
             launch.prompt,
             crate::task_creator::SingletonAgentOverrides::default(),
+            false,
         )
         .await?;
         let task_id = response.task_id;
