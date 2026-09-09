@@ -1278,7 +1278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watcher_clears_stale_idle_for_an_unmeasured_adopted_session() {
+    async fn watcher_projects_unobserved_adoption_to_unknown_then_busy_event() {
         let unique = unique_name("terminal-watcher-unmeasured-adoption");
         let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
         let config = test_config(&unique, &daemon_dir);
@@ -1308,6 +1308,18 @@ mod tests {
                 }],
             )
             .await;
+            // The next PTY repaint is measured by the adopted daemon. Its
+            // Busy event, not a reconnect or viewer attach, restores the
+            // runtime projection from the honest unknown value.
+            write_event(
+                &mut subscriber,
+                &DaemonEvent::StatusChanged {
+                    session_id: "task-child".to_string(),
+                    status: kanna_daemon::protocol::SessionStatus::Busy,
+                    waiting_prompt_snippet: None,
+                },
+            )
+            .await;
             write_event(&mut subscriber, &DaemonEvent::ShuttingDown).await;
         });
 
@@ -1324,7 +1336,7 @@ mod tests {
             .get_pipeline_item("task-child")
             .unwrap()
             .unwrap();
-        assert_eq!(task.runtime_status, None);
+        assert_eq!(task.runtime_status.as_deref(), Some("busy"));
         let _ = std::fs::remove_file(socket_path);
         let _ = std::fs::remove_dir_all(daemon_dir);
     }

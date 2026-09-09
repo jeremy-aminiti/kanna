@@ -826,9 +826,13 @@ async fn emit_status_changed(
     if session.is_retired() {
         return;
     }
-    if !session.update_status(status).await {
-        return;
-    }
+    // `MirrorResult::status` is already edge-triggered by the status
+    // detector.  In particular, its first rendered verdict after adoption is
+    // an observation edge even when it equals the inherited bootstrap status.
+    // Do not use `update_status` as a second edge filter: that would hide the
+    // first Busy event from a server which truthfully projected the unobserved
+    // adopted session as unknown.
+    session.update_status(status).await;
     if session.is_retired() {
         return;
     }

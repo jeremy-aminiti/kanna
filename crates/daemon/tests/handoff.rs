@@ -658,35 +658,6 @@ fn attach(conn: &mut ClientConn, id: &str) {
     }
 }
 
-fn wait_for_session_status(
-    conn: &mut ClientConn,
-    session_id: &str,
-    expected: SessionStatus,
-    timeout: Duration,
-) {
-    let deadline = Instant::now() + timeout;
-    let expected = serde_json::to_value(expected).unwrap();
-    loop {
-        conn.send(&Cmd::List);
-        match conn.recv() {
-            Evt::SessionList { sessions } => {
-                if sessions.iter().any(|session| {
-                    session["session_id"] == session_id && session["status"] == expected
-                }) {
-                    return;
-                }
-            }
-            Evt::Error { code, message } => panic!("list failed: {:?}: {}", code, message),
-            other => panic!("expected SessionList, got: {:?}", other),
-        }
-        assert!(
-            Instant::now() < deadline,
-            "session {session_id:?} never reached status {expected:?}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 fn send_input(conn: &mut ClientConn, id: &str, data: &[u8]) -> Vec<u8> {
     conn.send(&Cmd::Input {
         session_id: id.to_string(),
@@ -2955,17 +2926,18 @@ fn test_adopted_pty_remeasures_an_unclassified_snapshot_before_first_attach() {
         executable: "/bin/sh".to_string(),
         args: vec![
             "-c".to_string(),
-            // The snapshot deliberately ends on an unclassifiable updater
-            // footer. After handoff the child keeps painting a Codex busy
-            // footer; no viewer is ever attached, so this pins the adopted
-            // reader's next-frame remeasurement path.
-            "printf 'Header\\r\\n✔ Update installed · Restart to update\\r\\n› '; while [ ! -f \"$KANNA_HANDOFF_RELEASE\" ]; do sleep 0.05; done; while :; do printf '\\033[2J\\033[HHeader\\r\\n• Waiting for background terminal (20m 39s • esc to interrupt)\\r\\n› '; sleep 0.05; done".to_string(),
+            // Captured from the 2026-09-08 owner handoff report: Claude's
+            // updater line was visible without its live spinner. That
+            // snapshot is deliberately unclassified; after handoff this same
+            // Claude session repaints its captured Channeling footer. No
+            // viewer is ever attached, so this pins next-frame remeasurement.
+            "printf 'Header\\r\\n✔ Update installed · Restart to update\\r\\n❯ '; while [ ! -f \"$KANNA_HANDOFF_RELEASE\" ]; do sleep 0.05; done; while :; do printf '\\033[2J\\033[H✽ Channeling… (25m 21s · esc to interrupt)\\r\\n✔ Update installed · Restart to update\\r\\nWaiting for task (esc to give additional instructions)\\r\\n❯ '; sleep 0.05; done".to_string(),
         ],
         cwd: "/tmp".to_string(),
         env,
         cols: 80,
         rows: 24,
-        agent_provider: Some("codex".to_string()),
+        agent_provider: Some("claude".to_string()),
         operator_input_only: false,
     });
     match conn_a.recv() {
@@ -2974,17 +2946,29 @@ fn test_adopted_pty_remeasures_an_unclassified_snapshot_before_first_attach() {
     }
     drop(conn_a);
     let daemon_b = DaemonHandle::start_in(&dir);
-    let mut conn_b = daemon_b.connect();
+    let mut events = daemon_b.connect();
+    events.send(&Cmd::Subscribe);
+    assert!(matches!(events.recv(), Evt::Ok));
     std::fs::write(&release_path, b"go").unwrap();
 
     // Deliberately never send AttachSnapshot: the adopted reader and status
-    // detector must already be running before any terminal client selects it.
-    wait_for_session_status(
-        &mut conn_b,
-        "sess-adopted-stream",
-        SessionStatus::Busy,
-        Duration::from_secs(2),
-    );
+    // detector must publish Busy to the subscriber before any terminal client
+    // selects it. Polling List would miss the observation edge this regresses.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match events.recv_with_timeout(Duration::from_millis(100)) {
+            Ok(Evt::StatusChanged { session_id, status })
+                if session_id == "sess-adopted-stream" && status == SessionStatus::Busy =>
+            {
+                break
+            }
+            Ok(_) if Instant::now() < deadline => continue,
+            Err(_) if Instant::now() < deadline => continue,
+            other => {
+                panic!("adopted Claude repaint never published Busy without attach: {other:?}")
+            }
+        }
+    }
 
     drop(daemon_b);
     cleanup(&dir);

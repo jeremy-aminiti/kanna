@@ -2971,6 +2971,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_observed_busy_is_an_edge_even_when_it_matches_the_bootstrap_status() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/claude/working-footer-2.1.263-171x65.json"
+        ))
+        .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+        // Adopted sessions retain the daemon's Busy bootstrap, but no frame
+        // has made that value observable to the server yet.
+        let record = spawn_test_record(AgentProvider::Claude, SessionStatus::Busy).unwrap();
+        let handle = Arc::new(SessionHandle::new(record));
+
+        let observed = handle
+            .mirror_output_at(
+                fixture["serialized"].as_str().unwrap().as_bytes(),
+                false,
+                Instant::now(),
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(observed.status, Some(SessionStatus::Busy));
+        assert!(handle.state.lock().await.status_observed);
+        assert!(
+            !handle.update_status(observed.status.unwrap()).await,
+            "the publisher must retain this observation edge even though the stored status is Busy"
+        );
+    }
+
+    #[tokio::test]
     async fn unbracketed_claude_repaint_cannot_publish_idle_until_output_settles() {
         let mut record = spawn_test_record(AgentProvider::Claude, SessionStatus::Busy).unwrap();
         record.status_observed = true;
