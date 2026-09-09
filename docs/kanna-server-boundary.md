@@ -26,7 +26,10 @@ explicit desktop authorization, after checking database access in that parent.
 Other isolation signals remain intact, and the cleanup opener checks again.
 
 The real desktop database requires explicit `KANNA_DESKTOP_DB_ACCESS=desktop`,
-supplied by the desktop when it launches the server. Isolated/test/worktree
+supplied by the desktop when it launches the server. "Real" covers the shipped
+app, the staging desktop — an owner's daily driver, not a scratch instance —
+and the legacy identifier; the guarded set is derived from those identifier
+constants, so renaming one moves its protection with it. Isolated/test/worktree
 processes cannot override the veto with that authorization. `kd` supplies
 `KANNA_DB_ISOLATED=1`; macOS's ignored `XDG_DATA_HOME` also vetoes production
 access. The guard protects the OS account's production paths independently of

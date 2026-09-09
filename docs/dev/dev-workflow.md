@@ -69,12 +69,25 @@ Other isolation signals remain intact, and the cleanup opener checks again.
 Database naming is not permission to open the production database. The Rust
 SQLite opening and legacy-relocation boundaries enforce
 `kanna_runtime_defaults::database_access`: accessing the account's real
-`build.kanna/kanna-v2.db` or legacy `com.kanna.app/kanna-v2.db` requires
-`KANNA_DESKTOP_DB_ACCESS=desktop`. The desktop supplies this explicitly when
-spawning its server; CLI and MCP continue using that server over the API.
+`build.kanna/kanna-v2.db`, the staging desktop's
+`build.kanna.staging/kanna-v2.db`, or the legacy
+`com.kanna.app/kanna-v2.db` requires `KANNA_DESKTOP_DB_ACCESS=desktop`. The
+desktop supplies this explicitly when spawning its server, for staging exactly
+as for the shipped app; CLI and MCP continue using that server over the API.
 A standalone server must deliberately supply that authorization to run the real
 desktop instance. An explicit production `db_path` alone does not authorize it.
 The path and database name are unchanged, including on a fresh install.
+
+"Production" here means a real desktop database rather than a development one.
+`Kanna Staging.app` is somebody's daily driver, not a scratch instance, so its
+database is protected on exactly the same terms as the shipped app's — an
+unauthorized process (a test gate, a worker that lost its `--db-path`) is
+refused, and any isolation marker refuses it unconditionally. The guarded set
+is derived from `DESKTOP_BUNDLE_IDENTIFIER`,
+`STAGING_DESKTOP_BUNDLE_IDENTIFIER` and `LEGACY_DESKTOP_BUNDLE_IDENTIFIER`
+rather than restating their strings, and a binding test fails if the two ever
+diverge: renaming an identifier must move its protection with it instead of
+quietly leaving the database it names open.
 
 This also covers an installed worker whose generated service unit drops
 `--db-path`: its canonical fallback is refused by the server unless the process

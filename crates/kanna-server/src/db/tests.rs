@@ -4148,16 +4148,45 @@ fn workflow_edit_audit_and_execution_supersession_survive_feed_pruning() {
 fn production_access_is_refused_at_every_database_entry_point() {
     const PROBE: &str = "KANNA_DB_GUARD_SANDBOX_PROBE";
     if std::env::var_os(PROBE).is_some() {
-        let paths = kanna_runtime_defaults::database_access::production_database_paths().unwrap();
-        let production = paths[0].to_str().unwrap();
-        for error in [
-            Db::open(production).unwrap_err(),
-            Db::open_migrated(production).unwrap_err(),
-            Db::open_for_tests(production).unwrap_err(),
+        // Select by identifier: the guarded set is derived from the identifier
+        // constants and its order is not a contract.
+        let guarded = |identifier: &str| {
+            let directory = std::ffi::OsStr::new(identifier);
+            kanna_runtime_defaults::database_access::production_database_paths()
+                .unwrap()
+                .into_iter()
+                .find(|path| {
+                    path.parent().and_then(std::path::Path::file_name) == Some(directory)
+                        && path
+                            .to_string_lossy()
+                            .contains("Library/Application Support")
+                })
+                .unwrap_or_else(|| panic!("{identifier} must be guarded"))
+        };
+        // The staging desktop's database is the owner's daily driver, so it is
+        // refused at the same entry points as the shipped app's.
+        for identifier in [
+            kanna_runtime_defaults::DESKTOP_BUNDLE_IDENTIFIER,
+            kanna_runtime_defaults::STAGING_DESKTOP_BUNDLE_IDENTIFIER,
         ] {
-            assert!(error.to_string().contains("REFUSED:"), "{error}");
+            let path = guarded(identifier);
+            let production = path.to_str().unwrap();
+            for error in [
+                Db::open(production).unwrap_err(),
+                Db::open_migrated(production).unwrap_err(),
+                Db::open_for_tests(production).unwrap_err(),
+            ] {
+                assert!(
+                    error.to_string().contains("REFUSED:"),
+                    "{identifier}: {error}"
+                );
+            }
         }
-        let error = super::relocate_legacy_database_if_needed(&paths[1], &paths[0]).unwrap_err();
+        let error = super::relocate_legacy_database_if_needed(
+            &guarded(kanna_runtime_defaults::LEGACY_DESKTOP_BUNDLE_IDENTIFIER),
+            &guarded(kanna_runtime_defaults::DESKTOP_BUNDLE_IDENTIFIER),
+        )
+        .unwrap_err();
         assert!(error.contains("REFUSED:"), "{error}");
         return;
     }
