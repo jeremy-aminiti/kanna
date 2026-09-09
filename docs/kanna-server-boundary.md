@@ -2572,11 +2572,19 @@ and debounce decisions, in the native wait and in the collecting server. Both
   was automatic. Closing cancels remaining runs; those cancellations are redundant
   with closure. Provider rejection with recovery is redundant with its fallback
   or dedicated parked event. Successful runs with a successor are serviced.
-- Drop routine creation/start/stage progress, successful automatic main and post
-  completion, busy/read/activity edges, input-delivery echoes, ordinary transfer
+- Keep an open successful final automatic main stage without a post: the engine
+  has no continuation and explicit advancement is still required. This uses the
+  task's resolved workflow, not the `auto` policy alone. A fresh settled scan also
+  keeps an open exited session whose latest run was cancelled without a stage
+  verdict; its earlier completion is outside a new subscriber's cursor. The
+  durable runtime echo stays quiet, as do closed or replaced sessions.
+- Drop routine creation/start/stage progress, successful automatic main completion
+  with an engine continuation and successful post completion, busy/read/activity edges, input-delivery echoes, ordinary transfer
   progress, and automatic-stage idle. A runtime waiting edge duplicates the
   explicit question event; an initial settled waiting snapshot still surfaces it.
-  Unknown event kinds or missing failure/policy information remain visible.
+  Unknown event kinds or missing failure/policy information remain visible. If a
+  peer lacks continuation metadata, an unserviced successful main completion
+  stays visible conservatively; a recorded successor still makes it quiet.
 
 `task.lifecycle_failed` is appended when preparation or detached execution of an
 accepted stage transition fails (`payload.operation: "stage_transition"`,

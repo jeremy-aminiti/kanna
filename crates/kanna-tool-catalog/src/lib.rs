@@ -1588,13 +1588,16 @@ pub fn is_relevant_subscription_event(event: &Value) -> bool {
                 return true;
             }
             if payload["status"] == "succeeded" {
-                if context["completionTransition"] == "auto"
+                if context["closed"] == true
+                    || (context["completionTransition"] == "auto"
+                        && context["mainCompletionHasContinuation"] == true)
                     || payload["kind"] == "post"
                     || (payload.get("stage").is_some()
                         && current.get("stage").is_some()
                         && (payload["stage"] != current["stage"]
                             || (context["completionTransition"].is_null()
-                                && current["stageTransition"] == "auto")))
+                                && current["stageTransition"] == "auto"
+                                && context["mainCompletionHasContinuation"] == true)))
                 {
                     return false;
                 }
@@ -1648,7 +1651,8 @@ pub fn is_relevant_subscription_event(event: &Value) -> bool {
             if payload["currentState"] == true
                 && (latest["status"] == "failed"
                     || (latest["status"] == "succeeded"
-                        && transition != "auto"
+                        && (transition != "auto"
+                            || latest["mainCompletionHasContinuation"] != true)
                         && latest["kind"] != "post"))
             {
                 return true;
@@ -1661,8 +1665,11 @@ pub fn is_relevant_subscription_event(event: &Value) -> bool {
                     && transition != "auto";
             }
             // Termination with no recorded verdict is incomplete lifecycle.
-            // A terminal run already supplied the durable completion signal.
-            payload["runtimeState"] == "exited" && latest["status"] == "running"
+            // A terminal run already supplied the durable completion signal, but
+            // a fresh subscriber still needs an unresolved verdictless exit.
+            payload["runtimeState"] == "exited"
+                && (latest["status"] == "running"
+                    || (payload["currentState"] == true && latest["status"] == "cancelled"))
         }
         Some("task.revision_requested") => {
             payload["exhausted"] != false || latest["status"] != "running"
@@ -1877,6 +1884,80 @@ mod subscription_relevance_tests {
         assert!(
             !is_relevant_subscription_event(&event),
             "durable waiting duplicates awaiting_input"
+        );
+    }
+
+    #[test]
+    fn final_automatic_completion_needs_attention_until_serviced() {
+        let mut event = serde_json::json!({"type":"run.finished", "payload":{
+            "runId":"final", "stage":"final", "kind":"main", "status":"succeeded",
+            "currentTask":{"stage":"final", "latestRun":{"id":"final", "status":"succeeded"}},
+            "notificationContext":{"completionTransition":"auto", "mainCompletionHasContinuation":false}
+        }});
+        assert!(is_relevant_subscription_event(&event));
+        event["payload"]["notificationContext"]["mainCompletionHasContinuation"] =
+            serde_json::json!(true);
+        assert!(
+            !is_relevant_subscription_event(&event),
+            "engine has a successor/post"
+        );
+        event["payload"]["notificationContext"]["mainCompletionHasContinuation"] = Value::Null;
+        assert!(
+            is_relevant_subscription_event(&event),
+            "unknown peer semantics stay visible"
+        );
+        event["payload"]["currentTask"]["latestRun"] =
+            serde_json::json!({"id":"replacement", "status":"running"});
+        assert!(
+            !is_relevant_subscription_event(&event),
+            "replacement services the completion"
+        );
+        event["payload"]["currentTask"]["latestRun"] =
+            serde_json::json!({"id":"final", "status":"succeeded"});
+        event["payload"]["notificationContext"]["closed"] = serde_json::json!(true);
+        assert!(!is_relevant_subscription_event(&event));
+    }
+
+    #[test]
+    fn fresh_reconciliation_is_not_a_duplicate_runtime_edge() {
+        let mut event = serde_json::json!({"type":"task.runtime_changed", "payload":{
+            "stage":"final", "runtimeState":"exited", "currentState":true,
+            "currentTask":{"stage":"final", "stageTransition":"auto"},
+            "notificationContext":{"runtimeState":"exited", "latestRun":{
+                "kind":"main", "status":"cancelled", "completionTransition":"auto",
+                "mainCompletionHasContinuation":false
+            }}
+        }});
+        assert!(
+            is_relevant_subscription_event(&event),
+            "fresh observer missed run.finished"
+        );
+        event["payload"]["currentState"] = serde_json::json!(false);
+        assert!(
+            !is_relevant_subscription_event(&event),
+            "durable edge duplicates run.finished"
+        );
+        event["payload"]["currentState"] = serde_json::json!(true);
+        event["payload"]["notificationContext"]["closed"] = serde_json::json!(true);
+        assert!(!is_relevant_subscription_event(&event));
+        event["payload"]["notificationContext"]["closed"] = serde_json::json!(false);
+        event["payload"]["notificationContext"]["runtimeState"] = serde_json::json!("busy");
+        assert!(
+            !is_relevant_subscription_event(&event),
+            "replaced session is busy"
+        );
+        event["payload"]["notificationContext"]["runtimeState"] = serde_json::json!("exited");
+        event["payload"]["notificationContext"]["latestRun"]["status"] =
+            serde_json::json!("succeeded");
+        assert!(
+            is_relevant_subscription_event(&event),
+            "final auto success still requires explicit advance"
+        );
+        event["payload"]["notificationContext"]["latestRun"]["mainCompletionHasContinuation"] =
+            serde_json::json!(true);
+        assert!(
+            !is_relevant_subscription_event(&event),
+            "engine services automatic successor"
         );
     }
 

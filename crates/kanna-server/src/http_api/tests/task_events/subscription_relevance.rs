@@ -45,9 +45,30 @@ fn noise(db: &Db, count: usize) {
 async fn automatic_review_to_pr_and_noise_drain_before_limit_without_changing_raw_history() {
     let state = test_state_with_seed("selection-auto", "Selection", seed_orchestration);
     let db = Db::open(&state.config().db_path).unwrap();
+    // The pinned workflow really has an automatic successor. Its successful
+    // completion is quiet even before the engine has entered that successor.
+    db.connection_for_e2e_tests()
+        .execute(
+            "UPDATE pipeline_item SET stage = 'review', pipeline_def = ? WHERE id = 'child-a'",
+            [json!({"stages":[{"name":"review", "transition":"auto"},
+            {"name":"pr", "transition":"manual"}]})
+            .to_string()],
+        )
+        .unwrap();
     run_with_policy(&db, "review", "child-a", "review", "auto");
     db.finish_stage_run("review", "succeeded", Some("success"), None)
         .unwrap();
+    assert_eq!(selected(state.clone(), query(2)).await["events"], json!([]));
+    settle_runtime_tasks(&db, &["child-a"]);
+    assert_eq!(
+        selected(
+            state.clone(),
+            json!({"taskIds":"child-a", "localOnly":true,
+        "timeoutSecs":0})
+        )
+        .await["events"],
+        json!([])
+    );
     db.update_pipeline_item_stage("child-a", "pr").unwrap();
     run_with_policy(&db, "pr", "child-a", "pr", "manual");
     noise(&db, 12);
@@ -308,6 +329,16 @@ async fn subscription_worker_publishes_only_attention_and_ack_resumes_after_filt
     let db = Db::open(&state.config().db_path).unwrap();
     run_with_policy(&db, "manager", "child-c", "in progress", "manual");
     run_with_policy(&db, "automatic", "child-a", "in progress", "auto");
+    db.connection_for_e2e_tests()
+        .execute(
+            "UPDATE pipeline_item SET pipeline_def = ? WHERE id = 'child-a'",
+            [
+                json!({"stages":[{"name":"in progress", "transition":"auto"},
+            {"name":"pr", "transition":"manual"}]})
+                .to_string(),
+            ],
+        )
+        .unwrap();
     let app = router(state.clone());
     let (_, initial) = subscription_request(
         &app,
@@ -410,5 +441,136 @@ async fn excluded_backlog_cannot_extend_deadline_and_resumes_without_cursor_loss
         );
         resume["cursor"] = attention["cursor"].clone();
         assert_eq!(selected(state, resume).await["events"], json!([]));
+    }
+}
+
+#[tokio::test]
+async fn final_auto_completion_reaches_both_mailboxes_and_fresh_registration() {
+    for delivery in ["input", "codex_app_server"] {
+        for bootstrap in [false, true] {
+            let state = super::super::actions::final_auto_completion_state(&format!(
+                "final-auto-{delivery}-{bootstrap}"
+            ));
+            let db = Db::open(&state.config().db_path).unwrap();
+            let app = router(state.clone());
+            if bootstrap {
+                super::super::actions::complete_final_auto(&app).await;
+                settle_runtime_tasks(&db, &["child-a"]);
+            }
+            let (status, initial) = subscription_request(
+                &app,
+                "POST",
+                "/v1/event-subscriptions",
+                json!({"taskId":"child-c", "localOnly":true, "delivery":delivery}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{initial}");
+            let id = initial["id"].as_str().unwrap();
+            let page = if bootstrap {
+                initial.clone()
+            } else {
+                assert!(initial["pending"].is_null());
+                super::super::actions::complete_final_auto(&app).await;
+                let service =
+                    tokio::spawn(super::super::super::event_subscriptions::run(state.clone()));
+                let row = await_subscription(&state, id, |row| row.pending.is_some()).await;
+                service.abort();
+                let _ = service.await;
+                json!({"pending":row.pending, "batchId":row.batch_id})
+            };
+            assert_eq!(
+                event_pairs(&page["pending"]),
+                vec![(
+                    "child-a".into(),
+                    if bootstrap {
+                        "task.runtime_changed"
+                    } else {
+                        "run.finished"
+                    }
+                    .into()
+                )]
+            );
+            let (_, ack) = subscription_request(
+                &app,
+                "POST",
+                &format!("/v1/event-subscriptions/{id}/read"),
+                json!({"acknowledgeBatchId":page["batchId"]}),
+            )
+            .await;
+            assert!(ack["pending"].is_null());
+            let continued = selected(
+                state,
+                json!({"taskIds":"child-a", "localOnly":true,
+                "timeoutSecs":0, "cursor":ack["cursor"]}),
+            )
+            .await;
+            assert_eq!(continued["events"], json!([]));
+            assert_eq!(continued["cursor"], ack["cursor"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn exited_without_verdict_bootstraps_once_for_both_adapters_without_marking_read() {
+    for delivery in ["input", "codex_app_server"] {
+        let state =
+            test_state_with_seed(&format!("exited-{delivery}"), "Exited", seed_orchestration);
+        let db = Db::open(&state.config().db_path).unwrap();
+        run_with_policy(&db, "manager", "child-c", "in progress", "manual");
+        run_with_policy(&db, "automatic", "child-a", "in progress", "auto");
+        super::super::super::task_input::handle_task_terminal_state(&state, "child-a", 0)
+            .await
+            .unwrap();
+        db.connection_for_e2e_tests().execute(
+            "UPDATE pipeline_item SET runtime_event_pending_at = datetime('now', '-11 seconds')", [],
+        ).unwrap();
+        db.flush_debounced_activity_events(300).unwrap();
+        assert_eq!(
+            db.latest_stage_run("child-a").unwrap().unwrap().status,
+            "cancelled"
+        );
+        let before = db.get_pipeline_item("child-a").unwrap().unwrap();
+        assert_eq!(before.runtime_status.as_deref(), Some("exited"));
+        let app = router(state.clone());
+        let before_detail = get_json_body(&app, "/v1/tasks/child-a").await;
+        assert_eq!(before_detail["readState"], "unread");
+        let (status, initial) = subscription_request(
+            &app,
+            "POST",
+            "/v1/event-subscriptions",
+            json!({"taskId":"child-c", "localOnly":true, "delivery":delivery}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(
+            event_pairs(&initial["pending"]),
+            vec![("child-a".into(), "task.runtime_changed".into())]
+        );
+        let path = format!(
+            "/v1/event-subscriptions/{}/read",
+            initial["id"].as_str().unwrap()
+        );
+        let (_, read) = subscription_request(&app, "POST", &path, json!({})).await;
+        assert_eq!(read["pending"], initial["pending"]);
+        let (_, ack) = subscription_request(
+            &app,
+            "POST",
+            &path,
+            json!({"acknowledgeBatchId":initial["batchId"]}),
+        )
+        .await;
+        assert!(ack["pending"].is_null());
+        let continued = selected(
+            state,
+            json!({"taskIds":"child-a", "localOnly":true,
+            "timeoutSecs":0, "cursor":ack["cursor"]}),
+        )
+        .await;
+        assert_eq!(continued["events"], json!([]));
+        assert_eq!(continued["cursor"], ack["cursor"]);
+        let after = db.get_pipeline_item("child-a").unwrap().unwrap();
+        assert_eq!(after.activity, before.activity);
+        let after_detail = get_json_body(&app, "/v1/tasks/child-a").await;
+        assert_eq!(after_detail["readState"], before_detail["readState"]);
     }
 }

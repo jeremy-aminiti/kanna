@@ -378,3 +378,47 @@ results; completing their blocked assertions still requires the shared harness/
 transport and other failure dispositions above. That engineering work is not
 replaced by an owner waiver. Merge and Ship remain held until independent review
 explicitly resolves these findings and the required release evidence is satisfied.
+
+### Revision 1: final automatic completion and verdictless-exit bootstrap
+
+This revision addresses only the two review findings. Subscription enrichment
+uses the task's resolved workflow and the completion engine's shared
+post-or-successor check. Successful automatic final main completion without a
+post remains actionable until explicitly advanced, including a fresh settled
+scan. A new subscriber also reconciles an open exited session whose latest run
+was cancelled without a verdict; a durable runtime echo remains quiet. Closed
+or replaced sessions stay quiet. No completion state store, timing change,
+worker repair, terminal repair, or relay repair was added.
+
+The final-stage fixture invokes the actual complete-stage HTTP route and checks
+persisted success, an open task and no awaiting-advance event. Both `input` and
+`codex_app_server` selections receive the live completion in the mailbox and
+receive the unresolved completion on fresh registration. The zero-exit fixture
+invokes `handle_task_terminal_state`, settles its runtime using the existing
+DB debounce fixture, then registers each selection and verifies one bootstrap
+page, exact acknowledgement continuation without replay, and unchanged HTTP
+`readState`. A pinned automatic review-to-PR successor remains quiet before and
+after entering PR. These are boundary fixtures, not live provider TUI tests.
+
+After the renewed capacity release, the following ran sequentially with
+`CARGO_BUILD_JOBS=2`. Logs are under `.tmp/revision-verification/` in this revision
+worktree.
+
+| Command after the environment prefix | Result |
+| --- | --- |
+| `cargo test -p kanna-tool-catalog subscription_relevance_tests` | Exit 0; 5 passed |
+| `cargo test -p kanna-server --bin kanna-server http_api::tests::task_events::subscription_relevance -- --test-threads=1` | Exit 0; 9 passed, 5.88s |
+| `cargo test -p kanna-server --bin kanna-server http_api::tests::actions::complete_final_auto_without_post_remains_open_without_awaiting_advance -- --exact --test-threads=1` | Exit 0; 1 passed, 0.35s |
+| `cargo test -p kanna-server --bin kanna-server http_api::tests::task_events:: -- --test-threads=1` | Exit 0; 104 passed, 56.77s, including retained-peer, timing and adapter fixtures |
+| `cargo test -p kanna-tool-catalog -- --test-threads=1` | Exit 0; 7 unit and 41 contract tests passed |
+| `cargo clippy -p kanna-server --bin kanna-server --tests --no-deps -- -D warnings` | Exit 0 |
+| `cargo clippy -p kanna-tool-catalog --all-targets --no-deps -- -D warnings` | Exit 0 |
+
+The latest manager instruction requires this committed focused-results report
+before another full gate. `./kd test all` has therefore not been rerun for this
+revision. The earlier canonical exit 1 and every category in the independent
+failure matrix above remain intact: the matched-main representative stream
+failure does not dispose of peer-auth/LAN/Activity/downstream failures, and the
+worker environment diagnostic and desktop registration failure remain separate.
+Worker fixture repair `1750eec4` is in independent review and was not duplicated.
+Live Codex TUI/native timing and the unattended release boundary remain unverified.

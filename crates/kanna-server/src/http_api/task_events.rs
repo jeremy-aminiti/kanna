@@ -1276,6 +1276,10 @@ fn enrich_event_batch(
                 .map_err(|error| format!("db error: {error}"))?;
             payload.insert("notificationContext".into(), json!({
                 "completionTransition": run.as_ref().and_then(|run| run.completion_transition.as_deref()),
+                "mainCompletionHasContinuation": run.as_ref()
+                    .filter(|run| run.status == "succeeded" && run.kind == "main").map(|run|
+                    crate::task_creator::main_completion_continuation(&event_db, &task_id, &run.stage)
+                ).and_then(Result::ok).flatten(),
                 "closed": task.closed_at.is_some(),
                 "runtimeState": task.runtime_state,
                 "providerParked": task.provider_rejection.as_ref()
@@ -1285,6 +1289,10 @@ fn enrich_event_batch(
                 "latestRun": latest.as_ref().map(|run| json!({
                     "id": run.id, "kind": run.kind, "status": run.status,
                     "completionTransition": run.completion_transition,
+                    "mainCompletionHasContinuation": if run.status == "succeeded" && run.kind == "main" {
+                        crate::task_creator::main_completion_continuation(
+                            &event_db, &task_id, &run.stage).ok().flatten()
+                    } else { None },
                 })),
             }));
         }

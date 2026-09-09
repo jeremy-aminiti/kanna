@@ -7222,3 +7222,108 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
         let _ = std::fs::remove_file(&kanna_cli_path);
     }
 }
+
+/// A pinned final automatic main stage intentionally has no engine continuation.
+/// Shared with subscription tests so they exercise the real completion route.
+pub(super) fn final_auto_completion_state(label: &str) -> Arc<AppState> {
+    let repo_root = crate::test_paths::unique_test_path(label);
+    init_test_git_repo(&repo_root);
+    let repo_path = repo_root.to_string_lossy().to_string();
+    super::test_state_with_seed(label, "Final auto", move |db| {
+        db.insert_test_repo_with_path("repo-events", &repo_path, "Events")
+            .unwrap();
+        for id in ["child-a", "child-c"] {
+            db.insert_test_pipeline_item(
+                id,
+                "repo-events",
+                "work",
+                Some(id),
+                "in progress",
+                "2026-07-29 00:00:00",
+            )
+            .unwrap();
+        }
+        db.connection_for_e2e_tests()
+            .execute(
+                "UPDATE pipeline_item SET pipeline_def = ? WHERE id = 'child-a'",
+                [
+                    serde_json::json!({"stages":[{"name":"in progress", "transition":"auto"}]})
+                        .to_string(),
+                ],
+            )
+            .unwrap();
+        for (id, task, policy) in [
+            ("final", "child-a", "auto"),
+            ("manager", "child-c", "manual"),
+        ] {
+            db.insert_stage_run(crate::db::NewStageRun {
+                id,
+                task_id: task,
+                stage: "in progress",
+                kind: "main",
+                agent: None,
+                agent_provider: Some("codex"),
+                model: None,
+                effort: None,
+                status: "running",
+                result: None,
+                feedback: None,
+                session_id: Some(task),
+                provider_session_id: None,
+                cwd: None,
+                resumed_from_run_id: None,
+            })
+            .unwrap();
+            db.connection_for_e2e_tests()
+                .execute(
+                    "UPDATE stage_run SET completion_transition = ? WHERE id = ?",
+                    [policy, id],
+                )
+                .unwrap();
+        }
+    })
+}
+
+pub(super) async fn complete_final_auto(app: &axum::Router) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/tasks/child-a/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"runId":"final", "status":"success", "summary":"done"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+}
+
+#[tokio::test]
+async fn complete_final_auto_without_post_remains_open_without_awaiting_advance() {
+    let state = final_auto_completion_state("final-auto-completion");
+    let db = Db::open(&state.config().db_path).unwrap();
+    complete_final_auto(&super::router(state)).await;
+    assert_eq!(
+        db.latest_stage_run("child-a").unwrap().unwrap().status,
+        "succeeded"
+    );
+    let task = db.get_pipeline_item("child-a").unwrap().unwrap();
+    assert!(task.closed_at.is_none());
+    assert_eq!(task.stage.as_deref(), Some("in progress"));
+    let count: i64 = db
+        .connection_for_e2e_tests()
+        .query_row(
+            "SELECT count(*) FROM task_event WHERE type = 'task.awaiting_advance'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+}
