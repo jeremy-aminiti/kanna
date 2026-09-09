@@ -8,6 +8,7 @@ import {
   type KdEnvironmentProfile
 } from "./environment";
 import { selectPreferredLanAddress } from "./lan-address";
+import { accessSync, constants, readdirSync } from "node:fs";
 
 export interface DevWindow {
   name: string;
@@ -23,6 +24,10 @@ export interface DevPlan {
 export interface BuildDevPlanInput {
   repoRoot: string;
   env: NodeJS.ProcessEnv;
+  /** Defaults to the host platform; injectable so both branches are testable. */
+  platform?: NodeJS.Platform;
+  /** Defaults to probing `/dev/dri`; injectable for the same reason. */
+  canUseDrmRenderNode?: () => boolean;
   desktopSecretEnv?: NodeJS.ProcessEnv;
   mobile: boolean;
   emulators: boolean;
@@ -170,6 +175,48 @@ function relayFirebaseEnv(input: BuildDevPlanInput): Record<string, string | und
   };
 }
 
+/**
+ * Whether this user can open a DRM render node.
+ *
+ * WebKitGTK's default renderer wants one. Where it cannot get one — a VM with
+ * no passthrough, or a user outside the `render` group — the WebProcess never
+ * starts: the UI process blocks writing to a socket whose peer never appears,
+ * so the app runs with no window at all and says nothing about why. There is
+ * no error to read, which is why this is a capability check rather than a
+ * message match.
+ */
+function hasDrmRenderNode(): boolean {
+  try {
+    return readdirSync("/dev/dri")
+      .filter((entry) => entry.startsWith("renderD"))
+      .some((entry) => {
+        try {
+          accessSync(`/dev/dri/${entry}`, constants.R_OK | constants.W_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The Linux-only environment the desktop window needs beyond the display
+ * session it inherits. Empty on a machine whose GPU WebKit can actually use,
+ * so this never downgrades a working renderer.
+ */
+export function linuxDesktopWebkitEnv(input: BuildDevPlanInput): Record<string, string> {
+  const platform = input.platform ?? process.platform;
+  if (platform !== "linux") return {};
+  if (input.env.WEBKIT_DISABLE_DMABUF_RENDERER) {
+    return { WEBKIT_DISABLE_DMABUF_RENDERER: input.env.WEBKIT_DISABLE_DMABUF_RENDERER };
+  }
+  const canUseRenderNode = input.canUseDrmRenderNode ?? hasDrmRenderNode;
+  return canUseRenderNode() ? {} : { WEBKIT_DISABLE_DMABUF_RENDERER: "1" };
+}
+
 function e2eEnv(input: BuildDevPlanInput): Record<string, string | undefined> {
   const entries = Object.entries(input.env).filter(([key]) => key.startsWith("KANNA_E2E_"));
   return Object.fromEntries(entries);
@@ -237,6 +284,7 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
     env: {
       ...sharedEnv,
       KANNA_ADVERTISED_RELAY_URL: resolveRelayUrl(input),
+      ...linuxDesktopWebkitEnv(input),
       ...(input.desktopSecretEnv ?? {}),
     },
     // KANNA_REQUIRE_SIDECARS keeps the Tauri build script's `externalBin`

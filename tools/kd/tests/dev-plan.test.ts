@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDevPlan, buildProductionMobilePlan } from "../src/runtime/dev-plan";
+import { buildDevPlan, buildProductionMobilePlan, linuxDesktopWebkitEnv } from "../src/runtime/dev-plan";
 
 describe("buildDevPlan", () => {
   it("starts desktop only by default", () => {
@@ -362,5 +362,56 @@ Run '\\''copilot update'\\'' to check for updates.
 
     expect(plan.windows[0]?.env.KANNA_FIREBASE_PROJECT_ID).toBe("kanna-staging");
     expect(plan.windows[0]?.env.KANNA_RELAY_URL).toBe("wss://relay-staging.kanna.build");
+  });
+});
+
+describe("linuxDesktopWebkitEnv", () => {
+  const base = {
+    repoRoot: "/repo",
+    mobile: false,
+    emulators: false,
+    firebaseConfigPath: "/repo/.firebase.json",
+    mobileServerUrl: "http://127.0.0.1:48120",
+  };
+
+  it("adds nothing on macOS", () => {
+    expect(
+      linuxDesktopWebkitEnv({ ...base, env: {}, platform: "darwin", canUseDrmRenderNode: () => false })
+    ).toEqual({});
+  });
+
+  it("leaves a Linux machine with a usable render node on WebKit's own renderer", () => {
+    expect(
+      linuxDesktopWebkitEnv({ ...base, env: {}, platform: "linux", canUseDrmRenderNode: () => true })
+    ).toEqual({});
+  });
+
+  it("disables the DMA-BUF renderer when no render node can be opened", () => {
+    // Without this the WebProcess never starts and the app runs with no
+    // window, silently — see the function's own comment.
+    expect(
+      linuxDesktopWebkitEnv({ ...base, env: {}, platform: "linux", canUseDrmRenderNode: () => false })
+    ).toEqual({ WEBKIT_DISABLE_DMABUF_RENDERER: "1" });
+  });
+
+  it("respects an explicit setting rather than re-deciding for the user", () => {
+    expect(
+      linuxDesktopWebkitEnv({
+        ...base,
+        env: { WEBKIT_DISABLE_DMABUF_RENDERER: "0" },
+        platform: "linux",
+        canUseDrmRenderNode: () => false,
+      })
+    ).toEqual({ WEBKIT_DISABLE_DMABUF_RENDERER: "0" });
+  });
+
+  it("reaches the desktop window", () => {
+    const plan = buildDevPlan({
+      ...base,
+      env: {},
+      platform: "linux",
+      canUseDrmRenderNode: () => false,
+    });
+    expect(plan.windows[0]?.env.WEBKIT_DISABLE_DMABUF_RENDERER).toBe("1");
   });
 });

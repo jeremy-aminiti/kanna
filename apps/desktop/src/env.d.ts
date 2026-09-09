@@ -137,9 +137,17 @@ interface KannaE2EHook {
   };
   terminalBuffers?: KannaTerminalBuffersE2EApi;
   remoteCompanion?: KannaRemoteCompanionE2EApi;
+  /** What the most recently initialized terminal view actually rendered with. */
+  terminalRenderer?: import("./composables/terminalRenderer").TerminalRendererOutcome | null;
 }
 
 interface Window {
   __KANNA_E2E__?: KannaE2EHook;
+  /**
+   * Opts an E2E run into the production WebGL terminal renderer. Read before
+   * the app loads a terminal, so the harness sets it on the page rather than
+   * through the E2E hook, which does not exist yet at that point.
+   */
+  __KANNA_E2E_TERMINAL_RENDERER__?: "webgl" | "dom";
   __KANNA_E2E_AUTH_INDEXEDDB_FAULT__?: KannaAuthIndexedDbFaultE2EApi;
 }

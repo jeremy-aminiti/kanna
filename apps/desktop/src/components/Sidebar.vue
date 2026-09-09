@@ -21,6 +21,7 @@ import {
 import { useKannaStore } from "../stores/kanna";
 import { isTaskTearingDown } from "../stores/taskStages";
 import { macOsTextInputAttrs } from "../utils/textInput";
+import { shortcutHint } from "../composables/useKeyboardShortcuts";
 
 const { t } = useI18n();
 const store = useKannaStore();
@@ -713,7 +714,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
     <div ref="sidebarContentRef" class="sidebar-content">
       <div v-if="repos.length === 0" class="empty-state">
         {{ $t('sidebar.noReposYet') }}<br>
-        {{ $t('sidebar.noReposHint', { shortcut: '⌘I' }) }}
+        {{ $t('sidebar.noReposHint', { shortcut: shortcutHint('createRepo') }) }}
       </div>
 
       <div class="repo-list">
@@ -1093,7 +1094,7 @@ defineExpose({ renameSelectedItem, focusSearch, searchQuery, matchesSearch, emit
           v-bind="macOsTextInputAttrs"
           type="text"
           class="search-input"
-          :placeholder="$t('sidebar.searchPlaceholder')"
+          :placeholder="$t('sidebar.searchPlaceholder', { shortcut: shortcutHint('focusSearch') })"
           @keydown.escape="searchQuery = ''; searchInputRef?.blur()"
         />
         <button

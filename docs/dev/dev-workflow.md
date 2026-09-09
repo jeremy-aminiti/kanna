@@ -538,7 +538,7 @@ VM described in
 
 Prerequisites beyond the macOS list: the apt packages in the Phase 0 baseline
 (including `libssl-dev`, still a build prerequisite because two crates route
-TLS through `native-tls`), and `sqlite3` for `./kd doctor`.
+TLS through `native-tls`).
 
 ```bash
 # One shared Ghostty checkout. Unset, libghostty-vt-sys clones the whole

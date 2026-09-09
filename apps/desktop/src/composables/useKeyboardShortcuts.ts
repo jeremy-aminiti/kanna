@@ -1,6 +1,13 @@
 import { onMounted, onUnmounted } from "vue";
 import { isTauri } from "../tauri-mock";
 import type { ShortcutContext } from "./useShortcutContext";
+import {
+  platformBinding,
+  resolveShortcutPlatform,
+  shortcutModifierTokens,
+  type ShortcutBinding,
+  type ShortcutPlatform,
+} from "./shortcutPlatform";
 
 export type ActionName =
   | "newTask"
@@ -61,7 +68,11 @@ interface ShortcutDef {
   shift?: boolean;
   alt?: boolean;
   ctrl?: boolean;
-  /** Display string for the shortcuts modal (e.g. "Cmd+Delete") */
+  /**
+   * The macOS display string. Other platforms derive their own from the
+   * modifiers they actually dispatch on — see `shortcutPlatform.ts`, which is
+   * also where the Linux mapping and its named exceptions live.
+   */
   display: string;
   /** Which contexts this shortcut appears in. Undefined = all contexts. */
   context?: ShortcutContext[];
@@ -132,12 +143,63 @@ export const shortcuts: ShortcutDef[] = [
   { action: "dismiss",    labelKey: "shortcuts.dismiss",       groupKey: "shortcuts.groupAppHelp", key: "Escape",                                                 display: "Escape",   context: ["main", "diff", "file", "tree", "graph", "newTask", "transfer"], hidden: true, paletteHidden: true },
 ];
 
+/**
+ * What each shortcut dispatches on and displays here. Resolved once: the
+ * platform cannot change while the app is running, and `matches` is on the
+ * keydown path for every keystroke the app sees.
+ */
+export function bindingsFor(platform: ShortcutPlatform): Map<ActionName, ShortcutBinding> {
+  return new Map(shortcuts.map((def) => [def.action, platformBinding(def.action, def, platform)]));
+}
+
+let resolvedBindings: Map<ActionName, ShortcutBinding> | null = null;
+
+function bindings(): Map<ActionName, ShortcutBinding> {
+  resolvedBindings ??= bindingsFor(resolveShortcutPlatform());
+  return resolvedBindings;
+}
+
+/** Test seam: the platform is fixed for an app run, and a test run is not one. */
+export function resetShortcutBindingsForTests(): void {
+  resolvedBindings = null;
+}
+
+/**
+ * The hint text for one action on this platform: "⌘I" or "Ctrl+Shift+I".
+ *
+ * Empty-state copy used to interpolate the glyph string directly, which is how
+ * a Linux user ended up being told to press a key their keyboard does not have.
+ */
+export function shortcutHint(action: ActionName): string {
+  return bindings().get(action)?.display ?? "";
+}
+
+/** The hint split into individual keys, for `<kbd>` rendering. */
+export function shortcutHintKeys(action: ActionName): string[] {
+  const hint = shortcutHint(action);
+  if (resolveShortcutPlatform() !== "mac") return hint.split("+").filter(Boolean);
+  const tokens = shortcutModifierTokens("mac");
+  const keys: string[] = [];
+  let rest = hint;
+  while (rest.length) {
+    const modifier = tokens.find((token) => rest.startsWith(token));
+    if (!modifier) {
+      keys.push(rest);
+      break;
+    }
+    keys.push(modifier);
+    rest = rest.slice(modifier.length);
+  }
+  return keys;
+}
+
 function matches(def: ShortcutDef, e: KeyboardEvent): boolean {
+  const binding = bindings().get(def.action) ?? def;
   // Exact modifier match — no extra modifiers allowed
-  if (e.metaKey !== (def.meta ?? false)) return false;
-  if (e.shiftKey !== (def.shift ?? false)) return false;
-  if (e.altKey !== (def.alt ?? false)) return false;
-  if (e.ctrlKey !== (def.ctrl ?? false)) return false;
+  if (e.metaKey !== (binding.meta ?? false)) return false;
+  if (e.shiftKey !== (binding.shift ?? false)) return false;
+  if (e.altKey !== (binding.alt ?? false)) return false;
+  if (e.ctrlKey !== (binding.ctrl ?? false)) return false;
   const keys = Array.isArray(def.key) ? def.key : [def.key];
   const codes = def.code ? (Array.isArray(def.code) ? def.code : [def.code]) : [];
   return keys.includes(e.key) || codes.includes(e.code);
@@ -167,7 +229,10 @@ export function getShortcutGroups(t: (key: string) => string): { key: string; ti
   for (const def of shortcuts) {
     if (def.hidden) continue;
     if (!map.has(def.groupKey)) map.set(def.groupKey, []);
-    map.get(def.groupKey)!.push({ keys: def.display, action: t(def.labelKey) });
+    map.get(def.groupKey)!.push({
+      keys: bindings().get(def.action)?.display ?? def.display,
+      action: t(def.labelKey),
+    });
   }
   const groups = groupOrder.filter((g) => map.has(g)).map((g) => ({ key: g, title: t(g), shortcuts: map.get(g)! }));
   return groups.map((group) => ({

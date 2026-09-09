@@ -1,13 +1,47 @@
 use std::collections::HashMap;
 use std::process::Command;
 
+use kanna_runtime_defaults::login_shell::login_shell;
+
+/// How the desktop should launch a shell, resolved once by the shared policy
+/// in `kanna-runtime-defaults`.
+///
+/// The frontend used to answer this itself, with a `/bin/zsh` literal in
+/// `stores/sessions.ts`. That was a second source of truth for something the
+/// server already decided, and on a machine with no zsh it was simply wrong.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellLaunch {
+    /// Absolute path to the shell binary.
+    pub executable: String,
+    /// The shell's own name, e.g. `zsh`, `bash`, `sh`.
+    pub name: String,
+    /// How this shell spells "login": `--login`, or `-l` for POSIX `sh`.
+    pub login_arg: String,
+}
+
+#[tauri::command]
+pub fn shell_launch() -> ShellLaunch {
+    let shell = login_shell();
+    ShellLaunch {
+        executable: shell.path().to_string(),
+        name: shell.name().to_string(),
+        login_arg: shell.login_arg().to_string(),
+    }
+}
+
 /// Ensure the Kanna zsh init directory exists with proxy rc files.
 ///
-/// Returns the path to the directory (suitable for ZDOTDIR).
-/// The init files set Kanna defaults (e.g. emacs keybindings) BEFORE
-/// sourcing the user's own rc files, so users can override in ~/.zshrc.
+/// Returns the path to the directory (suitable for ZDOTDIR), or `None` when
+/// the resolved shell is not zsh. ZDOTDIR means nothing to bash or dash, and
+/// these proxy files are zsh syntax: exporting the directory to a bash shell
+/// tab would be inert at best. Linux resolves to bash on a stock image, so
+/// this is the ordinary path there, not an edge case.
 #[tauri::command]
-pub fn ensure_term_init() -> Result<String, String> {
+pub fn ensure_term_init() -> Result<Option<String>, String> {
+    if login_shell().name() != "zsh" {
+        return Ok(None);
+    }
     let dir = crate::daemon_data_dir().join("zsh");
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create zsh init dir: {e}"))?;
 
@@ -48,7 +82,7 @@ unset _kanna_home KANNA_ORIG_ZDOTDIR
     }
 
     dir.to_str()
-        .map(|s| s.to_string())
+        .map(|s| Some(s.to_string()))
         .ok_or_else(|| "non-UTF-8 path".to_string())
 }
 
@@ -66,10 +100,16 @@ fn run_script_sync(
     cwd: &str,
     env: HashMap<String, String>,
 ) -> Result<String, String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let mut command = Command::new(&shell);
+    // The policy already reads $SHELL, and rejects the values that cannot run
+    // a Kanna script -- a shell that is not there, or one whose rc semantics
+    // this is not written for. macOS still resolves to `/bin/zsh` with `-l`,
+    // which is what this call site has always used.
+    let shell = login_shell();
+    let mut command = Command::new(shell.path());
     crate::subprocess_env::apply_child_env(&mut command, env);
     let output = command
+        // `-l` deliberately, not `login_arg()`: it is what this call site has
+        // always passed on macOS, and all three policy shells accept it.
         .arg("-l")
         .arg("-c")
         .arg(script)

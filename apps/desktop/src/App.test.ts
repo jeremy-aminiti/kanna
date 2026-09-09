@@ -382,7 +382,11 @@ vi.mock("./composables/useOperatorEvents", () => ({
   useOperatorEvents: vi.fn(),
 }));
 
-vi.mock("./composables/useKeyboardShortcuts", () => ({
+vi.mock("./composables/useKeyboardShortcuts", async (importOriginal) => ({
+  // Only the registration hook is replaced, so the test can drive actions
+  // directly. The hint helpers stay real: components render them, and a stub
+  // would let a platform mapping regress without anything noticing.
+  ...(await importOriginal<typeof import("./composables/useKeyboardShortcuts")>()),
   useKeyboardShortcuts: vi.fn((actions: KeyboardActions) => {
     capturedKeyboardActions = actions;
   }),

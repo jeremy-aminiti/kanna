@@ -1,10 +1,17 @@
 //! The shell Kanna runs repository commands and PTY tasks through.
 //!
-//! Three product surfaces need one: the setup/teardown supervisor
-//! (`workspace_commands`), login-shell PATH discovery
-//! (`task_creator::environment`), and the PTY bootstrap a task's agent CLI
-//! runs inside (`task_creator`). They must agree, and until Linux support
-//! they all simply said `/bin/zsh`.
+//! Four product surfaces need one: the setup/teardown supervisor
+//! (`kanna-server`'s `workspace_commands`), login-shell PATH discovery
+//! (`task_creator::environment`), the PTY bootstrap a task's agent CLI runs
+//! inside (`task_creator`), and the desktop app's own shell tabs and
+//! `run_script`. They must agree, and until Linux support they all simply
+//! said `/bin/zsh`.
+//!
+//! It lives here rather than in `kanna-server` because the desktop is a
+//! separate process that cannot call into the server's private modules. The
+//! desktop had its own copy of the old answer -- a `/bin/zsh` literal in
+//! TypeScript -- which is exactly the split brain this crate exists to
+//! prevent; it now asks Tauri, which asks this policy.
 //!
 //! macOS keeps saying exactly that: `/bin/zsh` ships with the system, is the
 //! default login shell, and every existing expectation -- including the argv
@@ -47,29 +54,47 @@ enum Family {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LoginShell {
+pub struct LoginShell {
     path: PathBuf,
     family: Family,
 }
 
 impl LoginShell {
     /// Absolute path to the shell binary.
-    pub(crate) fn path(&self) -> &str {
+    pub fn path(&self) -> &str {
         // Every candidate is an absolute path made of valid UTF-8 by
         // construction; `$SHELL` is only accepted after `to_str` succeeds.
         self.path.to_str().unwrap_or("/bin/sh")
     }
 
-    fn login_flag(&self) -> &'static str {
+    /// The shell's own name, e.g. `zsh`, `bash`, `sh`. Callers that write
+    /// shell-specific startup files -- the desktop's ZDOTDIR proxy rc files --
+    /// have to know which shell they are configuring, not just how to run it.
+    pub fn name(&self) -> &str {
+        self.path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("sh")
+    }
+
+    /// How this shell spells "login" on its own command line. Exposed because
+    /// the desktop builds two argv vectors of its own -- a bare login shell for
+    /// a shell tab, and a login+interactive `-c` for the legacy PTY launch --
+    /// and must not re-derive the spelling.
+    pub fn login_arg(&self) -> &'static str {
         match self.family {
             Family::LongLogin => "--login",
             Family::ShortLogin => "-l",
         }
     }
 
+    fn login_flag(&self) -> &'static str {
+        self.login_arg()
+    }
+
     /// Run `command` in a login shell, non-interactively: repository setup and
     /// teardown, which must source profiles but has no terminal.
-    pub(crate) fn login_args(&self, command: &str) -> Vec<String> {
+    pub fn login_args(&self, command: &str) -> Vec<String> {
         vec![
             self.login_flag().to_string(),
             "-c".to_string(),
@@ -80,7 +105,7 @@ impl LoginShell {
     /// Run `command` in a login *and interactive* shell: PATH discovery and
     /// the PTY bootstrap, both of which need the rc files an interactive
     /// shell sources, not just the profile.
-    pub(crate) fn login_interactive_args(&self, command: &str) -> Vec<String> {
+    pub fn login_interactive_args(&self, command: &str) -> Vec<String> {
         vec![
             self.login_flag().to_string(),
             "-i".to_string(),
@@ -91,7 +116,7 @@ impl LoginShell {
 }
 
 /// The process-wide resolved shell.
-pub(crate) fn login_shell() -> &'static LoginShell {
+pub fn login_shell() -> &'static LoginShell {
     static RESOLVED: std::sync::OnceLock<LoginShell> = std::sync::OnceLock::new();
     RESOLVED.get_or_init(|| {
         resolve_login_shell(std::env::var_os("SHELL").as_deref(), is_executable_file)

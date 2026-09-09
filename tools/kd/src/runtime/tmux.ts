@@ -14,12 +14,43 @@ export interface StartTmuxSessionOptions {
 
 const RECONCILE_OPTION = "@kanna_reconcile_key";
 
-function tmuxWindowEnvArgs(env: NodeJS.ProcessEnv): string[] {
-  const keys = [
-    "KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL",
-    "KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD",
-  ];
-  return keys.flatMap((key) => {
+const ALWAYS_FORWARDED_ENV_KEYS = [
+  "KANNA_DESKTOP_AUTO_SIGN_IN_EMAIL",
+  "KANNA_DESKTOP_AUTO_SIGN_IN_PASSWORD",
+];
+
+// The Linux desktop window has to reach the user's display server, and tmux
+// will not carry it there on its own: a window only keeps what `-e` named for
+// it, while the tmux *server* keeps whichever environment first created it —
+// which on a machine that has run `kd` from more than one login is not
+// necessarily this session's. Naming the session variables explicitly is also
+// what makes a respawn land on the same display the window started on.
+// macOS has no such variables, so it keeps the two-key list it always had.
+const LINUX_SESSION_ENV_KEYS = [
+  "WAYLAND_DISPLAY",
+  "DISPLAY",
+  "XAUTHORITY",
+  "XDG_RUNTIME_DIR",
+  "XDG_SESSION_TYPE",
+  "XDG_CURRENT_DESKTOP",
+  "DBUS_SESSION_BUS_ADDRESS",
+  "GDK_BACKEND",
+  // Set by `linuxDesktopWebkitEnv` when this machine has no usable DRM render
+  // node. A respawn that lost it would start an app with no window.
+  "WEBKIT_DISABLE_DMABUF_RENDERER",
+];
+
+export function tmuxWindowEnvKeys(platform: NodeJS.Platform = process.platform): string[] {
+  return platform === "linux"
+    ? [...ALWAYS_FORWARDED_ENV_KEYS, ...LINUX_SESSION_ENV_KEYS]
+    : [...ALWAYS_FORWARDED_ENV_KEYS];
+}
+
+export function tmuxWindowEnvArgs(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform
+): string[] {
+  return tmuxWindowEnvKeys(platform).flatMap((key) => {
     const value = env[key];
     return typeof value === "string" && value.length > 0
       ? [`${key}=${value}`]

@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { assertNotProductionDb, deleteSqliteDb, seedSqliteDb, resetSqliteDb } from "../src/runtime/db";
-import type { CommandRunner } from "../src/runtime/process";
 
 describe("dev database safety", () => {
   it("refuses production database names and paths", () => {
@@ -21,32 +21,55 @@ describe("dev database safety", () => {
     writeFileSync(dbPath, "old");
     writeFileSync(`${dbPath}-wal`, "wal");
     writeFileSync(`${dbPath}-shm`, "shm");
-    const calls: string[] = [];
-    const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push(`${command} ${args.join(" ")}`);
-        writeFileSync(dbPath, "");
-        return { exitCode: 0, stdout: "", stderr: "" };
-      }
-    };
-
-    await resetSqliteDb(runner, { dbName: "dev.db", dbPath });
+    resetSqliteDb({ dbName: "dev.db", dbPath });
 
     expect(existsSync(dbPath)).toBe(true);
     expect(existsSync(`${dbPath}-wal`)).toBe(false);
     expect(existsSync(`${dbPath}-shm`)).toBe(false);
-    expect(calls).toEqual([`sqlite3 ${dbPath} PRAGMA user_version;`]);
+    // Openable, and openable by SQLite rather than by whatever wrote "old".
+    const db = new DatabaseSync(dbPath);
+    try {
+      expect(db.prepare("PRAGMA user_version").get()).toEqual({ user_version: 0 });
+    } finally {
+      db.close();
+    }
   });
 
-  it("refuses production at the direct delete and seed boundaries", async () => {
+  it("seeds without needing a sqlite3 command line tool", () => {
+    // The `sqlite3` CLI is not installed on a stock Ubuntu image, and its
+    // absence used to surface as `spawn sqlite3 ENOENT` from inside an E2E run.
+    const dir = mkdtempSync(join(tmpdir(), "kd-db-seed-"));
+    const dbPath = join(dir, "dev.db");
+    resetSqliteDb({ dbName: "dev.db", dbPath });
+    const repoRoot = join(dir, "repo");
+    const seedDir = join(repoRoot, "apps", "desktop", "tests", "e2e");
+    mkdirSync(seedDir, { recursive: true });
+    writeFileSync(join(seedDir, "seed.sql"), "CREATE TABLE seeded (id INTEGER);\n");
+
+    seedSqliteDb(repoRoot, dbPath);
+
+    const db = new DatabaseSync(dbPath);
+    try {
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'seeded'").get(),
+      ).toEqual({ name: "seeded" });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("refuses to reset the production database before touching the disk", () => {
+    expect(() => resetSqliteDb({ dbName: "kanna-v2.db", dbPath: "/tmp/kanna-v2.db" })).toThrow(
+      "production database",
+    );
+  });
+
+  it("refuses production at the direct delete and seed boundaries", () => {
     const dir = mkdtempSync(join(tmpdir(), "kd-db-guard-"));
     const dbPath = join(dir, "kanna-v2.db");
     writeFileSync(dbPath, "owner data");
-    const runner: CommandRunner = {
-      async run() { throw new Error("must never execute SQLite"); }
-    };
     expect(() => deleteSqliteDb(dbPath)).toThrow("production database");
-    await expect(seedSqliteDb(runner, dir, dbPath)).rejects.toThrow("production database");
+    expect(() => seedSqliteDb(dir, dbPath)).toThrow("production database");
     expect(readFileSync(dbPath, "utf8")).toBe("owner data");
     rmSync(dir, { recursive: true });
   });

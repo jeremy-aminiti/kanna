@@ -127,7 +127,7 @@
     "transfer": "タスク転送ショートカット"
   },
   "sidebar": {
-    "searchPlaceholder": "タスクを検索…  ⌘F",
+    "searchPlaceholder": "タスクを検索…  {shortcut}",
     "clearSearch": "タスク検索をクリア",
     "noTasks": "タスクなし",
     "noTasksMatching": "「{query}」に一致するタスクはありません",

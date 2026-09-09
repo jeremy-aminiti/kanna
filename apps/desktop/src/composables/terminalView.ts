@@ -16,6 +16,10 @@ import { registerTerminalFileLinkProvider } from "./terminalFileLinkRegistry"
 import { createTerminalDropBridge, type TerminalDropBridge } from "./terminalDropBridge"
 import { isShiftEnter, SHIFT_ENTER_CSI_U } from "./terminalKeyboard"
 import { createTerminalInputProducerClassifier } from "./terminalInputProducer"
+import { recordTerminalRendererOutcome, requestedTerminalRenderer } from "./terminalRenderer"
+import { resolveShortcutPlatform, terminalClipboardAction } from "./shortcutPlatform"
+
+const terminalPlatform = resolveShortcutPlatform()
 
 export interface InitializedTerminalView {
   term: Terminal
@@ -62,20 +66,25 @@ export function initializeTerminalView(params: {
   })
   term.loadAddon(params.fitAddon)
   term.loadAddon(new WebLinksAddon(params.handleLinkActivate))
-  // Keep E2E screenshots tied to xterm's painted DOM rows. WKWebView can
-  // report the WebGL-backed logical buffer while capturing a blank native
-  // surface when a second desktop window is open; production keeps WebGL.
-  if (!window.__KANNA_E2E__) {
+  // Production keeps WebGL; E2E defaults to the DOM renderer so screenshots
+  // stay tied to xterm's painted rows. See `terminalRenderer.ts` for why, and
+  // for how a rendering-specific run opts back into WebGL.
+  if (requestedTerminalRenderer(window) === "webgl") {
     try {
       const webgl = new WebglAddon()
       webgl.onContextLoss(() => {
         console.warn("[terminal] WebGL context lost, falling back to DOM renderer")
+        recordTerminalRendererOutcome({ renderer: "dom", reason: "context-lost" })
         webgl.dispose()
       })
       term.loadAddon(webgl)
+      recordTerminalRendererOutcome({ renderer: "webgl" })
     } catch (e) {
       console.warn("[terminal] WebGL addon failed, falling back to DOM renderer:", e)
+      recordTerminalRendererOutcome({ renderer: "dom", reason: "unavailable" })
     }
+  } else {
+    recordTerminalRendererOutcome({ renderer: "dom", reason: "requested" })
   }
   term.loadAddon(new ImageAddon())
 
@@ -166,20 +175,39 @@ export function initializeTerminalView(params: {
       return true
     }
     if (isAppShortcut(e)) return false
-    // Prevent kitty keyboard from encoding Cmd+key as CSI sequences —
-    // let them fall through to the OS/browser (Cmd+Q, Cmd+V, etc.).
-    // Cmd+C is special: copy the terminal selection to clipboard.
-    if (e.type === "keydown" && e.metaKey) {
-      if (e.key === "c" && !e.altKey && !e.ctrlKey) {
+    // The clipboard chord: ⌘C/⌘V on macOS, Ctrl+Shift+C/V on Linux, where
+    // plain Ctrl+C is SIGINT and belongs to the PTY. See `shortcutPlatform`.
+    if (e.type === "keydown") {
+      const clipboardAction = terminalClipboardAction(e, terminalPlatform)
+      if (clipboardAction === "copy") {
         const sel = term.getSelection()
         if (sel) navigator.clipboard.writeText(sel)
         e.preventDefault()
+        return false
       }
-      if (params.options?.agentTerminal && e.key === "v" && !e.altKey && !e.ctrlKey) {
-        void params.maybeReadClipboardImage()
+      if (clipboardAction === "paste") {
+        if (params.options?.agentTerminal) void params.maybeReadClipboardImage()
+        // macOS lets ⌘V fall through to the webview's own paste event. No such
+        // native handler exists for Ctrl+Shift+V, so read it here — through
+        // `term.paste`, which still wraps the text in bracketed-paste markers
+        // when the program on the other end asked for them.
+        if (terminalPlatform !== "mac") {
+          e.preventDefault()
+          void navigator.clipboard
+            .readText()
+            .then((text) => {
+              if (text) term.paste(text)
+            })
+            .catch((error) => {
+              console.warn("[terminal] clipboard paste failed:", error)
+            })
+        }
+        return false
       }
-      return false
     }
+    // Prevent kitty keyboard from encoding Cmd+key as CSI sequences —
+    // let them fall through to the OS/browser (Cmd+Q, Cmd+V, etc.).
+    if (e.type === "keydown" && e.metaKey) return false
     return true
   })
 

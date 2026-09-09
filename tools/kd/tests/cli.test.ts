@@ -1314,7 +1314,7 @@ describe("kd CLI", () => {
       input: {},
     });
     expect(getTaskDefinition("test.rust").description).toBe(
-      "Run workspace Rust tests with daemon integration tests serialized.",
+      "Run workspace Rust tests with daemon integration tests serialized. --desktop adds the Tauri desktop crate on a platform whose default is headless.",
     );
     expect(parseCliArgs(["test", "desktop-e2e"])).toEqual({
       taskId: "test.desktop-e2e",

@@ -127,7 +127,7 @@
     "transfer": "작업 전송 단축키"
   },
   "sidebar": {
-    "searchPlaceholder": "작업 검색…  ⌘F",
+    "searchPlaceholder": "작업 검색…  {shortcut}",
     "clearSearch": "작업 검색 지우기",
     "noTasks": "작업 없음",
     "noTasksMatching": "\"{query}\"와 일치하는 작업이 없습니다",

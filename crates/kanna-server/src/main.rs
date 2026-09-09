@@ -12,7 +12,7 @@ mod human_control;
 mod internal_ports;
 mod ksp;
 mod logging;
-mod login_shell;
+pub(crate) use kanna_runtime_defaults::login_shell;
 mod mobile_api;
 mod pairing;
 mod register;

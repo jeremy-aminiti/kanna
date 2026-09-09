@@ -176,6 +176,8 @@ const mockState = vi.hoisted(() => {
         return "/tmp/kanna.sock";
       case "read_env_var":
         return readEnvVarOverrides[String(args?.name ?? "")] ?? "";
+      case "shell_launch":
+        return { executable: "/bin/zsh", name: "zsh", loginArg: "--login" };
       case "ensure_term_init":
         return "/tmp/kanna-zdotdir";
       case "read_builtin_resource":

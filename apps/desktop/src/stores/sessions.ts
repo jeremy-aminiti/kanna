@@ -18,6 +18,7 @@ import {
 import { shouldIgnoreRuntimeStatusDuringSetup } from "./taskRuntimeStatus";
 import { resolveTaskItemForDaemonSession } from "./taskSessionIdentity";
 import { isReadableDirectory, resolveShellSpawnCwd } from "../utils/shellCwd";
+import { resolveShellLaunch } from "../composables/shellLaunch";
 import { fetchRepoConfig, requireService, type PreparedPtySession, type PtySpawnOptions, type StoreContext, type TaskSessionRecoveryOptions } from "./state";
 import { isTaskSelectedInAnyWindow } from "./windowSelection";
 import { applyDesktopTaskRuntimeStatus, putDesktopTaskAgentSession } from "../services/desktopServerClient";
@@ -249,7 +250,10 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
       Object.assign(env, buildKannaCliPathEnv(resolvedKannaCliPath, runtimePath));
     }
     try {
-      env.ZDOTDIR = await invoke<string>("ensure_term_init");
+      // Null when the resolved shell is not zsh: ZDOTDIR means nothing to bash
+      // or dash, and the proxy rc files behind it are zsh syntax.
+      const zdotdir = await invoke<string | null>("ensure_term_init");
+      if (zdotdir) env.ZDOTDIR = zdotdir;
     } catch (error) {
       console.error("[store] failed to set up term init:", error);
     }
@@ -261,11 +265,12 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
         to: resolvedCwd.cwd,
       });
     }
+    const shell = await resolveShellLaunch();
     await invoke("spawn_session", {
       sessionId,
       cwd: resolvedCwd.cwd,
-      executable: "/bin/zsh",
-      args: ["--login"],
+      executable: shell.executable,
+      args: [shell.loginArg],
       env,
       cols: 80,
       rows: 24,
@@ -418,11 +423,12 @@ export function createSessionsApi(context: StoreContext): SessionsApi {
     });
     const fullCmd = buildTaskShellCommand(agentCmd, setupCmds, { kannaCliPath, agentCmdPreamble });
 
+    const shell = await resolveShellLaunch();
     await invoke("spawn_session", {
       sessionId,
       cwd,
-      executable: "/bin/zsh",
-      args: ["--login", "-i", "-c", fullCmd],
+      executable: shell.executable,
+      args: [shell.loginArg, "-i", "-c", fullCmd],
       env,
       cols,
       rows,

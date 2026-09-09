@@ -219,6 +219,10 @@ const devRestartInputSchema = devUpInputSchema.extend({
   withCredentials: z.boolean().default(false)
 });
 
+const rustTestInputSchema = z.object({
+  desktop: z.boolean().default(false)
+});
+
 const devDownInputSchema = z.object({
   killDaemon: z.boolean().default(false)
 });
@@ -567,7 +571,7 @@ export async function executeDevUpWithContext(input: DevUpInput, executor: Execu
   }
 
   if (input.deleteDb) {
-    await resetSqliteDb(executor.runner, dbTarget);
+    resetSqliteDb(dbTarget);
   }
 
   const env = applyEnvironmentProfile(executor.context.env, profile);
@@ -591,7 +595,7 @@ export async function executeDevUpWithContext(input: DevUpInput, executor: Execu
     reconcileKey: `dev:${formatEnvironmentProfile(profile)}`
   });
   if (input.seed) {
-    await seedSqliteDb(executor.runner, executor.context.repoRoot, env.KANNA_DB_PATH ?? "");
+    seedSqliteDb(executor.context.repoRoot, env.KANNA_DB_PATH ?? "");
   }
   if (input.attach) {
     await executor.runner.run("tmux", ["-L", executor.context.tmux.server, "attach", "-t", executor.context.tmux.session]);
@@ -2005,9 +2009,9 @@ async function executeDevSeed(input: z.infer<typeof seedInputSchema>): Promise<T
   const dbTarget = devDbTarget(context);
   assertNotProductionDb(dbTarget);
   if (input.deleteDb) {
-    await resetSqliteDb(nodeCommandRunner, dbTarget);
+    resetSqliteDb(dbTarget);
   }
-  await seedSqliteDb(nodeCommandRunner, context.repoRoot, context.env.KANNA_DB_PATH ?? "");
+  seedSqliteDb(context.repoRoot, context.env.KANNA_DB_PATH ?? "");
   return {
     ok: true,
     message: `Seeded ${context.env.KANNA_DB_PATH ?? ""}`,
@@ -2851,9 +2855,11 @@ export const taskDefinitions = [
   },
   {
     id: "test.rust",
-    description: "Run workspace Rust tests with daemon integration tests serialized.",
-    inputSchema: emptyInputSchema,
-    execute: async () => {
+    description:
+      "Run workspace Rust tests with daemon integration tests serialized. --desktop adds the Tauri desktop crate on a platform whose default is headless.",
+    inputSchema: rustTestInputSchema,
+    execute: async (_context, input) => {
+      const parsed = rustTestInputSchema.parse(input);
       const context = await resolveDefaultContext(process.env);
       return withRustGate({
         homeDir: context.homeDir,
@@ -2861,7 +2867,8 @@ export const taskDefinitions = [
         run: (env) => executeRustTests({
           repoRoot: context.repoRoot,
           env,
-          runner: nodeCommandRunner
+          runner: nodeCommandRunner,
+          desktop: parsed.desktop
         })
       });
     },
@@ -3118,7 +3125,9 @@ export const taskDefinitions = [
     description: "Check Kanna development prerequisites.",
     inputSchema: emptyInputSchema,
     execute: async () => {
-      const result = await checkRequiredCommands(nodeCommandRunner, ["git", "pnpm", "tmux", "rustc", "cargo", "sqlite3"]);
+      // `sqlite3` is deliberately absent: `kd` uses the `node:sqlite` bundled
+      // with the Node it already requires, so a stock image needs no CLI.
+      const result = await checkRequiredCommands(nodeCommandRunner, ["git", "pnpm", "tmux", "rustc", "cargo"]);
       return {
         ok: result.ok,
         message: formatJsonResult(result.commands),

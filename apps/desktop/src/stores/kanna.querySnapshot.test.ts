@@ -94,6 +94,8 @@ const mockState = vi.hoisted(() => {
 
   const invokeImplementation = async (command: string, args?: Record<string, unknown>) => {
     switch (command) {
+      case "shell_launch":
+        return { executable: "/bin/zsh", name: "zsh", loginArg: "--login" };
       case "ensure_term_init":
       case "list_sessions":
       case "get_app_data_dir":

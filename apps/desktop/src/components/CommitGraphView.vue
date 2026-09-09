@@ -5,6 +5,7 @@ import { invoke } from "../invoke";
 import { useLessScroll } from "../composables/useLessScroll";
 import { registerContextShortcuts } from "../composables/useShortcutContext";
 import { macOsTextInputAttrs } from "../utils/textInput";
+import { metaOrControlHint } from "../composables/shortcutPlatform";
 import {
   layoutCommitGraph,
   type GraphResult,
@@ -326,7 +327,7 @@ useLessScroll(scrollRef, {
 
 registerContextShortcuts("graph", [
   { label: t("commitGraph.shortcutSearch"), display: "/", groupKey: "shortcuts.groupSearch" },
-  { label: t("commitGraph.shortcutSearchAlt"), display: "⌘F", groupKey: "shortcuts.groupSearch" },
+  { label: t("commitGraph.shortcutSearchAlt"), display: metaOrControlHint("f"), groupKey: "shortcuts.groupSearch" },
   { label: t("commitGraph.shortcutNextPrevMatch"), display: "n / N", groupKey: "shortcuts.groupSearch" },
   { label: t("commitGraph.shortcutLineUpDown"), display: "j / k", groupKey: "shortcuts.groupNavigation" },
   { label: t("commitGraph.shortcutPageUpDown"), display: "f / b", groupKey: "shortcuts.groupNavigation" },

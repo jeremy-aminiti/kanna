@@ -127,7 +127,7 @@
     "transfer": "Task Transfer Shortcuts"
   },
   "sidebar": {
-    "searchPlaceholder": "Search tasks…  ⌘F",
+    "searchPlaceholder": "Search tasks…  {shortcut}",
     "clearSearch": "Clear task search",
     "noTasks": "No tasks",
     "noTasksMatching": "No tasks match \"{query}\"",

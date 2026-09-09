@@ -70,6 +70,8 @@ const mockState = vi.hoisted(() => {
       case "list_dir":
         return [];
       case "spawn_session":
+      case "shell_launch":
+        return { executable: "/bin/zsh", name: "zsh", loginArg: "--login" };
       case "ensure_term_init":
       case "get_app_data_dir":
       case "get_workflow_socket_path":
