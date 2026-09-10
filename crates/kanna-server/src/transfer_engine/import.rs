@@ -574,14 +574,22 @@ async fn run_import(
         source_machine_task_label: payload.task.branch.clone(),
     })
     .map_err(|error| format!("db error: {error}"))?;
-    if !db
+    let marked = db
         .mark_incoming_transfer_awaiting_acknowledgment(
             transfer_id,
             &local_task_id,
             ENGINE_CLAIM_TOKEN,
         )
         .map_err(|error| format!("db error: {error}"))?
-    {
+    )?;
+    let already_awaiting = db
+        .get_task_transfer(transfer_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .is_some_and(|transfer| {
+            transfer.local_task_id.as_deref() == Some(local_task_id.as_str())
+                && transfer.status == "awaiting_acknowledgment"
+        });
+    if !marked && !already_awaiting {
         return Err(format!(
             "failed to mark incoming transfer awaiting acknowledgment: {transfer_id}"
         )
