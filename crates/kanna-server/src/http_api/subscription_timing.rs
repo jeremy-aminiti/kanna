@@ -9,15 +9,47 @@ use tokio::time::Instant;
 pub(super) const QUIET: Duration = Duration::from_millis(300_000);
 pub(super) const MAX_HOLD: Duration = Duration::from_millis(300_000);
 pub(super) const ADMISSION_INTERVAL: Duration = Duration::from_millis(60_000);
+/// Floor for a per-subscription override of quiet/max-hold/admission
+/// spacing (validated at registration in `event_subscriptions::subscribe`).
+/// Without one, a near-zero override would defeat the pacing this module
+/// exists to provide.
+pub(super) const MIN_OVERRIDE: Duration = Duration::from_millis(1_000);
 
-#[derive(Default)]
 pub(super) struct Collection {
     first: Option<Instant>,
     last: Option<Instant>,
     urgent: bool,
+    quiet: Duration,
+    max_hold: Duration,
+}
+
+impl Default for Collection {
+    fn default() -> Self {
+        Self::new(QUIET, MAX_HOLD)
+    }
 }
 
 impl Collection {
+    pub(super) fn new(quiet: Duration, max_hold: Duration) -> Self {
+        Self {
+            first: None,
+            last: None,
+            urgent: false,
+            quiet,
+            max_hold,
+        }
+    }
+
+    /// Build from a subscription's own (already-validated) query overrides,
+    /// falling back to the manager-adopted defaults when absent — including
+    /// for a pre-existing row created before this override existed.
+    pub(super) fn from_query(quiet_ms: Option<u64>, max_hold_ms: Option<u64>) -> Self {
+        Self::new(
+            quiet_ms.map(Duration::from_millis).unwrap_or(QUIET),
+            max_hold_ms.map(Duration::from_millis).unwrap_or(MAX_HOLD),
+        )
+    }
+
     pub(super) fn observe(&mut self, events: &[Value], now: Instant) {
         if !events.is_empty() {
             self.first.get_or_insert(now);
@@ -28,7 +60,9 @@ impl Collection {
 
     pub(super) fn deadline(&self, receiver: Instant) -> Instant {
         match (self.first, self.last) {
-            (Some(first), Some(last)) => (last + QUIET).min(first + MAX_HOLD).min(receiver),
+            (Some(first), Some(last)) => {
+                (last + self.quiet).min(first + self.max_hold).min(receiver)
+            }
             _ => receiver,
         }
     }
@@ -77,13 +111,26 @@ fn urgent(event: &Value) -> bool {
 /// occurred; recovery never trusts a wall-clock timestamp or accumulates credit.
 pub(super) struct Admission {
     next: Option<Instant>,
+    interval: Duration,
 }
 
 impl Admission {
-    pub(super) fn new(recovered: bool) -> Self {
+    pub(super) fn new(recovered: bool, interval: Duration) -> Self {
         Self {
-            next: recovered.then(|| Instant::now() + ADMISSION_INTERVAL),
+            next: recovered.then(|| Instant::now() + interval),
+            interval,
         }
+    }
+
+    /// A subscription's own (already-validated) override, or the
+    /// manager-adopted default when absent — including for a pre-existing
+    /// row created before this override existed.
+    pub(super) fn interval_from_query(query: &Value) -> Duration {
+        query
+            .get("minAdmissionIntervalMs")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis)
+            .unwrap_or(ADMISSION_INTERVAL)
     }
 
     pub(super) fn deadline(&self) -> Option<Instant> {
@@ -91,7 +138,7 @@ impl Admission {
     }
 
     pub(super) fn admitted(&mut self) {
-        self.next = Some(Instant::now() + ADMISSION_INTERVAL);
+        self.next = Some(Instant::now() + self.interval);
     }
 }
 

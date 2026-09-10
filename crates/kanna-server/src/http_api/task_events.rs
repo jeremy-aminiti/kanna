@@ -157,6 +157,13 @@ pub(super) struct TaskEventsQuery {
     /// Set only by the owning subscription call, never from peer wire input.
     #[serde(skip)]
     subscription_timing: bool,
+    /// Per-subscription override of the collector's trailing-quiet duration,
+    /// validated and persisted by `event_subscriptions::subscribe`. Inert
+    /// unless `subscription_timing` is set.
+    quiet_ms: Option<u64>,
+    /// Per-subscription override of the collector's max collection hold.
+    /// Inert unless `subscription_timing` is set.
+    max_hold_ms: Option<u64>,
 }
 
 fn include_current_state_by_default() -> bool {
@@ -1446,7 +1453,8 @@ async fn wait_local_task_events(
     } else {
         deadline
     };
-    let mut timing = super::subscription_timing::Collection::default();
+    let mut timing =
+        super::subscription_timing::Collection::from_query(query.quiet_ms, query.max_hold_ms);
     let min_events = kanna_tool_catalog::clamp_task_event_min_events(query.min_events, limit);
     let debounce = hold_duration(query.debounce_ms);
     // Collected across re-reads, not per read: a batched wait returns one
@@ -2368,7 +2376,8 @@ async fn wait_aggregate_task_events(
     // every leg together — the same place the timeout is enforced. A leg that
     // has already answered is simply re-armed while the batch is still filling,
     // which is how a burst split across machines still returns as one response.
-    let mut timing = super::subscription_timing::Collection::default();
+    let mut timing =
+        super::subscription_timing::Collection::from_query(query.quiet_ms, query.max_hold_ms);
     let min_events = kanna_tool_catalog::clamp_task_event_min_events(query.min_events, limit);
     let debounce = hold_duration(query.debounce_ms);
     let mut debounce_deadline: Option<tokio::time::Instant> = None;

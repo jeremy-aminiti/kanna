@@ -18,6 +18,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
+mod subscription_overrides;
 mod subscription_remote;
 mod subscription_timing;
 
