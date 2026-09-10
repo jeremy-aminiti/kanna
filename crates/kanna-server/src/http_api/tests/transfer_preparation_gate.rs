@@ -1,20 +1,20 @@
-use super::*;
+//! The first preparation checkpoint a transferred task must clear before its
+//! daemon session is ever contacted: `create_task_with_requested_id_and_inputs`
+//! (`crates/kanna-server/src/http_api/tasks.rs`) creates the pipeline_item row
+//! and git worktree synchronously, then — while still on the blocking pool,
+//! before `DaemonClient::connect` is ever called — verifies the freshly
+//! prepared worktree's committed head against `transfer_import.headOid` and
+//! requires a durable `transferred_task_manifest` row in state `importing`
+//! bound to exactly this task id, flipping it to `prepared` only on success.
+//!
+//! The `#[cfg(test)]` fake-`task_creator` shortcut
+//! (`crates/kanna-server/src/http_api/tasks.rs:549`) now only intercepts
+//! non-transfer requests, so a transferred create genuinely exercises this
+//! gate end to end: real SQLite, a real git worktree, and a real (fake) daemon
+//! on a Unix socket standing in for `kanna-daemon`. These are the only two
+//! regression tests for it.
 
-/// The first preparation checkpoint a transferred task must clear before its
-/// daemon session is ever contacted: `create_task_with_requested_id_and_inputs`
-/// (`crates/kanna-server/src/http_api/tasks.rs`) creates the pipeline_item row
-/// and git worktree synchronously, then — while still on the blocking pool,
-/// before `DaemonClient::connect` is ever called — verifies the freshly
-/// prepared worktree's committed head against `transfer_import.headOid` and
-/// requires a durable `transferred_task_manifest` row in state `importing`
-/// bound to exactly this task id, flipping it to `prepared` only on success.
-///
-/// The `#[cfg(test)]` fake-`task_creator` shortcut
-/// (`crates/kanna-server/src/http_api/tasks.rs:549`) now only intercepts
-/// non-transfer requests, so a transferred create genuinely exercises this
-/// gate end to end: real SQLite, a real git worktree, and a real (fake) daemon
-/// on a Unix socket standing in for `kanna-daemon`. These are the only two
-/// regression tests for it.
+use super::*;
 
 /// Builds an isolated `Config` + git repo + SQLite DB for one test, exactly as
 /// [`super::create_task::assert_created_task_overrides_reach_daemon_spawn`]
@@ -31,9 +31,8 @@ fn build_gate_fixture(label: &str) -> GateFixture {
     let repo_root =
         crate::test_paths::unique_test_path(&format!("kanna-http-transfer-gate-{label}"));
     init_test_git_repo(&repo_root);
-    let daemon_dir = crate::test_paths::unique_test_path(&format!(
-        "kanna-http-transfer-gate-daemon-{label}"
-    ));
+    let daemon_dir =
+        crate::test_paths::unique_test_path(&format!("kanna-http-transfer-gate-daemon-{label}"));
     std::fs::create_dir_all(&daemon_dir).unwrap();
     let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
     let _ = std::fs::remove_file(&socket_path);

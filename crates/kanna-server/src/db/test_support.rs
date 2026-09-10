@@ -366,6 +366,27 @@ impl Db {
                 value TEXT,
                 PRIMARY KEY (work_id, phase)
             );
+
+            CREATE TABLE transferred_task_context (
+                task_id TEXT PRIMARY KEY REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                transfer_id TEXT NOT NULL UNIQUE,
+                workflow_definition TEXT NOT NULL,
+                previous_stage_result TEXT,
+                previous_main_result TEXT,
+                revision_feedback TEXT,
+                recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE transferred_task_manifest (
+                transfer_id TEXT PRIMARY KEY,
+                repo_id TEXT NOT NULL,
+                local_task_id TEXT,
+                head_oid TEXT NOT NULL,
+                base_oid TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('importing','prepared','failed')),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                prepared_at TEXT
+            );
             "#,
         )?;
         create_blocker_revision_triggers(&self.conn)?;
