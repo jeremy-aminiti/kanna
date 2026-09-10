@@ -344,6 +344,14 @@ impl Db {
               AND source_task_id IS NOT NULL
               AND status IN ('pending', 'streaming');
 
+            CREATE TABLE task_transfer_provenance (
+              pipeline_item_id TEXT PRIMARY KEY REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              source_peer_id TEXT NOT NULL,
+              source_task_id TEXT NOT NULL,
+              source_machine_task_label TEXT,
+              imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE transfer_work (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,

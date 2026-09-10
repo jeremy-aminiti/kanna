@@ -1579,22 +1579,37 @@ mod tests {
     }
 
     fn new_test_work_queue(label: &str) -> Arc<crate::transfer_engine::queue::TransferWorkQueue> {
-        crate::transfer_engine::queue::TransferWorkQueue::new(
-            crate::test_paths::unique_test_path_string(&format!("kanna-transfer-item4-work-{label}")),
-        )
+        let db_path = crate::test_paths::unique_test_path_string(&format!(
+            "kanna-transfer-item4-work-{label}"
+        ));
+        // `TransferWorkQueue::open_db` is a bare `Db::open`, which expects an
+        // already-migrated file — in production this path is always the same
+        // `config.db_path` the main kanna-server DB already migrated. This
+        // queue's own dedicated path needs the same one-time migration a
+        // fresh file never gets otherwise.
+        crate::db::Db::open_for_tests(&db_path).expect("create and migrate transfer work db");
+        crate::transfer_engine::queue::TransferWorkQueue::new(db_path)
     }
 
-    /// Spawns (lazily, on first `.control()` call) a real sidecar subprocess
-    /// rooted at `root`, discovering peers through the shared `registry_dir`
-    /// rather than real mDNS. Reusing the same `(root, peer_id)` pair across
-    /// calls after dropping the previous supervisor represents that same
-    /// machine's sidecar restarting: identity and durable on-disk state
-    /// (`root`) persist, everything in-memory does not.
+    /// Spawns a real sidecar subprocess rooted at `root`, discovering peers
+    /// through the shared `registry_dir` rather than real mDNS. Reusing the
+    /// same `(root, peer_id)` pair across calls after dropping the previous
+    /// supervisor represents that same machine's sidecar restarting:
+    /// identity and durable on-disk state (`root`) persist, everything
+    /// in-memory does not.
+    ///
+    /// Forces the actual spawn *now*, via a harmless `identity` control call,
+    /// rather than leaving it lazy: `TransferSidecarClient::spawn` reads the
+    /// identity env vars this sets from the process environment only at
+    /// spawn time, so a caller that built two supervisors back to back and
+    /// let both spawn lazily on first real use would hand the second
+    /// identity's environment to whichever supervisor happened to be used
+    /// first — not necessarily the one this call built.
     ///
     /// Mutates process-global identity env vars — callers must hold both
     /// `crate::test_sidecar_guard()` and `Item4EnvVarGuard::capture()` for
     /// the whole test.
-    fn spawn_test_sidecar(
+    async fn spawn_test_sidecar(
         root: &Path,
         registry_dir: &Path,
         peer_id: &str,
@@ -1606,11 +1621,16 @@ mod tests {
         std::env::set_var("KANNA_TRANSFER_PEER_ID", peer_id);
         std::env::set_var("KANNA_TRANSFER_DISPLAY_NAME", peer_id);
         std::env::set_var("KANNA_TRANSFER_DISCOVERY", "registry");
-        crate::transfer_sidecar::TransferSidecarSupervisor::with_binary_for_test(
+        let supervisor = crate::transfer_sidecar::TransferSidecarSupervisor::with_binary_for_test(
             config.clone(),
             work,
             real_sidecar_binary_for_test(),
-        )
+        );
+        supervisor
+            .control("identity", serde_json::json!({}))
+            .await
+            .expect("sidecar must come up and answer under its own identity");
+        supervisor
     }
 
     fn item4_test_config(label: &str) -> crate::config::Config {
@@ -1718,7 +1738,9 @@ mod tests {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let batch = log.wait_for_events(Some(*cursor), None, 50, remaining).await;
+            let batch = log
+                .wait_for_events(Some(*cursor), None, 50, remaining)
+                .await;
             *cursor = batch.cursor;
             if let Some(found) = batch
                 .events
@@ -1733,13 +1755,77 @@ mod tests {
         }
     }
 
+    /// Polls a durable work queue for its next item, retrying on an empty
+    /// read. `incoming_transfer_request` and `outgoing_transfer_committed`
+    /// are *durable* sidecar events
+    /// (`crate::transfer_engine::queue::is_durable_transfer_event`) — the
+    /// sidecar subprocess's own stdout reader routes them straight into this
+    /// queue's SQLite table, never into the advisory `TransferEventLog`
+    /// `wait_for_event_type` reads, and that routing itself races the
+    /// caller: `claim_next_transfer_work` can genuinely observe nothing yet
+    /// even after the control call that triggered the event has already
+    /// returned, since the sidecar's own stdout write and this queue's
+    /// background reader are a further asynchronous hop past that.
+    async fn wait_for_durable_work(
+        work: &Arc<crate::transfer_engine::queue::TransferWorkQueue>,
+        expected_kind: &str,
+        timeout: std::time::Duration,
+    ) -> crate::db::TransferWorkItem {
+        use std::future::Future as _;
+
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            // Register interest in the next `enqueue` *before* checking the
+            // DB, not after: `wait_for_work` is a plain `async fn`, so
+            // merely constructing its future runs none of its body —
+            // nothing is actually registered with the queue's `Notify`
+            // until the future is polled at least once. Polling it here
+            // (with a no-op waker; we are not yet ready to actually sleep
+            // on it) reaches and runs `wait_for_work`'s own
+            // `notified.as_mut().enable()` line, which is what makes a
+            // `notify_waiters()` racing the DB check below observable at
+            // all — `Notify::notify_waiters` has no saved permit, so a
+            // notification that fires while nothing is registered is lost
+            // forever, not queued for the next waiter.
+            let mut waiter =
+                std::pin::pin!(work
+                    .wait_for_work(deadline.saturating_duration_since(std::time::Instant::now())));
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            let _ = waiter.as_mut().poll(&mut context);
+
+            let claimed = work
+                .open_db()
+                .expect("open transfer work db")
+                .claim_next_transfer_work(&[])
+                .expect("claim transfer work");
+            if let Some(item) = claimed {
+                assert_eq!(
+                    item.kind, expected_kind,
+                    "unexpected durable work item claimed while waiting for `{expected_kind}`"
+                );
+                return item;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("timed out waiting for durable transfer work of kind `{expected_kind}`");
+            }
+            // The same, already-registered future: a concurrent `enqueue`
+            // between the poll above and here is not missed.
+            waiter.await;
+        }
+    }
+
     /// `start-pairing` targets a peer_id directly; against the file-based
     /// registry there is a short real window between a peer process coming
-    /// up and it having written its own registry entry, so this retries
-    /// (matching `control::is_connection_failure`'s own "peer not found:"
-    /// fragment) instead of requiring the caller to poll the registry file
+    /// up and it having written its own registry entry, so this retries —
+    /// *only* that specific, proven pre-dispatch discovery failure
+    /// (`RuntimeError::PeerNotFound`'s own `"peer not found: "` prefix,
+    /// `crates/task-transfer/src/runtime/events.rs`), matching
+    /// `control::is_connection_failure`'s own recognition of the same
+    /// fragment — instead of requiring the caller to poll the registry file
     /// itself, which would need a `kanna_task_transfer` dependency this
-    /// crate deliberately does not take.
+    /// crate deliberately does not take. Any other error (a genuine timeout,
+    /// a rejected/failed handshake, a protocol error) is a real answer and
+    /// must fail the test rather than being silently resubmitted.
     async fn start_pairing_with_retry(
         source: &crate::transfer_sidecar::TransferSidecarSupervisor,
         target_peer_id: &str,
@@ -1748,7 +1834,10 @@ mod tests {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             match source
-                .control("start-pairing", serde_json::json!({ "peerId": target_peer_id }))
+                .control(
+                    "start-pairing",
+                    serde_json::json!({ "peerId": target_peer_id }),
+                )
                 .await
             {
                 Ok(response) => {
@@ -1757,11 +1846,17 @@ mod tests {
                         .expect("start-pairing response missing verificationCode")
                         .to_string();
                 }
-                Err(error) => {
+                Err(error) if error.contains("peer not found:") => {
                     if std::time::Instant::now() >= deadline {
-                        panic!("start-pairing against {target_peer_id} never succeeded: {error}");
+                        panic!(
+                            "start-pairing against {target_peer_id} never found that peer in \
+                             the registry: {error}"
+                        );
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => {
+                    panic!("start-pairing against {target_peer_id} failed: {error}");
                 }
             }
         }
@@ -1772,33 +1867,53 @@ mod tests {
     /// `accept-pairing` control ops and the actual `pairing_requested`
     /// advisory event — the same seam the desktop uses, exercised end to
     /// end rather than assumed.
+    ///
+    /// `source`'s `start-pairing` wire request cannot itself complete until
+    /// `destination` calls `accept-pairing`
+    /// (`crates/task-transfer/src/runtime/listener.rs`'s `StartPairing`
+    /// handler holds the connection open, waiting on its own
+    /// `approval_receiver`, before ever writing a response) — so this must
+    /// race the two sides with `tokio::select!`, matching
+    /// `crates/task-transfer/tests/runtime.rs`'s own `pair_peers` helper,
+    /// rather than awaiting `start-pairing` to completion first. Awaiting it
+    /// first deadlocks: nothing would ever call `accept-pairing`, and both
+    /// sides' `peer_request_timeout` (15s) would fire instead.
     async fn pair_real_sidecars(
         source: &crate::transfer_sidecar::TransferSidecarSupervisor,
         destination: &crate::transfer_sidecar::TransferSidecarSupervisor,
         destination_peer_id: &str,
     ) {
-        let verification_code = start_pairing_with_retry(
+        let pairing = start_pairing_with_retry(
             source,
             destination_peer_id,
-            std::time::Duration::from_secs(15),
-        )
-        .await;
-        let mut destination_cursor = 0u64;
-        let requested = wait_for_event_type(
-            &destination.events(),
-            &mut destination_cursor,
-            "pairing_requested",
-            std::time::Duration::from_secs(15),
-        )
-        .await;
-        assert_eq!(
-            requested["verification_code"].as_str(),
-            Some(verification_code.as_str()),
-            "the pairing request's code must match the code start-pairing returned"
+            std::time::Duration::from_secs(30),
         );
+        tokio::pin!(pairing);
+
+        let destination_events = destination.events();
+        let mut destination_cursor = 0u64;
+        let requested = tokio::select! {
+            biased;
+            code = &mut pairing => {
+                panic!(
+                    "start-pairing completed before the destination ever emitted a \
+                     pairing_requested event to accept, with code {code}"
+                );
+            }
+            event = wait_for_event_type(
+                &destination_events,
+                &mut destination_cursor,
+                "pairing_requested",
+                std::time::Duration::from_secs(30),
+            ) => event,
+        };
         let pairing_request_id = requested["request_id"]
             .as_str()
             .expect("pairing_requested event missing request_id")
+            .to_string();
+        let verification_code = requested["verification_code"]
+            .as_str()
+            .expect("pairing_requested event missing verification_code")
             .to_string();
         destination
             .control(
@@ -1810,6 +1925,14 @@ mod tests {
             )
             .await
             .expect("accept-pairing must succeed once the request is genuinely pending");
+
+        // Only now can the source's still-pending start-pairing wire request
+        // actually complete.
+        let completed_code = pairing.await;
+        assert_eq!(
+            completed_code, verification_code,
+            "the pairing request's code must match the code start-pairing returned"
+        );
     }
 
     /// Drives a real preflight+commit from `source` to `destination_peer_id`
@@ -1869,6 +1992,10 @@ mod tests {
     /// further destination incarnations against the same durable identity
     /// and read back what the source durably recorded.
     struct Item4RealTransfer {
+        // Never read again after construction — held only so its `Drop` (and
+        // the real child process it owns) outlives every destination
+        // incarnation this reservation's callers spawn.
+        #[allow(dead_code)]
         source: crate::transfer_sidecar::TransferSidecarSupervisor,
         source_work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
         transfer_id: String,
@@ -1879,12 +2006,12 @@ mod tests {
     }
 
     impl Item4RealTransfer {
-        fn spawn_destination(
+        async fn spawn_destination(
             &self,
             label: &str,
-            work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
         ) -> crate::transfer_sidecar::TransferSidecarSupervisor {
             let config = item4_test_config(label);
+            let work = new_test_work_queue(label);
             spawn_test_sidecar(
                 &self.destination_root,
                 &self.registry_dir,
@@ -1892,6 +2019,7 @@ mod tests {
                 &config,
                 work,
             )
+            .await
         }
     }
 
@@ -1925,7 +2053,8 @@ mod tests {
             &source_peer_id,
             &source_config,
             Arc::clone(&source_work),
-        );
+        )
+        .await;
 
         let destination_root =
             crate::test_paths::unique_test_dir(&format!("kanna-transfer-item4-dest-{label}"));
@@ -1938,22 +2067,26 @@ mod tests {
             &registry_dir,
             &destination_peer_id,
             &bootstrap_config,
-            bootstrap_work,
-        );
+            Arc::clone(&bootstrap_work),
+        )
+        .await;
 
         pair_real_sidecars(&source, &destination_bootstrap, &destination_peer_id).await;
 
         let source_task_id = format!("task-item4-source-{label}");
-        let transfer_id = commit_real_transfer(&source, &destination_peer_id, &source_task_id).await;
+        let transfer_id =
+            commit_real_transfer(&source, &destination_peer_id, &source_task_id).await;
 
-        let mut destination_cursor = 0u64;
-        let incoming = wait_for_event_type(
-            &destination_bootstrap.events(),
-            &mut destination_cursor,
-            "incoming_transfer_request",
+        // `incoming_transfer_request` is durable (routed to the work queue,
+        // never the advisory event log) — see `wait_for_durable_work`.
+        let incoming_work = wait_for_durable_work(
+            &bootstrap_work,
+            crate::transfer_engine::queue::KIND_INCOMING_REQUEST,
             std::time::Duration::from_secs(15),
         )
         .await;
+        let incoming: serde_json::Value = serde_json::from_str(&incoming_work.payload_json)
+            .expect("parse incoming-transfer-request event");
         assert_eq!(
             incoming["transfer_id"].as_str(),
             Some(transfer_id.as_str()),
@@ -1982,24 +2115,21 @@ mod tests {
     /// production does) and asserts every field the destination sent
     /// matches what this test actually persisted — proof of the values on
     /// the wire, not merely that the call was reached.
-    fn assert_real_ack_values(
+    async fn assert_real_ack_values(
         reservation: &Item4RealTransfer,
         local_task_id: &str,
         content_commitment: &str,
         destination_repo_id: &str,
     ) {
-        let source_db = reservation.source_work.open_db().expect("open source work db");
-        let ack_work = source_db
-            .claim_next_transfer_work(&[])
-            .expect("claim source work")
-            .expect(
-                "the source must have durably recorded the outgoing-committed event before \
-                 this read",
-            );
-        assert_eq!(
-            ack_work.kind,
-            crate::transfer_engine::queue::KIND_OUTGOING_COMMITTED
-        );
+        // Durable, and racy for the same reason `incoming_transfer_request`
+        // is: the sidecar's own event emission and this queue's background
+        // reader are hops past `run_import`'s `Ok(())` return, not before it.
+        let ack_work = wait_for_durable_work(
+            &reservation.source_work,
+            crate::transfer_engine::queue::KIND_OUTGOING_COMMITTED,
+            std::time::Duration::from_secs(15),
+        )
+        .await;
         let ack_event: serde_json::Value =
             serde_json::from_str(&ack_work.payload_json).expect("parse outgoing-committed event");
         assert_eq!(
@@ -2042,7 +2172,8 @@ mod tests {
         let kanna_config = item4_test_config("persisted-kanna-server");
         {
             let db = crate::db::Db::open_for_tests(&kanna_config.db_path).expect("open test db");
-            db.insert_test_repo(repo_id, "Item4 Repo").expect("insert repo");
+            db.insert_test_repo(repo_id, "Item4 Repo")
+                .expect("insert repo");
             db.insert_test_pipeline_item(
                 local_task_id,
                 repo_id,
@@ -2076,12 +2207,14 @@ mod tests {
                 "in progress",
             );
             transfer.source_peer_id = Some(reservation.destination_peer_id.clone());
-            db.insert_task_transfer(&transfer).expect("insert task transfer");
+            db.insert_task_transfer(&transfer)
+                .expect("insert task transfer");
         }
 
+        let destination = reservation.spawn_destination("persisted-dest").await;
         let state = Arc::new(AppState::with_transfer_sidecar_for_test(
             kanna_config.clone(),
-            |work| reservation.spawn_destination("persisted-dest", work),
+            destination,
         ));
 
         let work = work_item("import:transfer-item4-persisted");
@@ -2096,7 +2229,8 @@ mod tests {
             local_task_id,
             "persisted-commitment-value",
             repo_id,
-        );
+        )
+        .await;
 
         let commitment = state
             .transfer_work()
@@ -2140,12 +2274,7 @@ mod tests {
         // `establish_real_transfer_reservation` dropping its own bootstrap
         // incarnation.
         {
-            let throwaway_work = new_test_work_queue("restart-throwaway");
-            let extra = reservation.spawn_destination("restart-extra", throwaway_work);
-            extra
-                .control("identity", serde_json::json!({}))
-                .await
-                .expect("the extra incarnation must come up and answer");
+            let _extra = reservation.spawn_destination("restart-extra").await;
         }
 
         let local_task_id = "task-item4-restart";
@@ -2153,7 +2282,8 @@ mod tests {
         let kanna_config = item4_test_config("restart-kanna-server");
         {
             let db = crate::db::Db::open_for_tests(&kanna_config.db_path).expect("open test db");
-            db.insert_test_repo(repo_id, "Item4 Repo").expect("insert repo");
+            db.insert_test_repo(repo_id, "Item4 Repo")
+                .expect("insert repo");
             db.insert_test_pipeline_item(
                 local_task_id,
                 repo_id,
@@ -2187,12 +2317,14 @@ mod tests {
                 "in progress",
             );
             transfer.source_peer_id = Some(reservation.destination_peer_id.clone());
-            db.insert_task_transfer(&transfer).expect("insert task transfer");
+            db.insert_task_transfer(&transfer)
+                .expect("insert task transfer");
         }
 
+        let destination = reservation.spawn_destination("restart-final").await;
         let state = Arc::new(AppState::with_transfer_sidecar_for_test(
             kanna_config.clone(),
-            |work| reservation.spawn_destination("restart-final", work),
+            destination,
         ));
 
         let work = work_item("import:transfer-item4-restart");
@@ -2208,7 +2340,8 @@ mod tests {
             local_task_id,
             "persisted-commitment-value-restart",
             repo_id,
-        );
+        )
+        .await;
     }
 
     /// Negative control: with no persisted content commitment, a retry must
