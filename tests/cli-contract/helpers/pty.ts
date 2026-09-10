@@ -24,6 +24,49 @@ const BRIDGE = join(HERE, "pty-bridge.py");
 /** Mirrors LOGICAL_INPUT_SUBMIT_DELAY_MS in crates/daemon/src/session.rs. */
 export const SUBMIT_ENTER_DELAY_MS = 150;
 
+/**
+ * {@link PtySession.submit}'s "write text, wait, then write CR separately"
+ * policy is what the daemon's logical-input writer did before task d2eb7fa0
+ * (PR #1369, "Always submit delivered task input; remove the draft-protection
+ * hold", 2026-09-08) removed the settle-wait fence entirely. It no longer
+ * matches what kanna-server puts on the wire and must not be read as
+ * evidence about current submission behavior — see
+ * docs/2026-09-10-mobile-connection-flicker-e2e-note.md. {@link submit} is
+ * left as-is for whatever it currently happens to cover; new coverage of
+ * real submission behavior should use {@link logicalMessageBytes} /
+ * {@link PtySession.submitLogical} below instead.
+ */
+
+const BRACKETED_PASTE_BEGIN = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
+
+/** Mirrors PASTE_FRAMING_MIN_LEN in crates/daemon/src/session.rs. */
+export const PASTE_FRAMING_MIN_LEN = 256;
+
+/**
+ * Mirrors `crates/daemon/src/session.rs::logical_message_bytes` (plus the
+ * trailing-newline trim `crates/kanna-server/src/http_api/task_input.rs::
+ * task_input_message` applies before handing the daemon anything) exactly:
+ * one PTY write containing the text — bracket-paste-framed when the
+ * terminal supports it and the trimmed message is >=256 bytes or carries a
+ * newline — with its `\r` submission boundary appended in the same buffer.
+ * No wait, no separate write: this is what a real logical-input delivery
+ * (kanna_send_task_input, the mobile composer's ordinary Send, a stage
+ * prompt) puts on the wire today, byte for byte.
+ */
+export function logicalMessageBytes(text: string, bracketedPasteMode: boolean): string {
+  const trimmed = text.replace(/[\r\n]+$/, "");
+  if (trimmed.length === 0) {
+    return "\r";
+  }
+  const hasNewline = /[\r\n]/.test(trimmed);
+  const byteLength = Buffer.byteLength(trimmed, "utf8");
+  if (!bracketedPasteMode || (!hasNewline && byteLength < PASTE_FRAMING_MIN_LEN)) {
+    return `${trimmed}\r`;
+  }
+  return `${BRACKETED_PASTE_BEGIN}${trimmed}${BRACKETED_PASTE_END}\r`;
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -103,6 +146,18 @@ export class PtySession {
       await sleep(SUBMIT_ENTER_DELAY_MS);
     }
     this.write("\r");
+  }
+
+  /**
+   * Deliver a logical message the way the daemon actually does today: one
+   * write, framed per {@link logicalMessageBytes}, no intervening wait. Use
+   * this — not {@link submit} — to test whether a real CLI's own input
+   * parser treats the trailing CR as submission; `bracketedPasteMode` should
+   * match whatever the target CLI actually advertises (the daemon frames a
+   * message only when the terminal itself has advertised the mode).
+   */
+  async submitLogical(text: string, bracketedPasteMode: boolean): Promise<void> {
+    this.write(logicalMessageBytes(text, bracketedPasteMode));
   }
 
   /** Write text one character at a time, the way a person types it. */
