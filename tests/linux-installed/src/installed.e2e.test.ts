@@ -161,15 +161,20 @@ describe("the installed worker's lifecycle", () => {
     requireHost();
     const added = await worker!.cli(["repo", "add", "--path", repo.path]);
     expect(added.code, `${added.stdout}${added.stderr}`).toBe(0);
-    const repos = await worker!.sql("SELECT id, path FROM repo", []);
-    const repoId = String(repos.find((row) => String(row.path).endsWith("/repo"))?.id);
+    const addedRepo = JSON.parse(added.stdout);
+    expect(addedRepo.path).toBe(repo.path);
+    expect(addedRepo.id).toEqual(expect.any(String));
+    expect(addedRepo.id.length).toBeGreaterThan(0);
+    const repoId = addedRepo.id;
 
     const created = await worker!.cli([
       "task", "create", "--repo-id", repoId, "--prompt", "installed lane task", "--workflow-name", "gate",
     ]);
     expect(created.code, created.stderr).toBe(0);
-    const rows = await worker!.sql("SELECT id FROM pipeline_item ORDER BY rowid DESC LIMIT 1", []);
-    const taskId = String(rows[0]?.id);
+    const createdTask = JSON.parse(created.stdout);
+    expect(createdTask.repoId).toBe(repoId);
+    expect(createdTask.taskId).toMatch(/^[a-f0-9]{8,64}$/);
+    const taskId = createdTask.taskId;
 
     await waitFor(
       async () => (await worker!.cli(["task", "logs", "--task-id", taskId])).stdout.includes("SCRIPT_READY"),
