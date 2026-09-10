@@ -297,3 +297,113 @@ tests use `delivery: "poll"`, which never reaches that code path at all (see
 delivery" phrasing reads as conditional, and switching delivery modes would
 need a fake PTY/daemon session neither fixture sets up. Flagged here rather
 than done, in case reconciliation wants it revisited.
+
+## Integration readiness against tuning's accepted head (2026-09-10)
+
+Tuning's source review was accepted at `5226be1cb` (172 tests), superseding
+the `02b65d2af` snapshot read earlier — its diff against `90fd52ee4` was read
+in full for this pass. It is now merging `origin/main` into its own branch
+(`task-5edc81f8-5` at `27cf52c364`); `origin/main` is unchanged at
+`3f9520ae2`. Nothing from it is applied to this branch — the actual file
+merge happens after it lands on `main`, per this task's standing
+instructions — but its shape is now stable enough to plan the merge
+precisely instead of provisionally.
+
+### What changed since `02b65d2af` that touches this task's files
+
+`event_subscriptions.rs`'s `step()` was substantially rewritten: one native
+`collect()` call is capped at `MAX_WAIT_TIMEOUT_SECS` (240s), but a
+subscription's own quiet/max-hold window can now exceed that (300s defaults,
+or an arbitrary per-subscription override), so `step()` now chains multiple
+native calls (a `'chain: loop`) sharing one `subscription_timing::Collection`
+instance across them, re-reading its *live* `intrinsic_deadline()` after each
+call rather than trusting a pre-call snapshot — this is the "240s collection
+cap" defect the correction notice named. `Collection::ready` dropped its
+`receiver`/`deadline` parameter (now just `(count, capacity, now)`); the
+subscription/aggregate wait's own `receiver`-based capping is a separate,
+unchanged concern. `wait_subscription_events` gained a third parameter, the
+shared `Arc<Mutex<Collection>>`.
+
+### Confirmed compatible, no redesign needed
+
+- The chain's own stop condition — `if batch["waitOutcome"] == "timeout" &&
+  !machine_errors_present { continue 'chain }` — does **not** chain past one
+  240s native call when `machineErrors` is present, for *any* machine,
+  local or remote. That means a remote-only fault (this task's isolation
+  case) still gets exactly one ~240s cycle per `step()` iteration under the
+  new code, matching what
+  `subscription_remote_outage_survives_a_server_restart_and_recovers`'s
+  "advance `MAX_WAIT_TIMEOUT_SECS` per idle cycle" loop already assumes. No
+  correction needed there; verified by reading the new code, not assumed.
+- This task's `wait_aggregate_task_events` loop-top guard (`task_events.rs`
+  near line 2389, `local_machine_faulted`) sits on lines tuning's diff does
+  not touch at all — a clean, non-adjacent merge.
+- `Collection::intrinsic_deadline`/chain-level `machineErrors` handling and
+  this task's `stale_machines` key-only dedup operate at different layers
+  (native-call sizing vs. whether `accept_page` wakes the subscriber) and do
+  not interact.
+
+### Two exact merge points (mechanical, not semantic)
+
+1. `wait_aggregate_task_events`'s `batch_complete` line: tuning's
+   `with_collection(&query, |c| c.ready(events.len(), limit, now)) ||
+   !machine_errors.is_empty()` needs `!machine_errors.is_empty()` replaced
+   with `local_machine_faulted(&machine_errors)` (same substitution this
+   task already made against the pre-tuning signature) — a parameter-count
+   adjustment (`ready` dropped `deadline`) plus the existing substitution,
+   nothing new.
+2. `event_subscriptions.rs`'s `accept_page` call sites: tuning's `step()`
+   restructuring calls `accept_page(&mut row, batch, false)` (still 3-arg,
+   untouched by tuning) once, after the `'chain` loop produces a final
+   `batch`; this task's `accept_page` takes a 4th `local_machine_id`
+   parameter and has its own local/remote-fault body. Combine by keeping
+   tuning's chain structure and threading this task's 4-arg call/body
+   through its single post-chain call site (and the `subscribe()` bootstrap
+   call site, similarly unmoved).
+
+### Stale-machine compact coverage: ready to apply once `compact()` exists
+
+Resolved design (recorded in the prior section) needs one field added to
+`event_subscriptions.rs`'s `compact()`, once it exists on this branch:
+
+```rust
+json!({
+    "id": row.id,
+    "active": row.active,
+    "error": row.error,
+    "wakeState": row.wake_state,
+    "batchId": row.batch_id,
+    "staleMachines": row.stale_machines,   // <- new, top-level, visible even when pending is null
+    "pending": pending,
+    "query": scope,
+})
+```
+
+`row.stale_machines: BTreeMap<String, String>` serializes directly as a
+`{machineId: reason}` object — already the small, bounded, non-cursor shape
+the resolved decision required (at most one entry per currently-stale peer);
+no new type or summarization needed. `pending.machineErrors` is untouched
+(still the per-batch diagnostic array). This is source-ready but not
+applied: `compact()` is tuning's function and does not exist on this branch
+before its merge lands.
+
+### Test inventory (unchanged head, all logically re-verified against
+### `5226be1cb`, none run — capacity, not authorization, is currently the
+### blocker: Studio at ~90.5% busy)
+
+- `crates/kanna-server/src/http_api/event_subscriptions.rs` —
+  `outage_isolation_tests::unchanged_remote_fault_does_not_rewake_even_as_its_text_churns`,
+  `outage_isolation_tests::stale_machines_and_its_dedup_survive_a_reload_from_the_durable_row`
+  (unit-level, call `accept_page`/`Db` directly — unaffected by any of the
+  `step()`/`Collection` changes above).
+- `crates/kanna-server/src/http_api/tests/task_events/subscription_remote.rs` —
+  `subscription_remote_outage_isolates_to_that_leg_and_recovers`,
+  `subscription_remote_cursor_rejection_remains_a_hard_pause_distinct_from_outage`,
+  `subscription_remote_outage_with_a_healthy_sibling_isolates_and_recovers`,
+  `subscription_remote_outage_survives_a_server_restart_and_recovers`
+  (integration-level, through the real relay/worker/mailbox seam).
+
+Focused command once capacity allows (unchanged from the prior round):
+`CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 cargo test -p kanna-server --bin
+kanna-server task_events:: -- --test-threads=1`, then the
+`event_subscriptions::outage_isolation_tests` filter.
