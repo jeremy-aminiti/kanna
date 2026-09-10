@@ -4,6 +4,7 @@
 //! like relay.rs; a fake transport that cancels it would hide this regression.
 use super::*;
 use crate::http_api::{DesktopRelayRequest, HttpInvokeResponse};
+use std::collections::HashMap;
 use tokio::sync::Semaphore;
 
 #[derive(Default)]
@@ -74,6 +75,115 @@ fn connect(source: &Arc<AppState>, peer: Arc<AppState>) -> RelayFixture {
                             receivers.spawn(async move {
                                 let wait = crate::http_api::dispatch_authenticated_http_invoke(
                                     peer, &method, &path, body,
+                                );
+                                tokio::pin!(wait);
+                                let result = tokio::select! {
+                                    result = &mut wait => result,
+                                    _ = response.closed() => {
+                                        if long { observed.abandoned.fetch_add(1, Ordering::SeqCst); }
+                                        // No cancellation message crosses the relay. Keep
+                                        // the permit through the actual peer deadline.
+                                        wait.await
+                                    }
+                                };
+                                drop(permit);
+                                if long { observed.released.fetch_add(1, Ordering::SeqCst); }
+                                let _ = response.send(Ok(result));
+                            });
+                        }
+                        _ => panic!("unexpected subscription relay operation"),
+                    }
+                }
+            }
+        }
+    });
+    RelayFixture {
+        task,
+        budget,
+        counts,
+    }
+}
+
+/// Like `connect`, but for a repo-scoped aggregate with more than one
+/// remote peer: `Invoke` is routed by its `desktop_id` to the matching
+/// backing state, and `ListActive` reports whatever `active` currently
+/// holds — mutable from the test, so a peer already discovered at bootstrap
+/// (its checkpoint established) can be dropped out of discovery entirely,
+/// the actual "peer absent from ListActive" shape, never a busy/503 leg.
+/// `counts` is shared by every routed peer: only one remote leg is ever
+/// admitted at a time in the fixtures that use this (an excluded peer is
+/// never dispatched at all), so a single semaphore/counter set still
+/// unambiguously reports that one healthy leg's own cadence.
+fn connect_repo_peers(
+    source: &Arc<AppState>,
+    peers: &[Arc<AppState>],
+    active: Arc<std::sync::Mutex<Vec<String>>>,
+) -> RelayFixture {
+    let mut requests = source.take_desktop_relay_requests().unwrap();
+    source.set_desktop_routing_available(true);
+    let permits = Arc::new(crate::relay::RelayHttpInvokePermits::new(1));
+    let budget = permits.for_path("/v1/task-events");
+    let counts = Arc::new(Counts::default());
+    let observed = counts.clone();
+    let routes: HashMap<String, Arc<AppState>> = peers
+        .iter()
+        .map(|peer| (peer.config().desktop_id.clone(), peer.clone()))
+        .collect();
+    let task = tokio::spawn(async move {
+        let mut receivers = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                Some(result) = receivers.join_next(), if !receivers.is_empty() => {
+                    result.expect("peer receiver panicked");
+                }
+                request = requests.recv() => {
+                    let Some(request) = request else { break };
+                    match request {
+                        DesktopRelayRequest::PublishTaskSnapshot { response, .. } => {
+                            let _ = response.send(Ok(()));
+                        }
+                        DesktopRelayRequest::ListActive { response, .. } => {
+                            let ids = active
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .clone();
+                            let _ = response.send(Ok(ids));
+                        }
+                        DesktopRelayRequest::Invoke {
+                            desktop_id,
+                            method,
+                            path,
+                            body,
+                            mut response,
+                            ..
+                        } => {
+                            assert!(path.starts_with("/v1/task-events?"));
+                            // Bootstrap uses timeout zero; count the long polls
+                            // whose lifetime is at issue separately from it.
+                            let long = !path.contains("timeoutSecs=0&");
+                            if long { observed.attempts.fetch_add(1, Ordering::SeqCst); }
+                            let permit = match permits.for_path(&path).try_acquire_owned() {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    observed.busy.fetch_add(1, Ordering::SeqCst);
+                                    let _ = response.send(Ok(HttpInvokeResponse {
+                                        status: 503, body: None,
+                                        error: Some("desktop is busy; too many concurrent requests".into()),
+                                    }));
+                                    continue;
+                                }
+                            };
+                            if long { observed.admitted.fetch_add(1, Ordering::SeqCst); }
+                            let target = routes
+                                .get(&desktop_id)
+                                .unwrap_or_else(|| {
+                                    panic!("relay request for unrouted peer {desktop_id}")
+                                })
+                                .clone();
+                            let observed = observed.clone();
+                            receivers.spawn(async move {
+                                let wait = crate::http_api::dispatch_authenticated_http_invoke(
+                                    target, &method, &path, body,
                                 );
                                 tokio::pin!(wait);
                                 let result = tokio::select! {
@@ -270,6 +380,148 @@ impl WatchFixture {
             service,
         };
         until(|| fixture.relay.counts.attempts.load(Ordering::SeqCst) == 1).await;
+        fixture
+    }
+
+    /// Three machines: `source` (local), `peer` (a healthy sibling, reusing
+    /// every existing `WatchFixture` method), and a third, separately
+    /// returned peer that is *already discovered* — its checkpoint
+    /// established during bootstrap, like the other two — and only then
+    /// excluded from `ListActive` before the worker's first real
+    /// collection cycle. That is the actual "MBP dropped WiFi" shape: the
+    /// peer is never spawned at all once excluded (the pre-spawn
+    /// `machineErrors` path in `wait_aggregate_task_events`), not admitted
+    /// and then rejected. Because it is never dispatched, the healthy
+    /// sibling's own relay counts (`fixture.relay.counts`) reflect that
+    /// sibling's cadence alone — unaffected by the excluded peer's absence,
+    /// with no extra admission or abandonment to account for.
+    async fn new_with_healthy_sibling_and_excluded_peer(
+    ) -> (Self, Arc<AppState>, Arc<std::sync::Mutex<Vec<String>>>) {
+        let (source, sibling) = aggregate_pending_leg_states();
+        let missing = test_state_with_seed("desktop-pending-missing", "Pending Missing", |db| {
+            db.insert_test_repo("repo-pending-missing", "Pending Missing Repo")
+                .expect("insert missing repo");
+            db.insert_test_pipeline_item(
+                "pending-missing-child",
+                "repo-pending-missing",
+                "missing child",
+                Some("Missing Child"),
+                "in progress",
+                "2026-08-16 00:00:00",
+            )
+            .expect("insert missing task");
+        });
+        for (state, repo) in [
+            (&source, "repo-pending-source"),
+            (&sibling, "repo-pending-peer"),
+            (&missing, "repo-pending-missing"),
+        ] {
+            Db::open(&state.config().db_path)
+                .unwrap()
+                .patch_repo(
+                    repo,
+                    crate::db::RepoPatch {
+                        remote_url_hash: Some(Some("sha256:subscription-fixture")),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let db = Db::open(&source.config().db_path).unwrap();
+        db.insert_test_pipeline_item(
+            "manager",
+            "repo-pending-source",
+            "manage",
+            Some("Manager"),
+            "in progress",
+            "2026-09-09 00:00:00",
+        )
+        .unwrap();
+        start_run(&db, "manager-run", "manager", "in progress");
+        let sibling_id = sibling.config().desktop_id.clone();
+        let missing_id = missing.config().desktop_id.clone();
+        let active = Arc::new(std::sync::Mutex::new(vec![
+            sibling_id.clone(),
+            missing_id.clone(),
+        ]));
+        let relay = connect_repo_peers(
+            &source,
+            &[sibling.clone(), missing.clone()],
+            active.clone(),
+        );
+        let app = router(source.clone());
+        let (status, initial) =
+            subscription_request(&app, "POST", "/v1/event-subscriptions", Self::request()).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        let id = initial["id"].as_str().unwrap().to_string();
+        let decoded = decode_cursor(initial["cursor"].as_str().unwrap());
+        for machine_id in [&sibling_id, &missing_id] {
+            assert!(
+                decoded["cursorsByMachine"][machine_id.as_str()]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("ke1."),
+                "{decoded}"
+            );
+        }
+        // Exclude the peer before the worker's first real cycle: an
+        // already-admitted leg cannot simply be revoked (see
+        // `subscription_retirement_abandons_one_leg_until_peer_deadline`),
+        // so the exclusion must land before any leg to this peer is ever
+        // spawned, not after.
+        active
+            .lock()
+            .unwrap()
+            .retain(|entry| *entry != missing_id);
+        let service = tokio::spawn(super::super::super::event_subscriptions::run(
+            source.clone(),
+        ));
+        let fixture = Self {
+            source,
+            peer: sibling,
+            relay,
+            app,
+            id,
+            service,
+        };
+        until(|| fixture.relay.counts.attempts.load(Ordering::SeqCst) == 1).await;
+        (fixture, missing, active)
+    }
+
+    /// Simulates a server restart for the subscribing machine: the worker
+    /// and relay connection are torn down (via `Drop`) and a fresh
+    /// `AppState` is built from the same persisted DB path. No in-memory
+    /// state survives the boundary — not the aggregate-wait registry, not
+    /// the admission clock, not the relay connection — only what is
+    /// durable in the DB. `peers` is reconnected through the same
+    /// multi-peer relay as `new_with_healthy_sibling_and_excluded_peer`,
+    /// carrying `active` through unchanged, so an excluded peer stays
+    /// excluded (and a since-recovered one stays recovered) exactly as it
+    /// was before the restart.
+    async fn restart(
+        self,
+        peers: &[Arc<AppState>],
+        active: Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Self {
+        let config = self.source.config().clone();
+        let peer = self.peer.clone();
+        let id = self.id.clone();
+        drop(self);
+        let source = Arc::new(AppState::new(config));
+        let relay = connect_repo_peers(&source, peers, active);
+        let app = router(source.clone());
+        let service = tokio::spawn(super::super::super::event_subscriptions::run(
+            source.clone(),
+        ));
+        let fixture = Self {
+            source,
+            peer,
+            relay,
+            app,
+            id,
+            service,
+        };
+        until(|| fixture.relay.counts.attempts.load(Ordering::SeqCst) >= 1).await;
         fixture
     }
 
@@ -642,6 +894,245 @@ async fn subscription_remote_cursor_rejection_remains_a_hard_pause_distinct_from
     let resumed = watch.register().await;
     assert_eq!(resumed["cursor"], json!(poisoned_cursor));
     assert_eq!(resumed["active"], json!(true));
+}
+
+/// A repo-scoped subscription with a healthy sibling peer AND a peer that
+/// was already discovered — its checkpoint established at bootstrap, like
+/// the sibling's — but then disappears from `ListActive` before the
+/// worker's first real collection cycle. This is the actual "MBP dropped
+/// WiFi" shape (relay stops reporting it at all), not a busy/503 leg, and
+/// it exercises the pre-spawn `machineErrors` path this fix added: the
+/// excluded peer is never even attempted, not admitted then rejected.
+/// Proves the healthy sibling's own retained wait is entirely unaffected —
+/// no extra admission, no abandonment — repeated local delivery keeps
+/// working through several real ACKs, the missing peer's exact checkpoint
+/// survives untouched and in scope, and its eventual return replays the
+/// intervening event from that preserved checkpoint.
+#[tokio::test(start_paused = true)]
+async fn subscription_remote_outage_with_a_healthy_sibling_isolates_and_recovers() {
+    let (watch, missing, active) =
+        WatchFixture::new_with_healthy_sibling_and_excluded_peer().await;
+    let missing_id = missing.config().desktop_id.clone();
+    let checkpoint = watch.row().cursor.unwrap();
+    let missing_checkpoint =
+        decode_cursor(&checkpoint)["cursorsByMachine"][missing_id.as_str()].clone();
+
+    // Round 1: a local event is delivered normally; the missing peer is
+    // reported (never even attempted) without pausing anything, and its
+    // checkpoint in the delivered batch is untouched.
+    Db::open(&watch.source.config().db_path)
+        .unwrap()
+        .update_pipeline_item_pr(
+            "pending-local-child",
+            Some(101),
+            "https://example.test/pull/101",
+        )
+        .unwrap();
+    let first = watch.page().await;
+    let batch = first.pending.as_ref().unwrap();
+    assert!(batch.get("watchError").is_none(), "{batch}");
+    assert_eq!(batch["machineErrors"].as_array().unwrap().len(), 1);
+    assert_eq!(batch["machineErrors"][0]["machineId"], json!(missing_id));
+    assert_eq!(
+        decode_cursor(batch["cursor"].as_str().unwrap())["cursorsByMachine"][missing_id.as_str()],
+        missing_checkpoint
+    );
+    assert_eq!(
+        event_pairs(batch),
+        vec![("pending-local-child".into(), "task.pr_created".into())]
+    );
+    watch.ack(&first).await;
+
+    // Round 2: another local event, still with the peer missing — proves
+    // repeated delivery, not a one-shot. The sibling's own leg (admitted
+    // once for round 1) is simply resumed via the aggregate-wait registry,
+    // exactly as it already is for a plain two-machine subscription (see
+    // subscription_notifications_and_ack_retain_one_remote_wait); a
+    // missing third peer changes nothing about that.
+    Db::open(&watch.source.config().db_path)
+        .unwrap()
+        .update_pipeline_item_pr(
+            "pending-local-child",
+            Some(102),
+            "https://example.test/pull/102",
+        )
+        .unwrap();
+    watch
+        .source
+        .publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    let second = watch.page().await;
+    let second_batch = second.pending.as_ref().unwrap();
+    assert!(second_batch.get("watchError").is_none(), "{second_batch}");
+    assert_eq!(second_batch["machineErrors"][0]["machineId"], json!(missing_id));
+    assert_eq!(
+        decode_cursor(second_batch["cursor"].as_str().unwrap())["cursorsByMachine"]
+            [missing_id.as_str()],
+        missing_checkpoint
+    );
+    watch.ack(&second).await;
+
+    // The missing peer was never probed at all: excluded pre-spawn, not
+    // admitted then rejected. The healthy sibling's own leg was admitted
+    // exactly once and never abandoned across both rounds — unaffected by
+    // the other peer's absence.
+    assert_eq!(watch.relay.counts.attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(watch.relay.counts.admitted.load(Ordering::SeqCst), 1);
+    assert_eq!(watch.relay.counts.abandoned.load(Ordering::SeqCst), 0);
+    assert_eq!(watch.relay.counts.busy.load(Ordering::SeqCst), 0);
+
+    // Recovery: an event lands on the missing peer while it is still
+    // excluded, then it returns to ListActive.
+    Db::open(&missing.config().db_path)
+        .unwrap()
+        .update_pipeline_item_pr(
+            "pending-missing-child",
+            Some(201),
+            "https://example.test/pull/201",
+        )
+        .unwrap();
+    active.lock().unwrap().push(missing_id.clone());
+    watch
+        .source
+        .publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    let recovered = watch.page().await;
+    let recovered_batch = recovered.pending.as_ref().unwrap();
+    assert!(recovered_batch.get("watchError").is_none(), "{recovered_batch}");
+    assert_eq!(recovered_batch["machineErrors"], json!([]));
+    assert_eq!(
+        event_pairs(recovered_batch),
+        vec![("pending-missing-child".into(), "task.pr_created".into())]
+    );
+    // Replayed from the preserved checkpoint, not reset to "now".
+    assert_ne!(
+        decode_cursor(recovered_batch["cursor"].as_str().unwrap())["cursorsByMachine"]
+            [missing_id.as_str()],
+        missing_checkpoint,
+        "recovery must advance past the preserved checkpoint, not just deliver from a fresh one"
+    );
+    watch.ack(&recovered).await;
+}
+
+/// A production restart mid-outage: the subscribing machine's own server
+/// process is torn down and rebuilt from the same persisted DB — a fresh
+/// `AppState`, so no in-memory aggregate-wait registry, admission clock or
+/// relay connection survives the boundary — while a remote peer stays
+/// excluded from `ListActive` throughout. Proves the peer's exact native
+/// checkpoint and its recorded stale coverage survive several real ACKs
+/// and the restart itself; that several further, genuinely quiet
+/// collection cycles post-restart (whose `machineErrors` text keeps
+/// changing call to call, since this machine's own routing never itself
+/// goes unavailable — see `AppState::desktop_routing_unreachable_error`)
+/// manufacture no new pending batch/`batchId` once the fault was already
+/// acknowledged; and that the peer's eventual return still replays its
+/// backlog from that preserved checkpoint. The
+/// `event_subscriptions::outage_isolation_tests` unit tests remain as
+/// narrower, non-integration coverage of the same dedup logic in
+/// isolation — this is the production worker/registry/restart seam they
+/// cannot reach.
+#[tokio::test(start_paused = true)]
+async fn subscription_remote_outage_survives_a_server_restart_and_recovers() {
+    let (watch, missing, active) =
+        WatchFixture::new_with_healthy_sibling_and_excluded_peer().await;
+    let missing_id = missing.config().desktop_id.clone();
+    let sibling = watch.peer.clone();
+    let original_checkpoint = decode_cursor(&watch.row().cursor.unwrap())["cursorsByMachine"]
+        [missing_id.as_str()]
+        .clone();
+
+    // Several real local events and ACKs while the peer stays excluded.
+    for pr in [301, 302, 303] {
+        Db::open(&watch.source.config().db_path)
+            .unwrap()
+            .update_pipeline_item_pr(
+                "pending-local-child",
+                Some(pr),
+                &format!("https://example.test/pull/{pr}"),
+            )
+            .unwrap();
+        watch
+            .source
+            .publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+        let page = watch.page().await;
+        let batch = page.pending.as_ref().unwrap();
+        assert!(batch.get("watchError").is_none(), "{batch}");
+        assert_eq!(
+            decode_cursor(batch["cursor"].as_str().unwrap())["cursorsByMachine"]
+                [missing_id.as_str()],
+            original_checkpoint,
+            "the excluded peer's checkpoint must not move across acked rounds"
+        );
+        watch.ack(&page).await;
+    }
+    assert!(
+        watch.row().stale_machines.contains_key(&missing_id),
+        "the ongoing fault must be recorded before restart"
+    );
+
+    // Restart: tear down the worker and relay, rebuild the subscribing
+    // machine's AppState fresh from the same persisted DB path. The peer
+    // stays excluded throughout, carried through unchanged via `active`.
+    let watch = watch
+        .restart(&[sibling.clone(), missing.clone()], active.clone())
+        .await;
+
+    let restarted_row = watch.row();
+    assert!(restarted_row.active);
+    assert_eq!(
+        decode_cursor(restarted_row.cursor.as_ref().unwrap())["cursorsByMachine"]
+            [missing_id.as_str()],
+        original_checkpoint,
+        "a restarted server must not silently reset or advance the excluded peer's checkpoint"
+    );
+    assert!(
+        restarted_row.stale_machines.contains_key(&missing_id),
+        "stale coverage must be readable immediately after restart, from the durable row alone"
+    );
+
+    // Several full, genuinely quiet collection cycles post-restart: the
+    // peer stays excluded (its error text changes call to call — this
+    // machine's own routing is never itself marked unavailable) and
+    // nothing new is observed locally either. None of that may manufacture
+    // a fresh pending batch once the fault is already acknowledged.
+    let batch_id_before_idle = watch.row().batch_id;
+    for _ in 0..2 {
+        tokio::time::advance(Duration::from_secs(kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS)).await;
+        notifications(&watch.source).await;
+        assert_eq!(
+            watch.row().batch_id, batch_id_before_idle,
+            "a still-down, already-reported peer must not manufacture a new pending batch"
+        );
+        assert_eq!(watch.row().wake_state, "idle");
+    }
+
+    // Recovery: an event lands on the peer while still excluded, then it
+    // returns.
+    Db::open(&missing.config().db_path)
+        .unwrap()
+        .update_pipeline_item_pr(
+            "pending-missing-child",
+            Some(401),
+            "https://example.test/pull/401",
+        )
+        .unwrap();
+    active.lock().unwrap().push(missing_id.clone());
+    watch
+        .source
+        .publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    let recovered = watch.page().await;
+    let recovered_batch = recovered.pending.as_ref().unwrap();
+    assert!(recovered_batch.get("watchError").is_none(), "{recovered_batch}");
+    assert_eq!(recovered_batch["machineErrors"], json!([]));
+    assert_eq!(
+        event_pairs(recovered_batch),
+        vec![("pending-missing-child".into(), "task.pr_created".into())]
+    );
+    assert_ne!(
+        decode_cursor(recovered_batch["cursor"].as_str().unwrap())["cursorsByMachine"]
+            [missing_id.as_str()],
+        original_checkpoint,
+        "recovery must replay from the preserved checkpoint, advancing past it"
+    );
+    watch.ack(&recovered).await;
 }
 
 #[tokio::test(start_paused = true)]

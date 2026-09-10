@@ -235,3 +235,65 @@ Current `main` was revalidated at `3f9520ae2` (Android emulator pairing
 terminal work): touches no file this task shares (`apps/mobile/**`,
 `crates/kanna-server/src/http_api/ksp.rs`, `tools/kd/**`); this task's fork
 point `90fd52ee4` still applies with no conflicts.
+
+## Revision round 1: required integration coverage
+
+Review found the prior round's coverage insufficient in two specific ways
+and required closing both before further verification:
+
+1. **The pre-spawn `machineErrors` path was never exercised.**
+   `subscription_remote_outage_isolates_to_that_leg_and_recovers` only used
+   a busy/503 leg (`Unavailable` via an exhausted relay permit), which is a
+   different `apply_aggregate_completion` branch than a peer simply absent
+   from `ListActive` — the actual MBP-dropped-WiFi shape, and the one the
+   `wait_aggregate_task_events` loop-top guard at `task_events.rs:2389`
+   (`local_machine_faulted`) exists to keep from short-circuiting local/
+   sibling collection. Added `WatchFixture::new_with_healthy_sibling_and_
+   excluded_peer` (three machines: source, a healthy sibling reusing the
+   existing `peer`/`page`/`ack` machinery, and a peer excluded from
+   `ListActive` *before* the worker's first real cycle — established at
+   bootstrap, then dropped, never admitted-then-abandoned) and
+   `connect_repo_peers` (routes `Invoke` by `desktop_id`, `ListActive` reads
+   a mutable, test-controlled roster). New test:
+   `subscription_remote_outage_with_a_healthy_sibling_isolates_and_recovers`
+   — repeated local delivery/ACKs, the excluded peer's exact checkpoint
+   in scope and untouched, the healthy sibling's admission/abandon counts
+   unaffected, and recovery replaying from the preserved checkpoint.
+
+2. **No restart regression, and the unit test's dedup coverage was too
+   narrow.** The `event_subscriptions::outage_isolation_tests` row-reload
+   unit test calls `accept_page` directly against a synthetic batch and a
+   reopened `Db` handle — it never restarts the worker or the aggregate-
+   wait registry, so it cannot prove restart *resumption*. It remains as
+   narrower, non-integration coverage of the dedup logic itself. Added
+   `WatchFixture::restart` (drops the fixture — aborting the old worker and
+   relay via `Drop` — then rebuilds a fresh `AppState` from the same
+   persisted DB path, so no in-memory registry/admission-clock/relay state
+   survives) and
+   `subscription_remote_outage_survives_a_server_restart_and_recovers`:
+   several real ACKs, then a restart, verifying the excluded peer's exact
+   checkpoint and `stale_machines` entry are readable from the durable row
+   alone immediately after, then several full 240s-timeout quiet collection
+   cycles post-restart (whose `machineErrors` text genuinely changes call to
+   call — `AppState::desktop_routing_unreachable_error` mints a fresh
+   `unix:<now>` string whenever this machine's own routing stays healthy,
+   confirmed by reading its implementation) asserting no new pending
+   batch/`batchId`, then recovery replaying the backlog.
+
+Both are integration tests through the production relay-fixture/worker/
+mailbox seam, per the review's requirement — no live network/peer
+manipulation, no change to `accept_page`'s or `wait_aggregate_task_events`'s
+logic itself. Written and reasoned through carefully but **not compiled or
+run**: this revision round's instructions hold builds/tests until the
+manager releases them, same as the prior round. `admitted`/`abandoned`/
+`busy` semaphore-based assertions reuse `connect`'s exact proven mechanics
+(just routed to multiple backing states); the "attempts stays at 1 across
+several acked local-only rounds" assertion mirrors
+`subscription_notifications_and_ack_retain_one_remote_wait`'s own, already-
+passing assertion for the two-machine case. Admission-pacing instrumentation
+(`subscription_timing`'s `TestEvent::Admitted`) was not reused — both new
+tests use `delivery: "poll"`, which never reaches that code path at all (see
+`event_subscriptions.rs`'s `step()`); the review's "if testing actual wake
+delivery" phrasing reads as conditional, and switching delivery modes would
+need a fake PTY/daemon session neither fixture sets up. Flagged here rather
+than done, in case reconciliation wants it revisited.
