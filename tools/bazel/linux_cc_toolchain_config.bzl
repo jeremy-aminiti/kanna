@@ -19,6 +19,11 @@ def _exec_path(file):
         return "external/" + file.short_path[3:]
     return file.short_path
 
+def _generated_tool_path(file):
+    # cc_toolchain resolves relative tool paths from this package, while
+    # generated wrappers live under the exec root's bazel-out tree.
+    return "../../" + file.path
+
 def _zig_cc_wrapper_impl(ctx):
     zig_toolchain = ctx.toolchains["@rules_zig//zig:toolchain_type"].zigtoolchaininfo
     zig = _exec_path(zig_toolchain.zig_files[0])
@@ -119,15 +124,15 @@ def _zig_cc_toolchain_config_impl(ctx):
             ),
         ],
         tool_paths = [
-            tool_path(name = "gcc", path = wrapper.path),
-            tool_path(name = "ld", path = wrapper.path),
-            tool_path(name = "cpp", path = wrapper.path),
-            tool_path(name = "ar", path = ctx.file.ar.path),
-            tool_path(name = "nm", path = ctx.file.nm.path),
-            tool_path(name = "objcopy", path = ctx.file.objcopy.path),
-            tool_path(name = "objdump", path = ctx.file.nm.path),
-            tool_path(name = "strip", path = ctx.file.strip.path),
-            tool_path(name = "gcov", path = ctx.file.nm.path),
+            tool_path(name = "gcc", path = _generated_tool_path(wrapper)),
+            tool_path(name = "ld", path = _generated_tool_path(wrapper)),
+            tool_path(name = "cpp", path = _generated_tool_path(wrapper)),
+            tool_path(name = "ar", path = _generated_tool_path(ctx.file.ar)),
+            tool_path(name = "nm", path = _generated_tool_path(ctx.file.nm)),
+            tool_path(name = "objcopy", path = _generated_tool_path(ctx.file.objcopy)),
+            tool_path(name = "objdump", path = _generated_tool_path(ctx.file.nm)),
+            tool_path(name = "strip", path = _generated_tool_path(ctx.file.strip)),
+            tool_path(name = "gcov", path = _generated_tool_path(ctx.file.nm)),
         ],
     )
 
