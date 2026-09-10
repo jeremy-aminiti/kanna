@@ -238,14 +238,39 @@ async fn run_sequence(
         // quit and crashed before recording its outcome, absence cannot prove
         // that the bytes were never delivered; upgrading that state to clean
         // would both hide uncertainty and permit an unsafe retry.
-        let ambiguous_phase = open_db(state).ok().and_then(|db| {
-            [WRAP_UP_PHASE, QUIT_PHASE].into_iter().find(|phase| {
-                db.read_transfer_work_observation(&work.id, phase)
-                    .ok()
-                    .map(|record| record.is_some())
-                    .unwrap_or(false)
-            })
-        });
+        let ambiguous_phase = match open_db(state) {
+            Ok(db) => {
+                let mut found = None;
+                for phase in [WRAP_UP_PHASE, QUIT_PHASE] {
+                    match db.read_transfer_work_observation(&work.id, phase) {
+                        Ok(Some(_)) => {
+                            found = Some(phase);
+                            break;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            return degraded(
+                                state,
+                                task_id,
+                                format!(
+                                    "could not establish finalization phase {phase} after session disappearance: {error}"
+                                ),
+                            );
+                        }
+                    }
+                }
+                found
+            }
+            Err(error) => {
+                return degraded(
+                    state,
+                    task_id,
+                    format!(
+                        "could not inspect finalization phase history after session disappearance: {error}"
+                    ),
+                );
+            }
+        };
         if let Some(phase) = ambiguous_phase {
             return degraded(
                 state,
