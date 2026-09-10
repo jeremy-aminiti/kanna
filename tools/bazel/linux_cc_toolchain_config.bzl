@@ -24,9 +24,15 @@ def _generated_tool_path(file):
     # this generated bazel-out path directly from the execution root.
     return file.path
 
+def _zig_binary(zig_toolchain):
+    for file in zig_toolchain.zig_files:
+        if file.basename == "zig":
+            return _exec_path(file)
+    fail("the resolved pinned Zig toolchain does not expose its zig binary")
+
 def _zig_cc_wrapper_impl(ctx):
     zig_toolchain = ctx.toolchains["@rules_zig//zig:toolchain_type"].zigtoolchaininfo
-    zig = _exec_path(zig_toolchain.zig_files[0])
+    zig = _zig_binary(zig_toolchain)
     marker = _exec_path(ctx.file.sysroot_marker)
     sysroot = marker[:-len("/.kanna-sysroot")]
     if ctx.attr.mode == "cc":
@@ -58,7 +64,7 @@ def _zig_cc_wrapper_impl(ctx):
     wrapper = ctx.actions.declare_file(ctx.label.name)
     ctx.actions.write(
         wrapper,
-        "#!/bin/sh\nset -eu\nzig=\"$PWD/{}\"\nsysroot=\"$PWD/{}\"\ncache=\"${{TMPDIR:-$PWD/.zig-cache}}\"\nmkdir -p \"$cache/global\" \"$cache/local\"\nexport ZIG_GLOBAL_CACHE_DIR=\"$cache/global\"\nexport ZIG_LOCAL_CACHE_DIR=\"$cache/local\"\n{}\n".format(
+        "#!/bin/sh\nset -eu\nzig=\"{}\"\nsysroot=\"{}\"\ncache=\"${{TMPDIR:-$PWD/.zig-cache}}\"\nmkdir -p \"$cache/global\" \"$cache/local\"\nexport ZIG_GLOBAL_CACHE_DIR=\"$cache/global\"\nexport ZIG_LOCAL_CACHE_DIR=\"$cache/local\"\n{}\n".format(
             zig,
             sysroot,
             command,
