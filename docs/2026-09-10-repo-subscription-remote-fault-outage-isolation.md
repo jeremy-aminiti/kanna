@@ -132,14 +132,75 @@ backlog from its preserved checkpoint with no unsubscribe/resubscribe.
 still passes: a `local_only` subscription with an invalid cursor is a local
 fault and still gets no free pass.
 
+## Verification (2026-09-10)
+
+Ran `crates/kanna-server`'s `task_events::` suite (107 tests — covers
+`subscription_remote`, `subscription_relevance`, `subscription_timing`, and
+the raw aggregate/cursor-rejection tests) and the two new
+`event_subscriptions::outage_isolation_tests` unit tests at
+`CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1`, plus a scoped
+`cargo clippy -p kanna-server --tests --bin kanna-server -- -D warnings` and
+`cargo fmt --all -- --check`. All green as of commit `5fc54e2dd`.
+
+Two test bugs were found and fixed along the way (production code
+unaffected by either):
+
+- `subscription_remote_cursor_rejection_remains_a_hard_pause_distinct_from_outage`
+  originally corrupted an *already-established* subscription's peer cursor.
+  By then the worker had already admitted a real long-poll to the peer with
+  the valid cursor; abandoning that in-flight leg (via the row-mismatch
+  revalidation) does not release its relay permit until its own deadline —
+  the same mechanic `subscription_retirement_abandons_one_leg_until_peer_deadline`
+  documents. The next attempt hit a busy-503 instead of ever reaching the
+  peer's cursor validation, so the test just hung until its own timeout.
+  Fixed by adding `WatchFixture::new_with_poisoned_peer_cursor`, which
+  corrupts the peer's native cursor before the worker ever spawns.
+- The durable-row-reload unit test inserted an `EventSubscription` row
+  without first inserting its referenced `pipeline_item`, tripping the
+  `task_id -> pipeline_item` foreign key the schema already enforces.
+
 ## Reconciliation note
 
 This task's source changes were written against `main` at
 `90fd52ee401dfcc900174d9564e2d9c388bec275`, before the subscription-tuning
-task's timing/API changes (task `5edc81f8`, committed at `ed906ff53`) merge.
-Once that merges, the sibling's
+task's timing/API changes (task `5edc81f8`, finished and advancing to review
+at `02b65d2af`) merge. Its diff was read in full for this verification pass;
+concretely:
+
+- `accept_page`'s outage logic is untouched by `02b65d2af` — confirms it was
+  deliberately deferred to this task, as its own limitation doc says.
+- `compact()`/`response(row, diagnostic)` (new there) need my
+  `local_machine_id` parameter on `accept_page` merged in; both are
+  independent edits to the same functions/call sites, not a design conflict.
+- `Collection::from_query(query.quiet_ms, query.max_hold_ms)` (new there)
+  sits on lines adjacent to my `local_machine_faulted` closure and scoped
+  break/OR conditions in `wait_aggregate_task_events`/`wait_local_task_events`
+  — an expected adjacent-line merge conflict, orthogonal in effect (theirs
+  governs collection duration, mine governs early-termination scope).
+- `WatchFixture::request()`/`ack()` (shared by my two new tests) gained
+  `diagnostic:true` plus `quietMs:2000`/`maxHoldMs:10000` overrides, and
+  `until()`'s budget grew from 2s to 400s simulated — my tests should
+  inherit this cleanly since they use the same helpers, but must be
+  re-run once merged rather than assumed to still pass.
+- `catalog.json`'s `kanna_read_event_subscription` description was rewritten
+  there (compact-response documentation) — my `staleMachines`/outage-behavior
+  sentence needs re-inserting into their new text, not restored verbatim.
+- Open, not decided here: `compact()`'s default response omits
+  `staleMachines`; only `pending.machineErrors` on an actually-delivered
+  batch carries partial-coverage info to a compact-mode caller. Whether
+  `compact()` should also expose `staleMachines` is a joint call for
+  reconciliation.
+
+Once `02b65d2af` merges, the sibling's
 `docs/2026-09-10-repo-subscription-remote-fault-pauses-all-legs-limitation.md`
 is resolved by this change and should be removed or marked resolved, and this
-task's new test's timing assumptions (1s quiet / 5s max hold, from the
-pre-tuning `subscription_timing.rs` constants) need re-validation against
-whatever the merged timing constants become.
+task's new tests' timing assumptions (1s quiet / 5s max hold, from the
+pre-tuning `subscription_timing.rs` constants used at verification time) need
+re-validation against the merged timing constants (300s/300s/60s defaults,
+mitigated for these specific fixtures by the per-subscription overrides
+`WatchFixture` will carry post-merge).
+
+Current `main` was revalidated at `3f9520ae2` (Android emulator pairing
+terminal work): touches no file this task shares (`apps/mobile/**`,
+`crates/kanna-server/src/http_api/ksp.rs`, `tools/kd/**`); this task's fork
+point `90fd52ee4` still applies with no conflicts.
