@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { localProcessFetch } from "@kanna/local-process-fetch";
 import { BUFFY_UID } from "./firebaseAuth";
@@ -95,6 +97,57 @@ describe("LAN-first desktop-to-desktop routing E2E", () => {
     },
     120_000
   );
+
+  /**
+   * `request_bootstrap`/`bootstrap_lan_trust` (lan_bootstrap.rs) establish
+   * trust entirely over the already-authenticated relay round trip -
+   * `state.invoke_relay_desktop`, not `lan_candidate_for` or any Bonjour
+   * state. This is deliberately a separate, narrower test from the one
+   * above: it proves the real bootstrap-over-relay production path
+   * (currently held: LAN discovery in this environment - see the
+   * checkpoint/commit history) independent of whether real mDNS discovery
+   * ever resolves a candidate. It reads the actual on-disk
+   * machine-trust.json each side wrote, never seeding it.
+   */
+  it(
+    "establishes a real trust grant over relay-based bootstrap, independent of LAN candidate discovery",
+    async () => {
+      const peer = await startSameAccountPeer(harness, "relay-bootstrap");
+      try {
+        // Same trigger as the empty-store test: any invoke with no existing
+        // grant kicks off `maybe_trigger_lan_bootstrap` in the background,
+        // regardless of whether a LAN candidate has ever been discovered.
+        await invokeMachine(harness, peer.desktopId, "/v1/status");
+
+        await waitForCondition(
+          async () => {
+            const store = await readMachineTrustStore(harness);
+            return store?.outbound.some(
+              (grant) =>
+                grant.targetDesktopId === peer.desktopId && grant.accountUid === BUFFY_UID
+            ) ?? false;
+          },
+          30_000,
+          `${harness.desktopId} never recorded a real outbound bootstrap grant for ${peer.desktopId}`
+        );
+
+        await waitForCondition(
+          async () => {
+            const store = await readMachineTrustStore(peer);
+            return store?.inbound.some(
+              (grant) =>
+                grant.sourceDesktopId === harness.desktopId && grant.accountUid === BUFFY_UID
+            ) ?? false;
+          },
+          30_000,
+          `${peer.desktopId} never recorded a real inbound bootstrap grant from ${harness.desktopId}`
+        );
+      } finally {
+        await peer.stop();
+      }
+    },
+    60_000
+  );
 });
 
 interface MachineInvokeResult {
@@ -102,6 +155,36 @@ interface MachineInvokeResult {
   body: unknown;
   error: string | null;
   route: "local" | "lan" | "relay";
+}
+
+interface MachineTrustGrant {
+  targetDesktopId?: string;
+  sourceDesktopId?: string;
+  accountUid: string;
+}
+
+interface MachineTrustStoreSnapshot {
+  inbound: MachineTrustGrant[];
+  outbound: MachineTrustGrant[];
+}
+
+/** Reads the real, on-disk `machine-trust.json` `request_bootstrap`/
+ * `bootstrap_lan_trust` themselves write - never seeded by this suite.
+ * `Config::machine_trust_store_path` derives it as a `machine-trust.json`
+ * sibling of `pairing_store_path`, which the harness always places at
+ * `<daemonDir>/pairings.json`. Absent (not yet written) reads as an empty
+ * store rather than an error - a genuine race with the background
+ * bootstrap task, not a failure. */
+async function readMachineTrustStore(
+  desktop: Pick<RemoteHarness, "paths"> | Pick<RemoteDesktop, "paths">
+): Promise<MachineTrustStoreSnapshot | null> {
+  const daemonDir = "daemonDir" in desktop.paths ? desktop.paths.daemonDir : join(desktop.paths.root, "daemon");
+  try {
+    const raw = await readFile(join(daemonDir, "machine-trust.json"), "utf8");
+    return JSON.parse(raw) as MachineTrustStoreSnapshot;
+  } catch {
+    return null;
+  }
 }
 
 async function invokeMachine(
