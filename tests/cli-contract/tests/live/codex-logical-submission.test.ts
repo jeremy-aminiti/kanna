@@ -1,8 +1,17 @@
 import { constants } from "node:fs";
 import { access, symlink } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { findCodexBinary } from "../../helpers/codex";
 import { codexBinaryOrNull, ptyBridgeAvailable } from "../../helpers/availability";
@@ -54,24 +63,207 @@ import { sleep, startPtySession, type PtySession } from "../../helpers/pty";
 // waitForComposerReady below replaced that file's own COMPOSER regex after
 // two real runs each falsified it a different way (see the comment there).
 //
-// STATE AS OF THE LATEST REAL RUNS (4 total; docs/2026-09-10-mobile-
-// connection-flicker-e2e-note.md has the full evidence): the
-// composer-readiness fix reaches a real "ready" read now — reachComposer no
-// longer fails — but the busy-phase proof still fails: codex keeps printing
-// "Booting MCP server: codex_apps (0s • esc to interrupt)" well past the
-// point `waitForComposerReady` reports ready, and the submitted instruction
-// lands as "tab to queue message" rather than executing, so
-// .kanna-busy-phase-start never appears within the 30s wait.
-// `codex_apps` is not a user-configured server (`codex mcp list` against a
-// totally fresh CODEX_HOME reports none) — it is a built-in feature.
-// Confirmed the exact flag with zero live-turn cost, no CLI invocation that
-// starts a session: `codex features list` (a local, instant, non-agentic
-// introspection command, run outside any test — not a live CLI turn) lists
-// `apps    stable    true` — the feature backing the "codex_apps" MCP
-// server, on by default. `--disable apps` is now passed at spawn below.
-// This has NOT yet been verified against a real run in this pass (that
-// would be the live-turn budget this note keeps separately accounted for);
-// it is a source correction only, ready for the next authorized run.
+// STATE AS OF THE LATEST REAL RUNS (5 total; docs/2026-09-10-mobile-
+// connection-flicker-e2e-note.md has the full evidence): runs 1-4 each
+// failed on a harness precondition (echo-based markers, a composer regex
+// too broad then too narrow, the codex_apps MCP-boot race) and were each
+// corrected in turn. Run 5 applied the `--disable apps` fix and confirmed it
+// closed the boot-race signature ("Booting MCP server: codex_apps" no longer
+// appears anywhere in the transcript) — but both cases still failed at the
+// same assertion, `enterObservedBusyPhase`'s `.kanna-busy-phase-start` check
+// (expected true, got false) within the 30s wait. The preserved tail shows
+// header/tip render and the submitted instruction visible on the composer
+// line, then nothing further within the captured window — no turn-start
+// indicator, no tool call, no response. That is consistent with either
+// ordinary session-startup latency independent of MCP boot (still exceeding
+// 30s on its own) or the actual submission question this file exists to
+// answer, and run 5's own evidence — a `session.output.slice(-1500)` tail —
+// cannot distinguish an echoed history line from an unsent draft, so it was
+// correctly marked unattributed rather than guessed either way. The fixture
+// otherwise ran clean: `--yolo -m gpt-5.6-sol -c model_reasoning_effort="low"
+// --disable apps` spawn confirmed applied, cleanup confirmed (no leftover
+// processes/temp dirs under this fixture's own naming).
+//
+// Per review of that gap, no 6th run has been executed yet. Instead this
+// file now carries the observation instrumentation described immediately
+// below (full raw/rendered output retention, Codex's own rollout JSONL as
+// submitted/tool-invocation ground truth, and separately timestamped
+// composer-ready vs. busy-start-observed checkpoints) — implemented and
+// ready, not yet exercised against a real session in this pass. The next
+// authorized run is the first one that will actually produce artifacts
+// under `.tmp/codex-run-artifacts/` to read.
+
+// OBSERVATION PLAN — added before any 6th run, per review of run 5's own
+// evidence gap: `session.output.slice(-1500)` and the visible `›` composer
+// line cannot tell an *echoed* history line (what the TUI redraws to show
+// what was already submitted) apart from an *unsent draft* still sitting in
+// the composer, and composer-text-clearing alone is not proof of submission
+// either — both are inferences from a screen-scrape of a bridge that
+// concatenates and strips ANSI rather than emulating a terminal grid (see
+// PtySession's own class doc). This section adds three things without
+// touching the live control flow's assertions or gating conditions:
+//
+// 1. Full, timestamped retention — not a 1500-char tail. Both the rendered
+//    (`PtySession.output`) and fully raw (`PtySession.rawOutput`, ANSI
+//    intact) byte streams, plus an explicit checkpoint log
+//    (stage -> ISO timestamp) for every stage transition below, written to
+//    `.tmp/codex-run-artifacts/<run>/` on every exit (pass or fail), not
+//    just captured inline in an assertion string.
+//
+// 2. Ground truth for "typed draft vs. submitted", from Codex's own record,
+//    not a screen inference: Codex persists each session as a JSONL
+//    "rollout" file under `$CODEX_HOME/sessions/YYYY/MM/DD/
+//    rollout-<timestamp>-<id>.jsonl` (confirmed by inspecting the *shape*
+//    of real, pre-existing rollout files under this machine's own
+//    `~/.codex/sessions/` — structure/keys only, no message content or
+//    secrets were read or are reproduced here). Each line is
+//    `{ timestamp, ordinal, type, payload }`; a `type: "response_item"`
+//    line with `payload.type === "message" && payload.role === "user"` is
+//    Codex's own record of a message it actually treated as submitted and
+//    handed to the model — categorically different from anything visible
+//    on the composer line, which can show unsent, echoed, or in-flight
+//    text indistinguishably to a screen-scrape. `payload.type ===
+//    "function_call"` with the shell command in `arguments`, and the
+//    matching `function_call_output`, is equally direct evidence that the
+//    tool was actually invoked, versus a touched marker file (which proves
+//    only that *a* shell ran, not that codex's own engine agrees it was
+//    asked to). Because this test's `CODEX_HOME` is a fresh temp dir
+//    created and owned solely by this test run (never the real
+//    `~/.codex`), any rollout file found under it belongs to this test and
+//    nothing else — captured here by copying only the `.jsonl` file(s)
+//    themselves (never `auth.json`, never the whole `CODEX_HOME`, which
+//    would risk pulling in the symlinked real credential) plus a
+//    structural summary that records `ordinal`/`type`/`payload.type`/
+//    `payload.role`/`timestamp` and a boolean match against this test's
+//    own known marker strings — never the raw `content`/`arguments`/
+//    `output` text — so nothing resembling a secret or arbitrary
+//    conversation content is written to disk or asserted on.
+//
+// 3. Readiness and mid-turn stay two separate, separately timestamped
+//    checkpoints, not one conflated signal: `composer-ready` (this test's
+//    existing `waitForComposerReady` — "codex is ready to accept a new
+//    message") is recorded distinctly from `busy-start-observed` ("a turn
+//    actually started mid-message" — this test's existing file-touch
+//    proof). The rollout's own `event_msg` `task_started`/`item_completed`
+//    entries, once captured, give a third, independent cross-check for the
+//    same distinction on the *next* run — not wired into this run's live
+//    gating, since that would be exactly the kind of blind variant this
+//    review asked not to introduce without first seeing what real
+//    rollout data looks like.
+//
+// None of this changes what makes a case pass or fail, and none of it was
+// run against a real session in this pass — it is instrumentation, staged
+// for the next authorized run.
+
+const ARTIFACTS_ROOT = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../../.tmp/codex-run-artifacts",
+);
+
+interface Checkpoint {
+  label: string;
+  atIso: string;
+  atMs: number;
+}
+
+function makeCheckpointRecorder(): { checkpoints: Checkpoint[]; record: (label: string) => void } {
+  const checkpoints: Checkpoint[] = [];
+  return {
+    checkpoints,
+    record(label: string) {
+      checkpoints.push({ label, atIso: new Date().toISOString(), atMs: Date.now() });
+    },
+  };
+}
+
+/** Every `.jsonl` under `<codexHome>/sessions/**` — the rollout file(s) this
+ * specific, test-owned session wrote, if any. Never touches `auth.json` or
+ * anything else in `codexHome`. */
+function findRolloutFiles(codexHome: string): string[] {
+  const sessionsRoot = join(codexHome, "sessions");
+  if (!existsSync(sessionsRoot)) return [];
+  const found: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      const stat = statSync(full);
+      if (stat.isDirectory()) walk(full);
+      else if (entry.endsWith(".jsonl")) found.push(full);
+    }
+  };
+  walk(sessionsRoot);
+  return found;
+}
+
+interface RolloutLineSummary {
+  ordinal: unknown;
+  type: unknown;
+  payloadType: unknown;
+  role: unknown;
+  timestamp: unknown;
+  matchesBusyPhaseInstruction: boolean;
+  matchesTestMessage: boolean;
+}
+
+/** Structural summary only — `ordinal`/`type`/`payload.type`/`payload.role`/
+ * `timestamp`, plus a boolean match against caller-supplied marker strings.
+ * Never extracts or returns `payload.content`/`arguments`/`output` text. */
+function summarizeRolloutStructurally(path: string, markers: string[]): RolloutLineSummary[] {
+  const lines = readFileSync(path, "utf8").split("\n").filter((line) => line.trim().length > 0);
+  return lines.map((line) => {
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return {
+        ordinal: null,
+        type: "PARSE_ERROR",
+        payloadType: null,
+        role: null,
+        timestamp: null,
+        matchesBusyPhaseInstruction: false,
+        matchesTestMessage: false,
+      };
+    }
+    const payload = (parsed.payload ?? {}) as Record<string, unknown>;
+    const serializedPayload = JSON.stringify(payload);
+    return {
+      ordinal: parsed.ordinal,
+      type: parsed.type,
+      payloadType: payload.type,
+      role: payload.role,
+      timestamp: parsed.timestamp,
+      matchesBusyPhaseInstruction: serializedPayload.includes(markers[0] ?? " "),
+      matchesTestMessage: serializedPayload.includes(markers[1] ?? " "),
+    };
+  });
+}
+
+/** Retains full timestamped PTY output (rendered and raw) plus checkpoints
+ * and any rollout evidence this session's own CODEX_HOME produced, under
+ * `.tmp/codex-run-artifacts/` (gitignored, not committed). Called from
+ * teardown, before either temp dir is removed, so nothing is lost to
+ * cleanup. Read-only with respect to CODEX_HOME: copies only the rollout
+ * `.jsonl` file(s), never `auth.json`, never the directory itself. */
+function captureArtifacts(
+  setup: CodexTuiSetup,
+  label: string,
+  checkpoints: Checkpoint[],
+  markers: string[],
+): void {
+  const runDir = join(ARTIFACTS_ROOT, `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}`);
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, "output.txt"), setup.session.output);
+  writeFileSync(join(runDir, "raw-output.txt"), setup.session.rawOutput);
+  writeFileSync(join(runDir, "checkpoints.json"), JSON.stringify(checkpoints, null, 2));
+  const rolloutFiles = findRolloutFiles(setup.codexHome);
+  writeFileSync(join(runDir, "rollout-files-found.json"), JSON.stringify(rolloutFiles, null, 2));
+  rolloutFiles.forEach((path, i) => {
+    copyFileSync(path, join(runDir, `rollout-${i}.jsonl`));
+    const summary = summarizeRolloutStructurally(path, markers);
+    writeFileSync(join(runDir, `rollout-${i}-summary.json`), JSON.stringify(summary, null, 2));
+  });
+}
 
 const TRUST_PROMPT = /trustthecontentsofthisdirectory/i;
 
@@ -233,9 +425,17 @@ async function enterObservedBusyPhase(
   return { started, startFile, endFile };
 }
 
-async function teardown(setup: CodexTuiSetup): Promise<void> {
+async function teardown(
+  setup: CodexTuiSetup,
+  label: string,
+  checkpoints: Checkpoint[],
+  markers: string[],
+): Promise<void> {
   // Only this test's own PTY child — nothing else on the machine.
   setup.session.kill();
+  // Capture before removing either temp dir — this is the one place the
+  // rollout file and full output would otherwise be lost to cleanup.
+  captureArtifacts(setup, label, checkpoints, markers);
   await removeDir(setup.cwd);
   await removeDir(setup.codexHome);
 }
@@ -265,11 +465,25 @@ async function runSubmissionCase(
     bracketedPasteMode: boolean,
   ) => { markerPath: string; message: string; label: string },
 ): Promise<void> {
+  const { checkpoints, record } = makeCheckpointRecorder();
+  record("case-start");
   if (!(await requireEnvironment(ctx))) return;
 
   const setup = await startCodexTui();
+  record("codex-spawned");
+  // Populated once `build()` runs below; captured on every exit path,
+  // including an early return from reachComposer/enterObservedBusyPhase, so
+  // markers defaults to just the busy-phase instruction until then.
+  let markers: string[] = [BUSY_START_FILE];
+  let label = "unlabeled";
   try {
     if (!(await reachComposer(setup, ctx))) return;
+    // Distinct from busy-start-observed below: this is "codex is ready to
+    // accept a new message" (initial submission readiness), not "a turn
+    // actually started mid-message" (the mid-turn condition) — the two
+    // conditions this review asked to keep separately timestamped rather
+    // than inferred from one conflated signal.
+    record("composer-ready");
 
     // Observed from this actual session, not assumed: `logical_message_bytes`
     // only frames when the terminal itself advertised bracketed paste
@@ -278,8 +492,10 @@ async function runSubmissionCase(
     // regardless would test a framing decision the daemon would never have
     // made for this CLI.
     const bracketedPasteMode = setup.session.sawBracketedPasteEnable();
+    record(`bracketed-paste-observed:${bracketedPasteMode}`);
 
     const { started, startFile, endFile } = await enterObservedBusyPhase(setup, bracketedPasteMode);
+    record(`busy-start-observed:${started}`);
     expect(
       started,
       `codex never entered the observed busy tool-work phase (${startFile} was never created) — ` +
@@ -293,10 +509,14 @@ async function runSubmissionCase(
       `claim mid-turn delivery either. TUI tail:\n${setup.session.output.slice(-1500)}`,
     ).toBe(false);
 
-    const { markerPath, message, label } = build(setup, bracketedPasteMode);
-    await setup.session.submitLogical(message, bracketedPasteMode);
+    const built = build(setup, bracketedPasteMode);
+    label = built.label;
+    markers = [BUSY_START_FILE, built.message];
+    await setup.session.submitLogical(built.message, bracketedPasteMode);
+    record("test-message-submitted");
 
-    const wrote = await setup.session.waitUntil(() => existsSync(markerPath), 180_000, 1_000);
+    const wrote = await setup.session.waitUntil(() => existsSync(built.markerPath), 180_000, 1_000);
+    record(`marker-observed:${wrote}`);
     expect(
       wrote,
       `codex never acted on ${label} delivered mid-turn. Cause unattributed: the transcript ` +
@@ -306,10 +526,11 @@ async function runSubmissionCase(
       `${bracketedPasteMode}. TUI tail:\n${setup.session.output.slice(-1500)}`,
     ).toBe(true);
     if (wrote) {
-      expect(readFileSync(markerPath, "utf8")).toContain("SUBMITTED_OK");
+      expect(readFileSync(built.markerPath, "utf8")).toContain("SUBMITTED_OK");
     }
   } finally {
-    await teardown(setup);
+    record("teardown-start");
+    await teardown(setup, label, checkpoints, markers);
   }
 }
 

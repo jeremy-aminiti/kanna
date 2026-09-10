@@ -899,6 +899,51 @@ harness can currently drive interactively at all.
    corrected to the fixture's own temp-dir names before concluding anything
    was clean, and left that other task's process untouched).
 
+**Correction, per manager review of run 5's own evidence:** the earlier
+re-report after run 5 proposed "check whether the composer clears after the
+`\r`" as the next smallest observation before a sixth run. That was wrong and
+was corrected before any sixth run was authorized or made: composer-text
+clearing alone is not unambiguous submission proof — `session.output` is a
+byte-concatenating bridge, not a real terminal-grid emulator (see
+`PtySession`'s own class doc), so it cannot distinguish an *echoed* history
+line (the TUI redrawing what it already submitted) from an *unsent draft*
+still sitting in the composer; a cleared-looking composer is consistent with
+either.
+
+**Observation-plan instrumentation added instead (source only, no sixth run
+made this pass)**, in `tests/cli-contract/tests/live/codex-logical-submission.test.ts`
+and `tests/cli-contract/helpers/pty.ts`:
+- `PtySession.rawOutput` — the complete, un-stripped byte stream (every
+  ANSI/OSC sequence intact), alongside the existing lossy `output` view.
+- A checkpoint recorder with explicit, separately-labeled stages —
+  `composer-ready` (initial submission readiness) is now recorded distinctly
+  from `busy-start-observed:<bool>` (the mid-turn condition), rather than
+  inferred from one conflated signal.
+- `findRolloutFiles`/`summarizeRolloutStructurally` — Codex persists each
+  session as its own JSONL "rollout" file under
+  `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`; a
+  `response_item` line with `payload.type === "message" && payload.role ===
+  "user"` is Codex's own record of a message it treated as actually
+  submitted — direct evidence, not a screen inference, distinguishing typed
+  draft from submitted history. Inspected read-only, structure/keys only (no
+  message content, tool arguments, or secrets read or reproduced): this
+  test's own `CODEX_HOME` is a fresh temp dir it alone owns, so any rollout
+  file found under it belongs to this run and nothing else. The summary
+  records only `ordinal`/`type`/`payload.type`/`payload.role`/`timestamp`
+  and a boolean marker match — never raw content.
+- `captureArtifacts`, wired into `teardown()` ahead of the existing temp-dir
+  removal, writes full raw/rendered output, checkpoints, and the copied
+  rollout file(s) plus their structural summary (never `auth.json`, never
+  the whole `CODEX_HOME`) to `.tmp/codex-run-artifacts/<run>/` — gitignored,
+  not committed — on every exit, pass or fail.
+
+None of this changed the two cases' pass/fail assertions, and none of it
+produced or claims to have produced any evidence yet: it was verified only
+via `vitest list` (safe, non-executing) and the offline suite, not against a
+real Codex session. It exists so the next authorized run — not yet made — has
+a full timestamped record and Codex's own ground truth to read, instead of
+another 1500-char tail guess.
+
 **Raw on-screen direct-typing is not ruled out either, and not for the reason
 this note previously gave.** `sendTaskTerminalInput` → raw KSP bytes forwards
 literal keystrokes with no synthesized `\r`, which is true, but that does not
@@ -948,9 +993,11 @@ feature in the original report. Closing
 this fully needs, in order of what it would actually settle: (a) the
 owner's affected session/provider/timestamp — still pending, not invented
 here — so the real daemon write timeline for that delivery can be read
-directly; (b) running the corrected `cargo test` subset above; (c) a Codex
-run that actually reaches its composer before injecting (the `COMPOSER`
-narrowing above, not yet reverified live) and/or a first real run of the
+directly; (b) running the corrected `cargo test` subset above; (c) a sixth
+Codex run — the observation-plan instrumentation above is now in place and
+ready for it, so that run would for the first time have a full timestamped
+raw/rendered record plus Codex's own rollout evidence to read, rather than
+another 1500-char tail guess; and/or a first real run of the
 authored-but-unverified Claude case, narrowed to whichever provider the
 owner's answer implicates once it arrives.
 

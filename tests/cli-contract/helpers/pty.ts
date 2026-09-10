@@ -115,6 +115,16 @@ export class PtySession {
     return stripAnsi(this.raw);
   }
 
+  /** The complete, un-stripped byte stream received so far — every ANSI/OSC
+   * escape sequence intact. {@link output} is a lossy derived view (this
+   * bridge concatenates and strips; it does not emulate a terminal grid,
+   * see PtySession's own class doc); this is the actual wire evidence
+   * underneath it, for a test that needs to retain the full record rather
+   * than a rendered guess. */
+  get rawOutput(): string {
+    return this.raw;
+  }
+
   /**
    * Whether this PTY session's own output has, at any point, sent DECSET
    * 2004h (`\x1b[?2004h`) — the terminal-capability announcement that
