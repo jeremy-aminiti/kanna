@@ -352,7 +352,7 @@ async fn run_import(
         // resume it must not be imported: minting a fresh session here is what
         // silently left the conversation behind on the source machine.
         session::assert_importable(
-            &transfer_id,
+            transfer_id,
             payload.task.agent_type.as_deref(),
             Some(payload.task.agent_provider.as_str()),
             payload.task.resume_session_id.as_deref(),
@@ -2949,6 +2949,22 @@ mod tests {
             .output()
             .unwrap();
         assert!(init_remote.status.success(), "{init_remote:?}");
+        let publish_base = std::process::Command::new("git")
+            .args([
+                "push",
+                source_remote.to_str().unwrap(),
+                "refs/heads/main:refs/heads/main",
+            ])
+            .current_dir(&source_repo)
+            .output()
+            .unwrap();
+        assert!(publish_base.status.success(), "{publish_base:?}");
+        let advertise_main = std::process::Command::new("git")
+            .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+            .current_dir(&source_remote)
+            .output()
+            .unwrap();
+        assert!(advertise_main.status.success(), "{advertise_main:?}");
         let source_input = crate::db::TaskInputRecord {
             id: 1,
             task_id: reservation.source_task_id.clone(),

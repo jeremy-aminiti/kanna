@@ -134,6 +134,15 @@ pub struct TransferredHistoryRecord {
     pub finished_at: Option<String>,
 }
 
+pub type TransferredTaskManifest = (String, String, String, Option<String>, String);
+pub type TransferredTaskContext = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 impl Db {
     pub fn upsert_transferred_task_manifest(
         &self,
@@ -173,13 +182,14 @@ impl Db {
     pub fn transferred_task_manifest(
         &self,
         transfer_id: &str,
-    ) -> Result<Option<(String, String, String, Option<String>, String)>, rusqlite::Error> {
+    ) -> Result<Option<TransferredTaskManifest>, rusqlite::Error> {
         self.conn.query_row(
             "SELECT repo_id,head_oid,base_oid,local_task_id,state FROM transferred_task_manifest WHERE transfer_id=?",
             [transfer_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))
             .optional()
     }
 
+    #[cfg(test)]
     pub fn mark_transferred_task_manifest_prepared(
         &self,
         transfer_id: &str,
@@ -190,7 +200,7 @@ impl Db {
     pub fn transferred_task_manifest_for_task(
         &self,
         task_id: &str,
-    ) -> Result<Option<(String, String, String, Option<String>, String)>, rusqlite::Error> {
+    ) -> Result<Option<TransferredTaskManifest>, rusqlite::Error> {
         self.conn.query_row(
             "SELECT repo_id,head_oid,base_oid,local_task_id,state FROM transferred_task_manifest WHERE local_task_id=?",
             [task_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
@@ -222,6 +232,7 @@ impl Db {
     /// something it never did. Settable only once the manifest is genuinely
     /// `prepared`, and only once: a later call is a no-op rather than
     /// overwriting a proof already relied on.
+    #[cfg(test)]
     pub fn set_transferred_task_manifest_content_commitment(
         &self,
         transfer_id: &str,
@@ -288,16 +299,7 @@ impl Db {
     pub fn transferred_task_context(
         &self,
         task_id: &str,
-    ) -> Result<
-        Option<(
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )>,
-        rusqlite::Error,
-    > {
+    ) -> Result<Option<TransferredTaskContext>, rusqlite::Error> {
         self.conn
             .query_row(
                 "SELECT transfer_id, workflow_definition, previous_stage_result,

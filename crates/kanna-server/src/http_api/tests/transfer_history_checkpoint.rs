@@ -121,6 +121,9 @@ async fn create_transferred_task(
             .unwrap();
         assert!(output.status.success(), "{output:?}");
     }
+    body["diffBaseRef"] = serde_json::Value::String(format!(
+        "refs/kanna/transfers/{transfer_id}/{head_oid}/base"
+    ));
     let workflow_definition = body["transferImport"]["workflowDefinition"]
         .as_str()
         .map(str::to_string)
