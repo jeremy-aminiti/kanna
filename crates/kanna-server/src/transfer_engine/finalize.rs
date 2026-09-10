@@ -1032,10 +1032,13 @@ mod tests {
                         .collect(),
                 },
                 DaemonCommand::SubmitInputIfSession { expected_pid, .. }
-                    if expected_pid != 4242 => DaemonEvent::Error {
-                    code: Some(DaemonErrorCode::SessionIncarnationMismatch),
-                    message: "the fake session incarnation changed".to_string(),
-                },
+                    if expected_pid != 4242 =>
+                {
+                    DaemonEvent::Error {
+                        code: Some(DaemonErrorCode::SessionIncarnationMismatch),
+                        message: "the fake session incarnation changed".to_string(),
+                    }
+                }
                 DaemonCommand::SubmitInputIfSession { data, .. } => match submit_refusal {
                     Some(code) => DaemonEvent::Error {
                         code: Some(code),
@@ -1685,7 +1688,9 @@ mod real_daemon_tests {
 
             let mut command = StdCommand::new(resolve_daemon_binary());
             command.env("KANNA_DAEMON_DIR", dir.to_str().expect("utf-8 daemon dir"));
-            let child = command.spawn().expect("failed to start a real kanna-daemon");
+            let child = command
+                .spawn()
+                .expect("failed to start a real kanna-daemon");
             // Own the child in the RAII guard *before* the readiness wait
             // below, not after: `Child`'s own `Drop` does not kill the
             // process, so a timeout panic here would otherwise leak a real
@@ -1745,7 +1750,9 @@ mod real_daemon_tests {
         let deadline = Instant::now() + timeout;
         loop {
             let sessions = list_sessions(client).await;
-            if let Some(session) = sessions.iter().find(|session| session.session_id == session_id)
+            if let Some(session) = sessions
+                .iter()
+                .find(|session| session.session_id == session_id)
             {
                 if session.status == expected {
                     return;
@@ -2069,7 +2076,15 @@ done
 
         let state = state_for(&daemon, "desktop-finalize-real-pid-fence");
         let stale_pid = real_pid.wrapping_add(1);
-        let result = inject(&state, &work_item(), SESSION, stale_pid, QUIT_PHASE, "/exit").await;
+        let result = inject(
+            &state,
+            &work_item(),
+            SESSION,
+            stale_pid,
+            QUIT_PHASE,
+            "/exit",
+        )
+        .await;
 
         assert!(
             matches!(result, Injected::SessionGone),
