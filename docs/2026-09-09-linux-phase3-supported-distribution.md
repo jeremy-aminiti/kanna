@@ -222,8 +222,8 @@ release graph (§7.1).
 | Dimension | Position | Evidence today |
 | --- | --- | --- |
 | Distribution floor | Ubuntu 24.04 LTS, glibc 2.39, kernel 6.8 | **Partially verified.** CI run `34439249468` built and audited on real `ubuntu-24.04`/`ubuntu-24.04-arm` hosted runners (§2) — package availability confirmed both architectures, but the audit found an undeclared dependency and no `.deb` was produced; no clean-install proof exists yet. |
-| x86-64 build | Required | CI lane written; **never run.** |
-| arm64 build | Required | Phase 2 built all seven binaries natively (debug). Release build not run. |
+| x86-64 build | Required | CI lane written and run: CI `34439249468` compiled and linked all eight binaries on `ubuntu-24.04`. **The release package was not produced** — the runtime audit vetoed before `dpkg-deb` (§2), so this is a compiled-binary result, not a package result. |
+| arm64 build | Required | Phase 2 built all seven binaries natively (debug) on the dev VM. CI `34439249468` separately compiled and linked all eight binaries on `ubuntu-24.04-arm`. **The release package was not produced**, for the same audit-veto reason. |
 | x86-64 installed acceptance | `ubuntu-24.04` hosted runner (substitute) | Lane written; **not wired into CI and never run** — see §7.3. |
 | arm64 installed acceptance | Native guest on an Apple Silicon Mac | **Not provisioned.** The existing VM is 26.04, not the 24.04 floor, and has no passwordless sudo. |
 | Display | GNOME Wayland primary; X11/XWayland runs, not performance-certified | Phase 2 evidence only, under headless GNOME. |

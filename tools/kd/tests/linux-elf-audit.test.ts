@@ -250,66 +250,95 @@ describe("the measured artifact closure", () => {
     ],
   };
 
-  it("is entirely covered by the policy", () => {
-    const artifacts: ElfFacts[] = Object.entries(MEASURED).map(([name, needed]) => ({
-      path: `/usr/lib/kanna/${name}`,
-      machine: "AArch64",
-      interpreter: "/lib/ld-linux-aarch64.so.1",
-      needed,
-      versionRequirements: { GLIBC: ["2.17", "2.39"] },
-      runpaths: [],
-    }));
-    const audit = auditArtifacts(policy, "arm64", artifacts);
-    expect(audit.findings).toEqual([]);
-  });
+  const FIVE_CXX_CONSUMERS = [
+    "kanna-daemon", "kanna-server", "kanna-task-transfer", "kanna-terminal-recovery", "kanna-worker",
+  ];
 
-  /**
-   * Both exceptions are load-bearing today and both are meant to go away, so
-   * the audit names every artifact still using them. This assertion is the
-   * record of how many that currently is — it should shrink, and a change
-   * either way should be deliberate.
-   */
-  it("reports exactly the artifacts still using a conditional exception", () => {
-    const artifacts: ElfFacts[] = Object.entries(MEASURED).map(([name, needed]) => ({
-      path: name,
-      machine: "AArch64",
-      interpreter: null,
-      needed,
-      versionRequirements: {},
-      runpaths: [],
-    }));
-    const audit = auditArtifacts(policy, "arm64", artifacts);
-    const openssl = audit.conditionalUses.filter((use) => use.soname === "libssl.so.3").map((use) => use.path);
-    const libcxx = audit.conditionalUses.filter((use) => use.soname === "libc++.so.1").map((use) => use.path);
-    const libunwind = audit.conditionalUses.filter((use) => use.soname === "libunwind.so.1").map((use) => use.path);
-    const FIVE_CXX_CONSUMERS = [
-      "kanna-daemon", "kanna-server", "kanna-task-transfer", "kanna-terminal-recovery", "kanna-worker",
-    ];
-    expect(openssl.sort()).toEqual(["kanna-cli", "kanna-mcp", "kanna-server"]);
-    expect(libcxx.sort()).toEqual(FIVE_CXX_CONSUMERS);
-    // libunwind.so.1 is a transitive consequence of the same accepted libc++abi
-    // exception, so it is conditionally used by exactly the same five artifacts.
-    expect(libunwind.sort()).toEqual(FIVE_CXX_CONSUMERS);
-  });
+  // Both shipping architectures, taken from the policy itself rather than
+  // repeated here, so the test can't silently drift from what the policy
+  // actually declares.
+  const LAUNCH_ARCHITECTURES = Object.entries(policy.architectures).map(([name, target]) => ({
+    name,
+    machine: target.elfMachine,
+    interpreter: target.interpreter,
+    loaderSoname: target.interpreter.split("/").pop()!,
+  }));
 
-  /**
-   * `libunwind-18` must reach `Depends` exactly once, alongside the already
-   * accepted libc++/libc++abi packages, and its build-only `-dev` sibling must
-   * never appear as a runtime dependency.
-   */
-  it("derives libunwind-18 in Depends exactly once, and never the -dev package", () => {
-    const artifacts: ElfFacts[] = Object.entries(MEASURED).map(([name, needed]) => ({
-      path: name,
-      machine: "AArch64",
-      interpreter: "/lib/ld-linux-aarch64.so.1",
-      needed,
-      versionRequirements: {},
-      runpaths: [],
-    }));
-    const audit = auditArtifacts(policy, "arm64", artifacts);
-    expect(audit.findings).toEqual([]);
-    const depends = dependsFromAudit(policy, audit);
-    expect(depends.filter((entry) => entry === "libunwind-18")).toHaveLength(1);
-    expect(depends).not.toContain("libunwind-18-dev");
-  });
+  /** `kanna-desktop`'s NEEDED set includes the dynamic loader itself; the
+   *  soname that appears there is architecture-specific. */
+  function measuredFor(loaderSoname: string): Record<string, string[]> {
+    return {
+      ...MEASURED,
+      "kanna-desktop": MEASURED["kanna-desktop"].map((soname) =>
+        soname.startsWith("ld-linux-") ? loaderSoname : soname
+      ),
+    };
+  }
+
+  for (const arch of LAUNCH_ARCHITECTURES) {
+    const measured = measuredFor(arch.loaderSoname);
+
+    it(`is entirely covered by the policy (${arch.name})`, () => {
+      const artifacts: ElfFacts[] = Object.entries(measured).map(([name, needed]) => ({
+        path: `/usr/lib/kanna/${name}`,
+        machine: arch.machine,
+        interpreter: arch.interpreter,
+        needed,
+        versionRequirements: { GLIBC: ["2.17", "2.39"] },
+        runpaths: [],
+      }));
+      const audit = auditArtifacts(policy, arch.name, artifacts);
+      expect(audit.findings).toEqual([]);
+    });
+
+    /**
+     * Both exceptions are load-bearing today and both are meant to go away,
+     * so the audit names every artifact still using them. This assertion is
+     * the record of how many that currently is — it should shrink, and a
+     * change either way should be deliberate.
+     */
+    it(`reports exactly the artifacts still using a conditional exception (${arch.name})`, () => {
+      const artifacts: ElfFacts[] = Object.entries(measured).map(([name, needed]) => ({
+        path: name,
+        machine: arch.machine,
+        interpreter: null,
+        needed,
+        versionRequirements: {},
+        runpaths: [],
+      }));
+      const audit = auditArtifacts(policy, arch.name, artifacts);
+      const openssl = audit.conditionalUses.filter((use) => use.soname === "libssl.so.3").map((use) => use.path);
+      const libcxx = audit.conditionalUses.filter((use) => use.soname === "libc++.so.1").map((use) => use.path);
+      const libunwind = audit.conditionalUses
+        .filter((use) => use.soname === "libunwind.so.1")
+        .map((use) => use.path);
+      expect(openssl.sort()).toEqual(["kanna-cli", "kanna-mcp", "kanna-server"]);
+      expect(libcxx.sort()).toEqual(FIVE_CXX_CONSUMERS);
+      // libunwind.so.1 is a transitive consequence of the same accepted
+      // libc++abi exception, so it is conditionally used by exactly the same
+      // five artifacts.
+      expect(libunwind.sort()).toEqual(FIVE_CXX_CONSUMERS);
+    });
+
+    /**
+     * `libunwind-18` must reach `Depends` exactly once, alongside the already
+     * accepted libc++/libc++abi packages, and its build-only `-dev` sibling
+     * must never appear as a runtime dependency.
+     */
+    it(`derives libunwind-18 in Depends exactly once, and never the -dev package (${arch.name})`, () => {
+      const artifacts: ElfFacts[] = Object.entries(measured).map(([name, needed]) => ({
+        path: name,
+        machine: arch.machine,
+        interpreter: arch.interpreter,
+        needed,
+        versionRequirements: {},
+        runpaths: [],
+      }));
+      const audit = auditArtifacts(policy, arch.name, artifacts);
+      expect(audit.findings).toEqual([]);
+      const depends = dependsFromAudit(policy, audit);
+      expect(depends.filter((entry) => entry === "libunwind-18")).toHaveLength(1);
+      expect(depends).not.toContain("libunwind-18-dev");
+    });
+  }
 });
