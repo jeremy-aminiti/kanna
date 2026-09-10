@@ -2234,7 +2234,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )
     })?;
 
-    // `transferred_task_context` (073) keeps only the *latest* snapshot of
+    // `transferred_task_context` (075) keeps only the *latest* snapshot of
     // each kind, which a second hop before this task's own first finished run
     // would otherwise re-export as if nothing had happened before it. This
     // sibling table holds the full ordered history instead, one row per
