@@ -24,6 +24,7 @@ mod relay_client;
 mod repo_browser;
 mod repo_commands;
 mod runtime;
+mod secure_file;
 mod session_replacements;
 mod task_creator;
 mod task_diff;

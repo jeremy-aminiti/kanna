@@ -32,8 +32,6 @@
 //! repair.
 
 use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 /// This desktop's LAN TLS identity: the private CA certificate a sibling
@@ -166,41 +164,19 @@ struct PersistedIdentity {
     leaf_private_key_pem: String,
 }
 
-/// Atomically persists the identity as 0600 - it contains private keys,
-/// never group/other-readable, matching `machine_trust::MachineTrustStore`'s
-/// persistence stance for the same reason.
+/// Atomically persists the identity as 0600 and refuses to write through a
+/// pre-existing temp path - see `secure_file::atomic_write_0600`. It
+/// contains private keys, never group/other-readable, matching
+/// `machine_trust::MachineTrustStore`'s persistence stance for the same
+/// reason.
 fn save(path: &Path, identity: &LanTlsIdentity) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
-    }
     let body = serde_json::to_string_pretty(&PersistedIdentity {
         ca_certificate_pem: identity.ca_certificate_pem.clone(),
         leaf_certificate_pem: identity.leaf_certificate_pem.clone(),
         leaf_private_key_pem: identity.leaf_private_key_pem.clone(),
     })
     .map_err(|error| format!("failed to serialize LAN TLS identity: {error}"))?;
-    let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true).mode(0o600);
-    let write_result = options
-        .open(&temp_path)
-        .and_then(|mut file| file.write_all(body.as_bytes()).and_then(|_| file.sync_all()));
-    if let Err(error) = write_result {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(format!(
-            "failed to write LAN TLS identity temp file {}: {error}",
-            temp_path.display()
-        ));
-    }
-    std::fs::rename(&temp_path, path).map_err(|error| {
-        let _ = std::fs::remove_file(&temp_path);
-        format!(
-            "failed to replace LAN TLS identity {} from {}: {error}",
-            path.display(),
-            temp_path.display()
-        )
-    })
+    crate::secure_file::atomic_write_0600(path, &body)
 }
 
 #[cfg(test)]

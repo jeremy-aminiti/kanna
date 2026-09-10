@@ -139,42 +139,17 @@ impl MachineTrustStore {
     }
 
     /// Atomically replaces the store on disk, reasserting owner-only
-    /// permissions on every write. Unlike `pairing::PairingStore` (hashes
-    /// only, no explicit permission enforcement today), this file can hold
-    /// live plaintext outbound bearer secrets, so it must never inherit a
-    /// permissive umask even transiently.
+    /// permissions and refusing to write through a pre-existing temp path
+    /// (a stale leftover or a symlink) on every write - see
+    /// `secure_file::atomic_write_0600`. Unlike `pairing::PairingStore`
+    /// (hashes only, no explicit permission enforcement today), this file
+    /// can hold live plaintext outbound bearer secrets, so it must never
+    /// inherit a permissive umask, and it must never write through a path
+    /// this process did not itself just create.
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-        }
         let body = serde_json::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize machine trust store: {e}"))?;
-        let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true).mode(0o600);
-        let write_result = options.open(&temp_path).and_then(|mut file| {
-            file.write_all(body.as_bytes())
-                .and_then(|_| file.sync_all())
-        });
-        if let Err(error) = write_result {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(format!(
-                "failed to write machine trust store temp file {}: {error}",
-                temp_path.display()
-            ));
-        }
-        std::fs::rename(&temp_path, path).map_err(|e| {
-            let _ = std::fs::remove_file(&temp_path);
-            format!(
-                "failed to replace machine trust store {} from {}: {e}",
-                path.display(),
-                temp_path.display()
-            )
-        })
+        crate::secure_file::atomic_write_0600(path, &body)
     }
 
     /// The candidate secret to bootstrap `target_desktop_id` with. Reuses an
