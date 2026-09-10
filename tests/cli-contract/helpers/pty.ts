@@ -116,6 +116,22 @@ export class PtySession {
   }
 
   /**
+   * Whether this PTY session's own output has, at any point, sent DECSET
+   * 2004h (`\x1b[?2004h`) — the terminal-capability announcement that
+   * enables bracketed paste. Mirrors exactly what the daemon itself keys
+   * framing on: `crates/daemon/src/session.rs`'s headless terminal tracks
+   * this same sequence and `Session::bracketed_paste_mode()` reads it back
+   * before `logical_message_bytes` decides whether to frame. A test must
+   * observe this from the real session before choosing `bracketedPasteMode`
+   * for {@link submitLogical} — asserting `true` unconditionally would be
+   * testing a framing decision the daemon itself would never have made for
+   * a CLI that never advertised the mode.
+   */
+  sawBracketedPasteEnable(): boolean {
+    return this.raw.includes("\x1b[?2004h");
+  }
+
+  /**
    * {@link output} with all whitespace removed. TUIs place each word with
    * cursor-movement escapes rather than spaces, so "Do you trust the contents"
    * strips down to "Doyoutrustthecontents" — matching against this form is the
