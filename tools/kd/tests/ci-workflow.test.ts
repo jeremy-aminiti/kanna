@@ -207,4 +207,36 @@ describe("the Linux release check", () => {
     const architectures = workflow.match(/architecture: (x86_64|arm64)/g);
     expect(architectures?.length).toBeGreaterThanOrEqual(4); // build + prerequisites, both archs
   });
+
+  /**
+   * Measured 2026-09-10 (run 34471789591): the hosted runners' prerequisites
+   * hold (real systemd PID 1, a `running` user manager, working
+   * `enable-linger`, passwordless sudo), so this job does the install-only
+   * check for real — `apt install` from the built package with no `-dev`
+   * packages present to mask a missing `Depends`, then the harness's
+   * install-only lifecycle coverage. It is still not the upgrade lane: that
+   * needs `KANNA_INSTALLED_DEB_OLD`/`_NEW` from two distinct source
+   * revisions, which is not wired here (§7 of the evidence doc), so
+   * `upgrade.e2e.test.ts` must not be invoked from this job.
+   */
+  it("installs the built package via apt and runs the install-only lifecycle probe, not the upgrade lane", () => {
+    const rawStep = workflow
+      .split(/\n(?=  installed-check:)/)
+      .find((s) => s.startsWith("  installed-check:"));
+    expect(rawStep).toBeDefined();
+    // Checked on the actual commands, comments stripped, so a comment
+    // mentioning upgrade.e2e.test.ts to explain why it's excluded can't trip
+    // the assertion that it is, in fact, excluded.
+    const step = rawStep!
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    expect(step).toContain("apt-get install");
+    expect(step).not.toMatch(/apt-get install[^\n]*-dev/);
+    expect(step).toContain("installed.e2e.test.ts");
+    expect(step).not.toContain("upgrade.e2e.test.ts");
+    expect(step).not.toContain("kd test linux-installed");
+    // Reuses this same run's own build output; no cross-run artifact fetch.
+    expect(step).not.toContain("run-id:");
+  });
 });

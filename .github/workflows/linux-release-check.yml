@@ -196,3 +196,101 @@ jobs:
           sudo -n true
           echo "exit=$?"
           set -e
+
+  # Measured on 2026-09-10 (run 34471789591): PID 1 is `systemd`, the user
+  # `systemctl --user is-system-running` reports `running` (not merely "ran"),
+  # `loginctl enable-linger` succeeds and persists, and `sudo -n true` succeeds
+  # on both `ubuntu-24.04` and `ubuntu-24.04-arm`. The prerequisites hold, so
+  # this job does the fresh-host install itself: apt install the just-built
+  # .deb (no `-dev` packages, so nothing can mask a missing `Depends`),
+  # confirm every shared library the audit declared is actually owned by a
+  # package and every installed executable resolves, then run the harness's
+  # install-only lifecycle coverage. It does not attempt the upgrade lane —
+  # that needs a second package from another source revision, still not wired
+  # (§7 of the evidence doc) — and it re-checks the two critical prerequisites
+  # itself rather than trusting the probe job's result, since that job is
+  # intentionally never-failing evidence, not a gate.
+  installed-check:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+            artifact: kanna-linux-x86_64
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+            artifact: kanna-linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm the two critical prerequisites before attempting anything
+        run: |
+          sudo -n true || { echo "::error::no passwordless sudo; cannot apt install"; exit 1; }
+          state="$(systemctl --user is-system-running)" || true
+          case "$state" in
+            running|degraded) ;;
+            *) echo "::error::systemctl --user is-system-running reported '$state', not running/degraded"; exit 1 ;;
+          esac
+
+      # Same workflow run's own `build` job output for this exact head — no
+      # cross-run download or extra token scope needed.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: .build/linux-package/out
+
+      # No `-dev` packages here: a `-dev` package would satisfy the same
+      # library at build time and hide a genuinely missing `Depends`. This is
+      # apt resolving the shipped package's own declared dependencies, on a
+      # host that never had the build's dev packages installed.
+      - name: Install the built package via apt (no dev packages)
+        run: |
+          set -x
+          deb="$(ls .build/linux-package/out/*.deb)"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "$deb"
+
+      - name: Confirm every declared runtime library is package-owned, and every installed executable resolves
+        run: |
+          set -x
+          fail=0
+          tree="/usr/lib/kanna-staging"
+          for exe in kanna-desktop kanna-worker kanna-daemon kanna-cli kanna-mcp kanna-server kanna-task-transfer kanna-terminal-recovery; do
+            echo "== $exe =="
+            out="$(ldd "$tree/$exe" 2>&1)" || fail=1
+            echo "$out"
+            if grep -q "not found" <<<"$out"; then
+              echo "::error::$exe has an unresolved dynamic dependency"
+              fail=1
+            fi
+          done
+          for lib in libc++.so.1 libc++abi.so.1 libunwind.so.1; do
+            path="$(ldconfig -p | awk -v l="$lib" '$1==l{print $NF; exit}')"
+            echo "== $lib -> ${path:-<not found by ldconfig>} =="
+            if [ -z "$path" ]; then echo "::error::$lib not resolvable by the dynamic linker"; fail=1; continue; fi
+            dpkg -S "$path" || { echo "::error::$path is not owned by any installed package"; fail=1; }
+          done
+          exit $fail
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Install-only: KANNA_INSTALLED_DEB alone drives installed.e2e.test.ts.
+      # upgrade.e2e.test.ts needs KANNA_INSTALLED_DEB_OLD/_NEW from two distinct
+      # source revisions and is not run here (same gap as above), so it is
+      # excluded rather than left to fail on a missing second artifact.
+      - name: Install-only lifecycle probe (real systemd --user unit, real worker)
+        working-directory: tests/linux-installed
+        env:
+          KANNA_INSTALLED_CHANNEL: staging
+        run: |
+          export KANNA_INSTALLED_DEB="$(ls "$GITHUB_WORKSPACE"/.build/linux-package/out/*.deb)"
+          pnpm exec vitest run --maxWorkers=1 src/installed.e2e.test.ts
