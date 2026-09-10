@@ -79,6 +79,8 @@ def _sysroot_repository_impl(repository_ctx):
     packages = _validate_lock(repository_ctx, lock)
     zig = _host_zig(repository_ctx)
     zig_cc = _host_zig_cc(repository_ctx)
+    overlay_source = repository_ctx.path(repository_ctx.attr._overlay_source)
+    repository_ctx.watch(overlay_source)
     overlay = repository_ctx.path(".tools/sysroot_overlay")
     repository_ctx.file(".tools/.keep", "")
     zig_cache = str(repository_ctx.path(".tools/zig-cache"))
@@ -90,7 +92,7 @@ def _sysroot_repository_impl(repository_ctx):
             "-O2",
             "-o",
             overlay,
-            repository_ctx.path(repository_ctx.attr._overlay_source),
+            overlay_source,
         ],
         environment = {
             "ZIG_GLOBAL_CACHE_DIR": zig_cache + "/global",
