@@ -43,7 +43,7 @@ def _zig_cc_wrapper_impl(ctx):
   -isystem "$sysroot/usr/include/atk-1.0" \\
   -isystem "$sysroot/usr/include/webkitgtk-4.1" \\
   -isystem "$sysroot/usr/include/libsoup-3.0" \\
-  -L"$sysroot/usr/lib/{multiarch}" "$@""".format(
+  -L"$sysroot/usr/lib/{multiarch}" \"$@\"""".format(
             target = ctx.attr.target,
             multiarch = ctx.attr.multiarch,
         )
