@@ -11,6 +11,11 @@ import { callVueMethod, tauriInvoke, setPreferencesOpen } from "../helpers/vue";
 import type { WebDriverClient } from "../helpers/webdriver";
 import { localProcessFetch } from "@kanna/local-process-fetch";
 import { formatAppWindowTitle, type AppBuildInfo } from "../../../src/stores/windowTitle";
+import {
+  assertNativeWindowIdentity,
+  resolveExpectedNativeWindowIdentity,
+  type ExpectedNativeWindowIdentity,
+} from "../helpers/windowIdentity";
 
 const { primary, secondary } = createPrimaryAndSecondaryClients();
 
@@ -40,6 +45,7 @@ let fixtureRepoPath = "";
 let primaryRepoId = "";
 let ownerDesktopId = "";
 let ownerTaskId: string | null = null;
+let expectedNativeWindowIdentity: ExpectedNativeWindowIdentity;
 
 function expectedWorktreeIdentity(): { taskId: string; worktree: string } {
   const worktree = basename(resolve(process.cwd(), "../.."));
@@ -380,6 +386,8 @@ describe("remote active-view restoration", () => {
     await secondary.createSession();
     // Each WebDriver port must independently prove that it is bound to this
     // task's dev window before the test resets state or interacts with it.
+    await assertNativeWindowIdentity(primary, expectedNativeWindowIdentity, "primary");
+    await assertNativeWindowIdentity(secondary, expectedNativeWindowIdentity, "secondary");
     await assertTaskSpecificDevWindow(primary, "primary");
     await assertTaskSpecificDevWindow(secondary, "secondary");
     await resetDatabase(primary);
