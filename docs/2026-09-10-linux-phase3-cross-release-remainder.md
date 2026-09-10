@@ -210,22 +210,41 @@ pkg-config path was added here.
 ## Bounded verification checkpoint
 
 The containment/collision correction after review of source head `2053cbefc`
-has not yet run a Bazel command. Its focused integration fixtures cover an
-absolute target rewrite, a rejected relative escape, an unchanged in-root
-link, an accepted byte/mode-identical duplicate, and a rejected conflicting
-duplicate by executing the production overlay helper. The same Bazel test also
-reads the evaluated amd64 repository's audit report and requires the real
-`libpython3.12-minimal` `sitecustomize.py` absolute link to have been rewritten
-inside the sysroot. Pending the exact `RESUME LINUX FOUNDATION REVIEW
-VERIFICATION` release, the required sequential `--jobs=1` rerun is:
+was verified on the Apple Silicon Studio at exact source head
+`87e1d6b83a041a3a64ef3acc7be3bb880d2cd6a9`. The owner released a focused
+three-command tranche only; all commands ran sequentially with `--jobs=1`:
 
-1. `bazel test //packaging/linux:resolve_sysroot_test --jobs=1`
-2. `bazel build //tools/bazel:linux_toolchain_canary_x86_64 --platforms=//tools/bazel:linux_x86_64 --jobs=1`
-3. `bazel build //tools/bazel:linux_toolchain_canary_arm64 --platforms=//tools/bazel:linux_arm64 --jobs=1`
-4. `./kd test all`
+1. `bazel test //packaging/linux:resolve_sysroot_test --jobs=1` exited 0 in
+   43.365 seconds after reevaluating the 400-package amd64 repository. All 14
+   tests ran with no skip: the prior eight resolver/toolchain tests, fixtures
+   for absolute-target rewrite, rejected relative escape, unchanged in-root
+   link, accepted byte/mode-identical duplicate and rejected conflicting
+   duplicate, plus inspection of the evaluated repository audit output.
+2. `bazel build //tools/bazel:linux_toolchain_canary_x86_64
+   --platforms=//tools/bazel:linux_x86_64 --jobs=1` exited 0 in 5.809 seconds.
+   The output remains an ELF64 x86-64 executable with interpreter
+   `/lib64/ld-linux-x86-64.so.2`.
+3. `bazel build //tools/bazel:linux_toolchain_canary_arm64
+   --platforms=//tools/bazel:linux_arm64 --jobs=1` exited 0 in 43.946 seconds
+   after reevaluating the 398-package arm64 repository. The output remains an
+   ELF64 AArch64 executable with interpreter
+   `/lib/ld-linux-aarch64.so.1`.
 
-The successful evidence below predates that correction and therefore does not
-prove the new containment/collision behavior.
+Direct post-build inspection on that Studio found both repositories export
+`usr/lib/python3.12/sitecustomize.py` as
+`../../../etc/python3.12/sitecustomize.py`. Both audit reports record the
+original `/etc/python3.12/sitecustomize.py` target and contain no staging or
+host path. Before Bazel was released, the lightweight Python invocation ran
+the prior eight tests successfully and reported the Bazel-only integration
+class as one skip; it was not counted as integration proof.
+
+The released commands causally exposed and corrected Bazel 9's explicit
+`cc_binary` load, the registered external-repository name, use of the pinned
+rules_zig macOS SDK wrapper for compiling the repository helper, Bazel's
+staging-root rewrite of archive-absolute symlinks, and the need to watch the
+helper source as a repository input. Failed attempts produced no accepted
+repository or canary evidence. `./kd test all` remains separately queued and
+was not run by this focused release.
 
 The owner released only the focused sysroot test and two canary builds on the
 Studio, sequentially with `--jobs=1`. The coherent pre-verification source
