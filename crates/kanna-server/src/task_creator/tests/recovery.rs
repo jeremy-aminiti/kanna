@@ -1189,82 +1189,11 @@ async fn a_rejected_resume_is_transparent_to_a_later_recovery() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
-/// The quota replacement producer has the same failed/retained-feedback shape
-/// as the rejected launch, and must be transparent for the same reason: the
-/// provider refused the turn, so no work was recorded on that row.
-#[tokio::test]
-#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
-async fn a_quota_replacement_is_transparent_to_a_later_recovery() {
-    let (repo_root, config, db) = init_recovery_fixture("task-recovery-quota-chain");
-    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
-    db.finish_stage_run(
-        "run-killed-mid-turn",
-        "succeeded",
-        Some(r#"{"status":"success","summary":"the stage finished before the outage"}"#),
-        None,
-    )
-    .unwrap();
-    // The shape the quota producer leaves: refused attempt closed with a
-    // retained revision feedback and no agent verdict, replacing the success.
-    db.insert_stage_run(NewStageRun {
-        id: "run-quota-refused",
-        task_id: "recovery-task",
-        stage: "in progress",
-        kind: "main",
-        agent: None,
-        agent_provider: Some("claude"),
-        model: Some(RECOVERY_MODEL),
-        effort: None,
-        status: "running",
-        result: None,
-        feedback: Some(REVIEW_FEEDBACK),
-        session_id: Some("recovery-task"),
-        provider_session_id: Some(RECOVERY_SESSION_ID),
-        cwd: Some(worktree.to_string_lossy().as_ref()),
-        resumed_from_run_id: None,
-    })
-    .unwrap();
-    db.set_test_stage_run_replaces_run_id("run-quota-refused", "run-killed-mid-turn")
-        .unwrap();
-    db.finish_stage_run_without_work(
-        "run-quota-refused",
-        "failed",
-        Some("claude refused this stage for spent quota and recorded no work"),
-        Some(REVIEW_FEEDBACK),
-        crate::db::no_work_termination::QUOTA_REPLACEMENT,
-    )
-    .unwrap();
-    let refused = db.stage_run("run-quota-refused").unwrap().unwrap();
-    assert_eq!(
-        refused.feedback.as_deref(),
-        Some(REVIEW_FEEDBACK),
-        "the revision's requested changes survive the replacement untouched"
-    );
-
-    let config_dir = repo_root.join("empty-claude-config");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    write_fresh_claude_probe(&worktree);
-    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
-    std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
-    let (status, commands) = resume_round(&config).await;
-    std::env::remove_var("CLAUDE_CONFIG_DIR");
-    assert_eq!(status, axum::http::StatusCode::OK);
-    let command_line = spawned_command_line(&commands);
-    assert!(
-        command_line.contains("ALREADY completed and recorded its verdict"),
-        "a quota refusal is not a task verdict: {command_line}"
-    );
-    assert!(
-        command_line.contains("the stage finished before the outage"),
-        "A's recorded result must survive the quota hop: {command_line}"
-    );
-
-    let _ = std::fs::remove_dir_all(&repo_root);
-}
-
-/// The spawn-failure class member. `record_stage_transition_run` inserts the
-/// replacement while it is still running, so a spawn that then fails leaves a
-/// linked row between the success and the next recovery.
+/// The spawn-failure producer, driven for real. A recovery of succeeded A is
+/// prepared, the daemon refuses the spawn, and `fail_bound_stage_run` closes
+/// the replacement. Nothing here sets the classification or the lineage: both
+/// have to come from production code, which is the whole point — reverting
+/// that producer to `finish_stage_run` must break this test.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
 async fn a_failed_replacement_spawn_is_transparent_to_a_later_recovery() {
@@ -1277,43 +1206,63 @@ async fn a_failed_replacement_spawn_is_transparent_to_a_later_recovery() {
         None,
     )
     .unwrap();
-    db.insert_stage_run(NewStageRun {
-        id: "run-spawn-failed",
-        task_id: "recovery-task",
-        stage: "in progress",
-        kind: "main",
-        agent: None,
-        agent_provider: Some("claude"),
-        model: Some(RECOVERY_MODEL),
-        effort: None,
-        status: "running",
-        result: None,
-        feedback: None,
-        session_id: Some("recovery-task"),
-        provider_session_id: Some(RECOVERY_SESSION_ID),
-        cwd: Some(worktree.to_string_lossy().as_ref()),
-        resumed_from_run_id: None,
-    })
-    .unwrap();
-    db.set_test_stage_run_replaces_run_id("run-spawn-failed", "run-killed-mid-turn")
-        .unwrap();
-    db.finish_stage_run_without_work(
-        "run-spawn-failed",
-        "failed",
-        Some("failed to start stage in progress: daemon error"),
-        Some("stage spawn failed"),
-        crate::db::no_work_termination::STAGE_SPAWN_FAILED,
-    )
-    .unwrap();
-
     let config_dir = repo_root.join("empty-claude-config");
     std::fs::create_dir_all(&config_dir).unwrap();
     write_fresh_claude_probe(&worktree);
+
     let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
     std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
-    let (status, commands) = resume_round(&config).await;
+
+    // The daemon refuses the spawn, so the real producer closes the run.
+    let refusing = super::spawn_recording_fake_daemon(config.daemon_dir.clone(), true).await;
+    let app = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+        config.clone(),
+    )));
+    let response = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::post("/v1/tasks/recovery-task/actions/resume")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let _ = refusing.await.unwrap();
+
+    let failed = loop {
+        let run = db.latest_stage_run("recovery-task").unwrap().unwrap();
+        if run.id != "run-killed-mid-turn" && run.status == "failed" {
+            break run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        failed.no_work_termination.as_deref(),
+        Some(crate::db::no_work_termination::STAGE_SPAWN_FAILED),
+        "the real spawn-failure producer must persist its classification: {failed:?}"
+    );
+    assert_eq!(
+        failed.replaces_run_id.as_deref(),
+        Some("run-killed-mid-turn"),
+        "and production must have recorded the lineage before the spawn was attempted"
+    );
+
+    // Recover again: the spawn that never ran recorded no verdict.
+    let recording = super::spawn_recording_fake_daemon(config.daemon_dir.clone(), false).await;
+    let app = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+        config.clone(),
+    )));
+    let response = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::post("/v1/tasks/recovery-task/actions/resume")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let commands = recording.await.unwrap();
     std::env::remove_var("CLAUDE_CONFIG_DIR");
-    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
     let command_line = spawned_command_line(&commands);
     assert!(
         command_line.contains("ALREADY completed and recorded its verdict"),
@@ -1323,6 +1272,14 @@ async fn a_failed_replacement_spawn_is_transparent_to_a_later_recovery() {
         command_line.contains("recorded before the spawn ever failed"),
         "A's recorded result must survive a failed replacement spawn: {command_line}"
     );
+
+    let original = db.stage_run("run-killed-mid-turn").unwrap().unwrap();
+    assert_eq!(original.status, "succeeded");
+    assert!(original
+        .result
+        .as_deref()
+        .unwrap()
+        .contains("recorded before the spawn ever failed"));
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
