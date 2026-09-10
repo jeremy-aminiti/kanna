@@ -275,7 +275,11 @@ jobs:
             path="$(ldconfig -p | awk -v l="$lib" '$1==l{print $NF; exit}')"
             echo "== $lib -> ${path:-<not found by ldconfig>} =="
             if [ -z "$path" ]; then echo "::error::$lib not resolvable by the dynamic linker"; fail=1; continue; fi
-            dpkg -S "$path" || { echo "::error::$path is not owned by any installed package"; fail=1; }
+            # Noble's merged-/usr layout makes /lib a symlink to /usr/lib;
+            # ldconfig reports the /lib form, but dpkg's file-list database
+            # is keyed on the canonical /usr/lib path. Resolve before asking.
+            realpath="$(readlink -f "$path")"
+            dpkg -S "$realpath" || { echo "::error::$realpath is not owned by any installed package"; fail=1; }
           done
           exit $fail
 
