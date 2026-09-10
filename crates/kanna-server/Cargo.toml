@@ -16,6 +16,22 @@ toml = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = "9"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+# Same major version reqwest's rustls-tls feature and hyper-rustls already
+# resolve transitively (see Cargo.lock) - added here as direct dependencies
+# only so the LAN machine-invoke listener/client can use their types
+# directly. `ring` explicitly, not rustls's own default `aws_lc_rs`: aws-lc-rs
+# pulls aws-lc-sys, which needs cmake/a C toolchain to build from source -
+# exactly the host build-machine dependency this repo's release builds must
+# not require. `ring` is already the resolved provider elsewhere in this
+# same dependency graph (see Cargo.lock), so this adds no second crypto
+# backend to audit. rustls-pemfile decodes the PEM this desktop persists its
+# own self-signed identity as; rcgen generates that identity (reviewed,
+# widely-used cert-generation crate - no hand-rolled X.509/ASN.1 encoding),
+# also pinned to its own `ring` feature for the same reason.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = "2"
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 futures-util = "0.3"
 rusqlite = { version = "0.32.1", features = ["bundled", "hooks"] }
 log = "0.4"
