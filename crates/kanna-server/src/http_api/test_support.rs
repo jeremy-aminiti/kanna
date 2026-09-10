@@ -8,6 +8,18 @@ use crate::db::Db;
 use axum::Router;
 use std::sync::Arc;
 
+/// A revision route returns before its detached worker releases ownership.
+/// Tests that subsequently deliver a provider notice must wait for that
+/// release, not race the notice against the preceding stage transition.
+pub(crate) async fn wait_for_task_mutation_to_finish(state: &AppState, task_id: &str) {
+    let _mutation = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        state.begin_requested_task_mutation(task_id),
+    )
+    .await
+    .expect("the detached task mutation did not finish");
+}
+
 fn seed_test_mutation_tasks(config: &Config, task_ids: &[&str]) {
     let db = Db::open_for_tests(&config.db_path).expect("open test db");
     db.insert_test_repo("repo-test-mutation", "Mutation Test Repo")

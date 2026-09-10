@@ -747,6 +747,7 @@ async fn succeeded_recovery_without_a_transcript_does_not_replay_the_finished_st
 /// semantics — the ancestor run, not the rejected recovery run, holds the
 /// verdict.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // Provider preflight runs inside the HTTP route's worker.
 async fn rejected_resume_after_a_success_verdict_keeps_the_no_redo_instruction() {
     let (repo_root, config, db) = init_recovery_fixture("task-recovery-rejected-succeeded");
     let worktree = repo_root.join(".kanna-worktrees/task-recovery");
@@ -757,41 +758,71 @@ async fn rejected_resume_after_a_success_verdict_keeps_the_no_redo_instruction()
         None,
     )
     .unwrap();
-    // The recovery run this fix creates: running, resuming the succeeded run.
-    db.insert_stage_run(NewStageRun {
-        id: "run-resume-attempt",
-        task_id: "recovery-task",
-        stage: "in progress",
-        kind: "main",
-        agent: None,
-        agent_provider: Some("claude"),
-        model: Some(RECOVERY_MODEL),
-        effort: None,
-        status: "running",
-        result: None,
-        feedback: None,
-        session_id: Some("recovery-task"),
-        provider_session_id: Some(RECOVERY_SESSION_ID),
-        cwd: Some(worktree.to_string_lossy().as_ref()),
-        resumed_from_run_id: Some("run-killed-mid-turn"),
-    })
+    // Generate the recovery through its actual producer. Success recovery
+    // shipped with explicit replacement provenance; a hand-inserted row with
+    // only resumed_from_run_id instead models ambiguous conversation reuse.
+    let config_dir = repo_root.join("claude-config");
+    write_recovery_transcript(&config_dir, &worktree);
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    let previous_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+    std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    let state = std::sync::Arc::new(crate::http_api::AppState::new(config.clone()));
+    let mut recovery_daemon =
+        super::spawn_recording_fake_daemon(config.daemon_dir.clone(), false).await;
+    let response = tower::ServiceExt::oneshot(
+        crate::http_api::router(state.clone()),
+        axum::http::Request::post("/v1/tasks/recovery-task/actions/resume")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
     .unwrap();
+    let recovered =
+        tokio::time::timeout(std::time::Duration::from_secs(60), &mut recovery_daemon).await;
+    match previous_config {
+        Some(previous) => std::env::set_var("CLAUDE_CONFIG_DIR", previous),
+        None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+    }
+    if recovered.is_err() {
+        recovery_daemon.abort();
+        let _ = recovery_daemon.await;
+    }
+    let initial_commands = recovered.expect("success recovery did not spawn").unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    crate::http_api::wait_for_task_mutation_to_finish(&state, "recovery-task").await;
+    let recovery = db.latest_stage_run("recovery-task").unwrap().unwrap();
+    assert_eq!(recovery.status, "running");
+    assert_eq!(
+        recovery.replaces_run_id.as_deref(),
+        Some("run-killed-mid-turn")
+    );
+    assert_eq!(
+        recovery.resumed_from_run_id.as_deref(),
+        Some("run-killed-mid-turn")
+    );
+    assert!(spawned_command_line(&initial_commands).contains("--resume"));
     write_fresh_claude_probe(&worktree);
 
-    let fake_daemon = spawn_rejected_resume_fake_daemon(
+    let mut fake_daemon = spawn_rejected_resume_fake_daemon(
         config.daemon_dir.clone(),
         rejected_resume_screen(),
         true,
     )
     .await;
-    crate::http_api::handle_task_terminal_state(
-        &crate::http_api::AppState::new(config.clone()),
-        "recovery-task",
-        1,
-    )
-    .await
-    .unwrap();
-    let commands = fake_daemon.await.unwrap();
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        tokio::join!(
+            crate::http_api::handle_task_terminal_state(&state, "recovery-task", 1),
+            &mut fake_daemon,
+        )
+    })
+    .await;
+    if observed.is_err() {
+        fake_daemon.abort();
+        let _ = fake_daemon.await;
+    }
+    let (result, commands) = observed.expect("rejected success recovery did not finish");
+    result.unwrap();
+    let commands = commands.unwrap();
 
     let command_line = commands
         .iter()
@@ -822,6 +853,18 @@ async fn rejected_resume_after_a_success_verdict_keeps_the_no_redo_instruction()
         finished.status, "succeeded",
         "the ancestor's verdict is not the rejected attempt's to rewrite"
     );
+    let rejected = db.stage_run(&recovery.id).unwrap().unwrap();
+    assert_eq!(rejected.status, "failed");
+    assert_eq!(
+        rejected.no_work_termination.as_deref(),
+        Some(crate::db::no_work_termination::REJECTED_RESUME_LAUNCH)
+    );
+    let replacement = db.latest_stage_run("recovery-task").unwrap().unwrap();
+    assert_eq!(
+        replacement.replaces_run_id.as_deref(),
+        Some(recovery.id.as_str())
+    );
+    assert!(replacement.resumed_from_run_id.is_none());
 
     let _ = std::fs::remove_dir_all(&repo_root);
 }
