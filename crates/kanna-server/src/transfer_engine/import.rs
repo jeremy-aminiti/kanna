@@ -1496,25 +1496,16 @@ mod tests {
     // Item 4: retry/replay against the durable destination-server proof.
     //
     // These exercise the real `run_import`, a real destination SQLite DB,
-    // and a real `kanna-task-transfer` sidecar *subprocess* — not a helper
-    // predicate standing in for either. They intentionally do not spin up a
-    // second, real source-side sidecar/peer (that full two-node harness is
-    // the same out-of-checkpoint-bound gap item 3's own
-    // `docs/2026-09-09-transfer-admission-proof-e2e-gap.md` names for
-    // `run_push`; see `docs/2026-09-10-item4-ack-replay-two-peer-e2e-gap.md`
-    // for what remains uncovered here and why). What they *do* prove for
-    // real: whether `verify_persisted_task_bundle` — and therefore any
-    // artifact/ledger fetch — runs at all is directly observable, because a
-    // fetch attempted against a real sidecar that was never told about this
-    // transfer, or whose in-memory artifact cache was just emptied by a
-    // restart, is guaranteed to fail with a distinct, fetch-shaped error
-    // *before* the ack call is ever reached. The skip-path's ack replay is
-    // then genuinely driven through `control::acknowledge_import_committed`
-    // against that same real subprocess; without a paired source peer it
-    // cannot complete, but it fails with the sidecar's *own*, specific
-    // "missing source peer" answer — which is only reachable after the
-    // artifact-fetch step was skipped, and never the fetch-shaped error a
-    // wrongly-unskipped verification would produce instead.
+    // and TWO real `kanna-task-transfer` sidecar *subprocesses* — a source
+    // and a destination, genuinely paired (`start-pairing`/`accept-pairing`)
+    // and driven through a genuine preflight+commit — not a helper predicate
+    // standing in for any of it. Peer discovery uses the sidecar's existing
+    // `KANNA_TRANSFER_DISCOVERY=registry` file-based mode (the same one
+    // `crates/task-transfer/tests/sidecar_control.rs` uses), not real
+    // multicast mDNS, so pairing is fast and does not depend on the test
+    // environment's network configuration. `KANNA_TRANSFER_PORT=0` lets the
+    // OS assign each sidecar's listener port, so nothing here can collide
+    // with another worktree's or another test's fixed port.
     //
     // Requires the sidecar binary to actually be built first:
     //   cargo build -p kanna-task-transfer
@@ -1546,26 +1537,75 @@ mod tests {
         );
     }
 
+    /// Snapshots the sidecar identity env vars these fixtures mutate and
+    /// restores their prior values (or absence) on drop, including on panic
+    /// unwind — `test_sidecar_guard` serializes the *processes* these tests
+    /// spawn, it does not touch the ambient environment they read from at
+    /// spawn time. Capture this before the first mutation and hold it for
+    /// the whole test, declared after `test_sidecar_guard`'s own guard so it
+    /// drops (and restores) first, while that lock is still held.
+    struct Item4EnvVarGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl Item4EnvVarGuard {
+        const NAMES: [&'static str; 5] = [
+            "KANNA_TRANSFER_ROOT",
+            "KANNA_TRANSFER_REGISTRY_DIR",
+            "KANNA_TRANSFER_PEER_ID",
+            "KANNA_TRANSFER_DISPLAY_NAME",
+            "KANNA_TRANSFER_DISCOVERY",
+        ];
+
+        fn capture() -> Self {
+            Self {
+                saved: Self::NAMES
+                    .iter()
+                    .map(|&name| (name, std::env::var(name).ok()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl Drop for Item4EnvVarGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn new_test_work_queue(label: &str) -> Arc<crate::transfer_engine::queue::TransferWorkQueue> {
+        crate::transfer_engine::queue::TransferWorkQueue::new(
+            crate::test_paths::unique_test_path_string(&format!("kanna-transfer-item4-work-{label}")),
+        )
+    }
+
     /// Spawns (lazily, on first `.control()` call) a real sidecar subprocess
-    /// rooted at a fresh, unique `KANNA_TRANSFER_ROOT`. Each call with a new
-    /// `label` is a distinct process identity; the same `label` reused after
-    /// dropping the previous supervisor represents that same machine's
-    /// sidecar restarting, since it reuses the same durable root.
+    /// rooted at `root`, discovering peers through the shared `registry_dir`
+    /// rather than real mDNS. Reusing the same `(root, peer_id)` pair across
+    /// calls after dropping the previous supervisor represents that same
+    /// machine's sidecar restarting: identity and durable on-disk state
+    /// (`root`) persist, everything in-memory does not.
     ///
-    /// Mutates process-global identity env vars, exactly as
-    /// `transfer_sidecar`'s own `a_dead_sidecar_is_replaced_rather_than_left_wedged`
-    /// test does — callers must hold `crate::test_sidecar_guard()` for the
-    /// whole test.
-    fn spawn_test_destination_sidecar(
+    /// Mutates process-global identity env vars — callers must hold both
+    /// `crate::test_sidecar_guard()` and `Item4EnvVarGuard::capture()` for
+    /// the whole test.
+    fn spawn_test_sidecar(
         root: &Path,
+        registry_dir: &Path,
         peer_id: &str,
         config: &crate::config::Config,
         work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
     ) -> crate::transfer_sidecar::TransferSidecarSupervisor {
-        std::env::remove_var("KANNA_TRANSFER_REGISTRY_DIR");
         std::env::set_var("KANNA_TRANSFER_ROOT", root);
+        std::env::set_var("KANNA_TRANSFER_REGISTRY_DIR", registry_dir);
         std::env::set_var("KANNA_TRANSFER_PEER_ID", peer_id);
-        std::env::set_var("KANNA_TRANSFER_DISPLAY_NAME", "Item4 Destination");
+        std::env::set_var("KANNA_TRANSFER_DISPLAY_NAME", peer_id);
+        std::env::set_var("KANNA_TRANSFER_DISCOVERY", "registry");
         crate::transfer_sidecar::TransferSidecarSupervisor::with_binary_for_test(
             config.clone(),
             work,
@@ -1573,7 +1613,7 @@ mod tests {
         )
     }
 
-    fn item4_test_config(label: &str, transfer_port: u16) -> crate::config::Config {
+    fn item4_test_config(label: &str) -> crate::config::Config {
         crate::config::Config {
             relay_url: "wss://relay.example".to_string(),
             device_token: "device-token".to_string(),
@@ -1592,7 +1632,9 @@ mod tests {
             environment: "development".to_string(),
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
-            transfer_port,
+            // Let the OS assign the sidecar's listener port; two fixed test
+            // ports collided across concurrently running worktrees.
+            transfer_port: 0,
             activity_event_debounce_seconds: 300,
             pairing_store_path: crate::test_paths::unique_test_file(
                 &format!("kanna-pairings-item4-{label}"),
@@ -1604,15 +1646,15 @@ mod tests {
     /// A minimal, valid `task-bundle` payload — the only mode `run_import`
     /// accepts — for a transfer whose `local_task_id` is already known (the
     /// retry/re-entry shape every test below exercises). `stage` is the one
-    /// field the tests vary, to route `verify_persisted_task_bundle` into an
-    /// early, git-free, deterministic failure when they need it exercised
-    /// without a real repository fixture.
-    fn item4_task_bundle_payload_json(stage: &str) -> serde_json::Value {
+    /// field the negative-control tests vary, to route
+    /// `verify_persisted_task_bundle` into an early, git-free, deterministic
+    /// failure without a real repository fixture.
+    fn item4_task_bundle_payload_json(source_task_id: &str, stage: &str) -> serde_json::Value {
         serde_json::json!({
             "target_peer_id": "peer-item4-dest",
             "task": {
                 "source_peer_id": "peer-item4-source",
-                "source_task_id": "task-item4-source",
+                "source_task_id": source_task_id,
                 "resume_session_id": null,
                 "stage": stage,
                 "pipeline": "single-reviewer",
@@ -1644,6 +1686,7 @@ mod tests {
     fn item4_new_task_transfer(
         transfer_id: &str,
         local_task_id: &str,
+        source_task_id: &str,
         payload_stage: &str,
     ) -> crate::db::NewTaskTransfer {
         crate::db::NewTaskTransfer {
@@ -1654,37 +1697,355 @@ mod tests {
             target_peer_id: None,
             source_desktop_id: None,
             target_desktop_id: None,
-            source_task_id: Some("task-item4-source".to_string()),
+            source_task_id: Some(source_task_id.to_string()),
             local_task_id: Some(local_task_id.to_string()),
             error: None,
-            payload_json: Some(item4_task_bundle_payload_json(payload_stage).to_string()),
+            payload_json: Some(
+                item4_task_bundle_payload_json(source_task_id, payload_stage).to_string(),
+            ),
         }
+    }
+
+    /// Blocks (via the event log's own `wait_for_events`, which blocks in
+    /// bounded rechecks rather than a manual sleep loop) until an event of
+    /// `expected_type` appears, advancing `cursor` past everything read.
+    async fn wait_for_event_type(
+        log: &Arc<crate::transfer_sidecar::TransferEventLog>,
+        cursor: &mut u64,
+        expected_type: &str,
+        timeout: std::time::Duration,
+    ) -> serde_json::Value {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let batch = log.wait_for_events(Some(*cursor), None, 50, remaining).await;
+            *cursor = batch.cursor;
+            if let Some(found) = batch
+                .events
+                .iter()
+                .find(|entry| entry["event"]["type"].as_str() == Some(expected_type))
+            {
+                return found["event"].clone();
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("timed out waiting for sidecar event `{expected_type}`");
+            }
+        }
+    }
+
+    /// `start-pairing` targets a peer_id directly; against the file-based
+    /// registry there is a short real window between a peer process coming
+    /// up and it having written its own registry entry, so this retries
+    /// (matching `control::is_connection_failure`'s own "peer not found:"
+    /// fragment) instead of requiring the caller to poll the registry file
+    /// itself, which would need a `kanna_task_transfer` dependency this
+    /// crate deliberately does not take.
+    async fn start_pairing_with_retry(
+        source: &crate::transfer_sidecar::TransferSidecarSupervisor,
+        target_peer_id: &str,
+        timeout: std::time::Duration,
+    ) -> String {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match source
+                .control("start-pairing", serde_json::json!({ "peerId": target_peer_id }))
+                .await
+            {
+                Ok(response) => {
+                    return response["verificationCode"]
+                        .as_str()
+                        .expect("start-pairing response missing verificationCode")
+                        .to_string();
+                }
+                Err(error) => {
+                    if std::time::Instant::now() >= deadline {
+                        panic!("start-pairing against {target_peer_id} never succeeded: {error}");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+
+    /// Drives a real LAN pairing handshake between two real sidecar
+    /// subprocesses to completion, over the actual `start-pairing` /
+    /// `accept-pairing` control ops and the actual `pairing_requested`
+    /// advisory event — the same seam the desktop uses, exercised end to
+    /// end rather than assumed.
+    async fn pair_real_sidecars(
+        source: &crate::transfer_sidecar::TransferSidecarSupervisor,
+        destination: &crate::transfer_sidecar::TransferSidecarSupervisor,
+        destination_peer_id: &str,
+    ) {
+        let verification_code = start_pairing_with_retry(
+            source,
+            destination_peer_id,
+            std::time::Duration::from_secs(15),
+        )
+        .await;
+        let mut destination_cursor = 0u64;
+        let requested = wait_for_event_type(
+            &destination.events(),
+            &mut destination_cursor,
+            "pairing_requested",
+            std::time::Duration::from_secs(15),
+        )
+        .await;
+        assert_eq!(
+            requested["verification_code"].as_str(),
+            Some(verification_code.as_str()),
+            "the pairing request's code must match the code start-pairing returned"
+        );
+        let pairing_request_id = requested["request_id"]
+            .as_str()
+            .expect("pairing_requested event missing request_id")
+            .to_string();
+        destination
+            .control(
+                "accept-pairing",
+                serde_json::json!({
+                    "pairingRequestId": pairing_request_id,
+                    "verificationCode": verification_code,
+                }),
+            )
+            .await
+            .expect("accept-pairing must succeed once the request is genuinely pending");
+    }
+
+    /// Drives a real preflight+commit from `source` to `destination_peer_id`
+    /// over the wire, returning the transfer_id the destination's sidecar
+    /// minted — this is what actually creates the destination's
+    /// `incoming_reservations` entry `acknowledge_import_committed` needs;
+    /// nothing about it is fabricated. The wire-level commit payload is
+    /// deliberately minimal (matching
+    /// `crates/task-transfer/tests/runtime.rs`'s own
+    /// `destination_can_acknowledge_import_commit_back_to_source`): the
+    /// sidecar does not itself validate the task-bundle contract, only
+    /// `run_import`'s own parse of the *separately seeded*
+    /// `task_transfer.payload_json` DB column does.
+    async fn commit_real_transfer(
+        source: &crate::transfer_sidecar::TransferSidecarSupervisor,
+        destination_peer_id: &str,
+        source_task_id: &str,
+    ) -> String {
+        let preflight = source
+            .control(
+                "prepare-outgoing-transfer",
+                serde_json::json!({
+                    "payload": {
+                        "phase": "preflight",
+                        "sourceTaskId": source_task_id,
+                        "targetPeerId": destination_peer_id,
+                    }
+                }),
+            )
+            .await
+            .expect("preflight must succeed against a paired peer");
+        let transfer_id = preflight["transferId"]
+            .as_str()
+            .expect("preflight response missing transferId")
+            .to_string();
+        source
+            .control(
+                "prepare-outgoing-transfer",
+                serde_json::json!({
+                    "payload": {
+                        "phase": "commit",
+                        "transferId": transfer_id,
+                        "payload": {
+                            "target_peer_id": destination_peer_id,
+                            "task": { "source_task_id": source_task_id },
+                        },
+                    }
+                }),
+            )
+            .await
+            .expect("commit must be accepted by a paired peer");
+        transfer_id
+    }
+
+    /// A genuine, wire-admitted transfer reservation between two real
+    /// sidecar subprocesses, plus everything a caller needs to spawn its own
+    /// further destination incarnations against the same durable identity
+    /// and read back what the source durably recorded.
+    struct Item4RealTransfer {
+        source: crate::transfer_sidecar::TransferSidecarSupervisor,
+        source_work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
+        transfer_id: String,
+        registry_dir: PathBuf,
+        destination_root: PathBuf,
+        destination_peer_id: String,
+        source_task_id: String,
+    }
+
+    impl Item4RealTransfer {
+        fn spawn_destination(
+            &self,
+            label: &str,
+            work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
+        ) -> crate::transfer_sidecar::TransferSidecarSupervisor {
+            let config = item4_test_config(label);
+            spawn_test_sidecar(
+                &self.destination_root,
+                &self.registry_dir,
+                &self.destination_peer_id,
+                &config,
+                work,
+            )
+        }
+    }
+
+    /// Pairs a real source and destination sidecar over a shared file-based
+    /// registry (no real mDNS), then drives a real preflight+commit from
+    /// source to destination, so the destination's own
+    /// `incoming_reservations` entry for the returned `transfer_id` is
+    /// genuine wire-admitted state — not a fixture-only assumption. The
+    /// bootstrap destination incarnation used to receive the commit is
+    /// dropped before returning: every caller spawns its own destination
+    /// incarnation(s) against `destination_root` via
+    /// `Item4RealTransfer::spawn_destination`, so `run_import` always talks
+    /// to a process that must reload this reservation from disk, exactly
+    /// like a real restart — including in the one-incarnation case, which is
+    /// still a restart relative to the incarnation that actually received
+    /// the commit.
+    async fn establish_real_transfer_reservation(label: &str) -> Item4RealTransfer {
+        let registry_dir =
+            crate::test_paths::unique_test_dir(&format!("kanna-transfer-item4-registry-{label}"));
+        std::fs::create_dir_all(&registry_dir).expect("create registry dir");
+
+        let source_root =
+            crate::test_paths::unique_test_dir(&format!("kanna-transfer-item4-source-{label}"));
+        std::fs::create_dir_all(&source_root).expect("create source root");
+        let source_peer_id = format!("peer-item4-source-{label}");
+        let source_config = item4_test_config(&format!("{label}-source"));
+        let source_work = new_test_work_queue(&format!("{label}-source"));
+        let source = spawn_test_sidecar(
+            &source_root,
+            &registry_dir,
+            &source_peer_id,
+            &source_config,
+            Arc::clone(&source_work),
+        );
+
+        let destination_root =
+            crate::test_paths::unique_test_dir(&format!("kanna-transfer-item4-dest-{label}"));
+        std::fs::create_dir_all(&destination_root).expect("create destination root");
+        let destination_peer_id = format!("peer-item4-dest-{label}");
+        let bootstrap_config = item4_test_config(&format!("{label}-dest-bootstrap"));
+        let bootstrap_work = new_test_work_queue(&format!("{label}-dest-bootstrap"));
+        let destination_bootstrap = spawn_test_sidecar(
+            &destination_root,
+            &registry_dir,
+            &destination_peer_id,
+            &bootstrap_config,
+            bootstrap_work,
+        );
+
+        pair_real_sidecars(&source, &destination_bootstrap, &destination_peer_id).await;
+
+        let source_task_id = format!("task-item4-source-{label}");
+        let transfer_id = commit_real_transfer(&source, &destination_peer_id, &source_task_id).await;
+
+        let mut destination_cursor = 0u64;
+        let incoming = wait_for_event_type(
+            &destination_bootstrap.events(),
+            &mut destination_cursor,
+            "incoming_transfer_request",
+            std::time::Duration::from_secs(15),
+        )
+        .await;
+        assert_eq!(
+            incoming["transfer_id"].as_str(),
+            Some(transfer_id.as_str()),
+            "the destination's own incoming-transfer event must name the committed transfer"
+        );
+
+        // Drop the bootstrap incarnation: everything from here on reads only
+        // the reservation genuinely persisted to disk, never this process's
+        // still-warm in-memory state.
+        drop(destination_bootstrap);
+
+        Item4RealTransfer {
+            source,
+            source_work,
+            transfer_id,
+            registry_dir,
+            destination_root,
+            destination_peer_id,
+            source_task_id,
+        }
+    }
+
+    /// Reads back the source sidecar's own durable record of the ack replay
+    /// (`outgoing_transfer_committed`, queued via
+    /// `crate::transfer_engine::queue::enqueue_durable_event` exactly as
+    /// production does) and asserts every field the destination sent
+    /// matches what this test actually persisted — proof of the values on
+    /// the wire, not merely that the call was reached.
+    fn assert_real_ack_values(
+        reservation: &Item4RealTransfer,
+        local_task_id: &str,
+        content_commitment: &str,
+        destination_repo_id: &str,
+    ) {
+        let source_db = reservation.source_work.open_db().expect("open source work db");
+        let ack_work = source_db
+            .claim_next_transfer_work(&[])
+            .expect("claim source work")
+            .expect(
+                "the source must have durably recorded the outgoing-committed event before \
+                 this read",
+            );
+        assert_eq!(
+            ack_work.kind,
+            crate::transfer_engine::queue::KIND_OUTGOING_COMMITTED
+        );
+        let ack_event: serde_json::Value =
+            serde_json::from_str(&ack_work.payload_json).expect("parse outgoing-committed event");
+        assert_eq!(
+            ack_event["transfer_id"].as_str(),
+            Some(reservation.transfer_id.as_str())
+        );
+        assert_eq!(
+            ack_event["source_task_id"].as_str(),
+            Some(reservation.source_task_id.as_str())
+        );
+        assert_eq!(
+            ack_event["destination_local_task_id"].as_str(),
+            Some(local_task_id)
+        );
+        assert_eq!(
+            ack_event["content_commitment"].as_str(),
+            Some(content_commitment),
+            "the content commitment replayed to the source must be exactly the persisted proof"
+        );
+        assert_eq!(
+            ack_event["destination_repo_id"].as_str(),
+            Some(destination_repo_id)
+        );
     }
 
     /// The decisive positive case: once `verify_persisted_task_bundle` has
     /// already persisted a content commitment for this transfer, a retry
-    /// must skip it entirely — no artifact or input-ledger fetch — and go
-    /// straight to replaying the acknowledgment. The destination "server" is
-    /// represented as durably as this repo's other transfer fixtures
-    /// represent it (a fresh `AppState`/`Db` built from the same persisted
-    /// `db_path`, matching `transfer_sidecar`'s own restart tests) rather
-    /// than actually forking a `kanna-server` binary, since `run_import` is
-    /// not an HTTP entry point — it is the queue-drain unit these very
-    /// `import.rs` tests already call directly.
+    /// must skip it entirely — no artifact or input-ledger fetch — go
+    /// straight to replaying the acknowledgment, and that replay must carry
+    /// the exact persisted commitment, destination repo id, and task
+    /// binding all the way to the source over a real wire round trip.
     #[tokio::test]
-    async fn retry_with_persisted_commitment_skips_reverification_and_reaches_real_ack_replay() {
+    async fn retry_with_persisted_commitment_skips_reverification_and_replays_the_real_ack() {
         let _guard = crate::test_sidecar_guard().await;
-        let transfer_id = "transfer-item4-persisted";
-        let local_task_id = "task-item4-persisted";
-        let config = item4_test_config("persisted", 47_101);
+        let _env_guard = Item4EnvVarGuard::capture();
+        let reservation = establish_real_transfer_reservation("persisted").await;
 
+        let local_task_id = "task-item4-persisted";
+        let repo_id = "repo-item4-persisted";
+        let kanna_config = item4_test_config("persisted-kanna-server");
         {
-            let db = crate::db::Db::open_for_tests(&config.db_path).expect("open test db");
-            db.insert_test_repo("repo-item4-persisted", "Item4 Repo")
-                .expect("insert repo");
+            let db = crate::db::Db::open_for_tests(&kanna_config.db_path).expect("open test db");
+            db.insert_test_repo(repo_id, "Item4 Repo").expect("insert repo");
             db.insert_test_pipeline_item(
                 local_task_id,
-                "repo-item4-persisted",
+                repo_id,
                 "resume the transferred agent",
                 None,
                 "in progress",
@@ -1692,108 +2053,110 @@ mod tests {
             )
             .expect("insert pipeline item");
             db.upsert_transferred_task_manifest(
-                transfer_id,
-                "repo-item4-persisted",
+                &reservation.transfer_id,
+                repo_id,
                 Some(local_task_id),
                 &"a".repeat(40),
                 &"b".repeat(40),
             )
             .expect("upsert manifest");
             assert!(db
-                .mark_transferred_task_manifest_prepared(transfer_id)
+                .mark_transferred_task_manifest_prepared(&reservation.transfer_id)
                 .expect("mark prepared"));
             assert!(db
                 .set_transferred_task_manifest_content_commitment(
-                    transfer_id,
+                    &reservation.transfer_id,
                     "persisted-commitment-value",
                 )
                 .expect("persist commitment"));
-            db.insert_task_transfer(&item4_new_task_transfer(
-                transfer_id,
+            let mut transfer = item4_new_task_transfer(
+                &reservation.transfer_id,
                 local_task_id,
+                &reservation.source_task_id,
                 "in progress",
-            ))
-            .expect("insert task transfer");
+            );
+            transfer.source_peer_id = Some(reservation.destination_peer_id.clone());
+            db.insert_task_transfer(&transfer).expect("insert task transfer");
         }
 
-        // Destination "server restart": the AppState below is a fresh
-        // process-analog built only from the durable db_path above, and it
-        // is handed a *never-before-used* real sidecar process that has
-        // never seen this transfer_id — representing both "destination
-        // server restarted" and "source artifact long gone" identically,
-        // since this retry's whole point is that neither may matter once
-        // the commitment is persisted.
-        let root = crate::test_paths::unique_test_dir("kanna-transfer-item4-persisted");
-        std::fs::create_dir_all(&root).expect("create transfer root");
-        let config_for_sidecar = config.clone();
         let state = Arc::new(AppState::with_transfer_sidecar_for_test(
-            config.clone(),
-            move |work| {
-                spawn_test_destination_sidecar(
-                    &root,
-                    "peer-item4-dest-persisted",
-                    &config_for_sidecar,
-                    work,
-                )
-            },
+            kanna_config.clone(),
+            |work| reservation.spawn_destination("persisted-dest", work),
         ));
 
         let work = work_item("import:transfer-item4-persisted");
-        let failure = run_import(&state, &work, transfer_id)
-            .await
-            .expect_err(
-                "an unpaired real sidecar cannot complete the ack replay, but the retry must \
-                 still reach it rather than fail earlier on a fetch",
-            );
-        let ImportFailure::Retry(reason) = failure else {
-            panic!("expected a retryable failure reaching the sidecar's ack replay: {failure:?}");
-        };
+        let result = run_import(&state, &work, &reservation.transfer_id).await;
         assert!(
-            reason.contains("missing source peer for import acknowledgment"),
-            "expected the real sidecar's own ack-replay error, proving the skip-path reached \
-             `acknowledge_import_committed`; got: {reason}"
-        );
-        let lowered = reason.to_lowercase();
-        assert!(
-            !lowered.contains("artifact") && !lowered.contains("ledger"),
-            "a persisted commitment must never let the retry attempt an artifact/ledger fetch: \
-             {reason}"
+            result.is_ok(),
+            "expected the retry to succeed via a real ack replay: {result:?}"
         );
 
-        // Immutability: the persisted proof survived the whole real retry
-        // attempt, including its failed ack replay, unchanged.
+        assert_real_ack_values(
+            &reservation,
+            local_task_id,
+            "persisted-commitment-value",
+            repo_id,
+        );
+
         let commitment = state
             .transfer_work()
             .open_db()
             .expect("db")
-            .transferred_task_manifest_content_commitment(transfer_id)
+            .transferred_task_manifest_content_commitment(&reservation.transfer_id)
             .expect("read commitment");
         assert_eq!(
             commitment.as_deref(),
             Some("persisted-commitment-value"),
-            "a retry must never recompute or clear an already-persisted content commitment"
+            "a successful retry must never recompute or clear the persisted content commitment"
         );
+
+        let transfer = state
+            .transfer_work()
+            .open_db()
+            .expect("db")
+            .get_task_transfer(&reservation.transfer_id)
+            .expect("read transfer")
+            .expect("transfer exists");
+        assert_eq!(transfer.status, "completed");
     }
 
-    /// Same skip-path, but the destination's sidecar *process* — not just
-    /// the kanna-server process — restarts between the manifest being
-    /// proven and this retry, so its in-memory `transfer_artifacts` cache
-    /// (which is never reindexed from disk on startup) is genuinely empty.
-    /// The retry must still never touch it.
+    /// Same skip-path and same real, wire-admitted reservation, but an extra
+    /// destination sidecar *process* restart happens between the commit and
+    /// the incarnation `run_import` actually talks to — so its in-memory
+    /// `transfer_artifacts` cache and its in-memory `incoming_reservations`
+    /// map are both genuinely empty, and only what
+    /// `Item4RealTransfer::spawn_destination`'s fresh process reloads from
+    /// `destination_root` on disk is available. The retry must still
+    /// succeed, with the same real ack values reaching the source.
     #[tokio::test]
     async fn retry_with_persisted_commitment_survives_a_real_sidecar_process_restart() {
         let _guard = crate::test_sidecar_guard().await;
-        let transfer_id = "transfer-item4-sidecar-restart";
-        let local_task_id = "task-item4-sidecar-restart";
-        let config = item4_test_config("sidecar-restart", 47_102);
+        let _env_guard = Item4EnvVarGuard::capture();
+        let reservation = establish_real_transfer_reservation("restart").await;
 
+        // One more incarnation between the commit and the one `run_import`
+        // uses: proves the reservation survives more than the single
+        // restart every other test already gets from
+        // `establish_real_transfer_reservation` dropping its own bootstrap
+        // incarnation.
         {
-            let db = crate::db::Db::open_for_tests(&config.db_path).expect("open test db");
-            db.insert_test_repo("repo-item4-sidecar-restart", "Item4 Repo")
-                .expect("insert repo");
+            let throwaway_work = new_test_work_queue("restart-throwaway");
+            let extra = reservation.spawn_destination("restart-extra", throwaway_work);
+            extra
+                .control("identity", serde_json::json!({}))
+                .await
+                .expect("the extra incarnation must come up and answer");
+        }
+
+        let local_task_id = "task-item4-restart";
+        let repo_id = "repo-item4-restart";
+        let kanna_config = item4_test_config("restart-kanna-server");
+        {
+            let db = crate::db::Db::open_for_tests(&kanna_config.db_path).expect("open test db");
+            db.insert_test_repo(repo_id, "Item4 Repo").expect("insert repo");
             db.insert_test_pipeline_item(
                 local_task_id,
-                "repo-item4-sidecar-restart",
+                repo_id,
                 "resume the transferred agent",
                 None,
                 "in progress",
@@ -1801,84 +2164,50 @@ mod tests {
             )
             .expect("insert pipeline item");
             db.upsert_transferred_task_manifest(
-                transfer_id,
-                "repo-item4-sidecar-restart",
+                &reservation.transfer_id,
+                repo_id,
                 Some(local_task_id),
                 &"a".repeat(40),
                 &"b".repeat(40),
             )
             .expect("upsert manifest");
             assert!(db
-                .mark_transferred_task_manifest_prepared(transfer_id)
+                .mark_transferred_task_manifest_prepared(&reservation.transfer_id)
                 .expect("mark prepared"));
             assert!(db
                 .set_transferred_task_manifest_content_commitment(
-                    transfer_id,
-                    "persisted-commitment-value",
+                    &reservation.transfer_id,
+                    "persisted-commitment-value-restart",
                 )
                 .expect("persist commitment"));
-            db.insert_task_transfer(&item4_new_task_transfer(
-                transfer_id,
+            let mut transfer = item4_new_task_transfer(
+                &reservation.transfer_id,
                 local_task_id,
+                &reservation.source_task_id,
                 "in progress",
-            ))
-            .expect("insert task transfer");
-        }
-
-        let root = crate::test_paths::unique_test_dir("kanna-transfer-item4-sidecar-restart");
-        std::fs::create_dir_all(&root).expect("create transfer root");
-        let peer_id = "peer-item4-dest-sidecar-restart";
-
-        // First incarnation: spawn it (on its own port, so its release on
-        // drop can never race the second incarnation's bind) and force it to
-        // actually come up and persist its identity under the shared root,
-        // then let it be killed on drop.
-        {
-            let first_config = item4_test_config("sidecar-restart-incarnation-1", 47_198);
-            let throwaway_work = crate::transfer_engine::queue::TransferWorkQueue::new(
-                crate::test_paths::unique_test_path_string("kanna-transfer-item4-throwaway-work"),
             );
-            let first =
-                spawn_test_destination_sidecar(&root, peer_id, &first_config, throwaway_work);
-            first
-                .control("identity", serde_json::json!({}))
-                .await
-                .expect("first sidecar incarnation must come up and answer");
+            transfer.source_peer_id = Some(reservation.destination_peer_id.clone());
+            db.insert_task_transfer(&transfer).expect("insert task transfer");
         }
 
-        // Second incarnation, same durable root: this is the one `run_import`
-        // actually talks to, standing in for the sidecar having restarted.
-        let config_for_sidecar = config.clone();
-        let root_for_sidecar = root.clone();
         let state = Arc::new(AppState::with_transfer_sidecar_for_test(
-            config.clone(),
-            move |work| {
-                spawn_test_destination_sidecar(
-                    &root_for_sidecar,
-                    peer_id,
-                    &config_for_sidecar,
-                    work,
-                )
-            },
+            kanna_config.clone(),
+            |work| reservation.spawn_destination("restart-final", work),
         ));
 
-        let work = work_item("import:transfer-item4-sidecar-restart");
-        let failure = run_import(&state, &work, transfer_id)
-            .await
-            .expect_err("an unpaired real sidecar cannot complete the ack replay");
-        let ImportFailure::Retry(reason) = failure else {
-            panic!("expected a retryable failure reaching the sidecar's ack replay: {failure:?}");
-        };
+        let work = work_item("import:transfer-item4-restart");
+        let result = run_import(&state, &work, &reservation.transfer_id).await;
         assert!(
-            reason.contains("missing source peer for import acknowledgment"),
-            "the restarted sidecar's empty artifact cache must not force a fetch attempt; \
-             expected the ack-replay error, got: {reason}"
+            result.is_ok(),
+            "the reservation, and therefore the retry, must survive a real sidecar restart: \
+             {result:?}"
         );
-        let lowered = reason.to_lowercase();
-        assert!(
-            !lowered.contains("artifact") && !lowered.contains("ledger"),
-            "a persisted commitment must never let the retry attempt an artifact/ledger fetch \
-             after a sidecar restart: {reason}"
+
+        assert_real_ack_values(
+            &reservation,
+            local_task_id,
+            "persisted-commitment-value-restart",
+            repo_id,
         );
     }
 
@@ -1921,6 +2250,7 @@ mod tests {
                 db.insert_task_transfer(&item4_new_task_transfer(
                     transfer_id,
                     local_task_id,
+                    "task-item4-source",
                     // The payload's stage disagrees with the pipeline_item's
                     // seeded "in progress" stage above.
                     "review",
@@ -2003,6 +2333,7 @@ mod tests {
                 db.insert_task_transfer(&item4_new_task_transfer(
                     transfer_id,
                     retrying_task_id,
+                    "task-item4-source",
                     "in progress",
                 ))
                 .expect("insert task transfer");

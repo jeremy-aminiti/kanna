@@ -1,4 +1,4 @@
-# Item 4 ack-replay gate: what the real-sidecar fixture proves, and what it doesn't yet
+# Item 4 ack-replay gate: real two-peer coverage, and what's still open
 
 Item 4 of the transfer-integrity work (`af02a511`) gates `run_import`'s
 re-entry (`crates/kanna-server/src/transfer_engine/import.rs:429-439`) on the
@@ -7,82 +7,82 @@ destination server's own durably persisted
 `verify_persisted_task_bundle` has proven a transfer, a retry must skip it
 entirely — no artifact or input-ledger fetch, no dependency on the sidecar's
 in-memory artifact cache or on the source machine still holding the artifact
-— and go straight to replaying `control::acknowledge_import_committed`. The
-new tests in `import.rs`'s own `mod tests`
-(`retry_with_persisted_commitment_skips_reverification_and_reaches_real_ack_replay`,
-`retry_with_persisted_commitment_survives_a_real_sidecar_process_restart`,
-plus the negative controls
-`retry_with_no_persisted_commitment_still_takes_the_verification_path` and
-`a_commitment_proven_for_another_task_cannot_authorize_this_tasks_ack`) prove
-this against a real destination SQLite DB and a real `kanna-task-transfer`
-sidecar *subprocess* — not a helper predicate standing in for either.
+— and go straight to replaying `control::acknowledge_import_committed` with
+the exact persisted proof.
 
-## What is proven for real
+## Revision history
 
-Whether `verify_persisted_task_bundle` runs at all — and therefore whether
-any artifact/ledger fetch is attempted — is directly observable without a
-real source peer: a fetch attempted against a sidecar that was never told
-about the transfer, or whose in-memory `transfer_artifacts` cache was just
-emptied by a process restart, is guaranteed to fail with a distinct,
-fetch-shaped error *before* the ack call is ever reached. The skip-path's ack
-replay is then genuinely driven through
-`control::acknowledge_import_committed` against that same real subprocess;
-without a paired source peer it cannot complete, but it fails with the
-sidecar's own, specific `"missing source peer for import acknowledgment"`
-answer (`crates/task-transfer/src/runtime/transfers.rs:608-613`) — which is
-only reachable *after* the artifact-fetch step was skipped, and is never the
-fetch-shaped error a wrongly-unskipped verification would produce instead.
-That is the fixture's actual observable: reaching a specific, later failure
-mode is proof the earlier one (a fetch) did not happen.
+An earlier version of this note (and the fixtures it described) used only a
+single, unpaired destination sidecar and inferred the skip-path from a
+definitive-but-uninformative sidecar error ("missing source peer"), reasoning
+that a genuine second peer was out of this checkpoint's bound by analogy to
+item 3's own two-node gap. On review, that was correctly rejected: reaching
+the ack call is not the same as proving the ack call carried the right
+values, or that a real, wire-admitted reservation survives a restart — an
+empty, never-admitted sidecar cannot demonstrate either. The fixtures below
+replace that reasoning with a real second peer.
 
-## What is not yet proven: the exact ack values on the wire
+## What is now proven for real
 
-`acknowledge_import_committed`'s destination-side reservation lookup
-(`transfers.rs:597-613`) fails before it ever touches
-`content_commitment`/`destination_repo_id` when there is no
-`incoming_reservations` entry for the transfer — and that entry is only ever
-created by a real admitted commit arriving over the wire from an actual
-paired source peer. Proving the *values* replayed on the wire — that
-`content_commitment` and `destination_repo_id` reach the source's
-`OutgoingTransferCommitted` event unchanged — needs a genuine second,
-paired `kanna-task-transfer` peer process, real LAN pairing
-(`start-pairing`/`accept-pairing`), and a real preflight+commit to seed that
-reservation.
+`import.rs`'s own `mod tests` now pairs two real `kanna-task-transfer`
+sidecar *subprocesses* — a source and a destination — over the sidecar's
+existing `KANNA_TRANSFER_DISCOVERY=registry` file-based discovery mode (the
+same one `crates/task-transfer/tests/sidecar_control.rs` already uses; no
+real mDNS multicast, so this does not depend on the test environment's
+network configuration), drives a genuine `start-pairing`/`accept-pairing`
+handshake and a genuine preflight+commit from source to destination, and only
+then seeds the destination's own durable DB (`transferred_task_manifest`,
+`task_transfer`) and calls the real `run_import`:
 
-This is deliberately not attempted here, for the same reason
-`docs/2026-09-09-transfer-admission-proof-e2e-gap.md` gives for the
-analogous gap in item 3's `run_push` coverage: pairing two real sidecar
-subprocesses through the full LAN discovery/pairing handshake is a
-two-node harness, one layer up from a single destination-side gate fixture,
-and out of this checkpoint's bound.
+- `retry_with_persisted_commitment_skips_reverification_and_replays_the_real_ack`
+  and `retry_with_persisted_commitment_survives_a_real_sidecar_process_restart`
+  both now assert `run_import` returns `Ok(())` — a genuinely completed
+  acknowledgment, not merely a specific error shape — and both read back the
+  *source* sidecar's own durable `outgoing_transfer_committed` work-queue
+  record and assert every field it carries (`transfer_id`, `source_task_id`,
+  `destination_local_task_id`, `content_commitment`, `destination_repo_id`)
+  against exactly what this test persisted. That is proof of the values that
+  crossed the wire, not just that the call was reached.
+- The restart test additionally spawns and kills one extra destination
+  sidecar incarnation between the real commit and the incarnation
+  `run_import` talks to, and `establish_real_transfer_reservation` itself
+  always drops its own bootstrap incarnation before returning — so every
+  positive test's `run_import` call is against a process whose
+  `incoming_reservations` entry was reloaded from disk, never carried over
+  warm in memory.
+- The no-fetch claim (an artifact/ledger fetch attempted against a sidecar
+  that never staged or received one is guaranteed to fail with a distinct,
+  fetch-shaped error) still holds and is still exercised implicitly: neither
+  positive test ever stages or fetches an artifact, and both still reach a
+  successful completion, which a wrongly-unskipped `verify_persisted_task_bundle`
+  could not produce (it would fail trying to fetch the input ledger from a
+  sidecar that has none staged).
+- `retry_with_no_persisted_commitment_still_takes_the_verification_path`
+  (absent proof still verifies) and
+  `a_commitment_proven_for_another_task_cannot_authorize_this_tasks_ack`
+  (existing task-binding guard) are unchanged — neither reaches the sidecar
+  at all, so neither needed the paired harness.
+- Pure DB-level immutability:
+  `db::tests::a_persisted_content_commitment_is_set_once_and_never_overwritten`.
 
-### What would make it testable
+## What is still open
 
-The same two-desktop harness `2026-09-09-transfer-admission-proof-e2e-gap.md`
-names: two paired real `kanna-server` (or in-process `AppState`) + real
-`kanna-task-transfer` sidecar pairs, so a source-side `run_push` can drive an
-actual reservation through to a destination-side `run_import` retry and the
-resulting `OutgoingTransferCommitted` event can be read back and asserted on
-the source. It would unlock this test and the several others both docs name.
-
-### What covers it meanwhile
-
-- The four tests above prove the skip/no-skip control flow for real, plus
-  content-commitment immutability
-  (`db::tests::a_persisted_content_commitment_is_set_once_and_never_overwritten`)
-  and the existing task-binding guard.
-- `crates/task-transfer/tests/runtime.rs`'s
-  `destination_can_acknowledge_import_commit_back_to_source` and
-  `destination_reloads_awaiting_ack_reservation_after_sidecar_restart` prove,
-  at the sidecar-to-sidecar wire level with two real paired
-  `TransferRuntime`s, that `acknowledge_import_committed` replays the correct
-  values end to end and survives a sidecar restart — the piece this gap
-  leaves unconnected to `run_import`'s own retry entry point.
+- **Compilation and execution.** These fixtures are source-authored against
+  a real subprocess/wire harness that has not yet been built or run — see
+  the task's report to its manager for the exact commands and current hold
+  status. Real timing (pairing handshake latency, registry-file discovery
+  delay) could not be tuned empirically; timeouts are generous (15s) but
+  unverified.
+- **Mixed old/new server-sidecar versions and the real desktop existing-clone
+  E2E.** Unchanged from `2026-09-09-transfer-admission-proof-e2e-gap.md`:
+  no fixture here runs two independently versioned builds against each
+  other, or drives the real desktop app's transfer path end to end. Out of
+  this item's bound.
 
 ## The committed-reservation TTL exemption (architect consultation `da6acf0b`, invariant 4)
 
-The consultation flagged, as a risk to verify rather than assume, that an
-ack retry delayed past `prune_incoming_reservations`'s TTL could lose the
+The consultation flagged, as a risk to verify rather than assume, that an ack
+retry delayed past `prune_incoming_reservations`'s TTL could lose the
 sidecar-side binding needed to route the replayed ack even though the
 server-side proof is fine. Read directly
 (`crates/task-transfer/src/runtime/replay_store.rs:330-348`): pruning already
