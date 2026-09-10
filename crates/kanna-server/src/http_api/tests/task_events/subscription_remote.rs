@@ -150,17 +150,29 @@ impl Drop for WatchFixture {
 
 impl WatchFixture {
     fn request() -> Value {
+        Self::request_with(json!({"quietMs": 2_000, "maxHoldMs": 10_000}))
+    }
+
+    fn request_with(overrides: Value) -> Value {
         // Diagnostic mode: these fixtures assert on the durable internal
         // cursor directly, which the default compact response omits.
-        // Per-subscription quiet/max-hold overrides, not the 300000ms
-        // globals: these fixtures assert exact peer-attempt counts and
-        // ordinary-batch timing, which the fixed 240s native receiver window
-        // would otherwise dominate now that the defaults exceed it.
-        json!({"taskId":"manager", "repoId":"repo-pending-source", "delivery":"poll", "diagnostic":true,
-            "quietMs": 2_000, "maxHoldMs": 10_000})
+        let mut body = json!({"taskId":"manager", "repoId":"repo-pending-source", "delivery":"poll", "diagnostic":true});
+        if let Some(extra) = overrides.as_object() {
+            for (key, value) in extra {
+                body[key] = value.clone();
+            }
+        }
+        body
     }
 
     async fn new(exhaust_budget: bool) -> (Self, Option<tokio::sync::OwnedSemaphorePermit>) {
+        Self::new_with(exhaust_budget, Self::request()).await
+    }
+
+    async fn new_with(
+        exhaust_budget: bool,
+        request: Value,
+    ) -> (Self, Option<tokio::sync::OwnedSemaphorePermit>) {
         let (source, peer) = aggregate_pending_leg_states();
         for (state, repo) in [
             (&source, "repo-pending-source"),
@@ -191,7 +203,7 @@ impl WatchFixture {
         let relay = connect(&source, peer.clone());
         let app = router(source.clone());
         let (status, initial) =
-            subscription_request(&app, "POST", "/v1/event-subscriptions", Self::request()).await;
+            subscription_request(&app, "POST", "/v1/event-subscriptions", request).await;
         assert_eq!(status, StatusCode::OK, "{initial}");
         assert!(initial["pending"].is_null(), "{initial}");
         assert!(initial["cursor"].as_str().unwrap().starts_with("ks1."));
@@ -490,6 +502,49 @@ async fn ordinary_quiet_deadlines_and_notification_storms_keep_the_remote_leg() 
     assert!(pairs.contains(&("pending-peer-child".into(), "task.lifecycle_failed".into())));
     assert_eq!(watch.relay.counts.abandoned.load(Ordering::SeqCst), 0);
     assert_eq!(watch.relay.counts.busy.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_aggregate_event_observed_in_one_native_leg_survives_into_a_later_leg() {
+    // A 250s quiet/max-hold window exceeds the fixed 240s native receiver, so
+    // the aggregate wait must chain a second call — issuing a fresh peer long
+    // poll — before the subscription's own deadline is reached. The local
+    // event is only ever observed inside the first (240s) leg; if the chain
+    // did not retain it across that leg's own timeout, the eventual page
+    // would either come back empty or, at best, only ever ack past it.
+    let (watch, _) = WatchFixture::new_with(
+        false,
+        WatchFixture::request_with(json!({"quietMs": 250_000, "maxHoldMs": 250_000})),
+    )
+    .await;
+    Db::open(&watch.source.config().db_path)
+        .unwrap()
+        .update_pipeline_item_pr(
+            "pending-local-child",
+            Some(301),
+            "https://example.test/pull/301",
+        )
+        .unwrap();
+    watch
+        .source
+        .publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    let page = watch.page().await;
+    // At least one additional long poll to the peer was issued beyond the
+    // first, proving a native receiver boundary was actually crossed here
+    // rather than the page merely settling within a single 240s call.
+    assert!(watch.relay.counts.attempts.load(Ordering::SeqCst) >= 2);
+    let batch = page.pending.as_ref().unwrap();
+    assert!(
+        batch.get("watchError").is_none(),
+        "peer errors: {}",
+        batch["machineErrors"]
+    );
+    assert_eq!(
+        event_pairs(batch),
+        vec![("pending-local-child".into(), "task.pr_created".into())]
+    );
+    let acked = watch.ack(&page).await;
+    assert_eq!(acked["cursor"], batch["cursor"]);
 }
 
 #[tokio::test(start_paused = true)]

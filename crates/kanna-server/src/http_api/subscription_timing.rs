@@ -164,11 +164,24 @@ pub(super) enum TestEvent {
     Observed(usize, Instant),
     Admitted(i64, Instant),
     Delivered,
+    /// One chained native call returned `"waitOutcome": "timeout"` (its own
+    /// receiver budget ran out, not the subscription's intrinsic deadline)
+    /// and the chain is re-issuing another call. A test barrier on this event
+    /// proves a native receiver boundary was actually crossed mid-collection,
+    /// rather than inferring it from a single large `advance()`.
+    LegTimedOut,
 }
 
 #[cfg(test)]
 pub(super) fn observed(state: &super::AppState, count: usize) {
     if let Some(events) = &state.subscription_test_events {
         let _ = events.send(TestEvent::Observed(count, Instant::now()));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn leg_timed_out(state: &super::AppState) {
+    if let Some(events) = &state.subscription_test_events {
+        let _ = events.send(TestEvent::LegTimedOut);
     }
 }
