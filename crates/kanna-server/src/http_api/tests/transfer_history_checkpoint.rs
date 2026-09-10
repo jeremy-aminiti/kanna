@@ -137,6 +137,8 @@ async fn create_transferred_task(
         serde_json::Value::String(workflow_definition.clone());
     let history = body["transferImport"]["history"].clone();
     let previous_stage_result = body["transferImport"]["previousStageResult"].clone();
+    let previous_main_result = body["transferImport"]["previousMainResult"].clone();
+    let revision_feedback = body["transferImport"]["revisionFeedback"].clone();
     let stage = body["stage"].as_str().unwrap_or("in progress").to_string();
     let request: crate::mobile_api::CreateTaskRequest = serde_json::from_value(body).unwrap();
     let source_payload =
@@ -155,6 +157,8 @@ async fn create_transferred_task(
                 "base_oid": head_oid,
                 "workflow_definition": workflow_definition,
                 "previous_stage_result": previous_stage_result,
+                "previous_main_result": previous_main_result,
+                "revision_feedback": revision_feedback,
                 "history": history,
                 "pipeline": request.workflow_name.clone(),
                 "agent_type": "pty",
@@ -288,7 +292,7 @@ async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_bra
             // — the shape a real TaskBundle transfer always carries — so a
             // fixture that omits it would silently skip the very path this
             // test exists to exercise.
-            "workflowDefinition": serde_json::json!({
+            "workflowDefinition": serde_json::to_string_pretty(&serde_json::json!({
                 "name": "history-checkpoint",
                 "stages": [
                     {
@@ -298,12 +302,14 @@ async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_bra
                     },
                     {
                         "name": "review",
-                        "prompt": "Review branch $BRANCH against $BASE_REF. Previous: $PREV_RESULT",
+                        "prompt": "Review branch $BRANCH against $BASE_REF. Previous: $PREV_RESULT Main: $PREV_MAIN_RESULT Feedback: $REVISION_FEEDBACK",
                         "policy": { "transition": "manual" }
                     }
                 ]
-            }).to_string(),
-            "previousStageResult": "hop1 review result: looks good",
+            })).unwrap(),
+            "previousStageResult": serde_json::json!({"status":"succeeded","summary":"s".repeat(300)}).to_string(),
+            "previousMainResult": serde_json::json!({"status":"succeeded","summary":"m".repeat(300)}).to_string(),
+            "revisionFeedback": "first review directive\nsecond review directive",
             "history": [
                 {
                     "sequence": 0,
@@ -313,7 +319,7 @@ async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_bra
                     "stage": "in progress",
                     "kind": "main",
                     "agent": "implement",
-                    "result": "{\"status\":\"succeeded\"}"
+                    "result": serde_json::json!({"status":"succeeded","summary":"h".repeat(300)}).to_string()
                 },
                 {
                     "sequence": 1,
@@ -372,8 +378,16 @@ async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_bra
         "$BRANCH must resolve to this task's own branch, not the imported fork ref: {command}"
     );
     assert!(
-        command.contains("hop1 review result: looks good"),
-        "$PREV_RESULT must carry the inherited latest result: {command}"
+        command.contains(&"s".repeat(300)),
+        "$PREV_RESULT must carry the full inherited result: {command}"
+    );
+    assert!(
+        command.contains(&"m".repeat(300)),
+        "$PREV_MAIN_RESULT was truncated: {command}"
+    );
+    assert!(
+        command.contains("first review directive") && command.contains("second review directive"),
+        "multiline revision feedback was not visible to the agent: {command}"
     );
 
     // The full ordered history persists with each record's original
@@ -386,6 +400,11 @@ async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_bra
     assert_eq!(history[0].origin_task_id, "task-hop0-original");
     assert_eq!(history[0].origin_run_id, "run-hop0-implement");
     assert_eq!(history[0].kind, "main");
+    assert!(history[0]
+        .result
+        .as_deref()
+        .unwrap()
+        .contains(&"h".repeat(300)));
     assert_eq!(history[1].sequence, 1);
     assert_eq!(history[1].origin_run_id, "run-hop0-commit");
     assert_eq!(history[1].kind, "post");
@@ -394,7 +413,12 @@ async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_bra
         .transferred_task_context("abcd0001")
         .unwrap()
         .expect("scalar context also persisted");
-    assert_eq!(context.2.as_deref(), Some("hop1 review result: looks good"));
+    assert!(context.2.as_deref().unwrap().contains(&"s".repeat(300)));
+    assert!(context.3.as_deref().unwrap().contains(&"m".repeat(300)));
+    assert_eq!(
+        context.4.as_deref(),
+        Some("first review directive\nsecond review directive")
+    );
 
     // The actual consumer: a reviewer, a manager, or a later hop reads the
     // full ordered history — not only the three latest scalars the prompt

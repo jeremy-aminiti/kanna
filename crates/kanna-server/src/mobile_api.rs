@@ -538,15 +538,13 @@ pub struct TransferredHistoryRecordSummary {
 
 impl TransferImportSummary {
     const MAX_FIELD_CHARS: usize = 200;
+    const MAX_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
     pub fn validate(&self) -> Result<(), String> {
         for (label, value) in [
             ("transferId", self.transfer_id.as_deref()),
             ("sourceMachine", self.source_machine.as_deref()),
             ("repoMode", self.repo_mode.as_deref()),
-            ("previousStageResult", self.previous_stage_result.as_deref()),
-            ("previousMainResult", self.previous_main_result.as_deref()),
-            ("revisionFeedback", self.revision_feedback.as_deref()),
         ] {
             if value.is_some_and(|value| value.chars().count() > Self::MAX_FIELD_CHARS) {
                 return Err(format!(
@@ -560,21 +558,38 @@ impl TransferImportSummary {
                 ));
             }
         }
-        if self
-            .workflow_definition
-            .as_deref()
-            .is_some_and(|value| value.len() > 4 * 1024 * 1024)
-        {
-            return Err("transferImport.workflowDefinition exceeds 4 MiB".into());
+        for (label, value) in [
+            ("previousStageResult", self.previous_stage_result.as_deref()),
+            ("previousMainResult", self.previous_main_result.as_deref()),
+            ("revisionFeedback", self.revision_feedback.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.len() > Self::MAX_CONTENT_BYTES) {
+                return Err(format!(
+                    "transferImport.{label} exceeds {} bytes",
+                    Self::MAX_CONTENT_BYTES
+                ));
+            }
+            if value.is_some_and(|value| {
+                value
+                    .chars()
+                    .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+            }) {
+                return Err(format!(
+                    "transferImport.{label} contains an unsupported control character"
+                ));
+            }
         }
         if self
             .workflow_definition
             .as_deref()
-            .is_some_and(|value| value.chars().any(char::is_control))
+            .is_some_and(|value| value.len() > Self::MAX_CONTENT_BYTES)
         {
-            return Err(
-                "transferImport.workflowDefinition must not contain control characters".into(),
-            );
+            return Err("transferImport.workflowDefinition exceeds 4 MiB".into());
+        }
+        if let Some(definition) = self.workflow_definition.as_deref() {
+            serde_json::from_str::<serde_json::Value>(definition).map_err(|error| {
+                format!("transferImport.workflowDefinition must be valid JSON: {error}")
+            })?;
         }
         Ok(())
     }
@@ -1982,6 +1997,43 @@ mod tests {
                 .validate()
                 .is_err_and(|error| error.contains("control characters")));
         }
+    }
+
+    #[test]
+    fn transfer_import_summary_accepts_full_results_feedback_and_formatted_workflow_json() {
+        let long_result = serde_json::json!({ "summary": "x".repeat(500) }).to_string();
+        let summary = TransferImportSummary {
+            workflow_definition: Some("{\n  \"name\": \"single-reviewer\"\n}\n".into()),
+            previous_stage_result: Some(long_result.clone()),
+            previous_main_result: Some(long_result),
+            revision_feedback: Some("first line\nsecond line".into()),
+            ..Default::default()
+        };
+        assert_eq!(summary.validate(), Ok(()));
+    }
+
+    #[test]
+    fn transfer_import_summary_rejects_invalid_workflow_json_and_oversized_content() {
+        let invalid = TransferImportSummary {
+            workflow_definition: Some("{ not json }".into()),
+            ..Default::default()
+        };
+        assert!(invalid.validate().unwrap_err().contains("valid JSON"));
+
+        let oversized = TransferImportSummary {
+            revision_feedback: Some("x".repeat(TransferImportSummary::MAX_CONTENT_BYTES + 1)),
+            ..Default::default()
+        };
+        assert!(oversized.validate().unwrap_err().contains("exceeds"));
+
+        let unsafe_feedback = TransferImportSummary {
+            revision_feedback: Some("feedback\u{1b}]2;spoof\u{7}".into()),
+            ..Default::default()
+        };
+        assert!(unsafe_feedback
+            .validate()
+            .unwrap_err()
+            .contains("unsupported control character"));
     }
 
     #[test]

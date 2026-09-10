@@ -808,6 +808,7 @@ async fn ordinary_put_resume_and_rerun_refuse_unprepared_bound_task() {
     for path in [
         "/v1/tasks/abad0005/actions/resume",
         "/v1/tasks/abad0005/actions/rerun-stage",
+        "/v1/tasks/abad0005/actions/advance-stage",
     ] {
         let response = app
             .clone()
@@ -818,5 +819,35 @@ async fn ordinary_put_resume_and_rerun_refuse_unprepared_bound_task() {
     }
     assert!(!connected.load(std::sync::atomic::Ordering::SeqCst));
     daemon.abort();
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    assert!(db
+        .complete_transferred_task_manifest_preparation("transfer-ordinary", &"a".repeat(64),)
+        .unwrap());
+    drop(db);
+    let advanced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let saw_advance = advanced.clone();
+    let prepared_app = super::router(Arc::new(super::AppState::with_stage_advancer(
+        fixture.config.clone(),
+        Arc::new(move |task_id| {
+            assert_eq!(task_id, "abad0005");
+            saw_advance.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::mobile_api::TaskActionResponse {
+                task_id: task_id.to_string(),
+                follow_task: None,
+                revision_budget: None,
+            })
+        }),
+    )));
+    let response = prepared_app
+        .oneshot(
+            Request::post("/v1/tasks/abad0005/actions/advance-stage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(advanced.load(std::sync::atomic::Ordering::SeqCst));
     fixture.cleanup();
 }
