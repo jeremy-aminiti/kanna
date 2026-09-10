@@ -772,21 +772,32 @@ mod notice_projection_handoff_tests {
                 .visible_notice(&mut classifier())
                 .unwrap()
                 .is_some());
+            // Once an old/degraded peer supplied ambiguous primary content,
+            // a later current-to-current transfer cannot recover its origin.
+            // A present optional field must not be advertised as proof of a
+            // clean lineage.
+            handoff.notice_snapshot = Some(projection.snapshot().unwrap());
+            let mut next = super::adopted_notice_terminal(&handoff).unwrap();
+            assert!(next.visible_notice(&mut classifier()).unwrap().is_some());
         }
     }
 
     #[test]
     fn unavailable_snapshots_lose_old_evidence_but_allow_future_refusals() {
-        let mut projection = super::adopted_notice_terminal(&handoff(None)).unwrap();
-        assert!(projection
-            .visible_notice(&mut classifier())
-            .unwrap()
-            .is_none());
-        projection.write(refusal().as_bytes());
-        assert!(projection
-            .visible_notice(&mut classifier())
-            .unwrap()
-            .is_some());
+        let mut broken_primary = snapshot(&refusal());
+        broken_primary.cols = 0;
+        for primary in [None, Some(broken_primary)] {
+            let mut projection = super::adopted_notice_terminal(&handoff(primary)).unwrap();
+            assert!(projection
+                .visible_notice(&mut classifier())
+                .unwrap()
+                .is_none());
+            projection.write(refusal().as_bytes());
+            assert!(projection
+                .visible_notice(&mut classifier())
+                .unwrap()
+                .is_some());
+        }
     }
 }
 

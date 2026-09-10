@@ -843,6 +843,33 @@ fn is_uuid_like(value: &str) -> bool {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn notice_projection_empty_snapshot_is_lossless() {
+        for text in ["", "\x1b[0m", "\x1b[2J\x1b[H", "x", "\r\n"] {
+            let mut terminal = super::HeadlessTerminal::new_notice_projection(120, 40).unwrap();
+            terminal.write(text.as_bytes());
+            let snapshot = terminal.snapshot_with_metadata().unwrap();
+            assert!(!snapshot.used_visible_text_fallback, "input={text:?}");
+            let mut restored =
+                super::HeadlessTerminal::notice_projection_from_snapshot(&snapshot.snapshot)
+                    .unwrap();
+            let restored_snapshot = restored.snapshot_with_metadata().unwrap();
+            assert!(!restored_snapshot.used_visible_text_fallback);
+            assert_eq!(
+                restored_snapshot.snapshot.cursor_row,
+                snapshot.snapshot.cursor_row
+            );
+            assert_eq!(
+                restored_snapshot.snapshot.cursor_col,
+                snapshot.snapshot.cursor_col
+            );
+            assert_eq!(
+                restored.debug_lines(40).unwrap(),
+                terminal.debug_lines(40).unwrap()
+            );
+        }
+    }
+
     use std::collections::HashMap;
 
     use crate::protocol::{AgentProvider, SessionStatus};

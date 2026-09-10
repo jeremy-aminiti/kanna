@@ -34,6 +34,12 @@ static TEST_INSTANCE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 const CAPTURES: &str =
     include_str!("../../../tests/cli-contract/fixtures/provider-quota-rejection.json");
 
+const INCIDENT_QUOTA_ROW: &str = concat!(
+    "(Fable): ⎿ You've reached your Fable limit. Run /usage-credits ",
+    "to continue or switch\", \"resumedFromRunId\": null, ",
+    "\"stage\": \"review\", \"status\": \"running\",",
+);
+
 /// Every wait below is for something that must eventually happen, never a
 /// latency contract: a dev box runs several Rust lanes and their compilers at
 /// once, so this ceiling exists only to contain a wedged fixture.
@@ -773,15 +779,7 @@ fn quoted_tool_json_refusal_is_not_current_but_real_wrapped_refusal_is() {
             if provider == "claude" {
                 // The recorded incident row contains real chrome, but its
                 // logical row begins with a prior result's scope prefix.
-                quoted.insert(
-                    1,
-                    concat!(
-                        "(Fable): ⎿ You've reached your Fable limit. Run /usage-credits ",
-                        "to continue or switch\", \"resumedFromRunId\": null, ",
-                        "\"stage\": \"review\", \"status\": \"running\",",
-                    )
-                    .to_string(),
-                );
+                quoted.insert(1, INCIDENT_QUOTA_ROW.to_string());
             }
             let mut fixture = GatedNoticeSession::start(
                 &format!("{provider}-quoted-{cols}"),
@@ -799,6 +797,29 @@ fn quoted_tool_json_refusal_is_not_current_but_real_wrapped_refusal_is() {
             fixture.assert_snapshot_contains("preserved-history-marker");
         }
     }
+}
+
+#[test]
+fn incident_json_seed_stays_display_only_before_and_after_startup_output() {
+    let capture = capture("claude");
+    let mut fixture = GatedNoticeSession::start_with_geometry(
+        "incident-json-seed",
+        &capture,
+        (80, 24),
+        (167, 65),
+        &[INCIDENT_QUOTA_ROW.to_string()],
+        &[],
+    );
+    fixture.settle();
+    assert!(fixture.output().is_empty());
+    fixture.assert_no_notice("incident JSON before any PTY output");
+    fixture.assert_snapshot_contains(INCIDENT_QUOTA_ROW);
+    fixture.release("startup");
+    fixture.await_output("fresh-startup-marker");
+    fixture.settle();
+    fixture.assert_no_notice("incident JSON plus unrelated startup bytes");
+    fixture.assert_snapshot_contains(INCIDENT_QUOTA_ROW);
+    fixture.assert_current_refusal(&capture);
 }
 
 /// The incident's seed is 167x65 but the fresh PTY starts at 80x24. Growing a
@@ -829,7 +850,10 @@ fn seeded_refusal_stays_historical_across_resize_and_current_refusal_still_repor
         .iter()
         .find(|line| line.contains("limit"))
         .unwrap();
-    for (cols, rows) in [(80, 24), (167, 65)] {
+    // A request equal to the kernel spawn geometry is an existing no-op in
+    // SessionSizeState even when the display seed has different dimensions.
+    // Request an actual size change so this control really exercises reflow.
+    for (cols, rows) in [(79, 24), (80, 24), (167, 65)] {
         fixture.resize(cols, rows);
         fixture.settle();
         fixture.assert_no_notice("seed after acknowledged resize/reflow");

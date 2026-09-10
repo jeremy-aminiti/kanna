@@ -13,7 +13,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Child;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio::time::{timeout, Instant};
@@ -24,6 +23,16 @@ const QUIET: Duration = Duration::from_secs(6);
 struct RealDaemon {
     child: Child,
     dir: PathBuf,
+    binary: PathBuf,
+}
+
+struct Successor(Child);
+
+impl Drop for Successor {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 impl RealDaemon {
@@ -55,11 +64,12 @@ impl RealDaemon {
         std::fs::create_dir_all(&dir).unwrap();
         // Own the child before any fallible readiness assertion.
         let mut daemon = Self {
-            child: Command::new(binary)
+            child: Command::new(&binary)
                 .env("KANNA_DAEMON_DIR", &dir)
                 .spawn()
                 .expect("start real daemon"),
             dir,
+            binary,
         };
         timeout(EVENTUAL, async {
             loop {
@@ -88,6 +98,37 @@ impl RealDaemon {
             .await
             .unwrap()
     }
+
+    async fn handoff(&mut self) {
+        let mut successor = Successor(
+            Command::new(&self.binary)
+                .env("KANNA_DAEMON_DIR", &self.dir)
+                .spawn()
+                .unwrap(),
+        );
+        timeout(EVENTUAL, async {
+            loop {
+                assert!(
+                    successor.0.try_wait().unwrap().is_none(),
+                    "successor exited"
+                );
+                let published = std::fs::read_to_string(self.dir.join("daemon.pid"))
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+                    == Some(successor.0.id());
+                if published
+                    && UnixStream::connect(self.socket()).await.is_ok()
+                    && self.child.try_wait().unwrap().is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("actual same-PTY handoff");
+        std::mem::swap(&mut self.child, &mut successor.0);
+    }
 }
 
 impl Drop for RealDaemon {
@@ -109,11 +150,10 @@ impl Drop for Relay {
 /// Forward actual commands and events byte-for-byte. The only observation is
 /// the real Subscribe acknowledgement, so the seed cannot race ahead of the
 /// server's subscription. No production readiness hook or protocol change.
-async fn relay(dir: &Path, upstream: PathBuf) -> (Relay, tokio::sync::oneshot::Receiver<()>) {
+async fn relay(dir: &Path, upstream: PathBuf) -> (Relay, tokio::sync::mpsc::UnboundedReceiver<()>) {
     std::fs::create_dir_all(dir).unwrap();
     let listener = UnixListener::bind(kanna_runtime_defaults::socket_path(dir)).unwrap();
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let ready = Arc::new(Mutex::new(Some(ready_tx)));
+    let (ready, ready_rx) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
         // Dropping the relay also cancels every accepted connection.
         let mut connections = tokio::task::JoinSet::new();
@@ -140,9 +180,17 @@ async fn relay(dir: &Path, upstream: PathBuf) -> (Relay, tokio::sync::oneshot::R
                         }
                         client.write_all(line.as_bytes()).await.unwrap();
                         if subscribing {
-                            ready.lock().unwrap().take().unwrap().send(()).unwrap();
+                            ready.send(()).unwrap();
                         }
-                        tokio::io::copy_bidirectional(&mut client, &mut daemon).await.unwrap();
+                        if let Err(error) = tokio::io::copy_bidirectional(&mut client, &mut daemon).await {
+                            // The real handoff closes both endpoints after
+                            // ShuttingDown. macOS can report ENOTCONN while
+                            // copy_bidirectional shuts down the closed half.
+                            assert!(matches!(error.kind(),
+                                std::io::ErrorKind::NotConnected |
+                                std::io::ErrorKind::BrokenPipe |
+                                std::io::ErrorKind::ConnectionReset), "relay I/O: {error}");
+                        }
                     });
                 }
                 completed = connections.join_next(), if !connections.is_empty() => {
@@ -219,17 +267,21 @@ fn shell_quote(text: &str) -> String {
 
 #[tokio::test]
 async fn real_seed_and_quoted_output_do_not_park_but_current_refusal_parks_once() {
-    let daemon = RealDaemon::start().await;
+    let mut daemon = RealDaemon::start().await;
     let mut config = test_config("quota-real-provenance");
     config.daemon_dir = daemon.dir.join("relay").to_string_lossy().into_owned();
     let (repo_root, db) = init_quota_fixture_without_candidates("quota-real-provenance", &config);
     insert_running_review_run(&db, &repo_root, "run-review", "claude", Some("opus"), None);
     let state = crate::http_api::AppState::new(config.clone());
     let replacements = state.session_replacements();
-    let (mut relay, ready) = relay(Path::new(&config.daemon_dir), daemon.socket()).await;
+    let (mut relay, mut ready) = relay(Path::new(&config.daemon_dir), daemon.socket()).await;
+    let (handoff_done, resume_watcher) = tokio::sync::oneshot::channel();
 
     let scenario = async {
-        ready.await.expect("watcher subscribed to the real daemon");
+        ready
+            .recv()
+            .await
+            .expect("watcher subscribed to the real daemon");
         let captures: Value = serde_json::from_str(include_str!(
             "../../../../../../tests/cli-contract/fixtures/provider-quota-rejection.json"
         ))
@@ -271,6 +323,7 @@ async fn real_seed_and_quoted_output_do_not_park_but_current_refusal_parks_once(
             "exec 3<\"$1\"; while IFS= read -r phase <&3; do case \"$phase\" in \
              startup) printf '\\r\\nfresh-startup-marker\\r\\n' ;; \
              quoted) printf '%s\\r\\n' {} ;; \
+             busy) printf '\\033[2J\\033[H✻ Thinking… (12s · ↓ 50 tokens)\\r\\n' ;; \
              refusal) printf '\\r\\n%s\\r\\n' {} ;; *) exit 2 ;; esac; done",
             shell_quote(&quoted),
             shell_quote(&frame),
@@ -331,13 +384,19 @@ async fn real_seed_and_quoted_output_do_not_park_but_current_refusal_parks_once(
         assert!(!events
             .iter()
             .any(|e| matches!(e, Event::ProviderNotice { .. })));
-        assert!(
-            matches!(
-                output.try_recv(),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-            ),
-            "gated provider must have produced no PTY output"
-        );
+        loop {
+            match output.try_recv() {
+                Ok(event) => assert!(
+                    !matches!(
+                        event,
+                        Event::Output { .. } | Event::Exit { .. } | Event::Error { .. }
+                    ),
+                    "gated provider must have produced no PTY output: {event:?}"
+                ),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(error) => panic!("output observer disconnected: {error}"),
+            }
+        }
         assert_unrejected(&db, "no new PTY output");
         for (phase, marker) in [("startup", "fresh-startup-marker"), ("quoted", "{\"text\"")] {
             release(&mut gate, phase);
@@ -346,7 +405,10 @@ async fn real_seed_and_quoted_output_do_not_park_but_current_refusal_parks_once(
                 loop {
                     match output.recv().await.expect("output observer closed") {
                         Event::Output { data, .. } => bytes.extend(data),
-                        event => panic!("unexpected output observer event: {event:?}"),
+                        event @ (Event::Exit { .. } | Event::Error { .. }) => panic!("{event:?}"),
+                        // Observers also receive daemon-derived snapshots and
+                        // metadata. Only Output proves a new PTY read.
+                        _ => {}
                     }
                     if String::from_utf8_lossy(&bytes).contains(marker) {
                         break;
@@ -408,6 +470,68 @@ async fn real_seed_and_quoted_output_do_not_park_but_current_refusal_parks_once(
         assert_eq!(parked.len(), 1);
         assert_eq!(parked[0]["reason"], "parked-no-candidate-list");
         assert_eq!(db.list_stage_runs_for_task(TASK_ID).unwrap().len(), 1);
+        readers.abort_all();
+        while readers.join_next().await.is_some() {}
+
+        // Transfer the actual PTY, then reconnect the actual watcher. A
+        // startup reannouncement may precede subscription, so additionally
+        // demand a new, observed producer announcement after a real busy
+        // frame. It still belongs to the same durable run/provider/scope.
+        daemon.handoff().await;
+        handoff_done.send(()).unwrap();
+        ready.recv().await.expect("watcher subscribed to successor");
+        let mut observer = daemon.connect().await;
+        assert!(matches!(
+            observer
+                .send_command(&DaemonCommand::Subscribe)
+                .await
+                .unwrap(),
+            Event::Ok
+        ));
+        let mut observer = events_from(observer, &mut readers);
+        release(&mut gate, "busy");
+        timeout(EVENTUAL, async {
+            loop {
+                let event = observer.recv().await.expect("successor observer closed");
+                assert!(!matches!(event, Event::Exit { .. } | Event::Error { .. }));
+                if matches!(
+                    event,
+                    Event::StatusChanged {
+                        status: kanna_daemon::protocol::SessionStatus::Busy,
+                        ..
+                    }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("real busy frame resets the daemon attempt latch");
+        release(&mut gate, "refusal");
+        timeout(EVENTUAL, async {
+            loop {
+                let event = observer.recv().await.expect("successor observer closed");
+                assert!(!matches!(event, Event::Exit { .. } | Event::Error { .. }));
+                if matches!(event, Event::ProviderNotice { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("successor produces a real duplicate refusal for the same run");
+        let additional = collect_for(&mut observer, QUIET).await;
+        assert!(!additional
+            .iter()
+            .any(|event| matches!(event, Event::ProviderNotice { .. })));
+        assert_eq!(db.provider_rejections_for_task(TASK_ID).unwrap().len(), 1);
+        assert_eq!(events_of(&db, "task.provider_quota_rejected").len(), 1);
+        assert_eq!(
+            events_of(&db, "task.provider_quota_parked").len(),
+            1,
+            "handoff/reannouncement must not cause a second recovery"
+        );
+        assert_eq!(db.list_stage_runs_for_task(TASK_ID).unwrap().len(), 1);
+        let mut control = daemon.connect().await;
         assert!(matches!(
             control
                 .send_command(&DaemonCommand::Kill {
@@ -420,15 +544,24 @@ async fn real_seed_and_quoted_output_do_not_park_but_current_refusal_parks_once(
         readers.abort_all();
         while readers.join_next().await.is_some() {}
     };
-    timeout(Duration::from_secs(90), async {
+    let watcher = async {
+        crate::terminal_watcher::terminal_state_watcher_once(&state, &replacements)
+            .await
+            .expect("watcher follows old daemon until ShuttingDown");
+        resume_watcher.await.expect("successor published");
+        crate::terminal_watcher::terminal_state_watcher_once(&state, &replacements).await
+    };
+    timeout(Duration::from_secs(120), async {
         tokio::select! {
-            result = crate::terminal_watcher::terminal_state_watcher_once(&state, &replacements) => {
+            result = watcher => {
                 panic!("real watcher stopped before scenario finished: {result:?}");
             }
             result = &mut relay.0 => panic!("relay stopped early: {result:?}"),
             () = scenario => {}
         }
-    }).await.expect("bounded real producer/consumer regression");
+    })
+    .await
+    .expect("bounded real producer/consumer regression");
     relay.0.abort();
     let _ = (&mut relay.0).await;
 }

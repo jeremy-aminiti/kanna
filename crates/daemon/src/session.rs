@@ -1935,6 +1935,98 @@ mod tests {
         handle.kill().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn notice_projection_keeps_synchronized_byte_chunks_and_attempt_latch_boundaries() {
+        let captures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/cli-contract/fixtures/provider-quota-rejection.json"
+        ))
+        .unwrap();
+        let capture = captures
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["provider"] == "codex" && entry["frame"].is_array())
+            .unwrap();
+        let frame = capture["frame"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let mut record = spawn_test_record(AgentProvider::Codex, SessionStatus::Busy).unwrap();
+        record.cli_version =
+            crate::detection::CliVersion::parse(capture["cliVersion"].as_str().unwrap());
+        let handle = SessionHandle::new(record);
+        let mut now = Instant::now();
+        // Exercise the production session owner with every UTF-8 and escape
+        // sequence boundary split, while the provider's frame is unfinished.
+        for byte in format!("\x1b[?2026h\x1b[2J\x1b[H{frame}").as_bytes() {
+            now += Duration::from_millis(1);
+            let result = handle
+                .mirror_output_at(&[*byte], false, now, Duration::ZERO)
+                .await
+                .unwrap();
+            assert!(
+                result.notice.is_none(),
+                "notice escaped an unfinished synchronized frame"
+            );
+        }
+        now += Duration::from_secs(1);
+        assert!(handle
+            .refresh_quiet_status_at(Duration::ZERO, now)
+            .await
+            .unwrap()
+            .notice
+            .is_none());
+        now += Duration::from_millis(1);
+        let closed = handle
+            .mirror_output_at(b"\x1b[?2026l", false, now, Duration::ZERO)
+            .await
+            .unwrap();
+        now += Duration::from_secs(1);
+        let settled = handle
+            .refresh_quiet_status_at(Duration::ZERO, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            usize::from(closed.notice.is_some()) + usize::from(settled.notice.is_some()),
+            1
+        );
+        assert!(handle.update_status(SessionStatus::Idle).await);
+        now += Duration::from_secs(1);
+        assert!(handle
+            .refresh_quiet_status_at(Duration::ZERO, now)
+            .await
+            .unwrap()
+            .notice
+            .is_none());
+
+        // This is the same update_status boundary called by the output owner,
+        // not a test mutation of the notice latch. A new attempt may refuse.
+        assert!(handle.update_status(SessionStatus::Busy).await);
+        now += Duration::from_secs(1);
+        let next = handle
+            .mirror_output_at(
+                format!("\x1b[2J\x1b[H{frame}").as_bytes(),
+                false,
+                now,
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+        now += Duration::from_secs(1);
+        let settled = handle
+            .refresh_quiet_status_at(Duration::ZERO, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            usize::from(next.notice.is_some()) + usize::from(settled.notice.is_some()),
+            1
+        );
+        handle.kill().await.unwrap();
+    }
+
     fn spawn_test_record(
         provider: AgentProvider,
         status: SessionStatus,
