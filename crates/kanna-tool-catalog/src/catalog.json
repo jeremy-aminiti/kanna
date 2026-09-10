@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "kanna_subscribe_events",
-      "description": "Subscribe once to task events. Returns promptly with a durable subscription and any already-settled actionable tasks. The default relevance policy runs BEFORE local and cross-machine batching for both input and codex_app_server delivery: failures, confirmed questions, manual gates (including idle without a verdict), unresolved/exhausted revisions, parked providers, dependency/close/PR/merge coordination, and observation faults wake. Routine busy/read edges, automatic successful main/post/stage progress, serviced completion echoes, and automatic-stage idle do not. Raw kanna_wait_events history is unchanged. Internal subscription timing uses manager-adopted defaults: ordinary (non-urgent) batches collect for up to 300000ms (5 minutes) from the first relevant observation, with no earlier quiet-triggered seal, and minimum 60000ms between adapter-call admissions. quiet_ms, max_hold_ms and min_admission_interval_ms let one subscription override these three defaults (validated, floor 1000ms, max_hold_ms >= quiet_ms); event_types and exclude_event_types add or narrow the event-type filter reused verbatim from kanna_wait_events. Every override is optional and additive — an unspecified subscription keeps the exact prior defaults and query shape. Full pages and urgent failures/questions/parking/watch faults seal early but never bypass admission pacing or acknowledgement. Bounds describe scheduler-added delay after observation with healthy execution and available acknowledgement, not universal event-creation latency or harness consumption time. Peer legs do not duplicate debounce; public wait timing is unchanged. Kanna owns the watcher; the agent need not run or background a process. The response is compact by default: id, active, error, wakeState, batchId, pending (events, hasMore, waitOutcome, machineErrors, watchError) and the watched query, omitting the durable internal cursor an agent never acts on directly. Pass diagnostic true for the full internal row (adds stage, branch, runId, revision, delivery, wakeAdmitted and the raw cursor) for troubleshooting. Read pending events with kanna_read_event_subscription and acknowledge the batch id after reconciling it. Wake delivery is a separate harness adapter. Only one active subscription per subscriber run; repeated calls return it. Subscriptions stop on run replacement or close. Local-process access only.",
+      "description": "Subscribe once to task events. Returns promptly with a durable subscription and any already-settled actionable tasks. The default relevance policy runs BEFORE local and cross-machine batching for both input and codex_app_server delivery: failures, confirmed questions, manual gates (including idle without a verdict), unresolved/exhausted revisions, parked providers, dependency/close/PR/merge coordination, and observation faults wake. Routine busy/read edges, automatic successful main/post/stage progress, serviced completion echoes, and automatic-stage idle do not. Raw kanna_wait_events history is unchanged. Internal subscription timing uses manager-adopted defaults: ordinary (non-urgent) batches collect for up to 300000ms (5 minutes) from the first relevant observation, with no earlier quiet-triggered seal, and minimum 60000ms between adapter-call admissions. quiet_ms, max_hold_ms and min_admission_interval_ms let one subscription override these three defaults (validated: floor 1000ms, max_hold_ms >= quiet_ms, and rejected rather than silently clamped if too large to schedule); event_types and exclude_event_types add or narrow the event-type filter reused verbatim from kanna_wait_events. Every override is optional and additive — an unspecified subscription keeps the exact prior defaults and query shape. Full pages and urgent failures/questions/parking/watch faults seal early but never bypass admission pacing or acknowledgement. Bounds describe scheduler-added delay after observation with healthy execution and available acknowledgement, not universal event-creation latency or harness consumption time. Peer legs do not duplicate debounce; public wait timing is unchanged. Kanna owns the watcher; the agent need not run or background a process. The response is compact by default: id, active, error, wakeState, batchId, pending (events, hasMore, waitOutcome, machineErrors, watchError) and the watched query, omitting the durable internal cursor an agent never acts on directly. Pass diagnostic true for the full internal row (adds stage, branch, runId, revision, delivery, wakeAdmitted and the raw cursor) for troubleshooting. Read pending events with kanna_read_event_subscription and acknowledge the batch id after reconciling it. Wake delivery is a separate harness adapter. Only one active subscription per subscriber run; repeated calls return it. Subscriptions stop on run replacement or close. Local-process access only.",
       "method": "POST",
       "path": "/v1/event-subscriptions",
       "response": "json",
@@ -94,7 +94,7 @@
         },
         {
           "name": "quiet_ms",
-          "description": "Override this subscription's trailing-quiet duration (default 300000ms/5 minutes). Validated to be at least 1000ms and no greater than max_hold_ms. Urgent events still seal immediately regardless of this value.",
+          "description": "Override this subscription's trailing-quiet duration (default 300000ms/5 minutes). Validated to be at least 1000ms, no greater than max_hold_ms, and not so large it cannot be scheduled. Urgent events still seal immediately regardless of this value.",
           "type": "integer",
           "required": false,
           "location": "body",
@@ -103,7 +103,7 @@
         },
         {
           "name": "max_hold_ms",
-          "description": "Override this subscription's maximum ordinary-collection hold from the first relevant observation (default 300000ms/5 minutes). Validated to be at least quiet_ms and at least 1000ms.",
+          "description": "Override this subscription's maximum ordinary-collection hold from the first relevant observation (default 300000ms/5 minutes). Validated to be at least quiet_ms, at least 1000ms, and not so large it cannot be scheduled.",
           "type": "integer",
           "required": false,
           "location": "body",
@@ -112,7 +112,7 @@
         },
         {
           "name": "min_admission_interval_ms",
-          "description": "Override the minimum spacing between adapter-call wake admissions for this subscription (default 60000ms/60s) — the wake-rate gate, not the collection window. Validated to be at least 1000ms. Urgent events remain gated by this floor.",
+          "description": "Override the minimum spacing between adapter-call wake admissions for this subscription (default 60000ms/60s) — the wake-rate gate, not the collection window. Validated to be at least 1000ms and not so large it cannot be scheduled. Urgent events remain gated by this floor.",
           "type": "integer",
           "required": false,
           "location": "body",

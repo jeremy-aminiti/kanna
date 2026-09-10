@@ -46,6 +46,33 @@ async fn invalid_timing_overrides_are_rejected_before_any_registration() {
 }
 
 #[tokio::test]
+async fn overrides_too_large_for_instant_arithmetic_are_rejected_not_panicked() {
+    // No policy ceiling, but each value is added to an `Instant` on every
+    // scheduling decision (`Collection::deadline`, `Admission`), which panics
+    // past what the platform's monotonic clock can represent — unlike
+    // `Duration::from_millis`, which silently accepts any `u64`. Each case
+    // here clears the floor and the quiet<=max_hold pair check on its own,
+    // so only the overflow guard can be the one rejecting it.
+    let state = test_state_with_seed("overrides-overflow", "Overrides", seed_orchestration);
+    let db = Db::open(&state.config().db_path).unwrap();
+    start_run(&db, "manager", "child-c", "in progress");
+    let app = router(state.clone());
+    let base = json!({"taskId":"child-c", "localOnly":true, "delivery":"poll",
+        "quietMs": 300_000, "maxHoldMs": 300_000, "minAdmissionIntervalMs": 60_000});
+    for field in ["quietMs", "maxHoldMs", "minAdmissionIntervalMs"] {
+        let mut body = base.clone();
+        body[field] = json!(u64::MAX);
+        if field == "quietMs" {
+            // Keep the pair check satisfied so only overflow can reject this.
+            body["maxHoldMs"] = json!(u64::MAX);
+        }
+        let (status, response) = subscribe(&app, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {response}");
+    }
+    assert!(db.event_subscriptions().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn omitted_overrides_keep_the_exact_prior_query_shape() {
     let state = test_state_with_seed("overrides-omitted", "Overrides", seed_orchestration);
     let db = Db::open(&state.config().db_path).unwrap();
