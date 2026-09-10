@@ -17,6 +17,8 @@ interface AuthoritativeSnapshotWaiter {
   predicate: (snapshot: KannaSnapshot) => boolean | Promise<boolean>;
   resolve: (snapshot: KannaSnapshot) => void;
   reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  abort?: () => void;
 }
 
 export interface QueryState<T> {
@@ -36,6 +38,10 @@ export interface ReloadSnapshotOptions {
   refreshDefinitions?: boolean;
 }
 
+export interface AuthoritativeSnapshotWaitOptions {
+  signal?: AbortSignal;
+}
+
 export interface QueriesApi {
   snapshot: QueryState<KannaSnapshot>;
   repos: QueryState<Repo[]>;
@@ -44,6 +50,7 @@ export interface QueriesApi {
   reloadSnapshot: (options?: ReloadSnapshotOptions) => Promise<void>;
   waitForAuthoritativeSnapshot: (
     predicate: (snapshot: KannaSnapshot) => boolean | Promise<boolean>,
+    options?: AuthoritativeSnapshotWaitOptions,
   ) => Promise<KannaSnapshot>;
   applyTaskStateChange: (change: TaskStateChange) => boolean;
   withOptimisticItemOverlay: <T>(input: {
@@ -124,9 +131,15 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     try {
       if (!await waiter.predicate(snapshot)) return;
       if (!authoritativeSnapshotWaiters.delete(waiter)) return;
+      if (waiter.signal && waiter.abort) {
+        waiter.signal.removeEventListener("abort", waiter.abort);
+      }
       waiter.resolve(snapshot);
     } catch (error) {
       if (!authoritativeSnapshotWaiters.delete(waiter)) return;
+      if (waiter.signal && waiter.abort) {
+        waiter.signal.removeEventListener("abort", waiter.abort);
+      }
       waiter.reject(error);
     }
   }
@@ -139,10 +152,25 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
 
   function waitForAuthoritativeSnapshot(
     predicate: (snapshot: KannaSnapshot) => boolean | Promise<boolean>,
+    options: AuthoritativeSnapshotWaitOptions = {},
   ): Promise<KannaSnapshot> {
     return new Promise((resolve, reject) => {
-      const waiter = { predicate, resolve, reject };
+      if (options.signal?.aborted) {
+        reject(options.signal.reason ?? new Error("Authoritative snapshot wait cancelled."));
+        return;
+      }
+      const waiter: AuthoritativeSnapshotWaiter = {
+        predicate,
+        resolve,
+        reject,
+        signal: options.signal,
+      };
+      waiter.abort = () => {
+        if (!authoritativeSnapshotWaiters.delete(waiter)) return;
+        reject(options.signal?.reason ?? new Error("Authoritative snapshot wait cancelled."));
+      };
       authoritativeSnapshotWaiters.add(waiter);
+      options.signal?.addEventListener("abort", waiter.abort, { once: true });
       void evaluateAuthoritativeSnapshotWaiter(waiter, baseSnapshot.value);
     });
   }

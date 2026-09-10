@@ -143,9 +143,10 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
         })),
       }),
       run,
-      reconcile: async () => {
-        await requireService(context.services.reloadSnapshot, "reloadSnapshot")();
-      },
+      // `run` owns an authoritative transition barrier. Once it resolves the
+      // base snapshot is already reconciled, so another fetch here could only
+      // turn a proven transition into a false client-side failure.
+      reconcile: async () => {},
     });
   }
 
@@ -182,10 +183,9 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
       context.services.waitForAuthoritativeSnapshot,
       "waitForAuthoritativeSnapshot",
     );
-    await reloadSnapshot();
-
+    const abortController = new AbortController();
     let failureMessage: string | null = null;
-    const settledSnapshot = await waitForAuthoritativeSnapshot(async (snapshot) => {
+    const settledSnapshotPromise = waitForAuthoritativeSnapshot(async (snapshot) => {
       if (
         stageAdvanceSnapshotCaughtUp(
           snapshot,
@@ -204,7 +204,13 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
       // while the stage itself moves only after SessionCreated. A snapshot in
       // that narrow window is still pending, not a failure. Only the run's
       // durable failed verdict may end the projection without the stage move.
-      const detail = await fetchDesktopTaskDetail(taskId);
+      let detail: Awaited<ReturnType<typeof fetchDesktopTaskDetail>>;
+      try {
+        detail = await fetchDesktopTaskDetail(taskId);
+      } catch (error) {
+        console.warn("[workflow:advanceStage] could not inspect successor run; transition remains pending:", error);
+        return false;
+      }
       const latestRun = detail.latestRun;
       if (
         latestRun
@@ -216,7 +222,25 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
         return true;
       }
       return false;
-    });
+    }, { signal: abortController.signal });
+
+    try {
+      await reloadSnapshot();
+    } catch (error) {
+      // The action was already accepted. A failed observation cannot prove
+      // that the transition failed, so retain the projection and let the next
+      // authoritative stream/snapshot refresh settle the registered barrier.
+      console.warn("[workflow:advanceStage] first post-acceptance snapshot reload failed; transition remains pending:", error);
+    }
+
+    let settledSnapshot: KannaSnapshot;
+    try {
+      settledSnapshot = await settledSnapshotPromise;
+    } finally {
+      // Normally the waiter removes itself when its predicate settles. Abort
+      // also releases it if this operation is cancelled while still pending.
+      abortController.abort();
+    }
     if (
       stageAdvanceSnapshotCaughtUp(
         settledSnapshot,

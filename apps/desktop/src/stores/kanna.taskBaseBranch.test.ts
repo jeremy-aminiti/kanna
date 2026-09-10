@@ -2791,6 +2791,79 @@ describe("kanna store task base branch integration", () => {
     expect(store.currentItem?.activity).toBe("working");
   });
 
+  it("keeps an accepted stage advance pending when its first authoritative reload fails", async () => {
+    mockState.workflowDefinition = {
+      name: "default",
+      stages: [
+        { name: "plan", transition: "manual" },
+        { name: "in progress", transition: "manual" },
+      ],
+    };
+    mockState.workflowItems = [
+      mockState.makeItem({
+        id: "item-source",
+        branch: "task-source",
+        stage: "plan",
+        activity: "idle",
+      }),
+    ];
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ taskId: "item-source" }),
+      text: async () => "",
+    });
+
+    const store = await createStore();
+    let snapshotAttempts = 0;
+    setDesktopSnapshotFetcherForTests(async () => {
+      snapshotAttempts += 1;
+      if (snapshotAttempts === 1) {
+        throw new Error("transient snapshot failure");
+      }
+      return {
+        entries: mockState.repos.map((repo) => ({
+          repo,
+          items: mockState.workflowItems.filter((item) => item.repo_id === repo.id),
+        })),
+        taskBlockers: mockState.taskBlockers,
+        worktreePaths: {},
+        settings: {},
+      };
+    });
+
+    let settled = false;
+    const advancePromise = store.advanceStage("item-source").then((result) => {
+      settled = true;
+      return result;
+    });
+
+    await vi.waitFor(() => {
+      expect(snapshotAttempts).toBe(1);
+    });
+    expect(settled).toBe(false);
+    expect(store.currentItem).toMatchObject({
+      stage: "in progress",
+      stage_advance_pending: true,
+      stage_advance_from: "plan",
+    });
+    expect(toastErrorMock).not.toHaveBeenCalled();
+
+    mockState.workflowItems = [
+      mockState.makeItem({
+        id: "item-source",
+        branch: "task-source-2",
+        stage: "in progress",
+        activity: "working",
+      }),
+    ];
+    await store.reloadSnapshot();
+
+    await expect(advancePromise).resolves.toBe("advanced");
+    expect(store.currentItem?.stage).toBe("in progress");
+    expect(store.currentItem?.stage_advance_pending).toBeUndefined();
+    expect(toastErrorMock).not.toHaveBeenCalled();
+  });
+
   it("keeps the next-stage projection while a detached transition runs longer than fifteen seconds", async () => {
     vi.useFakeTimers();
     try {
@@ -2869,25 +2942,26 @@ describe("kanna store task base branch integration", () => {
       json: async () => ({ taskId: "item-source" }),
       text: async () => "",
     });
+    const fetchTaskDetail = vi.fn(async () => ({
+      id: "item-source",
+      stage: "plan",
+      closedAt: null,
+      latestRun: {
+        id: "run-build-failed",
+        stage: "in progress",
+        kind: "main",
+        status: "failed",
+        summary: "failed to start stage in progress: setup exited 23",
+        resumedFromRunId: null,
+        resumeFallbackReason: null,
+        finishedAt: "2026-09-09T23:52:38Z",
+      },
+      revisionRounds: 0,
+      revisionLimit: 5,
+      childTaskIds: [],
+    }));
     updateDesktopServerClientHandlersForTests({
-      fetchTaskDetail: async () => ({
-        id: "item-source",
-        stage: "plan",
-        closedAt: null,
-        latestRun: {
-          id: "run-build-failed",
-          stage: "in progress",
-          kind: "main",
-          status: "failed",
-          summary: "failed to start stage in progress: setup exited 23",
-          resumedFromRunId: null,
-          resumeFallbackReason: null,
-          finishedAt: "2026-09-09T23:52:38Z",
-        },
-        revisionRounds: 0,
-        revisionLimit: 5,
-        childTaskIds: [],
-      }),
+      fetchTaskDetail,
     });
 
     const store = await createStore();
@@ -2911,6 +2985,11 @@ describe("kanna store task base branch integration", () => {
     expect(toastErrorMock).toHaveBeenCalledWith(
       "toasts.agentStartFailed: failed to start stage in progress: setup exited 23",
     );
+
+    const detailCallsAtSettlement = fetchTaskDetail.mock.calls.length;
+    expect(detailCallsAtSettlement).toBeGreaterThan(0);
+    await store.reloadSnapshot();
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(detailCallsAtSettlement);
   });
 
   it("keeps the projection when the successor run exists before its stage move lands", async () => {
