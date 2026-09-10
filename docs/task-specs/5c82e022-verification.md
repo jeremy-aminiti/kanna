@@ -248,3 +248,14 @@ part of the same test helper. This distinguishes a native window-focus event
 failure from a WebView-only focus discrepancy without adding a production
 focus command, resize, timer, or ownership exception. It is source-ready only;
 no native execution was performed for this instrumentation.
+
+Studio reproduced the failure at the exact diagnostic head on a second Mac:
+both native `is_focused` readings remained false despite the successful focus
+request, while the terminal input was focused. Tao's macOS `set_focus` silently
+skips `makeKeyAndOrderFront` when the native window is minimized or invisible.
+The next source-only diagnostic therefore also records public native
+`is_minimized` and `is_visible` values before and after the request. If either
+guard is unhealthy (the window is hidden or minimized), the smallest correction
+is a harness window-state restoration;
+if both are healthy, the evidence instead requires a distinct app-activation
+observation before proposing any correction. No ownership behavior is changed.

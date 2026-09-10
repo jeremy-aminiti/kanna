@@ -29,6 +29,10 @@ interface FocusObservation {
   nativeFocusError: string | null;
   nativeFocusedAfter: boolean | null;
   nativeFocusedBefore: boolean | null;
+  nativeMinimizedAfter: boolean | null;
+  nativeMinimizedBefore: boolean | null;
+  nativeVisibleAfter: boolean | null;
+  nativeVisibleBefore: boolean | null;
   terminalHasFocus: boolean;
 }
 
@@ -212,7 +216,11 @@ async function focusTerminal(client: WebDriverClient, ownerTaskId: string): Prom
         listen("tauri://focus", true),
         listen("tauri://blur", false),
       ]);
-      const nativeFocusedBefore = await internals.invoke("plugin:window|is_focused", { label });
+      const [nativeFocusedBefore, nativeMinimizedBefore, nativeVisibleBefore] = await Promise.all([
+        internals.invoke("plugin:window|is_focused", { label }),
+        internals.invoke("plugin:window|is_minimized", { label }),
+        internals.invoke("plugin:window|is_visible", { label }),
+      ]);
       let nativeFocusError = null;
       try {
         await internals.invoke("plugin:window|set_focus", { label });
@@ -227,13 +235,21 @@ async function focusTerminal(client: WebDriverClient, ownerTaskId: string): Prom
       const local = document.querySelector(".main-panel .terminal-container .xterm-helper-textarea");
       const input = remote instanceof HTMLElement ? remote : local;
       if (input instanceof HTMLElement) input.focus();
-      const nativeFocusedAfter = await internals.invoke("plugin:window|is_focused", { label });
+      const [nativeFocusedAfter, nativeMinimizedAfter, nativeVisibleAfter] = await Promise.all([
+        internals.invoke("plugin:window|is_focused", { label }),
+        internals.invoke("plugin:window|is_minimized", { label }),
+        internals.invoke("plugin:window|is_visible", { label }),
+      ]);
       result = {
         documentHasFocus: document.hasFocus(),
         focusEvents,
         nativeFocusError,
         nativeFocusedAfter,
         nativeFocusedBefore,
+        nativeMinimizedAfter,
+        nativeMinimizedBefore,
+        nativeVisibleAfter,
+        nativeVisibleBefore,
         terminalHasFocus: document.activeElement === input,
       };
     } catch (error) {
