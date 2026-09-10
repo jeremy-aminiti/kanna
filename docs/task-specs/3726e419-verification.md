@@ -38,6 +38,16 @@ loses its result is not evidence of a pass.
 
 ## Known incomplete checks
 
+- Latest canonical gate on the published product head `9d834b3c9` ran with
+  `GHOSTTY_SOURCE_DIR` bound to the pinned cache, `CARGO_BUILD_JOBS=1`, and
+  `RUST_TEST_THREADS=1`; it exited **1**. Rust tests passed, but mock E2E
+  failed 2 of 48 targets: `sidebar-task-state.test.ts` observed busy/unread as
+  normal/700 rather than italic/400, and
+  `terminal-output-performance.test.ts` reported an unregistered terminal
+  buffer. Raw output and the owning exit are
+  `.tmp/3726e419-pr-head-kd-test-all.log` and `.exit`. This canonical gate is
+  explicitly **not passed**.
+
 - Latest revision-round-4 canonical gate: `CARGO_BUILD_JOBS=2 ./kd test all`
   exited **1**. Full stdout/stderr is retained at
   `task-3726e419-9/.tmp/kd-test-all-revision4.log`; the owning shell's actual
@@ -113,6 +123,22 @@ keyboard-native lane was not started: pressure was normal but only about 699 MB
 was available after the paired controls. These paired passes resolve neither
 the historical full-gate failure's root cause nor merge approval; approval
 remains held.
+
+## Final paired failure controls
+
+The two targets that failed the latest canonical gate were then run together,
+sequentially, under the same canonical runner/configuration on the actual
+merge-base `90fd52ee4` and published PR head `9d834b3c9`. Both runners verified
+their exact task/worktree/commit native titles before input; both exited **0**:
+sidebar-task-state passed **1/1** and terminal-output-performance passed
+**3/3**. Retained artifacts are
+`.tmp/3726e419-merge-base-two-failure-control.{log,exit}` and
+`.tmp/3726e419-pr-head-two-failure-control.{log,exit}`. Both owned stacks and
+temporary worktrees were removed. The paired focused result is
+non-deterministic reproduction evidence, not a branch-causal finding and not a
+replacement for the failed canonical gate. The sole remaining acceptance gap is
+one released canonical `CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 ./kd test all`
+result; merge remains held pending that gate's reconciliation.
 
 ## Original focused-control procedure
 
