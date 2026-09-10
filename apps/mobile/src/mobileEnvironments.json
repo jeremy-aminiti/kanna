@@ -1,10 +1,11 @@
 {
   "dev": {
-    "runtimeVersion": "2.2.4",
+    "runtimeVersion": "2.2.5",
     "name": "dev",
     "displayName": "Kanna Dev",
     "scheme": "kanna-dev",
     "iosBundleId": "build.kanna.app.dev",
+    "androidPackageId": "build.kanna.app.dev",
     "iosGoogleServicesFile": "./firebase/GoogleService-Info.production.plist",
     "firebase": {
       "apiKey": "kanna-local",
@@ -18,11 +19,12 @@
     "otaChannel": null
   },
   "staging": {
-    "runtimeVersion": "2.2.3",
+    "runtimeVersion": "2.2.4",
     "name": "staging",
     "displayName": "Kanna Staging",
     "scheme": "kanna-staging",
     "iosBundleId": "build.kanna.app.staging",
+    "androidPackageId": "build.kanna.app.staging",
     "iosGoogleServicesFile": "./firebase/GoogleService-Info.staging.plist",
     "firebase": {
       "apiKey": "AIzaSyCRsov6oQu8Fg0clB2mdB5RgwM8GGwCQXk",
@@ -36,11 +38,12 @@
     "otaChannel": "staging"
   },
   "prod": {
-    "runtimeVersion": "2.2.3",
+    "runtimeVersion": "2.2.4",
     "name": "prod",
     "displayName": "Kanna",
     "scheme": "kanna",
     "iosBundleId": "build.kanna.app",
+    "androidPackageId": "build.kanna.app",
     "iosGoogleServicesFile": "./firebase/GoogleService-Info.production.plist",
     "firebase": {
       "apiKey": "AIzaSyDvGtzo25dQO2zr5itGsDL-adr5dhrfm2c",

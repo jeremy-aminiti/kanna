@@ -19,6 +19,7 @@ import {
   resolveMobileReleaseAppPath,
   waitForPhysicalDeviceMetroReadiness,
   resolveMobileNativeIdentity,
+  resolveMobileAndroidIdentity,
   parseXcdeviceList,
   parseSimctlDeviceList,
   selectPhysicalDevice,
@@ -92,6 +93,19 @@ describe("physical-device mobile runtime", () => {
       appEnv: "prod",
       bundleId: "build.kanna.app",
       devClientScheme: "exp+kanna-mobile",
+      displayName: "Kanna"
+    });
+  });
+
+  it("resolves the Android package and display name from the same environment registry", () => {
+    expect(resolveMobileAndroidIdentity({ KANNA_APP_ENV: "dev" })).toEqual({
+      appEnv: "dev",
+      packageId: "build.kanna.app.dev",
+      displayName: "Kanna Dev"
+    });
+    expect(resolveMobileAndroidIdentity({ KANNA_APP_ENV: "production" })).toEqual({
+      appEnv: "prod",
+      packageId: "build.kanna.app",
       displayName: "Kanna"
     });
   });

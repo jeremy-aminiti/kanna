@@ -51,6 +51,49 @@ function pairingService(fetchImpl: FetchLike, claimTimeoutMs?: number) {
 }
 
 describe("machine pairing", () => {
+  it("refreshes an explicit discovery candidate before claiming a code", async () => {
+    const browser = createStaticBonjourBrowser([]);
+    let refreshed = false;
+    const refreshableBrowser = {
+      ...browser,
+      async refresh() {
+        refreshed = true;
+      },
+      getServices: () => refreshed ? services() : []
+    };
+    const fetchImpl = vi.fn<FetchLike>(async (url) => response(
+      url.includes("10.0.0.2") ? 200 : 400,
+      url.includes("10.0.0.2")
+        ? { desktopId: "desktop-1", desktopName: "Desk One" }
+        : { error: "invalid code" }
+    ));
+    const service = createMachinePairingService({
+      bonjourBrowser: refreshableBrowser,
+      fetchImpl,
+      getDeviceIdentity: () => ({ deviceId: "phone-1", deviceName: "Kanna Mobile" })
+    });
+
+    await expect(service.claimCode("ABC123")).resolves.toMatchObject({
+      desktopId: "desktop-1"
+    });
+  });
+
+  it("reports an unreachable explicit endpoint instead of no discovered machine", async () => {
+    const browser = {
+      ...createStaticBonjourBrowser([]),
+      refresh: async () => { throw new Error("offline"); }
+    };
+    const service = createMachinePairingService({
+      bonjourBrowser: browser,
+      fetchImpl: vi.fn(),
+      getDeviceIdentity: () => ({ deviceId: "phone-1", deviceName: "Kanna Mobile" })
+    });
+
+    await expect(service.claimCode("ABC123")).rejects.toMatchObject({
+      reason: "unreachable"
+    });
+  });
+
   it("claims a QR payload only against its matching desktop", async () => {
     const fetchImpl = vi.fn<FetchLike>(async () => response(200, {
       desktopId: "desktop-2",

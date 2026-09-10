@@ -2660,12 +2660,33 @@ acknowledgement does not alter human read state. No cursor format, relay protoco
 mailbox backpressure or delivery retry contract changes.
 
 The owning subscription collector also applies one internal timing policy:
-**1000ms trailing quiet**, **5000ms maximum collection hold** from the first
-relevant observation, and **5000ms minimum between adapter-call admissions**.
-These are manager-adopted engineering defaults, not owner-specified values or
-measured tuning. Capacity remains 100, minimum one. Quiet resets only on relevant
-observations; the collection closes at the earliest of last observation + 1s,
-first observation + 5s, or the existing receiver deadline. Full pages seal early.
+**300000ms (5 minute) trailing quiet and maximum collection hold**, equal by
+design so an ordinary batch collects for the full window from its first
+relevant observation rather than sealing early on a short trailing-quiet gap,
+and **60000ms minimum between adapter-call admissions**. The 5-minute figure is
+an owner-specified value (superseding an earlier manager-proposed 30s/120s
+split); the 60s admission floor remains a manager-adopted engineering default,
+not measured tuning. Capacity remains 100, minimum one. Quiet resets only on
+relevant observations; the collection closes at the earliest of last
+observation + 300s, first observation + 300s, urgent attention, or a full
+page.
+
+The 300s figures exceed the fixed 240s native receiver window
+(`kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS`), so a single native
+`wait_local_task_events`/`wait_aggregate_task_events` call cannot honor them
+alone. `event_subscriptions::step` owns the true window instead: it shares one
+`subscription_timing::Collection` across as many chained native calls as it
+takes (each still capped at 240s, and each sized to the remaining time once
+the first relevant observation is known), and treats a native call's own
+`"waitOutcome": "timeout"` — its budget merely expiring — as "not yet", not
+"done". Only a native `"events"` outcome (urgent, a full page, or the
+collector's own quiet/max-hold reached) is genuinely final. A native call's
+own receiver therefore never truncates the subscription's real window,
+including when the first relevant event arrives late inside one call's own
+240s leg — the shared collection's first-observation instant survives into
+whatever calls follow. Peer legs and checkpoints are unaffected: chaining
+just re-invokes the same wait with an advanced cursor, which the existing
+aggregate session retention already reuses like any other retry.
 Failed run/main/post facts, lifecycle/teardown/merge-handoff failures, provider
 parking, confirmed input requests, watch/machine errors and unknown attention
 seal urgently. Urgency skips quiet debounce, never admission pacing, FIFO cursors,
@@ -2673,7 +2694,7 @@ immutable pending pages, matching acknowledgement or adapter/run safety.
 
 The minimum admission interval applies to both adapters, including full pages and
 notification-triggered retries that provably delivered nothing. There are no
-accumulated burst credits: admissions are at least 5s apart (12/minute sustained).
+accumulated burst credits: admissions are at least 60s apart (1/minute sustained).
 No adapter wake accompanies the immediately observed bootstrap. Timing is selected
 only by `wait_subscription_events` at the top-level collector, not by the wire
 relevance flag; peer legs and public native/MCP waits keep their existing timing.
@@ -2687,16 +2708,17 @@ before retry: cooldown expiry is not a generic retry loop.
 The JSON record adds optional-on-read `wakeAdmitted`, preserved through ack and
 protected against stale delivery writes. Live timing is monotonic and survives
 same-id pause/recovery; service/process recovery conservatively rearms at most one
-5s cooldown, including legacy rows. No persisted wall time can cause a burst or an
+60s cooldown, including legacy rows. No persisted wall time can cause a burst or an
 indefinite wait. A recovered `sending` page remains uncertain, without resubmission.
 Older servers may ignore this additive hint: mailbox/cursor compatibility survives,
 but enforcing temporal pacing requires the new owning server.
 
 These are conditional scheduler-delay bounds **after observation in the current
 collecting page**, assuming healthy execution and available acknowledgement:
-ordinary collection adds at most 5s; an observed urgent page is eligible immediately
-if the admission slot is free, otherwise after its remaining cooldown (at most 5s).
-They are not universal event-creation-to-wake bounds. An unacknowledged page, older
+ordinary collection adds at most 300s; an observed urgent page is eligible
+immediately if the admission slot is free, otherwise after its remaining
+cooldown (at most 60s). They are not universal event-creation-to-wake bounds.
+An unacknowledged page, older
 backlog, unavailable transport or stalled server can delay observation/delivery;
 a busy harness may consume admitted output later. No urgent page overtakes those
 facts or replaces an unacknowledged page.
@@ -2712,6 +2734,98 @@ Registration retries reuse the active mailbox and reject conflicting settings.
 `POST /v1/event-subscriptions/{id}/unsubscribe` stops observation and preserves
 the pending page. Corresponding typed CLI commands are `task subscribe-events`,
 `task read-event-subscription`, and `task unsubscribe-events`.
+
+All three endpoints (and their `kanna_subscribe_events` /
+`kanna_read_event_subscription` / `kanna_unsubscribe_events` MCP tools) return
+a **compact** response by default: `id`, `active`, `error`, `wakeState`,
+`batchId`, `staleMachines`, `pending` (`events`, `hasMore`, `waitOutcome`,
+`machineErrors`, `watchError`), and the watched `query` with any cursor-shaped
+key stripped. Acknowledgement is by `batchId` alone, so the durable
+observation cursor (top-level `cursor` and `pending.cursor`) is internal
+replay/reconnect state an agent never needs to read or round-trip. Pass
+`diagnostic: true` (a query parameter on unsubscribe, a body field on
+subscribe/read) for the full internal row — adds `stage`, `branch`, `runId`,
+`revision`, `delivery`, `wakeAdmitted` and the raw cursor — for
+troubleshooting. The durable mailbox itself, its cursor, and restart/reconnect
+semantics are unchanged; this is a response-shape default only.
+
+`staleMachines` is top-level, not nested under `pending`: an unreachable
+remote peer's degraded coverage is durable, deduped row state (see the
+repo-scoped subscription's outage isolation below), not a batch-scoped fact,
+so it stays visible on a quiet subscription (`pending: null`) between wakes —
+a compact-mode caller does not need `diagnostic: true` just to see a
+known-down peer. It is the same small `{machineId: reason}` map the mailbox
+already uses for de-duplication, never the durable cursor or anything
+cursor-shaped; a delivered batch's own `pending.machineErrors` is unchanged
+and still carries the per-batch diagnostic array.
+
+A repo/parent-scoped subscription fans observation out across every machine
+in scope. One remote peer being unreachable degrades only that peer's own
+leg: `wait_aggregate_task_events` never spawns a wait to a machine currently
+absent from discovery (a fault attributed to that machine, not this one),
+and treats a fault reported for any other machine as informational rather
+than as cause to cut the wait short — the remaining active machines,
+including this one, keep running their normal collection cycle. `accept_page`
+mirrors that split: only a fault attributed to *this* machine's own leg
+(`wait_local_task_events` itself failing, or an already-explicit
+`watchError` such as an invalid/expired cursor) still fails the whole
+subscription (`active` becomes `false`) — that is a local DB/delivery fault
+or a lost checkpoint, and stays fully actionable, never silently reset or
+retried. A remote peer's fault is tracked on the row (`stale_machines`,
+surfaced as `staleMachines` above) and de-duplicated by machine id, not by
+its error text, which can otherwise churn call to call for one continuous
+fault (`AppState::desktop_routing_unreachable_error` mints a fresh
+since-`now` timestamp whenever this machine's own relay routing stays
+healthy) — comparing text would manufacture a fresh wake every collection
+cycle for an unreachable peer that never actually changed. An unchanged,
+already-reported peer fault therefore produces no new page; a new fault, a
+recovery, or real events (with the fault riding along as an annotation) do.
+The unreachable peer's own native checkpoint is left exactly as `apply_
+aggregate_completion` last recorded it — never advanced, never dropped from
+the aggregate's machine roster — so its return replays every event since
+that checkpoint through the same subscription, with no unsubscribe/
+resubscribe needed.
+
+`kanna_subscribe_events` also accepts optional, validated, per-subscription
+knobs that reuse existing ownership rather than adding a policy engine:
+`event_types` and `exclude_event_types` are passed straight through as the
+same `TaskEventsQuery` filter `kanna_wait_events` already exposes — a query
+filter, never part of the cursor, additive to the subscription's fixed
+baseline exclusion (`task.activity_changed`, `task.runtime_settled`,
+`task.input_delivered`). `quiet_ms`, `max_hold_ms` and
+`min_admission_interval_ms` override that one subscription's collection
+window and admission floor (defaults 300000/300000/60000ms); each is
+rejected below a 1000ms floor, and `max_hold_ms` is rejected below
+`quiet_ms`. There is deliberately no policy ceiling, and none is needed on
+correctness grounds either: `Duration::from_millis` accepts any `u64`, and so
+does the `Instant + Duration` arithmetic these values feed into
+(`Collection::intrinsic_deadline`, `Admission`) — a `u64` millisecond count
+can never exceed `Duration`'s own far larger capacity, confirmed empirically
+(`Instant::now().checked_add(Duration::from_millis(u64::MAX))` never returns
+`None`). An extreme `quiet_ms`/`max_hold_ms` is genuinely honored — the
+collector chains native calls to cover it, exactly like the default — not
+capped by the 240s native receiver; an extreme `min_admission_interval_ms`
+just delays that subscription's own future admissions. Urgent-event handling
+is unaffected: an urgent batch still seals its collection immediately
+regardless of these overrides, gated only by the (possibly overridden)
+minimum admission interval — no new urgency taxonomy, no runtime retry loop.
+
+These fields are additive and optional at the wire and in storage: a
+subscription that never sets them persists the exact `query` shape it always
+has, so pre-existing rows and the registration-retry `existing.query != query`
+equality check are unaffected. A subscription's own value is read back from
+its persisted `query` on every collection (`quietMs`/`maxHoldMs`) and at
+worker (re)start (`minAdmissionIntervalMs`, bound once into that
+subscription's `Admission`); a row from before this feature shipped simply
+has no such keys and falls back to the global defaults, identical to its
+prior behavior. This omission contract depends on the request the server
+actually receives never carrying these keys unless the caller means to
+override — so the catalog declares no `default` for them: the shared MCP/CLI
+request resolver (`value_for_param`) fills in a declared default for any
+omitted parameter and sends it on the wire, which would turn every omitted
+knob into an explicit (if numerically identical) override, breaking retry and
+resume for every pre-existing row. Each description states its default in
+prose instead.
 
 The first returned page is already observed by the registering caller. A later
 page receives one coalesced wake. Wakes contain only the subscription and batch

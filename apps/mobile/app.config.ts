@@ -32,6 +32,7 @@ interface MobileAppEnvironment {
   displayName: string;
   scheme: string;
   iosBundleId: string;
+  androidPackageId: string;
   iosGoogleServicesFile: string;
   firebase: MobileFirebaseExtraConfig;
   relayUrl: string;
@@ -108,6 +109,8 @@ interface ExpoConfig {
   scheme: string;
   icon: string;
   android: {
+    package: string;
+    usesCleartextTraffic?: boolean;
     adaptiveIcon: {
       foregroundImage: string;
       backgroundImage: string;
@@ -265,6 +268,11 @@ export function createExpoConfig(
     scheme: appEnvironment.scheme,
     icon: "./assets/icon.png",
     android: {
+      package: appEnvironment.androidPackageId,
+      // The first Android slice reaches the task-scoped desktop server over
+      // the emulator's host alias. Shipped identities remain on Android's
+      // cleartext-denying default until physical-LAN policy is designed.
+      ...(appEnvironment.name === "dev" ? { usesCleartextTraffic: true } : {}),
       adaptiveIcon: {
         foregroundImage: "./assets/adaptive-icon-foreground.png",
         backgroundImage: "./assets/adaptive-icon-background.png"

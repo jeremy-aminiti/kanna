@@ -69,7 +69,7 @@ async function validateTrustedService(
   if (!trustedDesktopIds.has(desktopId)) return null;
 
   const baseUrl = `http://${service.host}:${service.port}`;
-  const status = await fetchStatus(baseUrl, fetchImpl, probeTimeoutMs);
+  const status = await fetchDesktopStatus(baseUrl, fetchImpl, probeTimeoutMs);
   const displayName =
     typeof status?.desktopName === "string"
       ? status.desktopName.trim()
@@ -95,7 +95,7 @@ function orderServices(
   });
 }
 
-async function fetchStatus(
+export async function fetchDesktopStatus(
   baseUrl: string,
   fetchImpl: FetchLike,
   timeoutMs = 5_000
