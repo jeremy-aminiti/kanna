@@ -61,7 +61,8 @@ below exited 0:
 
 ## Hosted apt/GnuPG proof — 2026-09-10
 
-The owner explicitly authorized pushing clean `task-e43677ab` at
+Task Manager (declared source `manager`), within the owner's broader goal,
+explicitly authorized pushing clean `task-e43677ab` at
 `e1b42f9e067805db05a3e2e9ea3d1363051f58a6` and dispatching only the prepared
 interop job. Push and dispatch exited 0.
 [Run 34520900452, attempt 1](https://github.com/tampopogk/kanna/actions/runs/34520900452)
