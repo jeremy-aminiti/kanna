@@ -313,6 +313,25 @@ pub(super) fn build_stage_prompt(
             sections.push(section);
         }
     }
+    // Imported revisions must reach the first fresh destination session even
+    // when the pinned workflow predates `$REVISION_FEEDBACK`. Keep the token
+    // available for workflows that deliberately place the feedback, but give
+    // every other workflow an independent, explicitly labelled section rather
+    // than overloading `$PREV_RESULT` or `$PREV_MAIN_RESULT`.
+    let template_places_revision_feedback = agent_prompt.contains("$REVISION_FEEDBACK")
+        || agent_prompt.contains("${REVISION_FEEDBACK}")
+        || stage_prompt.is_some_and(|prompt| {
+            prompt.contains("$REVISION_FEEDBACK") || prompt.contains("${REVISION_FEEDBACK}")
+        });
+    if !template_places_revision_feedback {
+        if let Some(feedback) = context
+            .revision_feedback
+            .map(str::trim)
+            .filter(|feedback| !feedback.is_empty())
+        {
+            sections.push(format!("## Revision Feedback\n\n{feedback}"));
+        }
+    }
 
     sections.join("\n\n")
 }
