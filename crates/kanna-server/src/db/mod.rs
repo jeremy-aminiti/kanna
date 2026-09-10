@@ -75,7 +75,7 @@ pub use task_inputs::{
 pub use transfer_work::{TransferWorkItem, MAX_TRANSFER_WORK_ATTEMPTS};
 pub use transfers::{
     is_active_outgoing_transfer_conflict, NewTaskTransfer, NewTaskTransferProvenance,
-    PendingIncomingTransfer, TaskTransfer,
+    PendingIncomingTransfer, TaskTransfer, TransferredHistoryRecord,
 };
 
 pub(crate) use event_subscriptions::EventSubscription;
@@ -161,6 +161,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "074_transferred_task_input_provenance",
     "075_transferred_task_context",
     "076_transferred_task_manifest",
+    "077_transferred_task_history",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2229,6 +2230,34 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 prepared_at TEXT
             );",
+        )
+    })?;
+
+    // `transferred_task_context` (073) keeps only the *latest* snapshot of
+    // each kind, which a second hop before this task's own first finished run
+    // would otherwise re-export as if nothing had happened before it. This
+    // sibling table holds the full ordered history instead, one row per
+    // foreign run, keyed by the run's own origin identity so a retried import
+    // converges rather than duplicating.
+    run_migration(conn, "077_transferred_task_history", |conn| {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS transferred_task_history (
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL,
+                origin_peer_id TEXT NOT NULL,
+                origin_task_id TEXT NOT NULL,
+                origin_run_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                agent TEXT,
+                result TEXT,
+                feedback TEXT,
+                finished_at TEXT,
+                recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (task_id, origin_peer_id, origin_task_id, origin_run_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_transferred_task_history_task_sequence
+                ON transferred_task_history(task_id, sequence);",
         )
     })?;
 

@@ -826,6 +826,28 @@ impl Db {
         self.latest_finished_stage_run_result_of_kind(task_id, Some("main"))
     }
 
+    /// Every finished run this task has recorded locally, oldest first. A
+    /// transfer export uses this to carry the task's own contribution to the
+    /// ordered stage/main/post/revision history, appended after whatever it
+    /// itself inherited from an earlier hop.
+    pub fn finished_stage_runs(&self, task_id: &str) -> Result<Vec<StageRun>, rusqlite::Error> {
+        let mut stmt = match self.conn.prepare(
+            "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
+                    feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
+                    resume_fallback_reason, completion_transition,
+                    COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+             FROM stage_run
+             WHERE task_id = ? AND status IN ('succeeded', 'failed')
+             ORDER BY rowid ASC",
+        ) {
+            Ok(stmt) => stmt,
+            Err(err) if is_missing_stage_run_table(&err) => return Ok(Vec::new()),
+            Err(err) => return Err(err),
+        };
+        let rows = stmt.query_map([task_id], stage_run_from_row)?;
+        rows.collect()
+    }
+
     fn latest_finished_stage_run_result_of_kind(
         &self,
         task_id: &str,

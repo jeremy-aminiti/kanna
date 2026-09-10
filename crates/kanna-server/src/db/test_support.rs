@@ -387,6 +387,24 @@ impl Db {
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 prepared_at TEXT
             );
+
+            CREATE TABLE transferred_task_history (
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL,
+                origin_peer_id TEXT NOT NULL,
+                origin_task_id TEXT NOT NULL,
+                origin_run_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                agent TEXT,
+                result TEXT,
+                feedback TEXT,
+                finished_at TEXT,
+                recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (task_id, origin_peer_id, origin_task_id, origin_run_id)
+            );
+            CREATE INDEX idx_transferred_task_history_task_sequence
+                ON transferred_task_history(task_id, sequence);
             "#,
         )?;
         create_blocker_revision_triggers(&self.conn)?;

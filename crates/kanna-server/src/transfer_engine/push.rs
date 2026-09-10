@@ -15,8 +15,8 @@ use super::control;
 use super::finalize;
 use super::payload::{
     self, OutgoingTransferPayload, RepoAcquisitionMode, TransferBundlePayload,
-    TransferFinalizationState, TransferInputLedgerPayload, TransferRepoPayload,
-    TransferTaskPayload,
+    TransferFinalizationState, TransferHistoryRecordPayload, TransferInputLedgerPayload,
+    TransferRepoPayload, TransferTaskPayload,
 };
 use super::session;
 use crate::db::{Db, TransferWorkItem};
@@ -684,16 +684,51 @@ async fn build_payload(
 ) -> Result<OutgoingTransferPayload, String> {
     let mode = RepoAcquisitionMode::TaskBundle;
     let context_db = state.transfer_work().open_db()?;
+    // This task may itself be a prior hop's destination: it can be re-transferred
+    // before it has finished a single local run of its own, in which case the
+    // local queries below all read `None` and the inherited context is all
+    // there is. Reading it first, once, means both the scalar fallbacks and
+    // the combined ordered history below agree on the same snapshot.
+    let inherited_context = context_db
+        .transferred_task_context(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?;
     let previous_stage_result = context_db
         .latest_finished_stage_run_result(&source.item.id)
-        .map_err(|error| format!("db error: {error}"))?;
+        .map_err(|error| format!("db error: {error}"))?
+        .or_else(|| {
+            inherited_context
+                .as_ref()
+                .and_then(|context| context.2.clone())
+        });
     let previous_main_result = context_db
         .latest_finished_main_stage_run_result(&source.item.id)
-        .map_err(|error| format!("db error: {error}"))?;
+        .map_err(|error| format!("db error: {error}"))?
+        .or_else(|| {
+            inherited_context
+                .as_ref()
+                .and_then(|context| context.3.clone())
+        });
     let revision_feedback = context_db
         .latest_stage_run(&source.item.id)
         .map_err(|error| format!("db error: {error}"))?
-        .and_then(|run| run.feedback);
+        .and_then(|run| run.feedback)
+        .or_else(|| {
+            inherited_context
+                .as_ref()
+                .and_then(|context| context.4.clone())
+        });
+    let inherited_history = context_db
+        .transferred_task_history(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let own_history = context_db
+        .finished_stage_runs(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let history = combine_transfer_history(
+        &inherited_history,
+        &own_history,
+        &preflight.source_peer_id,
+        &source.item.id,
+    );
     // `pipeline` is the legacy storage column name for the task's workflow.
     let workflow_name = source
         .item
@@ -745,6 +780,7 @@ async fn build_payload(
             previous_stage_result,
             previous_main_result,
             revision_feedback,
+            history,
             workflow: workflow_name.clone(),
             legacy_pipeline: workflow_name,
             display_name: source.item.display_name.clone(),
@@ -783,6 +819,56 @@ async fn build_payload(
         artifacts: staged.artifacts,
         finalization,
     })
+}
+
+/// Builds the ordered history a payload's `task.history` carries: whatever
+/// this task itself inherited from an earlier hop, followed by the runs it
+/// has since finished locally, renumbered into one contiguous sequence.
+///
+/// A run in `own_runs` was executed on this machine under `source_task_id`,
+/// so it has never crossed a peer before; its origin is stamped as this
+/// export's own `(source_peer_id, source_task_id, run.id)`, exactly like
+/// [`super::payload::encode_task_input_ledger`] stamps a first-origin input.
+/// A record in `inherited` already carries the origin it was first exported
+/// under and is copied through unchanged — a second hop must never credit
+/// itself with work an earlier machine actually did.
+fn combine_transfer_history(
+    inherited: &[crate::db::TransferredHistoryRecord],
+    own_runs: &[crate::db::StageRun],
+    source_peer_id: &str,
+    source_task_id: &str,
+) -> Vec<TransferHistoryRecordPayload> {
+    let mut records: Vec<TransferHistoryRecordPayload> = inherited
+        .iter()
+        .map(|record| TransferHistoryRecordPayload {
+            sequence: 0,
+            origin_peer_id: record.origin_peer_id.clone(),
+            origin_task_id: record.origin_task_id.clone(),
+            origin_run_id: record.origin_run_id.clone(),
+            stage: record.stage.clone(),
+            kind: record.kind.clone(),
+            agent: record.agent.clone(),
+            result: record.result.clone(),
+            feedback: record.feedback.clone(),
+            finished_at: record.finished_at.clone(),
+        })
+        .collect();
+    records.extend(own_runs.iter().map(|run| TransferHistoryRecordPayload {
+        sequence: 0,
+        origin_peer_id: source_peer_id.to_string(),
+        origin_task_id: source_task_id.to_string(),
+        origin_run_id: run.id.clone(),
+        stage: run.stage.clone(),
+        kind: run.kind.clone(),
+        agent: run.agent.clone(),
+        result: run.result.clone(),
+        feedback: run.feedback.clone(),
+        finished_at: run.finished_at.clone(),
+    }));
+    for (index, record) in records.iter_mut().enumerate() {
+        record.sequence = index as u64;
+    }
+    records
 }
 
 /// The terminal snapshot the destination replays before the agent takes over.
@@ -1181,6 +1267,109 @@ mod tests {
             started_at: "2026-08-21 00:00:00".into(),
             finished_at: None,
         }
+    }
+
+    fn finished_run(id: &str, kind: &str, result: &str, finished_at: &str) -> crate::db::StageRun {
+        crate::db::StageRun {
+            id: id.into(),
+            status: "succeeded".into(),
+            kind: kind.into(),
+            result: Some(result.into()),
+            finished_at: Some(finished_at.into()),
+            ..stage_run(Some("claude"), None)
+        }
+    }
+
+    fn inherited_record(
+        origin_task_id: &str,
+        origin_run_id: &str,
+        sequence: i64,
+    ) -> crate::db::TransferredHistoryRecord {
+        crate::db::TransferredHistoryRecord {
+            sequence,
+            origin_peer_id: "peer-hop0".into(),
+            origin_task_id: origin_task_id.into(),
+            origin_run_id: origin_run_id.into(),
+            stage: "in progress".into(),
+            kind: "main".into(),
+            agent: Some("implement".into()),
+            result: Some("{\"status\":\"succeeded\"}".into()),
+            feedback: None,
+            finished_at: Some("2026-09-08 00:00:00".into()),
+        }
+    }
+
+    /// A task that has never been transferred exports only its own local
+    /// runs, each freshly stamped with this hop's own peer/task/run identity
+    /// — the "first origin" case `encode_task_input_ledger` establishes for
+    /// inputs.
+    #[test]
+    fn combine_transfer_history_stamps_first_origin_for_a_never_transferred_task() {
+        let own = vec![
+            finished_run(
+                "run-1",
+                "main",
+                "{\"status\":\"succeeded\"}",
+                "2026-09-09 00:00:00",
+            ),
+            finished_run(
+                "run-2",
+                "post",
+                "{\"status\":\"succeeded\"}",
+                "2026-09-09 00:05:00",
+            ),
+        ];
+        let history = combine_transfer_history(&[], &own, "peer-source", "task-1");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].sequence, 0);
+        assert_eq!(history[0].origin_peer_id, "peer-source");
+        assert_eq!(history[0].origin_task_id, "task-1");
+        assert_eq!(history[0].origin_run_id, "run-1");
+        assert_eq!(history[0].kind, "main");
+        assert_eq!(history[1].sequence, 1);
+        assert_eq!(history[1].origin_run_id, "run-2");
+        assert_eq!(history[1].kind, "post");
+    }
+
+    /// The second-hop case the checkpoint exists for: a task that is itself
+    /// a prior hop's destination re-exports what it inherited *first*,
+    /// unchanged, followed by whatever it has since finished locally — never
+    /// crediting this machine with work an earlier one actually did.
+    #[test]
+    fn combine_transfer_history_orders_inherited_history_before_local_runs_and_renumbers_sequence()
+    {
+        let inherited = vec![
+            inherited_record("task-original", "run-original-1", 0),
+            inherited_record("task-original", "run-original-2", 1),
+        ];
+        let own = vec![finished_run(
+            "run-local-1",
+            "main",
+            "{\"status\":\"succeeded\"}",
+            "2026-09-09 12:00:00",
+        )];
+        let history = combine_transfer_history(&inherited, &own, "peer-hop1", "task-hop1");
+
+        assert_eq!(history.len(), 3);
+        // Inherited records keep their original origin untouched.
+        assert_eq!(history[0].origin_peer_id, "peer-hop0");
+        assert_eq!(history[0].origin_task_id, "task-original");
+        assert_eq!(history[0].origin_run_id, "run-original-1");
+        assert_eq!(history[1].origin_peer_id, "peer-hop0");
+        assert_eq!(history[1].origin_run_id, "run-original-2");
+        // This hop's own run is stamped with its own identity and placed last.
+        assert_eq!(history[2].origin_peer_id, "peer-hop1");
+        assert_eq!(history[2].origin_task_id, "task-hop1");
+        assert_eq!(history[2].origin_run_id, "run-local-1");
+        // Sequence is renumbered contiguously across the combined list, not
+        // preserved from either source independently.
+        assert_eq!(
+            history
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     /// The 2026-09-08 refusal.

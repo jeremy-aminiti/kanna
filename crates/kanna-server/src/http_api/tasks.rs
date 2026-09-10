@@ -1202,6 +1202,42 @@ async fn create_task_with_requested_id_and_inputs(
                             },
                         ));
                     }
+                    if !context.history.is_empty() {
+                        let records: Vec<crate::db::TransferredHistoryRecord> = context
+                            .history
+                            .iter()
+                            .map(|record| crate::db::TransferredHistoryRecord {
+                                sequence: record.sequence as i64,
+                                origin_peer_id: record.origin_peer_id.clone(),
+                                origin_task_id: record.origin_task_id.clone(),
+                                origin_run_id: record.origin_run_id.clone(),
+                                stage: record.stage.clone(),
+                                kind: record.kind.clone(),
+                                agent: record.agent.clone(),
+                                result: record.result.clone(),
+                                feedback: record.feedback.clone(),
+                                finished_at: record.finished_at.clone(),
+                            })
+                            .collect();
+                        if let Err(error) = db.import_transferred_task_history(
+                            crate::task_creator::prepared_task_id(&prepared),
+                            &records,
+                        ) {
+                            let reason =
+                                format!("could not persist transferred task history: {error}");
+                            let rollback =
+                                crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                            return Err((
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                match rollback {
+                                    Ok(()) => reason,
+                                    Err(rollback) => {
+                                        format!("{reason}; rollback failed: {rollback}")
+                                    }
+                                },
+                            ));
+                        }
+                    }
                 }
             }
             if !imported_inputs.is_empty() {

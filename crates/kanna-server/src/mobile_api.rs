@@ -487,6 +487,36 @@ pub struct TransferImportSummary {
     pub previous_main_result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_feedback: Option<String>,
+    /// Ordered source stage/main/post/revision history, oldest first,
+    /// carried through from [`crate::transfer_engine::payload::TransferTaskPayload::history`]
+    /// so the destination can persist and re-export it. Not itself part of
+    /// the display banner; a second hop reads it back from
+    /// `transferred_task_history` rather than from this in-flight request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<TransferredHistoryRecordSummary>,
+}
+
+/// [`TransferImportSummary::history`]'s entry shape — a copy of
+/// [`crate::transfer_engine::payload::TransferHistoryRecordPayload`] on the
+/// request-internal side of the wire/internal boundary, the same duplication
+/// already used for `previous_stage_result` and friends above.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferredHistoryRecordSummary {
+    pub sequence: u64,
+    pub origin_peer_id: String,
+    pub origin_task_id: String,
+    pub origin_run_id: String,
+    pub stage: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
 }
 
 impl TransferImportSummary {

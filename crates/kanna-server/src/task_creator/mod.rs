@@ -3212,6 +3212,18 @@ fn resolve_task_spawn(
         None
     };
 
+    // The task's own branch (`task-{id}`) isn't created until after this
+    // function returns, but for a requested id — which every transfer import
+    // supplies deterministically (`session::destination_task_id`) — the id
+    // itself, and so the branch name, is already fixed. `$BRANCH` must resolve
+    // to that destination branch, never to `base_ref` (for a transfer, the
+    // imported private fork ref): a stage prompt that names $BRANCH, like
+    // `review`'s, would otherwise send the agent to a ref that isn't this
+    // task's own history.
+    let destination_branch = request
+        .requested_task_id
+        .as_deref()
+        .map(|task_id| format!("task-{task_id}"));
     let final_prompt = if request.stage_override.is_some() {
         if let Some(import) = request.transfer_import.as_ref().filter(|import| {
             import.previous_stage_result.is_some()
@@ -3231,7 +3243,9 @@ fn resolve_task_spawn(
                         .as_deref()
                         .or(import.previous_stage_result.as_deref()),
                     prev_main_result: import.previous_main_result.as_deref(),
-                    branch: request.base_ref.as_deref(),
+                    branch: destination_branch
+                        .as_deref()
+                        .or(request.base_ref.as_deref()),
                     base_ref: request
                         .stored_base_ref
                         .as_deref()
@@ -3255,7 +3269,9 @@ fn resolve_task_spawn(
                 task_prompt: Some(&request.task_prompt),
                 prev_result: None,
                 prev_main_result: None,
-                branch: request.base_ref.as_deref(),
+                branch: destination_branch
+                    .as_deref()
+                    .or(request.base_ref.as_deref()),
                 base_ref: request
                     .stored_base_ref
                     .as_deref()
