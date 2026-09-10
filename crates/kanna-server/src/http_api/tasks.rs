@@ -1223,45 +1223,115 @@ async fn create_task_with_requested_id_and_inputs(
                         format!("db error: {error}"),
                     )
                 })?;
-                let transfer_id = import.transfer_id.as_deref().ok_or_else(|| {
-                    (
-                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                        "transferred task is missing transfer identity".to_string(),
-                    )
-                })?;
-                let expected_head = import.head_oid.as_deref().ok_or_else(|| {
-                    (
-                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                        "transferred task is missing committed head".to_string(),
-                    )
-                })?;
+                // Every failure below is discovered after `prepared` already
+                // created the task's pipeline_item row and git worktree, so
+                // (like the transfer-context and imported-inputs gates just
+                // above) each one must roll that artifact back rather than
+                // leaving an orphaned, never-admitted task behind.
+                let transfer_id = match import.transfer_id.as_deref() {
+                    Some(transfer_id) => transfer_id,
+                    None => {
+                        let reason = "transferred task is missing transfer identity".to_string();
+                        let rollback =
+                            crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                        return Err((
+                            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                            match rollback {
+                                Ok(()) => reason,
+                                Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                            },
+                        ));
+                    }
+                };
+                let expected_head = match import.head_oid.as_deref() {
+                    Some(expected_head) => expected_head,
+                    None => {
+                        let reason = "transferred task is missing committed head".to_string();
+                        let rollback =
+                            crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                        return Err((
+                            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                            match rollback {
+                                Ok(()) => reason,
+                                Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                            },
+                        ));
+                    }
+                };
                 let (worktree, branch) = crate::task_creator::prepared_task_worktree(&prepared);
-                let actual =
-                    crate::transfer_engine::git::commit_oid(std::path::Path::new(worktree), branch)
-                        .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error))?;
+                let actual = match crate::transfer_engine::git::commit_oid(
+                    std::path::Path::new(worktree),
+                    branch,
+                ) {
+                    Ok(actual) => actual,
+                    Err(reason) => {
+                        let rollback =
+                            crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                        return Err((
+                            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                            match rollback {
+                                Ok(()) => reason,
+                                Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                            },
+                        ));
+                    }
+                };
                 if actual != expected_head {
+                    let reason = "transferred task head changed during preparation".to_string();
+                    let rollback =
+                        crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
                     return Err((
                         axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                        "transferred task head changed during preparation".to_string(),
+                        match rollback {
+                            Ok(()) => reason,
+                            Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                        },
                     ));
                 }
-                let manifest = db
-                    .transferred_task_manifest(transfer_id)
-                    .map_err(|error| db_write_error("db error", error))?;
+                let manifest = match db.transferred_task_manifest(transfer_id) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        let (status, reason) = db_write_error("db error", error);
+                        let rollback =
+                            crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                        return Err((
+                            status,
+                            match rollback {
+                                Ok(()) => reason,
+                                Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                            },
+                        ));
+                    }
+                };
                 if manifest.as_ref().is_none_or(|(_, _, _, task, state)| {
                     task.as_deref() != Some(crate::task_creator::prepared_task_id(&prepared))
                         || state != "importing"
                 }) {
+                    let reason = "transferred task lacks an importing manifest".to_string();
+                    let rollback =
+                        crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
                     return Err((
                         axum::http::StatusCode::CONFLICT,
-                        "transferred task lacks an importing manifest".to_string(),
+                        match rollback {
+                            Ok(()) => reason,
+                            Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                        },
                     ));
                 }
-                 db.mark_transferred_task_manifest_prepared(transfer_id)
-                    .map_err(|error| {
-                        db_write_error("could not persist transfer preparation", error)
-                     })?;
-             }
+                if let Err(error) = db.mark_transferred_task_manifest_prepared(transfer_id) {
+                    let (status, reason) =
+                        db_write_error("could not persist transfer preparation", error);
+                    let rollback =
+                        crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                    return Err((
+                        status,
+                        match rollback {
+                            Ok(()) => reason,
+                            Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                        },
+                    ));
+                }
+            }
             if !resolved_blocker_ids.is_empty() || review_context.is_some() {
                 let db = Db::open(&state.config.db_path).map_err(|e| {
                     (
