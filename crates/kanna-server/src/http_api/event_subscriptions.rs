@@ -613,32 +613,19 @@ async fn step(
     // total never exceeds one page.
     let mut retained_events: Vec<Value> = Vec::new();
     let batch = 'chain: loop {
-        // `capped_by_deadline` is true when this call's own timeout was sized
-        // to the subscription's remaining window rather than the fixed 240s
-        // ceiling. A call sized that way that still comes back "timeout"
-        // (rather than "events") means its own receiver — which we set equal
-        // to the remaining time — expired exactly at the intrinsic deadline:
-        // that is genuine completion (whatever accumulated is everything
-        // there is to get), not "this call's unrelated budget ran out, ask
-        // again". Only a "timeout" from a call capped at the 240s ceiling
-        // (nothing observed yet, or more than 240s still remaining) means the
-        // chain must re-issue.
-        let (native_timeout, capped_by_deadline) = {
+        let native_timeout = {
             let guard = collection
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             match guard.intrinsic_deadline() {
                 Some(deadline) => {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    let secs = remaining
+                    remaining
                         .as_secs()
-                        .saturating_add(u64::from(remaining.subsec_nanos() > 0));
-                    (
-                        secs.clamp(1, kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS),
-                        secs <= kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS,
-                    )
+                        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+                        .clamp(1, kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS)
                 }
-                None => (kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS, false),
+                None => kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS,
             }
         };
         let mut call_row = row.clone();
@@ -692,13 +679,30 @@ async fn step(
                 let machine_errors_present = batch["machineErrors"]
                     .as_array()
                     .is_some_and(|errors| !errors.is_empty());
-                if batch["waitOutcome"] == "timeout"
-                    && !machine_errors_present
-                    && !capped_by_deadline
-                {
-                    #[cfg(test)]
-                    subscription_timing::leg_timed_out(state);
-                    continue 'chain;
+                if batch["waitOutcome"] == "timeout" && !machine_errors_present {
+                    // Whether this leg's own timeout also means the
+                    // subscription is genuinely done cannot be decided from
+                    // how this call's timeout was originally sized: a later
+                    // relevant event observed mid-call can push the live
+                    // Collection's intrinsic deadline further out (quiet is
+                    // anchored to the latest observation), so a call sized to
+                    // the deadline as it stood at dispatch can still return
+                    // "timeout" well before the subscription's now-later
+                    // deadline. Re-read the live collection here, after the
+                    // call, rather than trusting a pre-call snapshot.
+                    let live_deadline_reached = {
+                        let guard = collection
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        guard
+                            .intrinsic_deadline()
+                            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                    };
+                    if !live_deadline_reached {
+                        #[cfg(test)]
+                        subscription_timing::leg_timed_out(state);
+                        continue 'chain;
+                    }
                 }
                 batch["events"] = json!(std::mem::take(&mut retained_events));
                 break 'chain Ok(batch);

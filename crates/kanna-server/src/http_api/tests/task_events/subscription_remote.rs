@@ -548,6 +548,65 @@ async fn an_aggregate_event_observed_in_one_native_leg_survives_into_a_later_leg
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_aggregate_later_event_extends_the_live_deadline_mid_leg_and_is_not_sealed_early() {
+    // quiet (300s) < max_hold (600s): quiet, anchored to the LATEST
+    // observation, actually controls the deadline. The first event's own leg
+    // (240s ceiling) times out well short of the initial 300s deadline; a
+    // second event lands only after that re-issued leg has been dispatched
+    // (sized to the now-stale 300s point), which must extend the live
+    // deadline rather than let the stale leg's own receiver seal the page.
+    let (watch, _) = WatchFixture::new_with(
+        false,
+        WatchFixture::request_with(json!({"quietMs": 300_000, "maxHoldMs": 600_000})),
+    )
+    .await;
+    Db::open(&watch.source.config().db_path)
+        .unwrap()
+        .update_pipeline_item_pr(
+            "pending-local-child",
+            Some(501),
+            "https://example.test/pull/501",
+        )
+        .unwrap();
+    watch
+        .source
+        .publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    // Wait for the re-issued (second) long poll, proving leg 1's own 240s
+    // receiver was crossed before the page could settle.
+    until(|| watch.relay.counts.attempts.load(Ordering::SeqCst) >= 2).await;
+    // Not yet sealed: still short of even the original (soon-to-be-stale)
+    // 300s deadline, let alone the extended one.
+    assert_ne!(watch.row().wake_state, "ready");
+    Db::open(&watch.source.config().db_path)
+        .unwrap()
+        .append_task_event(
+            "pending-local-child",
+            crate::db::TaskEventKind::TaskClosed,
+            json!({}),
+        )
+        .unwrap();
+    watch
+        .source
+        .publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    let page = watch.page().await;
+    let batch = page.pending.as_ref().unwrap();
+    assert!(
+        batch.get("watchError").is_none(),
+        "peer errors: {}",
+        batch["machineErrors"]
+    );
+    assert_eq!(
+        event_pairs(batch),
+        vec![
+            ("pending-local-child".into(), "task.pr_created".into()),
+            ("pending-local-child".into(), "task.closed".into()),
+        ]
+    );
+    let acked = watch.ack(&page).await;
+    assert_eq!(acked["cursor"], batch["cursor"]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn initial_discovery_fault_pins_local_tail_before_recovery() {
     let state = test_state_with_seed("subscription-discovery", "Discovery", seed_orchestration);
     state.set_desktop_routing_available(true);
