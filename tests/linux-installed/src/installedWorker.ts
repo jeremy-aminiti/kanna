@@ -211,7 +211,6 @@ export class InstalledWorker {
     const env: NodeJS.ProcessEnv = Object.fromEntries(
       Object.entries(process.env).filter(([key]) => !key.startsWith("KANNA_"))
     );
-    env.KANNA_E2E_TEST_SQL = "1";
     env.PATH = `${options.providerBinDir}:${env.PATH ?? ""}`;
 
     // The unit is written by the installed `kanna-worker` itself, so the lane
@@ -297,16 +296,6 @@ export class InstalledWorker {
       throw new Error(`${path} failed (${response.status}): ${await response.text()}`);
     }
     return (await response.json()) as T;
-  }
-
-  async sql(sql: string, params: unknown[] = []): Promise<Array<Record<string, unknown>>> {
-    const response = await this.api("/v1/e2e/sql", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sql, params, query: true }),
-    });
-    if (!response.ok) throw new Error(`e2e sql failed (${response.status}): ${await response.text()}`);
-    return ((await response.json()) as { rows: Array<Record<string, unknown>> }).rows;
   }
 
   async cli(args: string[]): Promise<Run> {

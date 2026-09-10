@@ -66,6 +66,17 @@ push or release publication has been performed by this task.
 
 ## Remaining obligations and holds
 
+The upgrade harness's known SQL404 was repaired at its observation boundary:
+repo/task identities now come from production CLI responses, delivered input
+from `/v1/tasks/{id}/inputs`, and completion from task detail and the scoped
+`/v1/task-events` feed. It pins run id, branch and worktree across restart in
+addition to the existing agent pid/start-time assertions. The installed-only
+harness no longer exposes a SQL helper or requests the test-only SQL route.
+On the Studio, `pnpm --dir tests/linux-installed exec tsc --noEmit` and
+`pnpm --dir tests/linux-installed exec vitest run src/installedLayout.test.ts --maxWorkers=1`
+both exited 0 (six layout tests). The actual two-version E2E test remains
+unexecuted; this is a source/type correction, not a live-upgrade pass.
+
 - Hermetic Zig 0.15.2 cross-release graph, both glibc-2.39 target triples,
   pinned Ubuntu sysroots, eight atomic crate-universe repins, static Ghostty
   C++ closure and Bazel-produced debs: **not implemented or built here**.
