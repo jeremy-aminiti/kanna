@@ -614,7 +614,11 @@ function toggleContextLines() {
 }
 
 function refreshBranchDiffOnWindowFocus() {
-  if (scope.value !== "branch" || loading.value) return;
+  // Every open tab stays mounted, so every branch DiffView hears the window's
+  // focus event. Only the one in front owns that refresh: reloading a hidden
+  // diff discards its search state and needlessly rebuilds the rendered patch
+  // before the reader returns to it.
+  if (!(props.isForeground?.() ?? true) || scope.value !== "branch" || loading.value) return;
   void loadDiff({ preserveCurrentScroll: true });
 }
 

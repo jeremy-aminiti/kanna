@@ -3,6 +3,7 @@
 import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import DiffModal from "../DiffModal.vue";
 import DiffView from "../DiffView.vue";
 import { clearContextShortcuts, resetContext } from "../../composables/useShortcutContext";
 import en from "../../i18n/locales/en.json";
@@ -819,6 +820,75 @@ describe("DiffView", () => {
     expect(renderMock.mock.calls.at(-1)?.[0]?.fileDiff).toMatchObject({
       name: "after-rebase.txt",
     });
+
+    wrapper.unmount();
+  });
+
+  it("does not refresh a background branch diff when the app window regains focus", async () => {
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_branch_upstream") return null;
+      if (command === "git_merge_base") return "base-sha";
+      if (command === "git_diff_branch_range") {
+        return "diff --git a/background.txt b/background.txt";
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mount(DiffModal, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "branch",
+        baseRef: "origin/main",
+        embedded: true,
+        active: true,
+      },
+      attachTo: document.body,
+      global: {
+        provide: {
+          windowWorkspace: {},
+        },
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    const branchLoads = () => invokeMock.mock.calls.filter(
+      ([command]) => command === "git_diff_branch_range",
+    );
+    expect(branchLoads()).toHaveLength(1);
+    const renderedContainer = wrapper.get<HTMLElement>(".diff-container").element;
+
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "/",
+      bubbles: true,
+    }));
+    await flushPromises();
+    await wrapper.get(".search-input").setValue("keep this search");
+    renderedContainer.scrollTop = 240;
+    renderedContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+    await wrapper.setProps({ active: false });
+    window.dispatchEvent(new Event("focus"));
+    await waitForTimerTurn();
+    expect(branchLoads()).toHaveLength(1);
+
+    // Ordinary tab activation changes only the modal's foreground ownership.
+    // The same rendered tree, scroll offset and local selection stay in place.
+    await wrapper.setProps({ active: true });
+    expect(branchLoads()).toHaveLength(1);
+    expect(wrapper.get(".diff-container").element).toBe(renderedContainer);
+    expect(renderedContainer.scrollTop).toBe(240);
+    expect(wrapper.get(".diff-file-header").attributes("title")).toBe("background.txt");
+    expect(wrapper.get<HTMLInputElement>(".search-input").element.value).toBe("keep this search");
+
+    // A real window-focus refresh while the diff is visible remains intact.
+    window.dispatchEvent(new Event("focus"));
+    await waitForTimerTurn();
+    expect(branchLoads()).toHaveLength(2);
 
     wrapper.unmount();
   });
