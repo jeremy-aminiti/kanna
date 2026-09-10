@@ -183,16 +183,143 @@ Not executed: any simulator, device, or real WebView render. `cargo`/native/
 emulator gates were not invoked in this session per the task's execution
 hold.
 
-## iOS simulator first-attach before/after comparison — ready to run, held
+## iOS simulator lane — executed 2026-09-10, build/launch verified, task-reach blocked
 
-Per `AGENTS.md` this is a UI-feel change and simulator verification is
-necessary but not sufficient on its own; it wants an on-device look. Not run
-this session — the task's execution hold covers native/mobile/emulator
-launches. This is the exact, ready-to-run procedure for when it lifts, using
-only tools already installed and already working on this Mac Studio (per
-prior sessions' own notes: iOS simulator builds succeed here; `kd mobile run
---simulator "iPhone 17 Pro"` is a known-working device name/build on this
-machine) — nothing native needs building, since the fix is JS-only.
+RESUME MOBILE CONNECTION REGRESSION VERIFICATION authorized one bounded
+canonical iOS DEV simulator lane; this ran it. Result: **the build, native
+runtime identity, and app launch are now verified by execution, not
+assumption — but the redraw/overlay video capture itself was not obtained**,
+because reaching a task's terminal screen turned out to need tooling this
+session does not have and was told not to install. Reported plainly rather
+than as a completed capture.
+
+**Simulator targeted by exact UDID, never `booted`:** `1CCF3E78-D553-46A9-A4A3-74F4D1BDE0A4`
+("iPhone 16 Pro Max", `com.apple.CoreSimulator.SimRuntime.iOS-18-5`) —
+deliberately not one of the "iPhone 17 Pro" / iOS 26.x devices used in prior
+sessions, to route around the already-diagnosed iOS 26 "Open in…?" SpringBoard
+alert (`ios-simulator-builds-fail-on-mac-studio` memory) rather than
+re-hitting it. iOS 18.5 was available and already installed; nothing new was
+downloaded or licensed.
+
+**Native runtime compatibility — checked before assuming, per instruction, not
+assumed:** the just-merged Android PR #1419 bumped `dev.runtimeVersion`
+2.2.4 → 2.2.5 in `mobileEnvironments.json` (confirmed by diffing
+`90fd52ee4..3f9520ae2`), so "JS-only fix ⇒ no build" was **not** a safe
+assumption on its own this time — a stale prior install would carry the old
+runtime identity. Ran the full canonical path anyway (`expo prebuild` →
+CocoaPods → `xcodebuild` → install → launch, via `mcp__kd-mcp__mobile_run`
+with `simulator: "1CCF3E78-D553-46A9-A4A3-74F4D1BDE0A4"`), which regenerates
+native config every time regardless. The on-screen Expo dev-tools overlay
+after launch reads **"Kanna Dev · Runtime version: 2.2.5"** — confirmed
+visually in `.tmp/mobile-flicker-capture/screen-01-pre-deeplink.png` (not
+committed) — i.e. the installed binary's native identity matches current
+main's config exactly, by observation.
+
+**Exact command and exit:**
+```
+mcp__kd-mcp__mobile_run { simulator: "1CCF3E78-D553-46A9-A4A3-74F4D1BDE0A4" }
+```
+completed (ran long enough to move to background, ~120s+, finished
+successfully): `"ok": true`, `"Launched Kanna mobile on iPhone 16 Pro Max
+simulator. Bundle ID: build.kanna.app.dev. Metro: http://127.0.0.1:8094.
+Profile: build=dev, owner=worktree, cloud=emulators. App: installed and
+launched."`, `metroReadiness.afterLaunch.ok: true`. This is the FULL
+canonical worktree-scoped dev flow (`kd`'s own dev-window plan starts
+Firebase emulators, relay, the desktop Tauri app, `kanna-server`, and Metro
+before building/installing the mobile app) — not a shortcut, and it does its
+own bounded cargo build for the desktop sidecars/app as an inherent part of
+the authorized lane, not an extra one stacked on top.
+
+**Server/app identity used, exactly, for the record:** desktop
+`desktopId: desktop-c3dc45eb-35ad-41a3-b447-cd02d45b2d2d`,
+`environment: "development"`, `kanna-server` at `http://127.0.0.1:48128`
+(this worktree's own `KANNA_MOBILE_SERVER_PORT`) — a fresh, throwaway,
+worktree-scoped dev instance, not staging or production. Registered this
+repo (`repo-18d3f3efcc1e6440`, `/Users/jeremyhale/.kanna/repos/kanna-2`) and
+created one disposable scratch task (`cbf2d141`, a trivial "print 1–20 then
+wait" Claude prompt, chosen only to have a live PTY session to attach the
+terminal viewer to) directly via that dev server's own local HTTP API
+(`POST /v1/repos`, `POST /v1/tasks` — both local-process-trusted, no token
+needed, no cloud/account involved). Closed it
+(`POST /v1/tasks/cbf2d141/actions/close`, confirmed `closedAt` set) and
+removed its worktree/branch (`git worktree remove --force`,
+`git branch -D task-cbf2d141`) before finishing.
+
+**Blocked: no working way to seed a trusted desktop + selected task without
+Appium.** Both existing dev seams
+(`kanna://e2e-trust?desktopId=…&selectedTaskId=…` and `kanna://e2e-pair`,
+`apps/mobile/src/e2eTrustSeed.ts`) check for the literal protocol `"kanna:"`.
+Read the generated `ios/KannaDev/Info.plist` directly: this build registers
+`kanna-dev`, `build.kanna.app.dev`, and `exp+kanna-mobile` as URL schemes —
+**never bare `kanna`** — in `app.config.ts`'s scheme handling, for any
+environment. So `xcrun simctl openurl <udid> "kanna://e2e-trust?…"` fails
+outright with `NSOSStatusErrorDomain -10814` (`kLSApplicationNotFoundErr`,
+confirmed by direct execution, both before and after dismissing the dev-tools
+overlay) — this is a **different, more basic blocker than the iOS 26 alert**:
+LaunchServices has no app to route the scheme to at all. The E2E harness's
+own `seedTrustedDesktopThroughDeepLink` (`apps/mobile/e2e/helpers/trust-seed.ts`)
+works around exactly this by calling Appium's `mobile: deepLink` with an
+explicit `bundleId`, which hands the URL straight to the named app via
+XCUITest and never asks LaunchServices to resolve the scheme at all — which
+is why it isn't hit by this. Appium's XCUITest driver is not installed in
+this environment (`pnpm exec appium driver list --installed` returns none),
+and installing it was explicitly out of scope this lane ("no silent SDK/
+toolchain install").
+
+**Also tried, also blocked, and genuinely instructive: driving the app's own
+JS runtime directly via React Native's built-in remote debugger, no install
+needed.** Metro exposes a real CDP (Chrome DevTools Protocol) target at
+`ws://127.0.0.1:8094/inspector/debug?device=…&page=1` (found via
+`GET /json/list` — this is React Native's standard, always-on Fusebox
+debugger, not a new tool). Connected directly with Node's already-present
+`ws` package (`node_modules/.pnpm/ws@8.20.0`) and issued `Runtime.evaluate`
+calls against the live app — this genuinely works (confirmed executing
+arbitrary JS in the real running app's Hermes context; script in
+`.tmp/cdp-eval.mjs`, not committed). The goal was to seed the same trusted-
+desktop/selected-task state some other way — either by replaying the deep
+link's own persisted-storage write (`kanna.mobile.context.v1` via
+`@react-native-async-storage/async-storage`, per
+`apps/mobile/src/state/sessionPersistence.ts`) or by directly emitting a
+synthetic `"url"` event so the app's already-registered `Linking` listener
+fires. Neither panned out: this build is React Native's Bridgeless/New
+Architecture (`"description": "React Native Bridgeless [C++ connection]"` in
+the CDP target listing) — `global.require`, `global.__turboModuleProxy`, and
+`global.$$require_external` (Node-builtin shim only) are all absent or
+non-functional for reaching app modules; the legacy
+`global.__fbBatchedBridge` object still exists but its
+`_lazyCallableModules` registry is empty (nothing to dispatch `emit` through)
+and `global.__fbGenNativeModule("RNCAsyncStorage")` throws
+(`TypeError: undefined is not a function`) — a real, specific vestige of the
+old bridge that no longer functions once bridgeless mode is active. The one
+real native-module registry reachable, `global.expo.modules`, only lists
+Expo-authored modules (`ExponentFileSystem`, `ExpoDevLauncher`, etc.) —
+`RNCAsyncStorage` is a community module outside that registry and was not
+reachable through it either.
+
+**Net for this lane:** build ✅ (verified, not assumed), native runtime
+identity ✅ (verified by direct observation, addressing the exact "don't
+assume JS-only=no build" instruction), app launch ✅, real dev
+server/task/identity ✅ (created, used, and cleanly disposed of) — **but no
+first-attach redraw/overlay video or frame evidence was captured**, because
+every available path to programmatically select a task inside the running
+app was checked and found blocked, and driving the simulator's screen by
+hand was not available in this session. This is a concrete, narrower gap
+than "needs a human": specifically, it needs either (a) an authorized Appium
+XCUITest driver install, or (b) a human tapping "Pair a Mac" once on the
+simulator screen (the QR/pairing flow itself, exercised for real, would also
+be a more faithful "genuine disposable dev pairing" than the deep-link seam
+this lane tried first) — not a blanket "verification requires a person."
+
+**Cleanup performed, as instructed:** scratch task closed and its worktree/
+branch removed; `mcp__kd-mcp__dev_down` stopped the full dev stack (daemon,
+tmux windows for emulators/relay/desktop/mobile, terminal-recovery process —
+all reported cleaned, zero failures); the simulator was shut down
+(`xcrun simctl shutdown 1CCF3E78-…`, confirmed via `simctl list devices
+booted` returning empty). This worktree's own git state (`49d7cc169`) was
+never touched during any of this — no branch switch, no rebase, no stash —
+confirmed clean before and after. Logs/screenshots preserved under `.tmp/`
+(gitignored, not committed): `mobile-flicker-capture/screen-01-pre-deeplink.png`,
+`cdp-eval.mjs`.
 
 **1. Bring up the simulator dev stack, with the existing E2E terminal
 instrumentation enabled** (the same `EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED`
