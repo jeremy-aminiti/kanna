@@ -133,10 +133,15 @@ async fn attempt_lan_invoke(
     let Some(store_path) = state.config().machine_trust_store_path() else {
         return LanAttemptOutcome::PreDispatch("no machine trust store configured".to_string());
     };
+    let current_account_uid = state.authenticated_account_uid();
     let has_grant = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
         .ok()
         .zip(crate::machine_trust::unix_time_ms().ok())
-        .is_some_and(|(store, now_ms)| store.outbound_grant_for(desktop_id, now_ms).is_some());
+        .is_some_and(|(store, now_ms)| {
+            store
+                .outbound_grant_for(desktop_id, current_account_uid.as_deref(), now_ms)
+                .is_some()
+        });
     if !has_grant {
         return LanAttemptOutcome::PreDispatch(format!(
             "no unexpired outbound LAN grant for desktop {desktop_id}"

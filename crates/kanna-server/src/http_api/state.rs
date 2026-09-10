@@ -98,6 +98,16 @@ pub struct AppState {
     known_singleton_owners: Arc<StdMutex<SingletonOwnerObservations>>,
     relay_reconnect: Arc<Notify>,
     anonymous_push_revocations_changed: Arc<Notify>,
+    /// The account UID this desktop's relay connection currently
+    /// authenticates as, or `None` when signed out/rejected/not yet
+    /// authenticated. This is the single current-account reference every
+    /// automatic same-account LAN trust lookup must validate a record's own
+    /// `account_uid` against at the point of use - not merely a value
+    /// `machine_trust`'s periodic reconciliation happens to have run
+    /// against, which can otherwise leave a stale record momentarily
+    /// usable between an account transition and the next reconciliation
+    /// pass.
+    authenticated_account_uid: Arc<StdMutex<Option<String>>>,
     relay_desktop_routing_available: Arc<AtomicBool>,
     relay_desktop_routing_unavailable_reason: Arc<StdMutex<Option<String>>>,
     relay_desktop_routing_unreachable_since: Arc<StdMutex<Option<String>>>,
@@ -474,6 +484,7 @@ impl AppState {
             repo_checkout_root,
             known_singleton_owners: Arc::new(StdMutex::new(HashMap::new())),
             relay_reconnect: Arc::new(Notify::new()),
+            authenticated_account_uid: Arc::new(StdMutex::new(None)),
             anonymous_push_revocations_changed: Arc::new(Notify::new()),
             relay_desktop_routing_available: Arc::new(AtomicBool::new(false)),
             relay_desktop_routing_unavailable_reason: Arc::new(StdMutex::new(Some(
@@ -726,6 +737,27 @@ impl AppState {
 
     pub(crate) fn desktop_routing_available(&self) -> bool {
         self.relay_desktop_routing_available.load(Ordering::Acquire)
+    }
+
+    /// Sets the account UID this desktop's relay connection currently
+    /// authenticates as. `None` on sign-out, an authoritative rejection, or
+    /// before the first successful authentication.
+    pub(crate) fn set_authenticated_account_uid(&self, account_uid: Option<String>) {
+        *self
+            .authenticated_account_uid
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = account_uid;
+    }
+
+    /// The account UID every automatic same-account LAN trust lookup must
+    /// validate a record's own `account_uid` against - see the field's own
+    /// doc comment for why this is checked at the point of use rather than
+    /// relied on solely via periodic reconciliation.
+    pub(crate) fn authenticated_account_uid(&self) -> Option<String> {
+        self.authenticated_account_uid
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub(crate) fn take_desktop_relay_requests(

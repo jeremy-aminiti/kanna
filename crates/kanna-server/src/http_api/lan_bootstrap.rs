@@ -33,6 +33,12 @@ pub(super) struct LanBootstrapRequest {
 #[serde(rename_all = "camelCase")]
 pub(super) struct LanBootstrapResponse {
     ca_certificate_pem: String,
+    /// The target's own attested expiry for the inbound grant it just
+    /// created - the source must use this value verbatim rather than
+    /// computing its own from receipt time, so a late-arriving
+    /// acknowledgement cannot silently extend the effective lease beyond
+    /// what the target actually granted.
+    expires_at_unix_ms: u64,
 }
 
 /// Accepts an inbound same-account bootstrap. `source` is only ever
@@ -70,13 +76,13 @@ pub(super) async fn bootstrap_lan_trust(
     let now_ms = crate::machine_trust::unix_time_ms()
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
     let secret_hash = crate::pairing::hash_device_secret(candidate_secret);
-    {
+    let expires_at_unix_ms = {
         let _guard = crate::machine_trust::persistence_mutex()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut store = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
-        store.accept_inbound(
+        let inbound = store.accept_inbound(
             &source.source_desktop_id,
             &secret_hash,
             &source.account_uid,
@@ -86,10 +92,12 @@ pub(super) async fn bootstrap_lan_trust(
         store
             .save(&store_path)
             .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    }
+        inbound.expires_at_unix_ms
+    };
 
     Ok(Json(LanBootstrapResponse {
         ca_certificate_pem: identity.ca_certificate_pem,
+        expires_at_unix_ms,
     }))
 }
 
@@ -124,12 +132,15 @@ fn prepare_bootstrap_request(
 
 /// Consumes a target's bootstrap acknowledgement, moving the pending
 /// candidate into a confirmed outbound grant pinned to the target's
-/// attested CA certificate.
+/// attested CA certificate and expiry. `candidate_secret` must be the exact
+/// value this request sent (see `MachineTrustStore::confirm_outbound`'s own
+/// doc comment for why matching by target alone is not safe against a
+/// stale/late ack).
 fn confirm_bootstrap_response(
     store_path: &std::path::Path,
     target_desktop_id: &str,
+    candidate_secret: &str,
     response: LanBootstrapResponse,
-    now_ms: u64,
 ) -> Result<crate::machine_trust::OutboundGrant, String> {
     let _guard = crate::machine_trust::persistence_mutex()
         .lock()
@@ -137,17 +148,23 @@ fn confirm_bootstrap_response(
     let mut store = crate::machine_trust::MachineTrustStore::load_fail_closed(store_path)?;
     let grant = store.confirm_outbound(
         target_desktop_id,
+        candidate_secret,
         Some(response.ca_certificate_pem),
-        now_ms,
+        response.expires_at_unix_ms,
     )?;
     store.save(store_path)?;
     Ok(grant)
 }
 
 /// Initiates outbound trust with `target_desktop_id`, over the unchanged
-/// relay/invoke_desktop transport - not LAN, not Bonjour. Nothing decides
-/// *when* to call this yet (that is Bonjour discovery's job, still to
-/// come); this is the mechanism a future caller drives.
+/// *relay-only* `invoke_relay_desktop` primitive - deliberately never
+/// `invoke_desktop`, which will attempt LAN once that path is real.
+/// Bootstrap and renewal are the control exchange that establishes LAN
+/// trust in the first place; they must not themselves risk depending on an
+/// as-yet-unestablished (or stale) LAN route, which is what routing them
+/// through the general LAN-preferring seam would eventually do. Nothing
+/// decides *when* to call this yet (that is Bonjour discovery's job, still
+/// to come); this is the mechanism a future caller drives.
 pub(crate) async fn request_bootstrap(
     state: Arc<AppState>,
     target_desktop_id: String,
@@ -168,33 +185,31 @@ pub(crate) async fn request_bootstrap(
         now_ms,
     )?;
 
-    let routed = super::invoke_desktop::invoke_desktop(
-        state.clone(),
-        target_desktop_id.clone(),
-        "POST".to_string(),
-        "/v1/lan-routing/bootstrap".to_string(),
-        serde_json::json!({ "candidateSecret": candidate_secret }),
-    )
-    .await?;
+    let response = state
+        .invoke_relay_desktop(
+            target_desktop_id.clone(),
+            "POST".to_string(),
+            "/v1/lan-routing/bootstrap".to_string(),
+            serde_json::json!({ "candidateSecret": candidate_secret }),
+        )
+        .await?;
 
-    if routed.response.status != 200 {
-        return Err(routed.response.error.unwrap_or_else(|| {
+    if response.status != 200 {
+        return Err(response.error.unwrap_or_else(|| {
             format!(
                 "LAN bootstrap of {target_desktop_id} failed with HTTP {}",
-                routed.response.status
+                response.status
             )
         }));
     }
     let body: LanBootstrapResponse = serde_json::from_value(
-        routed
-            .response
+        response
             .body
             .ok_or_else(|| "bootstrap acknowledgement had no body".to_string())?,
     )
     .map_err(|error| format!("invalid bootstrap acknowledgement: {error}"))?;
 
-    let now_ms = crate::machine_trust::unix_time_ms()?;
-    confirm_bootstrap_response(&store_path, &target_desktop_id, body, now_ms)
+    confirm_bootstrap_response(&store_path, &target_desktop_id, &candidate_secret, body)
 }
 
 #[cfg(test)]
@@ -228,13 +243,32 @@ mod tests {
             .expect("caCertificatePem in response");
         assert!(ca_certificate_pem.starts_with("-----BEGIN CERTIFICATE-----"));
 
-        // The target now verifies the source's secret.
+        // The target now verifies the source's secret, but only under the
+        // account it was actually bootstrapped under.
         let store_path = target_state.config().machine_trust_store_path().unwrap();
         let store =
             crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path).unwrap();
         let now_ms = crate::machine_trust::unix_time_ms().unwrap();
-        assert!(store.verify_inbound("desktop-source", "the-candidate-secret", now_ms));
-        assert!(!store.verify_inbound("desktop-source", "wrong-secret", now_ms));
+        assert!(store.verify_inbound(
+            "desktop-source",
+            "the-candidate-secret",
+            Some("uid-1"),
+            now_ms
+        ));
+        assert!(!store.verify_inbound(
+            "desktop-source",
+            "wrong-secret",
+            Some("uid-1"),
+            now_ms
+        ));
+        assert!(
+            !store.verify_inbound("desktop-source", "the-candidate-secret", Some("uid-2"), now_ms),
+            "a grant minted under one account must not verify under another"
+        );
+        assert!(
+            !store.verify_inbound("desktop-source", "the-candidate-secret", None, now_ms),
+            "signed out (no current account) must never verify anything"
+        );
     }
 
     /// The source side's two halves, independent of any network call:
@@ -258,14 +292,16 @@ mod tests {
             "a retry before acknowledgement must resend the same candidate"
         );
 
+        let target_attested_expiry = now_ms + 12 * 60 * 60 * 1000;
         let grant = confirm_bootstrap_response(
             &store_path,
             "desktop-target",
+            &first_secret,
             LanBootstrapResponse {
                 ca_certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----"
                     .to_string(),
+                expires_at_unix_ms: target_attested_expiry,
             },
-            now_ms,
         )
         .expect("confirm");
 
@@ -274,12 +310,48 @@ mod tests {
             grant.trust_anchor_pem.as_deref(),
             Some("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----")
         );
+        assert_eq!(
+            grant.expires_at_unix_ms, target_attested_expiry,
+            "the target's own attested expiry must be used verbatim, not recomputed at receipt"
+        );
 
         let store = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
             .expect("reload store");
         assert!(store
-            .outbound_grant_for("desktop-target", now_ms)
+            .outbound_grant_for("desktop-target", Some("uid-1"), now_ms)
             .is_some());
+    }
+
+    /// A stale/late acknowledgement carrying an old secret must never
+    /// confirm a newer pending request for the same target - proven
+    /// directly against the store, matching `confirm_outbound`'s own
+    /// contract.
+    #[test]
+    fn a_stale_ack_with_the_wrong_secret_does_not_confirm_a_newer_pending_request() {
+        let store_path = crate::test_paths::unique_test_path("lan-bootstrap-stale-ack-store");
+        let now_ms = 1_000;
+
+        prepare_bootstrap_request(&store_path, "desktop-target", "uid-1", "development", now_ms)
+            .expect("prepare");
+
+        let error = confirm_bootstrap_response(
+            &store_path,
+            "desktop-target",
+            "an-old-secret-from-a-previous-request",
+            LanBootstrapResponse {
+                ca_certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----"
+                    .to_string(),
+                expires_at_unix_ms: now_ms + 1000,
+            },
+        )
+        .expect_err("a mismatched secret must refuse to confirm");
+        assert!(error.contains("no matching pending bootstrap"), "{error}");
+
+        // The genuinely pending request must be untouched by the rejected ack.
+        let store = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+            .expect("reload store");
+        assert_eq!(store.pending.len(), 1);
+        assert!(store.outbound.is_empty());
     }
 
     /// The extractor gate itself: a dispatch with no relay-attested source

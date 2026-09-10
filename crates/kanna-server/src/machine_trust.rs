@@ -184,20 +184,37 @@ impl MachineTrustStore {
     }
 
     /// Moves a pending bootstrap to a confirmed outbound grant once the
-    /// relay attests the addressed target accepted it. Idempotent:
-    /// acknowledging the same pending target twice just re-confirms the same
-    /// grant rather than erroring or duplicating it.
+    /// target acknowledges it. Matches on the *exact* `candidate_secret`
+    /// this specific request sent, not merely `target_desktop_id`: an
+    /// account transition between preparing a request and its acknowledgement
+    /// arriving could otherwise let a stale/late ack wrongly confirm an
+    /// unrelated, newer pending request for the same target - the secret is
+    /// this request's own nonce and a stale ack simply will not match the
+    /// pending record a newer request created. Takes the target's own
+    /// attested `expires_at_unix_ms` (returned by its `accept_inbound`
+    /// call) rather than computing a fresh one from receipt time, so a late
+    /// ack cannot silently extend the effective lease beyond what the
+    /// target actually granted.
     pub fn confirm_outbound(
         &mut self,
         target_desktop_id: &str,
+        candidate_secret: &str,
         trust_anchor_pem: Option<String>,
-        now_ms: u64,
+        expires_at_unix_ms: u64,
     ) -> Result<OutboundGrant, String> {
         let index = self
             .pending
             .iter()
-            .position(|pending| pending.target_desktop_id == target_desktop_id)
-            .ok_or_else(|| format!("no pending bootstrap for target {target_desktop_id}"))?;
+            .position(|pending| {
+                pending.target_desktop_id == target_desktop_id
+                    && pending.candidate_secret == candidate_secret
+            })
+            .ok_or_else(|| {
+                format!(
+                    "no matching pending bootstrap for target {target_desktop_id} - this \
+                     acknowledgement does not match the current request for it"
+                )
+            })?;
         let pending = self.pending.remove(index);
         let grant = OutboundGrant {
             target_desktop_id: pending.target_desktop_id,
@@ -206,7 +223,7 @@ impl MachineTrustStore {
             account_uid: pending.account_uid,
             environment: pending.environment,
             issued_at_unix_ms: pending.created_at_unix_ms,
-            expires_at_unix_ms: now_ms.saturating_add(LEASE_MS),
+            expires_at_unix_ms,
         };
         self.outbound
             .retain(|existing| existing.target_desktop_id != grant.target_desktop_id);
@@ -214,17 +231,25 @@ impl MachineTrustStore {
         Ok(grant)
     }
 
-    /// The unexpired outbound grant for a target, or `None` if there is none
-    /// or it has expired. Expiry is checked on every lookup rather than
-    /// pruned on a timer, so a store nobody has written to in days still
-    /// fails closed correctly.
+    /// The unexpired outbound grant for a target under the *currently*
+    /// authenticated account, or `None` if there is none, it has expired, or
+    /// `current_account_uid` is `None` (signed out) or does not match the
+    /// grant's own account. Checked fresh on every lookup rather than relied
+    /// on solely via periodic reconciliation - a record `retain_account`
+    /// has not yet pruned (a missed reconciliation pass, a save that failed,
+    /// a restart before the first one ran) must still never be usable once
+    /// the account it was minted under is no longer the current one.
     pub fn outbound_grant_for(
         &self,
         target_desktop_id: &str,
+        current_account_uid: Option<&str>,
         now_ms: u64,
     ) -> Option<&OutboundGrant> {
+        let current_account_uid = current_account_uid?;
         self.outbound.iter().find(|grant| {
-            grant.target_desktop_id == target_desktop_id && grant.expires_at_unix_ms > now_ms
+            grant.target_desktop_id == target_desktop_id
+                && grant.account_uid == current_account_uid
+                && grant.expires_at_unix_ms > now_ms
         })
     }
 
@@ -240,25 +265,42 @@ impl MachineTrustStore {
         account_uid: &str,
         environment: &str,
         now_ms: u64,
-    ) {
+    ) -> InboundGrant {
         self.inbound
             .retain(|existing| existing.source_desktop_id != source_desktop_id);
-        self.inbound.push(InboundGrant {
+        let grant = InboundGrant {
             source_desktop_id: source_desktop_id.to_string(),
             secret_hash: secret_hash.to_string(),
             account_uid: account_uid.to_string(),
             environment: environment.to_string(),
             issued_at_unix_ms: now_ms,
             expires_at_unix_ms: now_ms.saturating_add(LEASE_MS),
-        });
+        };
+        self.inbound.push(grant.clone());
+        grant
     }
 
-    /// Verifies a caller-presented secret against an unexpired inbound
-    /// grant, in constant time. Reuses `pairing::hash_device_secret` so the
-    /// two stores can never diverge on hash algorithm.
-    pub fn verify_inbound(&self, source_desktop_id: &str, secret: &str, now_ms: u64) -> bool {
+    /// Verifies a caller-presented secret against an unexpired inbound grant
+    /// bound to the *currently* authenticated account, in constant time.
+    /// Reuses `pairing::hash_device_secret` so the two stores can never
+    /// diverge on hash algorithm. `current_account_uid: None` (signed out)
+    /// never verifies anything, and a grant whose own account no longer
+    /// matches the current one is treated exactly like an absent grant -
+    /// the same at-point-of-use enforcement as `outbound_grant_for`.
+    pub fn verify_inbound(
+        &self,
+        source_desktop_id: &str,
+        secret: &str,
+        current_account_uid: Option<&str>,
+        now_ms: u64,
+    ) -> bool {
+        let Some(current_account_uid) = current_account_uid else {
+            return false;
+        };
         let Some(grant) = self.inbound.iter().find(|grant| {
-            grant.source_desktop_id == source_desktop_id && grant.expires_at_unix_ms > now_ms
+            grant.source_desktop_id == source_desktop_id
+                && grant.account_uid == current_account_uid
+                && grant.expires_at_unix_ms > now_ms
         }) else {
             return false;
         };
@@ -433,22 +475,48 @@ mod tests {
             .expect("pending create");
 
         let confirmed = store
-            .confirm_outbound("desktop-b", Some("pem-1".to_string()), 1_500)
+            .confirm_outbound("desktop-b", "secret", Some("pem-1".to_string()), 50_000)
             .expect("first confirm");
         assert!(store.pending.is_empty());
         assert_eq!(store.outbound.len(), 1);
         assert_eq!(confirmed.bearer_secret, "secret");
-        assert_eq!(confirmed.expires_at_unix_ms, 1_500 + LEASE_MS);
+        assert_eq!(
+            confirmed.expires_at_unix_ms, 50_000,
+            "the target's attested expiry must be used verbatim"
+        );
 
         // The pending record is gone once confirmed, so a duplicated
         // acknowledgement fails rather than fabricating a second grant from
         // nothing; the caller treats this as "already confirmed" and leaves
         // the existing outbound grant alone instead of erroring the request.
         assert!(
-            store.confirm_outbound("desktop-b", None, 2_000).is_err(),
+            store
+                .confirm_outbound("desktop-b", "secret", None, 2_000)
+                .is_err(),
             "confirming with no matching pending record must fail rather than fabricate one"
         );
         assert_eq!(store.outbound.len(), 1);
+    }
+
+    #[test]
+    fn confirm_outbound_refuses_a_secret_that_does_not_match_the_pending_request() {
+        let mut store = MachineTrustStore::default();
+        store
+            .pending_or_create(
+                "desktop-b",
+                "uid-1",
+                "development",
+                || Ok("real-secret".to_string()),
+                1_000,
+            )
+            .expect("pending create");
+
+        let error = store
+            .confirm_outbound("desktop-b", "stale-secret-from-another-request", None, 2_000)
+            .expect_err("a mismatched secret must not confirm an unrelated pending request");
+        assert!(error.contains("no matching pending bootstrap"), "{error}");
+        assert_eq!(store.pending.len(), 1, "the real pending request must survive");
+        assert!(store.outbound.is_empty());
     }
 
     #[test]
@@ -464,7 +532,7 @@ mod tests {
             )
             .expect("first pending");
         store
-            .confirm_outbound("desktop-b", None, 1_000)
+            .confirm_outbound("desktop-b", "first-secret", None, 1_000 + LEASE_MS)
             .expect("first confirm");
 
         // A fresh bootstrap for the same target (e.g. after the first grant
@@ -480,7 +548,7 @@ mod tests {
             )
             .expect("second pending");
         let renewed = store
-            .confirm_outbound("desktop-b", None, 5_000)
+            .confirm_outbound("desktop-b", "second-secret", None, 5_000 + LEASE_MS)
             .expect("second confirm");
 
         assert_eq!(store.outbound.len(), 1, "must not accumulate duplicate grants");
@@ -500,20 +568,32 @@ mod tests {
             )
             .expect("pending create");
         store
-            .confirm_outbound("desktop-b", None, 1_000)
+            .confirm_outbound("desktop-b", "secret", None, 1_000 + LEASE_MS)
             .expect("confirm");
 
-        assert!(store.outbound_grant_for("desktop-b", 1_000).is_some());
+        assert!(store
+            .outbound_grant_for("desktop-b", Some("uid-1"), 1_000)
+            .is_some());
         let just_before_expiry = 1_000 + LEASE_MS - 1;
         assert!(store
-            .outbound_grant_for("desktop-b", just_before_expiry)
+            .outbound_grant_for("desktop-b", Some("uid-1"), just_before_expiry)
             .is_some());
         let after_expiry = 1_000 + LEASE_MS;
         assert!(
             store
-                .outbound_grant_for("desktop-b", after_expiry)
+                .outbound_grant_for("desktop-b", Some("uid-1"), after_expiry)
                 .is_none(),
             "an expired grant must not be returned as usable"
+        );
+        assert!(
+            store
+                .outbound_grant_for("desktop-b", Some("uid-2"), 1_000)
+                .is_none(),
+            "a grant minted under one account must not be returned as usable under another"
+        );
+        assert!(
+            store.outbound_grant_for("desktop-b", None, 1_000).is_none(),
+            "signed out (no current account) must never see an outbound grant"
         );
     }
 
@@ -523,12 +603,20 @@ mod tests {
         let hash = pairing::hash_device_secret("real-secret");
         store.accept_inbound("desktop-a", &hash, "uid-1", "development", 1_000);
 
-        assert!(store.verify_inbound("desktop-a", "real-secret", 1_000));
-        assert!(!store.verify_inbound("desktop-a", "wrong-secret", 1_000));
-        assert!(!store.verify_inbound("desktop-unknown", "real-secret", 1_000));
+        assert!(store.verify_inbound("desktop-a", "real-secret", Some("uid-1"), 1_000));
+        assert!(!store.verify_inbound("desktop-a", "wrong-secret", Some("uid-1"), 1_000));
+        assert!(!store.verify_inbound("desktop-unknown", "real-secret", Some("uid-1"), 1_000));
         assert!(
-            !store.verify_inbound("desktop-a", "real-secret", 1_000 + LEASE_MS + 1),
+            !store.verify_inbound("desktop-a", "real-secret", Some("uid-1"), 1_000 + LEASE_MS + 1),
             "an expired inbound grant must stop verifying"
+        );
+        assert!(
+            !store.verify_inbound("desktop-a", "real-secret", Some("uid-2"), 1_000),
+            "a grant minted under one account must not verify under another"
+        );
+        assert!(
+            !store.verify_inbound("desktop-a", "real-secret", None, 1_000),
+            "signed out (no current account) must never verify anything"
         );
     }
 
@@ -556,7 +644,7 @@ mod tests {
             )
             .expect("pending for uid-2");
         store
-            .confirm_outbound("desktop-b", None, 1_000)
+            .confirm_outbound("desktop-b", "secret-1", None, 1_000 + LEASE_MS)
             .expect("confirm uid-1 outbound");
 
         let changed = store.retain_account(Some("uid-1"));

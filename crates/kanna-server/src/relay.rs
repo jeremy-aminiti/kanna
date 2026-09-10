@@ -108,6 +108,7 @@ fn apply_relay_authentication(
     publisher: &mut PublisherState,
     authenticated_user_id: &mut Option<String>,
     routing_generation: &mut u64,
+    desktop_routing_version: &mut u64,
 ) {
     let relay_client::RelayAuthentication {
         user_id,
@@ -115,12 +116,13 @@ fn apply_relay_authentication(
     } = authentication;
     log::info!("Relay authenticated as user {user_id}");
     reconcile_machine_trust_for_account(http_state, Some(&user_id));
+    http_state.set_authenticated_account_uid(Some(user_id.clone()));
     *authenticated_user_id = Some(user_id);
-    if capabilities
+    *desktop_routing_version = capabilities
         .desktop_routing
         .as_ref()
-        .is_some_and(|capability| capability.version >= 1)
-    {
+        .map_or(0, |capability| capability.version);
+    if *desktop_routing_version >= 1 {
         *routing_generation = http_state.set_desktop_routing_available(true);
     } else {
         http_state.set_desktop_routing_unavailable(
@@ -268,16 +270,27 @@ async fn run_relay_loop_with_timing(
         } else {
             relay_client::AccountAuthProbe::Unavailable
         };
-        let use_anonymous_push = anonymous_identity_available
-            && (config.desktop_secret.is_none()
-                || account_auth == relay_client::AccountAuthProbe::Rejected);
-        if use_anonymous_push {
-            // No configured credential, or relay authoritatively rejected the
-            // one this desktop has - either way, this desktop is not signed
-            // into any account right now. Automatic same-account LAN trust
-            // must not survive that: clear it rather than leave it to expire
-            // on its own lease.
+        // No configured credential, or relay authoritatively rejected the one
+        // this desktop has - either way, this desktop is not signed into any
+        // account right now. Automatic same-account LAN trust must not
+        // survive that: clear it rather than leave it to expire on its own
+        // lease. This must not be gated on anonymous_identity_available -
+        // that condition only decides *how* this loop proceeds next
+        // (anonymous push vs. falling through to a normal connection
+        // attempt), and gating the clear on it as well would silently skip
+        // reconciliation on a signed-out desktop whose anonymous identity
+        // also happens to be unavailable. An ordinary outage (relay
+        // unreachable) leaves account_auth as Unavailable, not Rejected, and
+        // a configured desktop_secret means this branch is not taken at
+        // all - either way this must retain eligible unexpired leases.
+        let signed_out_or_rejected = config.desktop_secret.is_none()
+            || account_auth == relay_client::AccountAuthProbe::Rejected;
+        if signed_out_or_rejected {
             reconcile_machine_trust_for_account(&http_state, None);
+            http_state.set_authenticated_account_uid(None);
+        }
+        let use_anonymous_push = anonymous_identity_available && signed_out_or_rejected;
+        if use_anonymous_push {
             run_anonymous_push_loop(
                 &config,
                 Arc::clone(&http_state),
@@ -350,6 +363,14 @@ async fn run_relay_loop_with_timing(
         let publication_enabled = cloud_task_publication_enabled(config.desktop_secret.as_deref());
         let mut authenticated_user_id: Option<String> = None;
         let mut routing_generation = 0;
+        // The negotiated desktopRouting capability version for *this*
+        // connection - not merely "some v1+ session was once seen". A
+        // sourceDesktopId is trustworthy only when the relay serving this
+        // exact connection actually attested to stamping it (v2+); an older
+        // relay forwards a sender's frame unchanged, so the field's mere
+        // presence proves nothing about a v1 connection - it could be
+        // whatever the sender itself wrote into its own message.
+        let mut desktop_routing_version: u64 = 0;
         if let Some(authentication) = initial_authentication {
             apply_relay_authentication(
                 authentication,
@@ -357,6 +378,7 @@ async fn run_relay_loop_with_timing(
                 &mut publisher,
                 &mut authenticated_user_id,
                 &mut routing_generation,
+                &mut desktop_routing_version,
             );
         }
         let mut disconnect_reason = "desktop relay connection ended".to_string();
@@ -858,6 +880,19 @@ async fn run_relay_loop_with_timing(
                             RelayInvoke::Http { method, path, body } => {
                                 log::info!("HTTP invoke #{}: {} {}", id, method, path);
 
+                                // Trust the frame's sourceDesktopId only when
+                                // *this connection* negotiated desktopRouting
+                                // v2+. An older relay forwards a sender's
+                                // frame unchanged, so on a v1 connection the
+                                // field's mere presence proves nothing - it
+                                // could be whatever the sender itself wrote
+                                // into its own message. Discard it rather
+                                // than propagate an unattested claim.
+                                let attested_source_desktop_id = if desktop_routing_version >= 2 {
+                                    source_desktop_id.clone()
+                                } else {
+                                    None
+                                };
                                 if let Err(e) = dispatch_relay_http_invoke(
                                     Arc::clone(&http_state),
                                     Arc::clone(&sink),
@@ -868,7 +903,7 @@ async fn run_relay_loop_with_timing(
                                         path,
                                         body,
                                         authenticated_user_id: authenticated_user_id.clone(),
-                                        source_desktop_id: source_desktop_id.clone(),
+                                        source_desktop_id: attested_source_desktop_id,
                                     },
                                 )
                                 .await
@@ -891,6 +926,7 @@ async fn run_relay_loop_with_timing(
                                 &mut publisher,
                                 &mut authenticated_user_id,
                                 &mut routing_generation,
+                                &mut desktop_routing_version,
                             );
                         }
                         RelayMessage::TaskSnapshotAck {
@@ -4094,6 +4130,145 @@ mod tests {
 
         relay_server.await.expect("relay server");
         let _ = std::fs::remove_file(database_path);
+    }
+
+    /// A relay that only ever negotiated desktopRouting v1 (or none at all)
+    /// forwards a sender's frame unchanged - it does not stamp or sanitize
+    /// sourceDesktopId itself. A caller-forged sourceDesktopId field on such
+    /// a connection must therefore never be trusted: this proves it through
+    /// the real receive/dispatch path (a fake relay sends the actual invoke
+    /// frame, this desktop's real relay loop and router process it) rather
+    /// than by constructing an AuthenticatedHttpInvoke marker directly - the
+    /// bootstrap endpoint's own RelayAttestedSource gate is the observable:
+    /// it must refuse the forged claim exactly as it would refuse one that
+    /// was never sent at all.
+    #[tokio::test]
+    async fn a_v1_relay_forwarding_a_forged_source_desktop_id_is_not_trusted() {
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind relay stand-in");
+        let relay_address = relay_listener.local_addr().expect("relay address");
+        let unique = format!(
+            "relay-v1-forged-source-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let database_path = crate::db::Db::test_db_path(&unique);
+        let isolated_dir = crate::test_paths::unique_test_dir(&unique);
+        let config = Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: isolated_dir.join("daemon").to_string_lossy().into_owned(),
+            db_path: database_path.clone(),
+            kanna_cli_path: None,
+            desktop_id: "desktop-target".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Target Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: isolated_dir
+                .join("pairings.json")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let database = crate::db::Db::open_for_tests(&database_path).expect("open test db");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+
+        let relay_server = tokio::spawn(async move {
+            let (stream, _) = relay_listener.accept().await.expect("accept relay");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept websocket");
+            let _auth = socket
+                .next()
+                .await
+                .expect("auth message")
+                .expect("auth frame");
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_ok",
+                        "userId": "operator-1",
+                        "capabilities": {
+                            "desktopRouting": { "version": 1 }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send auth ack");
+
+            // A well-behaved sender never populates this field itself (see
+            // relay_client.rs's own serialization test); a forged one here
+            // stands in for either a hostile client bypassing this crate's
+            // own sender entirely, or (equivalently, from the receiver's
+            // point of view) an old relay build that has not yet started
+            // sanitizing it.
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "invoke",
+                        "id": "forged-source-probe",
+                        "desktopId": "desktop-target",
+                        "sourceDesktopId": "desktop-attacker-forged",
+                        "method": "POST",
+                        "path": "/v1/lan-routing/bootstrap",
+                        "body": { "candidateSecret": "whatever" }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send forged-source invoke");
+
+            let response = loop {
+                let TungsteniteMessage::Text(text) = socket
+                    .next()
+                    .await
+                    .expect("relay socket closed before a response arrived")
+                    .expect("relay frame")
+                else {
+                    continue;
+                };
+                let value: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse relay message");
+                if value["type"] == "response" && value["id"] == "forged-source-probe" {
+                    break value;
+                }
+            };
+            assert_eq!(
+                response["status"], 401,
+                "a v1-negotiated connection's forged sourceDesktopId must not satisfy \
+                 RelayAttestedSource: {response:?}"
+            );
+        });
+
+        let relay_loop = run_relay_loop(config, database, Arc::clone(&state));
+        tokio::pin!(relay_loop);
+        let wait_for_server = async {
+            relay_server.await.expect("relay server assertions");
+        };
+        tokio::pin!(wait_for_server);
+        tokio::select! {
+            _ = &mut wait_for_server => {}
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        };
+
+        let _ = std::fs::remove_file(database_path);
+        let _ = std::fs::remove_dir_all(isolated_dir);
     }
 
     /// Drives the real `observer_loop` against a fake daemon connection and
