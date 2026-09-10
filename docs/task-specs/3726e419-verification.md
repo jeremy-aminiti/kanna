@@ -1,10 +1,16 @@
 # Remote task graph verification — 3726e419
 
-Recorded 2026-09-09 from commit `006dc35a3ca0e14ef682850d122127723786b125` plus the verification additions in this task.
+Recorded 2026-09-09. Historical evidence below retains the SHA that produced it;
+the published PR head is `9d834b3c920a07b1b0dbc3338c716b45cef651e9`.
 
 ## Current-head disposition (2026-09-09)
 
-The worktree is clean at `88e961be0dbb182cc8ee6a30225ed5075bffe078`.
+The reviewed committed tip was `3ccd9a9606ddc01b9fc57ed50fa3fde1df8a07ce`.
+Publication rebased it onto current `origin/main`, producing
+`9d834b3c920a07b1b0dbc3338c716b45cef651e9`. The final coverage commit has the
+same stable patch id on both tips; the trees are intentionally different because
+of that rebase and its compatible conflict resolutions.
+
 The production two-instance WebDriver case introduced in `ab418b56` is valid
 remote-projection evidence: it selects an owner task from the viewer, renders
 the owner graph, invokes the real viewer Open in IDE shortcut, and asserts the
@@ -32,31 +38,42 @@ loses its result is not evidence of a pass.
 
 ## Known incomplete checks
 
-- Released revision-round-4 canonical gate: `CARGO_BUILD_JOBS=2 ./kd test all`
+- Latest revision-round-4 canonical gate: `CARGO_BUILD_JOBS=2 ./kd test all`
   exited **1**. Full stdout/stderr is retained at
-  `.tmp/kd-test-all-revision4.log`; the owning shell's actual exit status is
-  `.tmp/kd-test-all-revision4.exit`. Its first failing target was the unrelated
+  `task-3726e419-9/.tmp/kd-test-all-revision4.log`; the owning shell's actual
+  exit status is `task-3726e419-9/.tmp/kd-test-all-revision4.exit`. Its first failing target was
   desktop mock E2E `tests/e2e/mock/modal-tear-off.test.ts`, whose
   `modal tear-off` assertion expected repo `modal-tear-off` but received
-  `modal-tear-off-startup`; the same run later also failed the unrelated
+  `modal-tear-off-startup`; the same run later also failed
   `tests/e2e/mock/terminal-output-performance.test.ts` because the terminal
-  buffer was not registered. Compared with this revision's base
-  `f269d4b00`, the branch changes only this verification document, so neither
-  failing test nor its product/test implementation is branch-caused. No source
-  change was made and this gate is not represented as passing.
-- Current-head canonical rerun (`CARGO_BUILD_JOBS=2 ./kd test all`) fixed the
-  branch-caused route-audit omission below and then failed only in the
+  buffer was not registered. These failures are **unattributed**: the complete
+  PR diff includes the modal tear-off implementation/test and the
+  `TerminalView.vue`/`useTerminal.ts` runtime path. The terminal-output test
+  file is unchanged, but its relevant runtime is not. No source change was
+  made and this gate is not represented as passing or pre-existing.
+- An **older** current-head canonical rerun (`CARGO_BUILD_JOBS=2 ./kd test all`)
+  fixed the branch-caused route-audit omission below and then failed only in the
   independent `kanna-worker` default-database baseline: `config::tests::the_default_database_is_the_workers_own_under_its_data_dir` and
   `unit::tests::the_unit_launches_against_the_resolved_database` received this
   worktree's `build.kanna/kanna-wt-task-3726e419-7.db` instead of
   `/srv/worker/kanna-worker.db`. The full output is retained at
   `.tmp/kd-test-all-current-head-rerun.log`. This task does not modify the
-  worker default-DB implementation.
+  worker default-DB implementation. This historical worker result does not
+  supersede or explain the later modal/terminal failures above.
 - The first current-head canonical attempt found and the task fixed one
   branch-caused failure: the new `GET /v1/tasks/{task_id}/graph` registration
   was absent from the LAN-auth route audit manifest. The rerun passed the
   server binary suite, including `every_registered_http_route_denies_unpaired_lan_by_default`
   (**1,417 passed, 0 failed**).
+- The final keyboard native control did **not** execute its test body. Its
+  command was `CARGO_BUILD_JOBS=1 pnpm --dir apps/desktop exec tsx
+  tests/e2e/run.ts tests/e2e/mock/keyboard-shortcuts.test.ts`; the isolated
+  runner was bound to task-11's tmux session
+  `kanna-e2e-task-3726e419-11-51451-1789012703356`, owner URL
+  `http://172.31.32.99:37061`, and assigned WebDriver URL
+  `http://127.0.0.1:21474`. Ghostty's pinned-source clone failed first with
+  exit 128 (`curl 56`, connection reset). Therefore there is no test count,
+  native-window identity, or successful keyboard-native result to claim.
 - The earlier full remote-E2E wrapper reported `terminal-flow.e2e.test.ts` exit 1, but its producer assertion was truncated. Its cause is **unknown**.
 - The unfiltered `task-listing-actions.e2e.test.ts` run exited 1 (5 failed, 3 passed): terminal `SCRIPT_READY` timeout; short-cursor format mismatch; relay task-events 404; singleton refusal text mismatch; and merge singleton 503. Their branch causality is **unknown**. No waiver is implied.
 - `pnpm exec tsc --noEmit` from repository root exited 1 because no root `tsconfig.json` was selected; it printed TypeScript help and is not a successful typecheck. An earlier Vue typecheck wrapper also failed before execution due to an incorrect redirection path.
@@ -65,3 +82,40 @@ loses its result is not evidence of a pass.
 ## Visual verification
 
 The refreshed focused two-instance native WebDriver captures rendered the expected viewer UI: `remote-graph.png` shows the remote marker and the owner-created `remote graph visual proof` commit; `remote-local-action-refusal.png` shows the translated “This action is not available for a task on another machine.” warning. The test settles the WebDriver-only toast enter transition before capture; it does not alter production behavior. The current captures have the canonical native identity preflight described above.
+
+## Deferred focused controls (do not run before `RESUME GRAPH FOCUSED VERIFICATION`)
+
+The unresolved full-gate failures require paired controls on the default branch
+and the published PR head. Use fresh, isolated worktrees and retain one log and
+an explicit shell-exit file per target/ref; do not reuse the historical full-gate
+result as either control.
+
+```sh
+PR_HEAD=9d834b3c920a07b1b0dbc3338c716b45cef651e9
+MAIN_HEAD=$(git rev-parse origin/main)
+MAIN_CONTROL="$PWD/.tmp/3726e419-main-control"
+git worktree add --detach "$MAIN_CONTROL" "$MAIN_HEAD"
+
+for CONTROL in "$MAIN_CONTROL" "$PWD"; do
+  LABEL=$(test "$CONTROL" = "$MAIN_CONTROL" && printf main || printf pr-head)
+  (
+    cd "$CONTROL/apps/desktop"
+    CARGO_BUILD_JOBS=1 pnpm exec tsx tests/e2e/run.ts \
+      tests/e2e/mock/modal-tear-off.test.ts
+  ) 2>&1 | tee "$PWD/.tmp/3726e419-${LABEL}-modal-tear-off.log"
+  printf '%s\n' "${pipestatus[1]}" > "$PWD/.tmp/3726e419-${LABEL}-modal-tear-off.exit"
+done
+```
+
+Repeat that exact loop with `tests/e2e/mock/terminal-output-performance.test.ts`
+and `terminal-output-performance` in the two artifact names. Compare the two
+actual exits and the failing assertion/output before making any causality claim.
+
+For keyboard-native proof, use the same PR-head isolation and command above
+only after first recording the runner's task worktree, tmux session, assigned
+WebDriver URL, desktop PID/start-time/executable, and the bound-session native
+title. The required title is exactly `Kanna — task 3726e419 · <worktree-branch>
+(<version> @ <short-head>)`; abort before input if any identity value differs.
+After the target exits, record its test count and shell exit in paired `.log` /
+`.exit` files. No native launch, build, or test execution is authorized until
+the stated release phrase.
