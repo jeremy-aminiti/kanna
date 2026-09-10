@@ -1499,11 +1499,33 @@ pub(crate) async fn handle_command(
             let writer_id = Arc::as_ptr(&writer) as usize;
             let lifecycle = sessions.lock().await.lifecycle_lock(&session_id);
             let _lifecycle_guard = lifecycle.lock().await;
-            let resize = session_sizes
-                .lock()
-                .await
-                .get_mut(&session_id)
-                .and_then(|state| state.activate(writer_id));
+            let trace_geometry = std::env::var_os("KANNA_E2E_TRACE_TERMINAL_GEOMETRY").is_some();
+            let (resize, trace) = {
+                let mut sizes = session_sizes.lock().await;
+                let Some(state) = sizes.get_mut(&session_id) else {
+                    if trace_geometry {
+                        log::warn!("[e2e-terminal-geometry] daemon active session={session_id} writer={writer_id} state=missing");
+                    }
+                    return;
+                };
+                let before = state.viewers.get(&writer_id).map(|viewer| {
+                    (
+                        viewer.viewer_id.clone(),
+                        viewer.cols,
+                        viewer.rows,
+                        viewer.visible,
+                        viewer.active,
+                    )
+                });
+                let resize = state.activate(writer_id);
+                (resize, (before, state.controller, state.last_applied))
+            };
+            if trace_geometry {
+                log::warn!(
+                    "[e2e-terminal-geometry] daemon active session={session_id} writer={writer_id} viewer={:?} controller={:?} last_applied={:?} resize={:?}",
+                    trace.0, trace.1, trace.2, resize
+                );
+            }
             if let Some((cols, rows)) = resize {
                 if let Some(session) = session_handle(&sessions, &session_id).await {
                     if session.resize(cols, rows).await.is_ok() {

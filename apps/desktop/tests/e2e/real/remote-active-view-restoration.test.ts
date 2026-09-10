@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -39,6 +39,11 @@ interface FocusObservation {
   nativeVisibleAfter: boolean | null;
   nativeVisibleBefore: boolean | null;
   terminalHasFocus: boolean;
+}
+
+interface TerminalControlTrace {
+  at: number;
+  frame: Record<string, unknown>;
 }
 
 let fixtureRepoPath = "";
@@ -169,7 +174,7 @@ async function focusTerminal(
   client: WebDriverClient,
   ownerTaskId: string,
   focusLabel: string,
-): Promise<void> {
+): Promise<FocusObservation> {
   const focusState = await client.executeAsync<FocusObservation>(`
     const done = arguments[arguments.length - 1];
     void (async () => {
@@ -255,6 +260,53 @@ async function focusTerminal(
     await capture(client, `foreground-focus-failure-${focusLabel}.png`);
     throw new Error(`foreground terminal focus was not established: ${JSON.stringify(focusState)}`);
   }
+  return focusState;
+}
+
+async function installTerminalControlTrace(client: WebDriverClient): Promise<void> {
+  await client.executeSync(`
+    const traceKey = "__KANNA_E2E_ACTIVE_VIEW_CONTROL_TRACE__";
+    if (window[traceKey]) return;
+    const originalSend = WebSocket.prototype.send;
+    const frames = [];
+    Object.defineProperty(window, traceKey, {
+      configurable: true,
+      value: { frames, originalSend },
+    });
+    WebSocket.prototype.send = function(data) {
+      try {
+        const parsed = typeof data === "string" ? JSON.parse(data) : null;
+        if (parsed && ["term_viewer_register", "term_viewer_active"].includes(parsed.type)) {
+          frames.push({ at: Date.now(), frame: parsed });
+        }
+      } catch {}
+      return originalSend.apply(this, arguments);
+    };
+  `);
+}
+
+async function terminalControlTrace(
+  client: WebDriverClient,
+  taskId: string,
+): Promise<TerminalControlTrace[]> {
+  return client.executeSync<TerminalControlTrace[]>(`
+    const frames = window.__KANNA_E2E_ACTIVE_VIEW_CONTROL_TRACE__?.frames ?? [];
+    return frames.filter((entry) => entry?.frame?.task_id === ${JSON.stringify(taskId)});
+  `);
+}
+
+async function captureHandbackDiagnostics(
+  taskId: string,
+  focus: FocusObservation,
+): Promise<void> {
+  const directory = process.env.KANNA_E2E_SCREENSHOT_DIR;
+  if (!directory) return;
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "owner-handback-control-trace.json"), `${JSON.stringify({
+    taskId,
+    focus,
+    primaryOutboundControl: await terminalControlTrace(primary, taskId),
+  }, null, 2)}\n`);
 }
 
 async function waitForRemoteTask(taskId: string): Promise<string> {
@@ -378,6 +430,7 @@ describe("remote active-view restoration", () => {
     await importTestRepo(secondary, fixtureRepoPath, "active-view-viewer");
     await signIn(primary);
     await signIn(secondary);
+    await installTerminalControlTrace(primary);
     ownerDesktopId = await waitForOwnerDesktopId();
   }, 180_000);
 
@@ -409,8 +462,15 @@ describe("remote active-view restoration", () => {
 
     // This is the actual local desktop foreground handback. Do not send any
     // terminal bytes: focus alone must restore its measured grid.
-    await focusTerminal(primary, ownerTaskId, "owner-handback");
-    const ownerRestored = await waitForOwnerAndRenderer(primary, ownerTaskId, ownerInitial);
+    const ownerHandbackFocus = await focusTerminal(primary, ownerTaskId, "owner-handback");
+    let ownerRestored: Dimensions;
+    try {
+      ownerRestored = await waitForOwnerAndRenderer(primary, ownerTaskId, ownerInitial);
+    } catch (error) {
+      await capture(primary, "owner-handback-failure.png");
+      await captureHandbackDiagnostics(ownerTaskId, ownerHandbackFocus);
+      throw error;
+    }
     expect(ownerRestored).toEqual(ownerInitial);
     await capture(primary, "owner-restored-without-terminal-input.png");
   }, 180_000);

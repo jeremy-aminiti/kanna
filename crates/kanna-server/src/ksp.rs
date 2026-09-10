@@ -2896,6 +2896,24 @@ impl StreamConn {
             }
         }
 
+        if std::env::var_os("KANNA_E2E_TRACE_TERMINAL_GEOMETRY").is_some() {
+            let kind = match &command {
+                TerminalControlCommand::Register { .. } => "register",
+                TerminalControlCommand::Active => "active",
+                TerminalControlCommand::Resize { .. } => "resize",
+                TerminalControlCommand::Takeover => "takeover",
+                TerminalControlCommand::Release => "release",
+                TerminalControlCommand::Input { .. } => "input",
+            };
+            let session_id = self
+                .terminal_controls
+                .get(&task_id)
+                .and_then(|control| control.session_id.as_deref())
+                .unwrap_or("unbound");
+            log::warn!(
+                "[e2e-terminal-geometry] ksp queued {kind} task={task_id} session={session_id}"
+            );
+        }
         let send_result = self
             .terminal_controls
             .get(&task_id)
