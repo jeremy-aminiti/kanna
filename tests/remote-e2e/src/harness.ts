@@ -62,6 +62,7 @@ export interface RemoteHarness {
     auth: number;
     firestore: number;
     functions: number;
+    lanRouting: number;
     relay: number;
     server: number;
     transfer: number;
@@ -112,6 +113,12 @@ async function allocatePorts(): Promise<RemoteHarness["ports"]> {
     auth: await findFreePort(),
     firestore: await findFreePort(),
     functions: await findFreePort(),
+    // Independently allocated per desktop, like `server`/`transfer` - two
+    // real kanna-server processes on one host must not collide on the
+    // hardcoded 4460 default (`kanna_runtime_defaults::DEFAULT_LAN_ROUTING_PORT`)
+    // the way `relay`/`auth`/`firestore`/`functions`/`ui` are deliberately
+    // shared across `startAdditionalDesktop`'s peers.
+    lanRouting: await findFreePort(),
     relay: await findFreePort(),
     server: await findFreePort(),
     transfer: await findFreePort(),
@@ -313,6 +320,7 @@ async function writeServerConfig(input: {
         `environment = "development"`,
         `lan_host = "${shellTomlString(input.lanHost)}"`,
         `lan_port = ${input.ports.server}`,
+        `lan_routing_port = ${input.ports.lanRouting}`,
         `transfer_port = ${input.ports.transfer}`,
         `pairing_store_path = "${shellTomlString(join(input.daemonDir, "pairings.json"))}"`
       ];
