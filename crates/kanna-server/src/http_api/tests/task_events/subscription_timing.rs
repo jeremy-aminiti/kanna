@@ -52,7 +52,23 @@ impl Watch {
         Self::configured(delivery, false).await
     }
 
+    /// A subscription with its own quiet/max-hold/admission-interval
+    /// overrides, so a test can exercise the collector's timing logic
+    /// without depending on the (much larger) global defaults or the fixed
+    /// 240s native receiver window.
+    async fn with_overrides(delivery: &'static str, overrides: Value) -> Self {
+        Self::configured_with(delivery, false, overrides).await
+    }
+
     async fn configured(delivery: &'static str, hold_delivery: bool) -> Self {
+        Self::configured_with(delivery, hold_delivery, json!({})).await
+    }
+
+    async fn configured_with(
+        delivery: &'static str,
+        hold_delivery: bool,
+        overrides: Value,
+    ) -> Self {
         let mut state =
             test_state_with_seed(&format!("timed-{delivery}"), "Timing", seed_orchestration);
         let (tx, events) = tokio::sync::mpsc::unbounded_channel();
@@ -132,8 +148,14 @@ for line in sys.stdin:
         // Start empty so this is a fresh registration, not restart recovery.
         let service = tokio::spawn(super::super::super::event_subscriptions::run(state.clone()));
         tokio::task::yield_now().await;
-        let (status, row) = subscription_request(&app, "POST", "/v1/event-subscriptions",
-            json!({"taskId":"child-c", "taskIds":["child-a","child-b"], "localOnly":true, "delivery":delivery})).await;
+        let mut body = json!({"taskId":"child-c", "taskIds":["child-a","child-b"], "localOnly":true, "delivery":delivery});
+        if let Some(extra) = overrides.as_object() {
+            for (key, value) in extra {
+                body[key] = value.clone();
+            }
+        }
+        let (status, row) =
+            subscription_request(&app, "POST", "/v1/event-subscriptions", body).await;
         assert_eq!(status, StatusCode::OK, "{row}");
         assert!(row["pending"].is_null());
         Self {
@@ -361,38 +383,48 @@ async fn ack_during_cooldown_invalidates_scheduled_wake_without_erasing_gate() {
 #[tokio::test(start_paused = true)]
 async fn lone_noise_sustained_and_urgent_bursts_have_the_same_bounds_for_both_adapters() {
     for delivery in ["input", "codex_app_server"] {
-        let mut watch = Watch::new(delivery).await;
+        // Per-subscription overrides, not the 300000/300000/60000ms global
+        // defaults: this test exercises the collector's quiet/max-hold/
+        // admission arithmetic itself, which the fixed 240s native receiver
+        // window would otherwise dominate now that the defaults exceed it
+        // (any intervening real event — even an irrelevant one — triggers a
+        // re-check that can complete the batch at the receiver instead).
+        let mut watch = Watch::with_overrides(
+            delivery,
+            json!({"quietMs": 2_000, "maxHoldMs": 10_000, "minAdmissionIntervalMs": 1_000}),
+        )
+        .await;
         watch.emit(TaskEventKind::PrCreated);
         let first = watch.observed().await;
         for _ in 0..4 {
-            tokio::time::advance(Duration::from_millis(60_000)).await;
+            tokio::time::advance(Duration::from_millis(400)).await;
             watch.emit(TaskEventKind::RunStarted); // irrelevant, never resets quiet
             tokio::task::yield_now().await;
         }
         watch.no_admission();
-        tokio::time::advance(Duration::from_millis(60_000)).await;
+        tokio::time::advance(Duration::from_millis(400)).await;
         let (batch, at) = watch.admitted().await;
-        assert_eq!(at - first, Duration::from_secs(300));
+        assert_eq!(at - first, Duration::from_secs(2));
         watch.delivered().await;
         watch.ack(batch).await;
         watch.emit(TaskEventKind::PrCreated);
         let first = watch.observed().await;
         for _ in 0..6 {
-            tokio::time::advance(Duration::from_millis(48_000)).await;
+            tokio::time::advance(Duration::from_millis(1_600)).await;
             watch.emit(TaskEventKind::PrCreated);
             watch.observed().await;
             watch.no_admission();
         }
-        tokio::time::advance(Duration::from_millis(12_000)).await;
+        tokio::time::advance(Duration::from_millis(400)).await;
         let (batch, at) = watch.admitted().await;
         assert_eq!(
             at - first,
-            Duration::from_secs(300),
+            Duration::from_secs(10),
             "continuous relevance cannot extend the cap"
         );
         watch.delivered().await;
         watch.ack(batch).await;
-        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::time::advance(Duration::from_millis(1_500)).await;
         watch.emit(TaskEventKind::PrCreated);
         watch.observed().await;
         tokio::time::advance(Duration::from_millis(200)).await;

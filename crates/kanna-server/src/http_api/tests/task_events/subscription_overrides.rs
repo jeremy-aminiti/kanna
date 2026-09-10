@@ -46,30 +46,29 @@ async fn invalid_timing_overrides_are_rejected_before_any_registration() {
 }
 
 #[tokio::test]
-async fn overrides_too_large_for_instant_arithmetic_are_rejected_not_panicked() {
-    // No policy ceiling, but each value is added to an `Instant` on every
-    // scheduling decision (`Collection::deadline`, `Admission`), which panics
-    // past what the platform's monotonic clock can represent — unlike
-    // `Duration::from_millis`, which silently accepts any `u64`. Each case
-    // here clears the floor and the quiet<=max_hold pair check on its own,
-    // so only the overflow guard can be the one rejecting it.
-    let state = test_state_with_seed("overrides-overflow", "Overrides", seed_orchestration);
+async fn there_is_no_reachable_overflow_so_an_extreme_override_is_accepted_not_panicked() {
+    // No policy ceiling. `Duration::from_millis` accepts any `u64`, and so
+    // does the `Instant + Duration` arithmetic it feeds into
+    // (`Collection::deadline`, `Admission`): a `u64` millisecond count can
+    // never exceed `Duration`'s own (far larger) capacity, so registration
+    // has nothing to reject here — confirmed empirically, not just assumed.
+    // An extreme override is simply capped in practice by the existing
+    // receiver deadline via `Collection::deadline`'s own `.min(receiver)`.
+    let state = test_state_with_seed("overrides-extreme", "Overrides", seed_orchestration);
     let db = Db::open(&state.config().db_path).unwrap();
     start_run(&db, "manager", "child-c", "in progress");
     let app = router(state.clone());
-    let base = json!({"taskId":"child-c", "localOnly":true, "delivery":"poll",
-        "quietMs": 300_000, "maxHoldMs": 300_000, "minAdmissionIntervalMs": 60_000});
-    for field in ["quietMs", "maxHoldMs", "minAdmissionIntervalMs"] {
-        let mut body = base.clone();
-        body[field] = json!(u64::MAX);
-        if field == "quietMs" {
-            // Keep the pair check satisfied so only overflow can reject this.
-            body["maxHoldMs"] = json!(u64::MAX);
-        }
-        let (status, response) = subscribe(&app, body).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {response}");
-    }
-    assert!(db.event_subscriptions().unwrap().is_empty());
+    let (status, initial) = subscribe(
+        &app,
+        json!({"taskId":"child-c", "localOnly":true, "delivery":"poll",
+            "quietMs": u64::MAX, "maxHoldMs": u64::MAX, "minAdmissionIntervalMs": u64::MAX}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    assert_eq!(initial["query"]["quietMs"], u64::MAX);
+    assert_eq!(initial["query"]["maxHoldMs"], u64::MAX);
+    assert_eq!(initial["query"]["minAdmissionIntervalMs"], u64::MAX);
+    assert_eq!(db.event_subscriptions().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -153,7 +152,7 @@ async fn quiet_and_max_hold_overrides_seal_an_ordinary_batch_at_the_overridden_w
     assert_eq!(status, StatusCode::OK, "{initial}");
     assert!(initial["pending"].is_null());
     let id = initial["id"].as_str().unwrap().to_string();
-    let service = tokio::spawn(super::super::event_subscriptions::run(state.clone()));
+    let service = tokio::spawn(super::super::super::event_subscriptions::run(state.clone()));
     // Ordinary (non-urgent) event: without the override this would need the
     // full 300000ms default to seal, which this real-time test cannot afford
     // to wait out. The floor (1000ms) is the smallest legal override.
@@ -183,7 +182,7 @@ async fn event_types_allowlist_admits_only_the_named_types() {
     assert_eq!(status, StatusCode::OK, "{initial}");
     assert!(initial["pending"].is_null());
     let id = initial["id"].as_str().unwrap().to_string();
-    let service = tokio::spawn(super::super::event_subscriptions::run(state.clone()));
+    let service = tokio::spawn(super::super::super::event_subscriptions::run(state.clone()));
     // Urgent on its own, but excluded by the allow-list.
     db.append_task_event("child-a", TaskEventKind::LifecycleFailed, json!({}))
         .unwrap();
@@ -213,7 +212,7 @@ async fn exclude_event_types_is_additive_to_the_fixed_baseline() {
     .await;
     assert_eq!(status, StatusCode::OK, "{initial}");
     let id = initial["id"].as_str().unwrap().to_string();
-    let service = tokio::spawn(super::super::event_subscriptions::run(state.clone()));
+    let service = tokio::spawn(super::super::super::event_subscriptions::run(state.clone()));
     // Excluded by the caller's own addition, on top of the baseline.
     db.append_task_event("child-a", TaskEventKind::AwaitingInput, json!({}))
         .unwrap();

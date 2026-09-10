@@ -15,19 +15,6 @@ pub(super) const ADMISSION_INTERVAL: Duration = Duration::from_millis(60_000);
 /// exists to provide.
 pub(super) const MIN_OVERRIDE: Duration = Duration::from_millis(1_000);
 
-/// True when a caller-supplied millisecond duration can be added to an
-/// `Instant` without overflowing. This is a representable-range check, not a
-/// policy ceiling: `Duration::from_millis` accepts any `u64` without
-/// overflowing, but `Instant + Duration` (used throughout this module and in
-/// `Collection::deadline`/`Admission`) panics past what the platform's
-/// monotonic clock can represent — e.g. `u64::MAX` milliseconds. Validated
-/// once at registration so no scheduling arithmetic later needs to re-check.
-pub(super) fn fits_instant(ms: u64) -> bool {
-    Instant::now()
-        .checked_add(Duration::from_millis(ms))
-        .is_some()
-}
-
 pub(super) struct Collection {
     first: Option<Instant>,
     last: Option<Instant>,

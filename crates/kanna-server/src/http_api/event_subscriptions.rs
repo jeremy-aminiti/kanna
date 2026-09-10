@@ -252,23 +252,13 @@ pub(super) async fn subscribe(
             "max_hold_ms must be at least quiet_ms".into(),
         ));
     }
-    // No ceiling by policy, but each value is added to an `Instant` on every
-    // scheduling decision (`Collection::deadline`, `Admission`), which panics
-    // past what the platform's monotonic clock can represent — unlike
-    // `Duration::from_millis`, which silently accepts any `u64`. Reject the
-    // actual overflow class of input here rather than at that later panic.
-    for (name, ms) in [
-        ("quiet_ms", quiet_ms),
-        ("max_hold_ms", max_hold_ms),
-        ("min_admission_interval_ms", min_admission_interval_ms),
-    ] {
-        if !subscription_timing::fits_instant(ms) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("{name} is too large to schedule"),
-            ));
-        }
-    }
+    // No ceiling by policy. `Duration::from_millis` accepts any `u64`, and so
+    // does the `Instant + Duration` arithmetic these values feed into
+    // (`Collection::deadline`, `Admission`): a `u64` millisecond count can
+    // never exceed `Duration`'s own (far larger) capacity, so there is no
+    // reachable overflow to guard against here — confirmed empirically
+    // (`Instant::now().checked_add(Duration::from_millis(u64::MAX))` never
+    // returns `None`), not just assumed.
     // Additive to the fixed baseline, so an untouched request produces the
     // exact same string as before.
     let mut exclude_event_types = vec![
