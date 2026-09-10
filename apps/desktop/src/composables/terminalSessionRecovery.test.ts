@@ -18,7 +18,6 @@ import {
   shouldEnableKittyKeyboard,
   shouldPushKittyKeyboardOnFreshAttach,
   shouldResetTerminalForSnapshot,
-  shouldResetTerminalOnReconnect,
   shouldRunTerminalDispose,
   shouldSupportKittyKeyboard,
   shouldSkipReconnect,
@@ -322,17 +321,6 @@ describe("shouldPushKittyKeyboardOnFreshAttach", () => {
   });
 });
 
-describe("shouldResetTerminalOnReconnect", () => {
-  it("keeps reset behavior for Claude and Copilot reconnects", () => {
-    expect(shouldResetTerminalOnReconnect({ agentProvider: "claude" })).toBe(true);
-    expect(shouldResetTerminalOnReconnect({ agentProvider: "copilot" })).toBe(true);
-  });
-
-  it("avoids resetting xterm state for Codex reconnects", () => {
-    expect(shouldResetTerminalOnReconnect({ agentProvider: "codex" })).toBe(false);
-  });
-});
-
 describe("shouldResetTerminalForSnapshot", () => {
   it("always resets for a respawned session id, Codex included", () => {
     expect(
@@ -351,14 +339,14 @@ describe("shouldResetTerminalForSnapshot", () => {
     ).toBe(true);
   });
 
-  it("keeps the provider-specific behavior on an ordinary reconnect", () => {
+  it("replaces full snapshots on ordinary reconnects for every provider", () => {
     expect(
       shouldResetTerminalForSnapshot({
         preserveRecoveredScrollback: false,
         sessionRespawned: false,
         agentProvider: "codex",
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       shouldResetTerminalForSnapshot({
         preserveRecoveredScrollback: false,

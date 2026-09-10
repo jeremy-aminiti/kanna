@@ -255,10 +255,12 @@ describe("terminal re-attach re-seed", () => {
     await client.deleteSession();
   });
 
-  it("keeps the whole grid when the daemon is replaced under the owner viewer", async () => {
+  it.each(["claude", "codex"])("keeps the whole %s grid when the daemon is replaced under the owner viewer", async (agentProvider) => {
     const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
     const sessionId = `reseed-${suffix}`;
     sessionIds.push(sessionId);
+    const messageMarker = `KRESEED_SUBMITTED_${suffix}`;
+    const responseMarker = `KRESEED_RESPONSE_${suffix}`;
     const readyMarker = `KRESEED_READY_${suffix}`;
     const settledMarker = `KRESEED_SETTLED_${suffix}`;
     const deltaMarker = `KRESEED_DELTA_${suffix}`;
@@ -271,9 +273,14 @@ describe("terminal re-attach re-seed", () => {
     // restored around it, so it changes one row and leaves the rest of the
     // frame exactly as it was before the handoff.
     const script = [
+      "stty -echo",
       "printf '\\033[2J\\033[H'",
       ...frameRows.map((row) => `printf '${row}\\n'`),
       `printf '${readyMarker}\\n'`,
+      // A controlled PTY fixture receives a real terminal submission. It is
+      // labelled with the provider under test, not an actual provider CLI.
+      "IFS= read -r submitted",
+      `printf '%s\\n${responseMarker}\\n' "$submitted"`,
       `while [ ! -f ${quietPath} ]; do sleep 0.05; done`,
       `printf '\\0337\\033[3;1H\\033[2K${deltaMarker}\\0338'`,
       `printf '\\0337\\033[999;1H${settledMarker}\\0338'`,
@@ -283,8 +290,8 @@ describe("terminal re-attach re-seed", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type, agent_provider)
-       VALUES (?, ?, ?, 'in progress', 'pty', 'claude')`,
-      [sessionId, repoId, "Daemon replacement re-seed fixture"],
+       VALUES (?, ?, ?, 'in progress', 'pty', ?)`,
+      [sessionId, repoId, "Daemon replacement re-seed fixture", agentProvider],
     );
     await invokeOrThrow(client, "spawn_session", {
       sessionId,
@@ -294,12 +301,20 @@ describe("terminal re-attach re-seed", () => {
       env: { TERM: "xterm-256color" },
       cols: 80,
       rows: 24,
-      agentProvider: "claude",
+      agentProvider,
     });
     await callVueMethod(client, "loadItems", repoId);
     await selectTask(client, sessionId);
     await client.waitForElement(".main-panel .terminal-container", 20_000);
     await waitForRenderedText(client, sessionId, readyMarker);
+
+    await client.executeSync(
+      `window.__KANNA_E2E__.terminalBuffers.input(${JSON.stringify(sessionId)}, ${JSON.stringify(messageMarker + "\r")});`,
+    );
+    await waitForRenderedText(client, sessionId, responseMarker);
+    const attached = await renderedFrameLines(client, sessionId);
+    expect(attached.filter((line) => line.includes(messageMarker))).toEqual([messageMarker]);
+    expect(attached.filter((line) => line.includes(responseMarker))).toEqual([responseMarker]);
 
     await queueUnparsedOutput(client, sessionId, 10_000);
     const replacement = await replaceDaemon(client);
@@ -323,6 +338,8 @@ describe("terminal re-attach re-seed", () => {
       expect(rendered).toContain(row);
     }
     expect(rendered).toContain(deltaMarker);
+    expect(rendered.filter((line) => line.includes(messageMarker))).toEqual([messageMarker]);
+    expect(rendered.filter((line) => line.includes(responseMarker))).toEqual([responseMarker]);
     expect(rendered).not.toContain(frameRows[2]);
     expect(daemonFrameLines(snapshot.serialized)).toEqual(rendered);
 
@@ -334,7 +351,7 @@ describe("terminal re-attach re-seed", () => {
         `window.__KANNA_E2E__?.terminalBuffers?.refresh(${JSON.stringify(sessionId)});`,
       );
       await sleep(400);
-      await client.screenshot(join(evidenceDir, "terminal-reattach-reseed.png"));
+      await client.screenshot(join(evidenceDir, `terminal-reattach-reseed-${agentProvider}.png`));
     }
   });
 });

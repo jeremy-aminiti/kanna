@@ -38,6 +38,21 @@ export interface TerminalSnapshotApplication {
  *  snapshot erases whatever it reflows on the way past, and a snapshot written
  *  on top of the buffer keeps the geometry handling it has always had. */
 export function applyTerminalSnapshot(params: TerminalSnapshotApplication): void {
+  // A failed capture can arrive as an empty payload. It has no state to
+  // replace ours with, but still completes in order with earlier writes.
+  if (params.data.length === 0) {
+    params.terminal.write(params.data, params.onParsed)
+    return
+  }
+  let distanceFromBottom = 0
+  if (params.replaceBuffer) {
+    // Capture after already accepted output has parsed and before queued RIS.
+    // Distance is approximate: retention and reflow can change row identity.
+    params.terminal.write("", () => {
+      const buffer = params.terminal.buffer.active
+      distanceFromBottom = buffer.baseY - buffer.viewportY
+    })
+  }
   const resize = () => {
     if (params.terminal.cols !== params.cols || params.terminal.rows !== params.rows) {
       params.terminal.resize(params.cols, params.rows)
@@ -51,9 +66,10 @@ export function applyTerminalSnapshot(params: TerminalSnapshotApplication): void
   if (params.replaceBuffer) {
     params.terminal.write(TERMINAL_FULL_RESET)
   }
-  if (params.onParsed) {
-    params.terminal.write(params.data, params.onParsed)
-  } else {
-    params.terminal.write(params.data)
-  }
+  params.terminal.write(params.data, () => {
+    if (params.replaceBuffer) {
+      params.terminal.scrollToLine(Math.max(0, params.terminal.buffer.active.baseY - distanceFromBottom))
+    }
+    params.onParsed?.()
+  })
 }
