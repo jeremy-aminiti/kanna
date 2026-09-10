@@ -914,10 +914,12 @@ async fn create_task_with_requested_id_and_inputs(
     };
 
     #[cfg(test)]
-    if let Some(task_creator) = state.task_creator.clone() {
-        return task_creator(payload)
-            .map(Json)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+    if payload.transfer_import.is_none() {
+        if let Some(task_creator) = state.task_creator.clone() {
+            return task_creator(payload)
+                .map(Json)
+                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+        }
     }
 
     // Everything before the daemon spawn is synchronous git/SQLite work —
