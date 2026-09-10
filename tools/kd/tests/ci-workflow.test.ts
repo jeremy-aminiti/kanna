@@ -157,11 +157,22 @@ describe("the Linux release check", () => {
    * a build-time linker input, not a new runtime dependency: the resulting
    * dynamic link is already the declared "conditional" exception in
    * packaging/linux/runtime-policy.json.
+   *
+   * Checked on the actual apt-get install command, comments stripped, so a
+   * comment merely mentioning these packages can't carry the assertion.
    */
   it("installs libc++/libc++abi dev packages before building", () => {
-    expect(workflow).toContain("libc++-dev");
-    expect(workflow).toContain("libc++abi-dev");
-    expect(workflow.indexOf("libc++-dev")).toBeLessThan(
+    const installStep = workflow
+      .split(/\n(?=\s*- name:)/)
+      .find((step) => step.includes("- name: Install build and packaging dependencies"));
+    expect(installStep).toBeDefined();
+    const aptCommand = installStep!
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    expect(aptCommand).toContain("libc++-dev");
+    expect(aptCommand).toContain("libc++abi-dev");
+    expect(workflow.indexOf("- name: Install build and packaging dependencies")).toBeLessThan(
       workflow.indexOf("- name: Build the candidate package")
     );
   });
