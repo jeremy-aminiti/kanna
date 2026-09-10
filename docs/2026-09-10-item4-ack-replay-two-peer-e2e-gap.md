@@ -65,14 +65,26 @@ then seeds the destination's own durable DB (`transferred_task_manifest`,
 - Pure DB-level immutability:
   `db::tests::a_persisted_content_commitment_is_set_once_and_never_overwritten`.
 
+## Verified
+
+All eight `transfer_engine::import::tests` (the two real-ack tests, both
+negative controls, and the four pre-existing tests this work left untouched)
+and `db::tests::a_persisted_content_commitment_is_set_once_and_never_overwritten`
+pass against the real `kanna-task-transfer` binary
+(`cargo build -p kanna-task-transfer`), `cargo clippy -p kanna-server --tests`
+(4 pre-existing warnings elsewhere, none in this work), and
+`cargo fmt --all -- --check`. Getting from "compiles" to "passes" surfaced and
+fixed several real bugs in the fixture itself — a lazy-spawn identity race, a
+pairing deadlock (the destination's `StartPairing` handler blocks on
+`accept-pairing` before ever responding), durable-vs-advisory event
+misrouting, an unmigrated work-queue DB, a genuine gap in the shared
+`init_test_schema` test fixture (missing `task_transfer_provenance`, never
+hit by any earlier test), and a lost-wake race in the durable-work wait. None
+of these needed a production code change; all are recorded in the commit
+that fixed them.
+
 ## What is still open
 
-- **Compilation and execution.** These fixtures are source-authored against
-  a real subprocess/wire harness that has not yet been built or run — see
-  the task's report to its manager for the exact commands and current hold
-  status. Real timing (pairing handshake latency, registry-file discovery
-  delay) could not be tuned empirically; timeouts are generous (15s) but
-  unverified.
 - **Mixed old/new server-sidecar versions and the real desktop existing-clone
   E2E.** Unchanged from `2026-09-09-transfer-admission-proof-e2e-gap.md`:
   no fixture here runs two independently versioned builds against each
