@@ -150,11 +150,17 @@ fn candidate_removed_by_fullname(fullname: &str) -> Option<String> {
     instance_name(fullname).map(str::to_string)
 }
 
-/// Starts browsing for same-account siblings' LAN routing listeners and
-/// applies every resolution/removal to `state`'s candidate map for as long
-/// as the returned handle's underlying thread runs (until the process
-/// exits or the daemon shuts down - there is no explicit stop today, matching
-/// the fact that nothing currently calls it outside of startup).
+/// Starts browsing for other desktops' LAN routing listeners and applies
+/// every resolution/removal to `state`'s candidate map for as long as the
+/// returned handle's underlying thread runs (until the process exits or the
+/// daemon shuts down - there is no explicit stop today, matching the fact
+/// that nothing currently calls it outside of startup). Every candidate this
+/// produces is an untrusted discovered peer, not a same-account sibling:
+/// discovery never checks account, and a resolution is recorded for
+/// whatever `desktopId` its TXT record claims regardless of who advertised
+/// it. Account and authentication decisions belong entirely to the existing
+/// trust/TLS route (`invoke_desktop`'s pinned-TLS client), which is what
+/// actually decides whether a candidate is ever worth trusting.
 pub fn start_discovery(state: Arc<AppState>) -> Result<JoinHandle<()>, String> {
     let daemon =
         ServiceDaemon::new().map_err(|error| format!("failed to start mDNS daemon: {error}"))?;
