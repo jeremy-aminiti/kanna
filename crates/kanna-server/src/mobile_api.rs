@@ -391,6 +391,23 @@ pub struct TaskInputs {
     pub inputs: Vec<crate::db::TaskInputRecord>,
 }
 
+/// A transferred task's full inherited stage/main/post/revision history, in
+/// delivery order, with each record's original run identity intact.
+///
+/// The task's prompt only ever carries the *latest* result of each kind
+/// (`$PREV_RESULT`/`$PREV_MAIN_RESULT`) — this is the durable record of
+/// everything before that, the [`TaskInputs`] of foreign run provenance: a
+/// reviewer, a manager, or a later hop re-exporting this task must read it
+/// here rather than conclude from an unread prompt that no prior work
+/// existed. Empty for a task that was never transferred, or whose sender
+/// predated this record — never an error.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskTransferHistory {
+    pub task_id: String,
+    pub history: Vec<crate::db::TransferredHistoryRecord>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskChild {
@@ -1156,6 +1173,28 @@ impl MobileApi {
             total,
             inputs,
         }))
+    }
+
+    /// The task's full inherited transfer history, oldest first.
+    /// `Ok(None)` means the task does not exist; an existing task that was
+    /// never transferred (or was transferred by a sender that predates this
+    /// record) is an empty list.
+    pub fn list_transfer_history(
+        &self,
+        task_or_branch_id: &str,
+    ) -> Result<Option<TaskTransferHistory>, String> {
+        let Some(task_id) = self
+            ._db
+            .resolve_pipeline_item_id(task_or_branch_id)
+            .map_err(|e| format!("db error: {}", e))?
+        else {
+            return Ok(None);
+        };
+        let history = self
+            ._db
+            .transferred_task_history(&task_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        Ok(Some(TaskTransferHistory { task_id, history }))
     }
 
     /// The parent's direct children, oldest first, with each child's latest

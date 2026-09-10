@@ -114,7 +114,13 @@ pub struct NewTaskTransferProvenance {
 /// run this task inherited from a transfer, in the order it was exported.
 /// `origin_*` is the run's identity on the machine that actually produced it,
 /// preserved unchanged across however many hops it has crossed since.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializable so [`crate::mobile_api::TaskTransferHistory`] can hand a
+/// caller the exact durable record — the same "read what was actually
+/// persisted" contract [`crate::db::TaskInputRecord`] gives
+/// `kanna_task_inputs`, rather than a summary derived from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TransferredHistoryRecord {
     pub sequence: i64,
     pub origin_peer_id: String,
