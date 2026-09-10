@@ -37,9 +37,14 @@ The owner reported (2026-09-10) quick full-screen redraws for the first few
 seconds after connecting to a session on mobile, "new since last upgrade,"
 plus a separate report of a missing Enter after submitting input. This note
 records what source tracing and existing test coverage actually establish for
-each, states plainly what remains unproven, and is explicit that no on-device
-or real-renderer reproduction was run this session (native/mobile/emulator
-gates are held).
+each, states plainly what remains unproven, and is updated in place across
+this task's sessions as work landed — a bounded iOS DEV simulator lane was
+later authorized and executed (below: build/runtime/launch verified, a real
+first-attach redraw capture still not obtained), and a real bug in the
+simulator lane's own deep-link seam was found and fixed along the way. Read
+each section's own "executed"/"not executed"/"authored, not run" language as
+current for its own claim rather than assuming the whole note is still at its
+original all-source-only state.
 
 ## Flicker: a source-demonstrated overlay bug, not yet a proven cure
 
@@ -245,26 +250,80 @@ needed, no cloud/account involved). Closed it
 removed its worktree/branch (`git worktree remove --force`,
 `git branch -D task-cbf2d141`) before finishing.
 
-**Blocked: no working way to seed a trusted desktop + selected task without
-Appium.** Both existing dev seams
-(`kanna://e2e-trust?desktopId=…&selectedTaskId=…` and `kanna://e2e-pair`,
-`apps/mobile/src/e2eTrustSeed.ts`) check for the literal protocol `"kanna:"`.
-Read the generated `ios/KannaDev/Info.plist` directly: this build registers
-`kanna-dev`, `build.kanna.app.dev`, and `exp+kanna-mobile` as URL schemes —
-**never bare `kanna`** — in `app.config.ts`'s scheme handling, for any
-environment. So `xcrun simctl openurl <udid> "kanna://e2e-trust?…"` fails
-outright with `NSOSStatusErrorDomain -10814` (`kLSApplicationNotFoundErr`,
-confirmed by direct execution, both before and after dismissing the dev-tools
-overlay) — this is a **different, more basic blocker than the iOS 26 alert**:
-LaunchServices has no app to route the scheme to at all. The E2E harness's
-own `seedTrustedDesktopThroughDeepLink` (`apps/mobile/e2e/helpers/trust-seed.ts`)
-works around exactly this by calling Appium's `mobile: deepLink` with an
-explicit `bundleId`, which hands the URL straight to the named app via
-XCUITest and never asks LaunchServices to resolve the scheme at all — which
-is why it isn't hit by this. Appium's XCUITest driver is not installed in
-this environment (`pnpm exec appium driver list --installed` returns none),
-and installing it was explicitly out of scope this lane ("no silent SDK/
-toolchain install").
+**Blocked this run, then fixed as a concrete bug: `apps/mobile/src/
+e2eTrustSeed.ts` hardcoded the literal protocol `"kanna:"`, which no dev or
+staging build ever registers.** Both existing dev seams
+(`kanna://e2e-trust?desktopId=…&selectedTaskId=…` and `kanna://e2e-pair`)
+checked `parsed.protocol !== "kanna:"`. Read the generated
+`ios/KannaDev/Info.plist` directly: this dev build registers `kanna-dev`,
+`build.kanna.app.dev`, and `exp+kanna-mobile` as URL schemes — never bare
+`kanna` — because `app.config.ts` sets `scheme: appEnvironment.scheme`, which
+is `kanna-dev` for dev and `kanna-staging` for staging
+(`mobileEnvironments.json`). **Correction to an earlier draft of this note:**
+it is not true that no build ever registers bare `kanna` — production's own
+`appEnvironment.scheme` *is* the literal `"kanna"`, so this bug was silent
+there; it only breaks dev and staging, which is exactly where E2E/simulator
+verification happens. So `xcrun simctl openurl <udid> "kanna://e2e-trust?…"`
+against this dev build failed outright with `NSOSStatusErrorDomain -10814`
+(`kLSApplicationNotFoundErr`, confirmed by direct execution, both before and
+after dismissing the dev-tools overlay) — a **different, more basic blocker
+than the iOS 26 alert**: LaunchServices had no app to route the scheme to at
+all. The E2E/Appium harness's own `seedTrustedDesktopThroughDeepLink`
+(`apps/mobile/e2e/helpers/trust-seed.ts`) never hit this because `mobile:
+deepLink` hands the URL straight to a named bundle id via XCUITest and never
+asks LaunchServices to resolve the scheme — it was masking the bug, not
+avoiding a different one.
+
+**Fixed in this task, same session, with causal tests** (see
+`apps/mobile/src/e2eTrustSeed.ts`, `apps/mobile/src/e2eTrustSeed.test.ts`,
+`apps/mobile/src/appModel.ts`): `installE2eTrustSeedHandler` now takes an
+optional `scheme` — the resolved environment's own registered scheme,
+threaded from `appModel.ts`'s already-resolved
+`resolveMobileAppEnvironment(extra?.appEnv).scheme` — and
+`matchesE2eProtocol` accepts either that scheme *or* the legacy literal
+`"kanna:"`, never only one. This preserves the Appium/legacy harness exactly
+as it worked before (it keeps sending literal `"kanna://"`, still accepted)
+while making the same deep link additionally reachable through a real
+OS-level open on dev/staging, which the literal alone never was. Preferred
+`e2e-pair` over `e2e-trust`-only per instruction: `e2e-trust` alone seeds a
+`TrustedDesktopRecord` with no `deviceSecret` — trust without a credential —
+while `claimPairingPayloadFromUrl` (`e2e-pair`) calls
+`controller.pairMachineByPayload`, the real pairing claim; a genuine
+disposable pairing for a future lane should send both. No native scheme was
+added — this only changes which of the *already-registered* schemes the
+existing JS-level Linking listener accepts, and no second test harness was
+created (same `e2eTrustSeed.test.ts` file, extended). Four new tests added,
+two confirmed causal (temporarily reverted the fix, reran, saw the expected
+failure, restored — same method as the `TerminalWebView.tsx` fix above); full
+mobile suite re-run clean (1956 passed, 3 pre-existing skips, up from 1952).
+**This was not run against a real simulator this session** (the native/
+simulator gate is held pending another task's foreground lane) — the fix is
+authored and unit-tested, not yet verified end-to-end against
+`xcrun simctl openurl`.
+
+**Separately, and worth being exact about: the `mobile_run` call this lane
+actually executed did not set `EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED=1` at
+all.** It was invoked as `mcp__kd-mcp__mobile_run { simulator: "…" }`, an MCP
+tool call with no environment-variable parameter and no prior `export` in a
+shell `kd` itself would inherit — so even setting that flag aside, this run
+could not have reached the trust-seed handler (gated on that exact env var in
+`App.tsx`) or `webviewDebuggingEnabled`, regardless of the scheme bug. An
+earlier draft of this note described a *hypothetical* future command with
+that flag prefixed on a shell invocation of `kd mobile run`; it must not be
+read as describing what this executed run actually did. The next canonical
+invocation needs the flag actually set — e.g. `EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED=1
+./kd mobile run --simulator <udid>` from a shell, or an equivalent explicit
+env parameter if driving it through `mcp__kd-mcp__mobile_run` again — and
+should confirm it took (Safari → Develop → [simulator] lists the Kanna
+WebView only when `webviewDebuggingEnabled` is true) rather than assuming it
+did.
+
+Appium's XCUITest driver is still not installed in this environment
+(`pnpm exec appium driver list --installed` returns none), and installing it
+remains out of scope — but with the scheme fix above, **a next simulator
+lane does not need it**: `xcrun simctl openurl <udid> "kanna-dev://e2e-trust?…"`
+(the dev build's own real scheme) should now reach the handler on its own,
+once the trust-seed flag is actually set for that run.
 
 **Also tried, also blocked, and genuinely instructive: driving the app's own
 JS runtime directly via React Native's built-in remote debugger, no install
@@ -302,13 +361,12 @@ assume JS-only=no build" instruction), app launch ✅, real dev
 server/task/identity ✅ (created, used, and cleanly disposed of) — **but no
 first-attach redraw/overlay video or frame evidence was captured**, because
 every available path to programmatically select a task inside the running
-app was checked and found blocked, and driving the simulator's screen by
-hand was not available in this session. This is a concrete, narrower gap
-than "needs a human": specifically, it needs either (a) an authorized Appium
-XCUITest driver install, or (b) a human tapping "Pair a Mac" once on the
-simulator screen (the QR/pairing flow itself, exercised for real, would also
-be a more faithful "genuine disposable dev pairing" than the deep-link seam
-this lane tried first) — not a blanket "verification requires a person."
+app was checked and found blocked this run. The root cause was not "no tool
+exists" but a real, now-fixed bug in the JS deep-link seam itself (above) —
+so this does not leave the next attempt waiting on Appium or a human: it
+needs the trust-seed flag actually set for that invocation (also above) and
+the fixed seam exercised against a real simulator, which this session did not
+get to do (native/simulator gate held for another task's foreground lane).
 
 **Cleanup performed, as instructed:** scratch task closed and its worktree/
 branch removed; `mcp__kd-mcp__dev_down` stopped the full dev stack (daemon,
@@ -321,64 +379,72 @@ confirmed clean before and after. Logs/screenshots preserved under `.tmp/`
 (gitignored, not committed): `mobile-flicker-capture/screen-01-pre-deeplink.png`,
 `cdp-eval.mjs`.
 
-**1. Bring up the simulator dev stack, with the existing E2E terminal
-instrumentation enabled** (the same `EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED`
-flag the E2E harness itself sets in `apps/mobile/e2e/helpers/metro.ts`; it
-also gates `webviewDebuggingEnabled`, so without it Safari's Web Inspector
-cannot attach to the terminal WebView at all):
+**Next simulator lane, ready to run once the native/simulator gate is free
+again** (held for another task's foreground lane as of this writing) —
+superseding the pre-execution draft this section used to carry, which named
+a generic `"iPhone 17 Pro"` device, `simctl io booted` (exactly the generic
+`booted` targeting this task was told never to use), and a blanket
+`git stash` baseline switch:
 
+**1. Bring up the simulator dev stack with the trust-seed flag actually set**
+(the executed run above did not set it — see the correction two paragraphs
+up — this is what fixes that, not a hypothetical):
 ```
-EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED=1 ./kd mobile run --simulator "iPhone 17 Pro"
+EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED=1 \
+  ./kd mobile run --simulator 1CCF3E78-D553-46A9-A4A3-74F4D1BDE0A4
+```
+(or the equivalent explicit env parameter if driving it through
+`mcp__kd-mcp__mobile_run` again rather than a shell). Verify it actually took
+— open Safari → Develop → [simulator] and confirm the Kanna WebView is
+listed (`webviewDebuggingEnabled` is gated on the same flag) — before relying
+on it, exactly as flagged above.
+
+**2. Reach the task's terminal using the now-fixed seam**, against the exact
+UDID from step 1, never `booted`:
+```
+xcrun simctl openurl 1CCF3E78-D553-46A9-A4A3-74F4D1BDE0A4 \
+  "kanna-dev://e2e-trust?desktopId=<id>&displayName=Dev&lanBaseUrl=http%3A%2F%2F127.0.0.1%3A<port>&selectedRepoId=<repo>&selectedTaskId=<task>"
+```
+For a genuine disposable *pairing* (not trust-seeding alone — e2e-trust has
+no credential) rather than reusing this session's scratch-task pattern, also
+send the real pairing payload the desktop's own pairing session issues:
+```
+xcrun simctl openurl 1CCF3E78-D553-46A9-A4A3-74F4D1BDE0A4 \
+  "kanna-dev://e2e-pair?payload=<url-encoded pairing payload>"
 ```
 
-`kd`'s dev-window construction (`tools/kd/src/runtime/dev-plan.ts`) prefixes
-specific `EXPO_PUBLIC_*` keys onto the Metro command but never clears the
-inherited shell environment first, so an exported var should reach Metro and
-get inlined into the served JS the normal way — **unconfirmed by execution;
-verify it took before relying on it** (open Safari → Develop → [simulator] →
-find the Kanna WebView in the list; if it's not listed, the flag did not
-reach Metro and the app needs a reload after fixing that before continuing).
-
-**2. Capture frame-accurate evidence of the redraw itself** — a standard,
-always-available Xcode CLI tool, no Appium and no human required for the
-capture step itself (only for judging the result, which a person or a later
-frame-diff pass can do from the file):
-
+**3. Capture frame-accurate evidence of the redraw itself**, targeted at the
+same exact UDID, never `booted`:
 ```
-xcrun simctl io booted recordVideo --codec=h264 .tmp/mobile-first-attach-<before|after>.mov &
+xcrun simctl io 1CCF3E78-D553-46A9-A4A3-74F4D1BDE0A4 recordVideo \
+  --codec=h264 .tmp/mobile-first-attach-<before|after>.mov &
 RECORD_PID=$!
-# ... attach to a task terminal for the first time here (fresh app launch or
-#     a task never opened this session, so beginTaskTerminal's empty/connecting
-#     seed genuinely runs) ...
+# ... attach to the task's terminal for the first time here ...
 sleep 8
 kill $RECORD_PID
 ```
 
-**3. Capture the instrumented counts** (richer than the video alone):
-Safari's Web Inspector console, attached to the terminal WebView found in
-step 1, can read `document.querySelector('[data-testid]')`-style state, or —
-simpler, since the app already renders it — the accessibility value text
-nodes `terminal-loading-indications:<N>` (from `TerminalWebView`'s own
-`loadingIndicationCount`, already wired to increment exactly once per
-overlay-raise) and the `terminal-inspection` JSON blob (`frameCount` and
-other fields from `buildTerminalDocument.ts`'s existing diagnostics) are
-visible in the accessibility tree / DOM without adding any new
-instrumentation. This step needs a person (or Appium, previously blocked
-here per `docs/2026-09-09-mobile-terminal-reconnect-e2e-note.md`) driving
-Safari's GUI — there is no CLI-scriptable Safari Web Inspector automation in
-this repo today — so it is secondary evidence, not the primary ready-to-run
-capture.
+**4. Capture the instrumented counts** (richer than the video alone): Safari's
+Web Inspector console, attached to the terminal WebView found in step 1, can
+read the accessibility value text nodes `terminal-loading-indications:<N>`
+(`TerminalWebView`'s own `loadingIndicationCount`) and the
+`terminal-inspection` JSON blob (`frameCount`, from
+`buildTerminalDocument.ts`'s existing diagnostics) without adding any new
+instrumentation. This step needs a person (or Appium — still not installed
+here, per `docs/2026-09-09-mobile-terminal-reconnect-e2e-note.md`) driving
+Safari's GUI; there is no CLI-scriptable Safari Web Inspector automation in
+this repo today, so it is secondary evidence, not the primary capture.
 
-**4. Before/after, same app instance, JS-only so no rebuild between states:**
-
-```
-git stash push -u -m "mobile-flicker-before-state"   # isolate: pre-fix TerminalWebView.tsx
-# reload the app fully (not Fast Refresh — a state-preserving refresh would
-# skip beginTaskTerminal's fresh-connect path entirely) and repeat steps 2-3
-# labelled "before"
-git stash pop
-# reload again, repeat steps 2-3 labelled "after"
-```
+**5. Before/after, bounded and reversible, not a blanket `git stash`:** the
+only file in question is `apps/mobile/src/screens/TerminalWebView.tsx`. Copy
+it aside, apply the exact revert this task verified fails without the fix
+(see "Verified, both failure and success side" above — the same edit that was
+applied and restored to prove the unit tests causal), reload the app fully
+(not Fast Refresh — a state-preserving refresh would skip
+`beginTaskTerminal`'s fresh-connect path entirely) and repeat steps 3–4
+labelled "before"; restore the file from the copy (never `git checkout`/
+`stash`/branch switch on a running app's worktree) and reload again for
+"after". This task's own committed git state must not move during any of it.
 
 Compare: whether the "before" recording/counts show a visible content
 repaint *after* the loading overlay has already cleared (the reported
@@ -487,45 +553,61 @@ policy that is not what ships. Whether it still happens to pass (OpenCode may
 well tolerate either shape) is unconfirmed and beside the point: it is not
 evidence about the *current* policy either way.
 
-**Planned, not executed, bounded reproduction — provider unspecified,
-runnable across all four live-tested CLIs so the owner's answer (still
-pending) selects which result matters rather than this note guessing:**
-1. Add `PtySession.submitLogical(text, { bracketedPasteMode })` mirroring
-   `logical_message_bytes` exactly — one `write()` of paste-begin + text +
-   paste-end + `\r` when framing applies (≥256 bytes or a newline, and the
-   terminal advertised the mode), else text + `\r` as one write, no
-   intervening wait. This replaces the stale 150ms-then-separate-write
-   `submit()` for any new test, rather than extending a helper that already
-   contradicts the contract it claims to pin.
-2. Reuse the existing per-CLI availability/binary-discovery helpers
-   (`findClaudeBinary`, `findCodexBinary`, `findCopilotBinary`,
-   `findOpenCodeBinary` — already used by `helpers/*-availability.ts`) and
-   `startPtySession` (already generic over `command`/`args`, not
-   OpenCode-specific) to drive each installed CLI's interactive TUI, skipping
-   any not installed — the same pattern `opencode-injected-input.test.ts`
-   already uses, not a new harness.
-3. Two scenarios per CLI, both while the CLI is actively busy/mid-turn
-   (start a long-running step first, as
-   `opencode-injected-input.test.ts`'s "quits immediately when the agent is
-   mid-turn" test already does, then inject during it — this is what makes it
-   a reproduction of "the terminal is repainting," not an idle-composer
-   happy path):
-   a. A short (<256 bytes, no newline) message — unframed, matching what a
-      short mobile Send actually puts on the wire.
-   b. A message shaped like `incident_shaped_message()` from
-      `reconnect.rs` (same size class as the owner's original 1,227-byte
-      report) — paste-framed, fragmenting across the CLI's own read calls.
-   Assert, per CLI, that the message is actually *acted on* (a marker file
-   written, or equivalent), the way `opencode-injected-input.test.ts`
-   already does — not merely that bytes reached the pty, which is what
-   `reconnect.rs` already covers.
-4. Not run this session: spawning and waiting on real CLI turns is slow
-   (the existing OpenCode tests carry 300s timeouts) and this task's
-   execution hold was read as covering exactly this class of "spawn a real
-   external process and wait on it" check, not only `cargo`/emulator. Ready
-   to write and run on authorization; if the owner names a specific
-   provider/session first, scenario (2) narrows to just that CLI rather than
-   all four.
+**Bounded reproduction — authored and unit-verified this session, not run
+against a real CLI turn.** Source/test authoring for this was released with
+an explicit "no live CLI turns" bound; two minimal cases were prepared
+(Claude and Codex — not all four), matching the manager's narrowing. The
+owner's provider for this mobile incident is still unknown; preparing Claude
+and Codex is not a claim about which one it was, only the two providers this
+harness can currently drive interactively at all.
+
+1. **Added** `logicalMessageBytes(text, bracketedPasteMode)` and
+   `PtySession.submitLogical(text, bracketedPasteMode)` to
+   `tests/cli-contract/helpers/pty.ts`, mirroring
+   `crates/daemon/src/session.rs::logical_message_bytes` *and* the
+   trailing-newline trim `task_input.rs::task_input_message` applies first —
+   one `write()` of paste-begin + text + paste-end + `\r` when framing
+   applies (≥256 UTF-8 bytes or a newline, and paste mode advertised), else
+   text + `\r`, no intervening wait. The older `submit()` (150ms-then-
+   separate-write) is left alone but now carries a doc comment pointing at
+   this instead, so a future reader does not mistake it for current
+   behavior. **Unit-tested** (pure, no process spawned — fully within the
+   "no live CLI turns" bound):
+   `tests/cli-contract/tests/offline/pty-logical-message.test.ts`, 8 cases
+   covering the empty/short/framed/threshold/newline/trim/UTF-8-byte-width
+   boundaries against `crates/daemon/tests/reconnect.rs`'s own equivalents
+   where one exists. Ran (offline, no live spawn): `pnpm test` in
+   `tests/cli-contract` → exit 0, 62 passed (8 files, up from 7/54).
+2. **Added** `tests/cli-contract/tests/live/codex-logical-submission.test.ts`
+   and `.../claude-logical-submission.test.ts` — each starts a real
+   interactive TUI (`--yolo` for Codex, `--dangerously-skip-permissions` for
+   Claude, both matching `crates/kanna-server/src/task_creator/commands.rs::
+   get_agent_permission_flags`'s own mapping for `permission_mode` `None`/
+   `"dontAsk"`, i.e. the same flags Kanna's own daemon passes for an ordinary
+   PTY-mode task — not a weakened or invented flag), puts it into a long busy
+   turn, then delivers a second, large (>256-byte, paste-framed) message
+   mid-turn via `submitLogical` and asserts the model *acted on it* (wrote a
+   marker file with the expected content) — not merely that bytes reached
+   the pty, which `crates/daemon/tests/reconnect.rs` already covers and this
+   note already found insufficient (above). **Verified these load and
+   resolve correctly without spawning anything**: `pnpm exec vitest list
+   --config vitest.live.config.ts tests/live/claude-logical-submission.test.ts
+   tests/live/codex-logical-submission.test.ts` → both test names collected,
+   zero CLI processes started (`vitest list` only collects; it does not run
+   `it()` bodies). The Codex file's trust-prompt/composer regexes are carried
+   from `codex-tui-quit.test.ts`, which has actually been run and passed; the
+   Claude file's equivalents are **an unverified best-effort guess** — this
+   repo has no prior live-TUI Claude test to carry a proven pattern from, and
+   no live CLI turn was run to check it in this pass. Both files say so in
+   their own comments.
+3. **Not done, deliberately:** no live CLI turn was started for either new
+   `tests/live/*.test.ts` file — that is the one real consumption lane this
+   note is now ready to have sequenced. `pnpm test:agent-cli-compat`
+   (`KANNA_RUN_LIVE_AGENT_CLI_CONTRACTS=1`) would run the *whole* live suite,
+   including the existing OpenCode/Copilot/flags files, which is broader than
+   "one real consumption lane" — running just the two new files needs
+   `vitest run --config vitest.live.config.ts tests/live/claude-logical-submission.test.ts
+   tests/live/codex-logical-submission.test.ts` with that same env var set.
 
 **Raw on-screen direct-typing is not ruled out either, and not for the reason
 this note previously gave.** `sendTaskTerminalInput` → raw KSP bytes forwards
@@ -553,12 +635,14 @@ the reported conditions, which is real but partial: it says nothing about
 whether a live CLI's parser actually treats that CR as submit, and the one
 existing live-CLI submission test pins a stale, no-longer-shipped contract.
 No fix was authored for this symptom because no currently-reproducing defect
-was located by any means available here. Closing this fully needs, in order
-of what it would actually settle: (a) the owner's affected session/provider/
-timestamp — still pending, not invented here — so the real daemon write
-timeline for that delivery can be read directly; (b) running the corrected
-`cargo test` subset above; (c) the planned live-CLI reproduction against
-whichever provider(s) the owner's answer implicates.
+was located by any means available here — source and test authoring for a
+bounded live-CLI reproduction is done (above), a real consumption lane is
+not. Closing this fully needs, in order of what it would actually settle:
+(a) the owner's affected session/provider/timestamp — still pending, not
+invented here — so the real daemon write timeline for that delivery can be
+read directly; (b) running the corrected `cargo test` subset above; (c) one
+real run of the two authored live-CLI cases (Claude, Codex), narrowed to
+whichever provider the owner's answer implicates once it arrives.
 
 ## Overlap — corrected
 
@@ -569,19 +653,29 @@ main (reviewed directly) is `crates/kanna-server/src/http_api.rs`,
 `crates/kanna-server/src/transfer_engine/{finalize,push}.rs`, and two docs —
 six files, none in `crates/daemon/`. An earlier draft of this note incorrectly
 said it was actively iterating in `session.rs`; that was wrong and is
-corrected here. There is no file-level *edit* overlap between that task's diff and either the
-flicker fix (`apps/mobile/src/screens/TerminalWebView.{tsx,test.tsx}`, this
-session's only edits) or the missing-Enter investigation (which read
-`crates/daemon/src/session.rs`, `crates/daemon/tests/reconnect.rs`,
-`crates/kanna-server/src/http_api/task_input.rs`, and
-`tests/cli-contract/helpers/pty.ts`, editing none of them). One *read*
-overlap is worth flagging even though it changed nothing: `b1d685b7` is
-actively iterating on `crates/kanna-server/src/http_api/task_input.rs`
-itself, so `try_submit_task_input_to_session`'s current body, read here to
-establish the "no separate CR write, no wait" finding above, may already be
-mid-change under that task's own work — worth re-confirming against
-`b1d685b7`'s eventual committed state rather than assuming this note's
-reading of that file stays current. Task `ed245f68` (Android emulator/
-pairing) touches `TaskScreen.tsx` and `taskComposerKeyboard.ts` but not
-`TerminalWebView.tsx` or `terminalReconnectPresentation.ts` — also confirmed
-no overlap.
+corrected here.
+
+Re-checked after this session's later edits (`apps/mobile/src/e2eTrustSeed.ts`,
+`apps/mobile/src/e2eTrustSeed.test.ts`, `apps/mobile/src/appModel.ts`,
+`tests/cli-contract/helpers/pty.ts`, and the two new
+`tests/cli-contract/tests/{offline,live}/*.test.ts` files) against both
+sibling branches' full diffs from their merge-base
+(`git diff --stat $(git merge-base origin/main task-b1d685b7-4) task-b1d685b7-4`
+and the equivalent for `task-ed245f68-4`, scoped to `apps/mobile` and
+`tests/cli-contract`): **both come back empty — no edit overlap with either
+sibling on any file this session touched**, including the ones edited after
+the original check above. (An earlier pass of this same re-check briefly
+showed a spurious `appModel.ts` diff against a stale local `main` ref before
+`git merge-base` was used explicitly; the merge-base comparison is the
+authoritative one and it is clean.)
+
+The one *read* overlap already on record still stands and is unaffected by
+this session's later edits: `b1d685b7` is actively iterating on
+`crates/kanna-server/src/http_api/task_input.rs` itself, so
+`try_submit_task_input_to_session`'s current body, read here to establish the
+"no separate CR write, no wait" finding above, may already be mid-change
+under that task's own work — worth re-confirming against `b1d685b7`'s
+eventual committed state rather than assuming this note's reading of that
+file stays current. Task `ed245f68` (Android emulator/pairing) touches
+`TaskScreen.tsx` and `taskComposerKeyboard.ts` but not `TerminalWebView.tsx`
+or `terminalReconnectPresentation.ts` — also confirmed no overlap.
