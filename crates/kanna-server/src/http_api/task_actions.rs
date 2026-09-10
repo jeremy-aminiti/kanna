@@ -1586,6 +1586,37 @@ fn pr_url_from_verdict(metadata: Option<&serde_json::Value>, summary: &str) -> O
         .map(str::to_string)
 }
 
+/// A pull-request review context carried by a stage-complete verdict.
+///
+/// Accepts both `reviewContext` and `review_context` because agents reach this
+/// through the MCP catalog and through plain `kanna-cli` JSON, and a
+/// convention mismatch here would silently drop the whole identity.
+fn review_context_from_verdict(
+    metadata: Option<&serde_json::Value>,
+) -> Result<Option<crate::db::ReviewContextInput>, (axum::http::StatusCode, String)> {
+    let Some(raw) = metadata
+        .and_then(|metadata| {
+            metadata
+                .get("reviewContext")
+                .or_else(|| metadata.get("review_context"))
+        })
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    // Deliberately not `.ok()`: a context whose shape is wrong must say so.
+    // Swallowing it would leave the agent believing it published a PR identity
+    // and the operator with a review it cannot queue, for no visible reason.
+    serde_json::from_value(raw.clone())
+        .map(Some)
+        .map_err(|error| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("invalid reviewContext metadata: {error}"),
+            )
+        })
+}
+
 fn pr_number_from_url(pr_url: &str) -> Option<i64> {
     pr_url
         .rsplit_once("/pull/")
@@ -1613,6 +1644,19 @@ pub(super) async fn complete_stage(
             "status must be success or failure".to_string(),
         ));
     }
+    // A review agent working without the triage dispatcher publishes the PR
+    // identity here, because there is no `kanna_create_task` call it could
+    // have carried it on. Validated before anything is recorded so a
+    // malformed context is a refused argument the agent can correct, not a
+    // completion that silently dropped it.
+    let review_context = match review_context_from_verdict(payload.metadata.as_ref())? {
+        Some(context) => Some(
+            context
+                .validated()
+                .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, error.to_string()))?,
+        ),
+        None => None,
+    };
     let should_auto_advance = payload.status == "success";
     let stage_result_value = serde_json::json!({
         "status": payload.status,
@@ -1770,6 +1814,21 @@ pub(super) async fn complete_stage(
                     db.update_pipeline_item_pr(&task_id, pr_number_from_url(&pr_url), &pr_url)
                         .map_err(|e| db_write_error("db error", e))?;
                 }
+            }
+            // Recorded on failure too: a reviewer that could not finish its
+            // brief may still have resolved which PR it was looking at, and
+            // the operator's control needs that identity regardless of the
+            // verdict. Refreshing deliberately bumps the context version, so
+            // an earlier decision taken against the old version reads as
+            // stale rather than being carried forward onto a new head.
+            if let Some(context) = review_context.as_ref() {
+                db.upsert_task_review_context(&task_id, context)
+                    .map_err(|error| {
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            format!("invalid review context: {error}"),
+                        )
+                    })?;
             }
             Ok((task_id, finished_run, false, false))
         })

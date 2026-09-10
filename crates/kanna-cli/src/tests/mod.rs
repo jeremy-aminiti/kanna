@@ -364,6 +364,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("workflow_name", "workflow_name"),
                     ("base_ref", "base_ref"),
                     ("diff_base_ref", "diff_base_ref"),
+                    ("review_context", "review_context"),
                     ("agent", "agent"),
                     ("agent_provider", "agent_provider"),
                     ("agent_type", "agent_type"),
@@ -457,6 +458,19 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("branch", "branch"),
                     ("target", "target"),
                     ("pr_url", "pr_url"),
+                    ("summary", "summary"),
+                ],
+            },
+        ),
+        (
+            "kanna_queue_reviewed_pr",
+            TypedToolSurface {
+                command_path: &["task", "queue-reviewed-pr"],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("review_context_version", "review_context_version"),
+                    ("head_sha", "head_sha"),
+                    ("instruction", "instruction"),
                     ("summary", "summary"),
                 ],
             },

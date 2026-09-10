@@ -5567,6 +5567,193 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
     assert_eq!(item.pr_number, Some(41));
 }
 
+/// A review created without the triage dispatcher has no `kanna_create_task`
+/// call that could have carried the pull request's identity, so the reviewer
+/// publishes it with its verdict. Without this, an independent review is
+/// permanently un-queueable and the operator's only recourse would be to
+/// re-derive the PR from the task's title or branch — the inference this whole
+/// path exists to refuse.
+#[tokio::test]
+async fn complete_stage_publishes_a_standalone_reviewers_pull_request_identity() {
+    let repo_temp = tempfile::Builder::new()
+        .prefix("kanna-http-review-context-")
+        .tempdir()
+        .unwrap();
+    let repo_root = repo_temp.path().join("repo");
+    init_test_git_repo(&repo_root);
+    let repo_path = repo_root.to_string_lossy().to_string();
+    let state = super::test_state_with_seed("desktop-review-context", "Studio Mac", move |db| {
+        db.insert_test_repo_with_path("repo-1", &repo_path, "Repo One")
+            .unwrap();
+        db.insert_test_pipeline_item(
+            "task-review",
+            "repo-1",
+            "Review pull request #41",
+            Some("PR #41"),
+            "review",
+            "2026-09-08 00:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_pipeline_def(
+            "task-review",
+            &serde_json::json!({
+                "name": "pr-review-single",
+                "stages": [{ "name": "review", "transition": "manual" }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-review",
+            task_id: "task-review",
+            stage: "review",
+            kind: "main",
+            agent: Some("pr-reviewer"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-review"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-review/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "runId": "run-review",
+                        "status": "success",
+                        "summary": "PR #41 briefed",
+                        "metadata": {
+                            "reviewContext": {
+                                "prUrl": "https://github.com/acme/repo/pull/41",
+                                "headRef": "feature/x",
+                                "headSha": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                                "baseRef": "main"
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    if status != StatusCode::OK {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        panic!("unexpected {status}: {}", String::from_utf8_lossy(&body));
+    }
+    let db = Db::open(&db_path).unwrap();
+    let context = db
+        .read_task_review_context("task-review")
+        .unwrap()
+        .expect("the reviewer's published context is durable");
+    assert_eq!(context.version, 1);
+    assert_eq!(context.context.head_sha, "a".repeat(40));
+    assert_eq!(context.context.base_ref, "main");
+    // Publishing an identity is not an approval and creates no decision.
+    assert!(db
+        .latest_human_review_decision("task-review")
+        .unwrap()
+        .is_none());
+}
+
+/// A malformed context is refused rather than dropped. Swallowing it would
+/// leave the agent believing it published a pull-request identity and the
+/// operator with a review they cannot queue, for no visible reason.
+#[tokio::test]
+async fn complete_stage_refuses_a_review_context_it_cannot_use() {
+    let state = super::test_state_with_seed("desktop-bad-review-context", "Studio Mac", |db| {
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-review",
+            "repo-1",
+            "Review pull request #41",
+            Some("PR #41"),
+            "review",
+            "2026-09-08 00:00:00",
+        )
+        .unwrap();
+        db.update_test_pipeline_item_pipeline_def(
+            "task-review",
+            &serde_json::json!({
+                "name": "pr-review-single",
+                "stages": [{ "name": "review", "transition": "manual" }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        db.insert_stage_run(crate::db::NewStageRun {
+            id: "run-review",
+            task_id: "task-review",
+            stage: "review",
+            kind: "main",
+            agent: Some("pr-reviewer"),
+            agent_provider: Some("claude"),
+            model: None,
+            effort: None,
+            status: "running",
+            result: None,
+            feedback: None,
+            session_id: Some("task-review"),
+            provider_session_id: None,
+            cwd: None,
+            resumed_from_run_id: None,
+        })
+        .unwrap();
+    });
+    let db_path = state.config.db_path.clone();
+    let app = super::router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/v1/tasks/task-review/actions/complete-stage")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "runId": "run-review",
+                        "status": "success",
+                        "summary": "PR #41 briefed",
+                        "metadata": {
+                            "reviewContext": {
+                                "prUrl": "https://github.com/acme/repo/pull/41",
+                                "headSha": "not-a-commit",
+                                "baseRef": "main"
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let db = Db::open(&db_path).unwrap();
+    assert!(db
+        .read_task_review_context("task-review")
+        .unwrap()
+        .is_none());
+    // The verdict is refused as a whole, so the run is not left half-recorded.
+    let runs = db.list_stage_runs_for_task("task-review").unwrap();
+    assert_eq!(runs[0].status, "running");
+}
+
 #[tokio::test]
 async fn delayed_completion_cannot_finish_a_replacement_run() {
     let state = super::test_state_with_seed("desktop-stale-completion", "Studio Mac", |db| {

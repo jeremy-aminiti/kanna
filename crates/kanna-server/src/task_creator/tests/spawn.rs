@@ -563,6 +563,7 @@ async fn prepared_agent_task_spawn_includes_task_specific_kanna_context() {
             transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
+            review_context: None,
 
             parent_task_id: None,
         },
@@ -676,6 +677,7 @@ async fn prepared_claude_pty_task_spawn_passes_kanna_context_as_append_system_pr
             transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
+            review_context: None,
 
             parent_task_id: None,
         },
@@ -766,6 +768,7 @@ async fn prepared_non_claude_pty_task_spawn_prepends_kanna_context_to_prompt() {
             transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
+            review_context: None,
 
             parent_task_id: None,
         },
@@ -858,6 +861,7 @@ async fn prepared_antigravity_pty_task_spawn_sets_up_worktree_alias() {
             transfer_import: None,
             blocker_task_ids: None,
             notify_task_id: None,
+            review_context: None,
 
             parent_task_id: None,
         },

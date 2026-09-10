@@ -123,8 +123,15 @@ export async function createScriptedTask(
     terminalKeyTraceFile?: string;
     tracePartialInput?: boolean;
     traceTerminalKeys?: boolean;
+    reviewedPrQueue?: ScriptedAgentOptions["reviewedPrQueue"];
     waitingPromptSnippet?: string;
     agentProvider?: "claude" | "codex";
+    /**
+     * A pull-request review identity for the created task, exactly as
+     * `pr-triage` dispatches one. Candidate information about the forge; it
+     * authorizes nothing on its own.
+     */
+    reviewContext?: Record<string, unknown>;
   }
 ): Promise<ScriptedTask> {
   const repoPath = join(
@@ -141,6 +148,7 @@ export async function createScriptedTask(
     terminalKeyTraceFile: options.terminalKeyTraceFile,
     tracePartialInput: options.tracePartialInput,
     traceTerminalKeys: options.traceTerminalKeys,
+    reviewedPrQueue: options.reviewedPrQueue,
   });
 
   const repo = asCreatedRepo(await harness.client.invokeDesktop({
@@ -168,6 +176,15 @@ export async function createScriptedTask(
       displayName: options.displayName,
       agentProvider: options.agentProvider ?? "codex",
       agentType: "pty",
+      ...(options.reviewContext === undefined
+        ? {}
+        : { reviewContext: {
+            ...options.reviewContext,
+            // A fixture review must name the actual checked-out commit too.
+            headSha: options.reviewContext.headSha ?? (await execFileAsync(
+              "git", ["rev-parse", "HEAD"], { cwd: repoPath }
+            )).stdout.trim()
+          } }),
       ...(options.terminalCols === undefined
         ? {}
         : { terminalCols: options.terminalCols }),

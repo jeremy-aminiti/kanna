@@ -166,6 +166,28 @@ pub enum TaskEventKind {
     /// `payload.rejectedProviders` lists what has been refused at this stage,
     /// and `payload.action` says in words what a human can do about it.
     ProviderQuotaParked,
+    /// A review task's structured pull-request context was published or
+    /// refreshed. This is *candidate information* an agent supplied about the
+    /// forge — which PR, which head commit, which base — and never an
+    /// approval. `payload.version` is what a human decision pins itself to, so
+    /// a refresh under an earlier decision reads as a version mismatch rather
+    /// than silently re-authorizing a head nobody looked at.
+    ReviewContextChanged,
+    /// A human authorized merging one reviewed head from the desktop or
+    /// mobile control. This is the only event in the feed that carries a
+    /// person's merge decision, and it is created only by that explicit
+    /// action — never by a stage completion, a close, a label, or an agent
+    /// reporting that its human seemed happy. `payload.decisionId` names the
+    /// immutable `human_review_decision` row, which is what the merge master
+    /// reads; the declared `operator` origin is unverified in the same way the
+    /// input ledger's is.
+    HumanReviewDecisionRecorded,
+    /// How far a recorded human decision's delivery to the merge singleton
+    /// got: `pending`, `delivered`, `failed`, or `uncertain`. Recorded beside
+    /// the decision, never inside it, so a redelivery never rewrites what was
+    /// decided. An `uncertain` outcome must be reconciled by a human, not
+    /// resent — the merge master may already hold the request.
+    HumanReviewDecisionDelivery,
 }
 
 impl TaskEventKind {
@@ -196,6 +218,9 @@ impl TaskEventKind {
             Self::TaskUnblocked => "task.unblocked",
             Self::ProviderQuotaRejected => "task.provider_quota_rejected",
             Self::ProviderQuotaParked => "task.provider_quota_parked",
+            Self::ReviewContextChanged => "task.review_context_changed",
+            Self::HumanReviewDecisionRecorded => "task.human_review_decision",
+            Self::HumanReviewDecisionDelivery => "task.human_review_decision_delivery",
         }
     }
 
@@ -226,6 +251,9 @@ impl TaskEventKind {
         Self::TaskUnblocked,
         Self::ProviderQuotaRejected,
         Self::ProviderQuotaParked,
+        Self::ReviewContextChanged,
+        Self::HumanReviewDecisionRecorded,
+        Self::HumanReviewDecisionDelivery,
     ];
 }
 

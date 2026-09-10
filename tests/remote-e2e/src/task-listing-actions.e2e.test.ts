@@ -750,6 +750,98 @@ describe("remote task listing, creation, and actions E2E", () => {
     }
   }, 180_000);
 
+  /** Real catalog CLI call from a scripted review PTY, through the server and
+   * daemon into an existing merge singleton. This tests relay wiring, not a
+   * model's interpretation of natural language or verified human presence. */
+  it("relays an explicit review instruction through the catalog tool exactly once", async () => {
+    const prUrl = "https://github.com/acme/repo/pull/4242";
+    const review = await createScriptedTask(harness, {
+      displayName: "PR #4242 review",
+      prompt: "Review pull request #4242 for a human reviewer.",
+      continuousOutput: false,
+      reviewedPrQueue: {
+        cliPath: remoteHarnessKannaCliPath(harness.repoRoot),
+        serverUrl: `http://127.0.0.1:${harness.ports.server}`
+      },
+      reviewContext: {
+        prUrl, headRepo: "contributor/repo", headRef: "feature/from-a-fork",
+        baseRef: "main", triageRank: 1,
+        relatedPrUrls: ["https://github.com/acme/repo/pull/4243"]
+      }
+    });
+    const detail = asRecord(await invokeDesktop(harness, "GET", `/v1/tasks/${review.taskId}`, null));
+    const context = asRecord(detail.reviewContext);
+    const reviewedHead = String(context.headSha);
+    expect(reviewedHead).toMatch(/^[a-f0-9]{40}$/);
+    expect(detail.humanReviewDecision ?? null).toBeNull();
+    const merge = asRecord(await invokeDesktop(harness, "POST",
+      `/v1/repos/${review.repoId}/agents/merge/signal`, {
+        message: "Wait for a reviewed PR.", agentProvider: "codex"
+      }));
+    const mergeTaskId = String(merge.taskId);
+    const reviewEvents = collectTerminalEvents(harness, review.taskId);
+    const mergeEvents = collectTerminalEvents(harness, mergeTaskId);
+    try {
+      // Remote viewers attach only after reporting a measured viewport.
+      reviewEvents.resize(80, 24);
+      mergeEvents.resize(80, 24);
+      await waitForTerminalOutput(reviewEvents, "SCRIPT_INPUT_READY");
+      await waitForTerminalOutput(mergeEvents, "SCRIPT_INPUT_READY");
+      const instruction = "Queue this PR, please.";
+      const call = (headSha: string) => invokeDesktop(harness, "POST", `/v1/tasks/${review.taskId}/input`, {
+        input: "QUEUE_REVIEWED_PR:" + JSON.stringify({
+          task_id: review.taskId, review_context_version: context.version,
+          head_sha: headSha, instruction
+        }),
+        source: "operator"
+      });
+      await call("0".repeat(40));
+      await waitForTerminalOutput(reviewEvents, "reviewed head moved");
+      expect(await querySql(harness,
+        "SELECT id FROM human_review_decision WHERE task_id = ?1", [review.taskId])).toEqual([]);
+
+      await call(reviewedHead);
+      await waitForTerminalOutput(reviewEvents, "SCRIPT_QUEUE_EXIT:0");
+      await waitForTerminalOutput(mergeEvents, "origin=operator-relayed");
+      const [decision] = await querySql(harness,
+        `SELECT id, pr_url, head, head_sha, base_ref, action_text, origin,
+                device_provenance, delivery_status, merge_task_id
+         FROM human_review_decision WHERE task_id = ?1`, [review.taskId]);
+      expect(decision).toMatchObject({
+        pr_url: prUrl, head: "contributor/repo:feature/from-a-fork",
+        head_sha: reviewedHead, base_ref: "main", action_text: instruction,
+        origin: "operator-relayed", delivery_status: "delivered", merge_task_id: mergeTaskId
+      });
+      expect(JSON.parse(String(decision!.device_provenance))).toEqual({
+        channel: "agent-session", observedStageRunId: asRecord(detail.latestRun).id
+      });
+      const inputs = () => querySql(harness,
+        "SELECT message FROM task_input WHERE task_id = ?1", [mergeTaskId]);
+      const delivered = await inputs();
+      expect(delivered).toHaveLength(1);
+      const message = String(delivered[0]!.message);
+      expect(message).toContain(`MERGE contributor/repo:feature/from-a-fork -> main [TASK ${review.taskId}] [PR ${prUrl}]`);
+      expect(message).toContain(`HUMAN-REVIEW-DECISION ${decision!.id}`);
+      expect(message).toContain(`reviewed-head=${reviewedHead}`);
+      expect(message).toContain(`HUMAN-AUTHORIZATION ${JSON.stringify(instruction)}`);
+      expect(message).toContain("origin=operator-relayed");
+      expect(message).toContain("TRIAGE-RANK 1");
+      expect(message).toContain("RELATED-PR https://github.com/acme/repo/pull/4243");
+
+      await call(reviewedHead);
+      await waitForTerminalOutput(reviewEvents, "was already delivered; do not send this again");
+      expect(await inputs()).toEqual(delivered);
+      expect(await querySql(harness,
+        "SELECT id FROM human_review_decision WHERE task_id = ?1", [review.taskId])).toHaveLength(1);
+      const [row] = await querySql(harness,
+        "SELECT merge_signaled_at FROM pipeline_item WHERE id = ?1", [review.taskId]);
+      expect(row?.merge_signaled_at ?? null).toBeNull();
+    } finally {
+      reviewEvents.close();
+      mergeEvents.close();
+    }
+  }, 120_000);
+
   it("advances stages, completes stages, requests revision, runs merge agent, and closes with current durable-task semantics", async () => {
     const advanceTask = await createScriptedTask(harness, {
       displayName: "Remote advance task"

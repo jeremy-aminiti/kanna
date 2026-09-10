@@ -1,7 +1,12 @@
 import { ActionSheetIOS, Alert, Platform } from "react-native";
 import type { TaskStageAction } from "../state/sessionStore";
 
-export type TaskAction = "preview" | "browse-files" | "mentioned-files" | "view-diff" | TaskStageAction;
+export type TaskAction =
+  | "preview"
+  | "browse-files"
+  | "mentioned-files"
+  | "view-diff"
+  | TaskStageAction;
 
 interface TaskActionDefinition {
   id: TaskAction;

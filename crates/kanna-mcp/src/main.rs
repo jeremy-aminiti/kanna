@@ -1887,6 +1887,7 @@ mod tests {
                 "kanna_create_task",
                 "kanna_signal_agent",
                 "kanna_signal_merge_handoff",
+                "kanna_queue_reviewed_pr",
                 "kanna_send_task_input",
                 "kanna_send_task_raw_input",
                 "kanna_close_task",

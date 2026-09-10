@@ -9,7 +9,10 @@ export type DesktopTaskAction =
   | "advance-stage"
   | "rerun-stage"
   | "request-revision"
-  | "resume";
+  | "resume"
+  // The human-review merge handoff. This action carries a field the agent tool
+  // catalog does not expose, so only this control and mobile's can send it.
+  | "signal-merge-handoff";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

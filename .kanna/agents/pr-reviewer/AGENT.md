@@ -63,6 +63,48 @@ The human may ask you to carry their verdict back to the PR so they do not have 
 
 Merging is out of scope in every case; Kanna merges through its merge agent, never from a review session.
 
+**Queue only on their explicit instruction in this session.** When the human tells you to queue this reviewed PR, call `kanna_queue_reviewed_pr` once, using this task's `reviewContext.version` and `reviewContext.headSha` from `kanna_get_task`, and quote their instruction verbatim in `instruction`. Check that the context still names the PR and commit they reviewed; never refresh it to a new head merely to make an old instruction pass. Do not ask for another confirmation: act, then report the PR URL, reviewed head, and delivery outcome.
+
+Agreement with the brief ("looks good", "yep"), finishing the review, a passing result, or idle time is not an instruction to queue. Never infer authorization. Never use plain `kanna_signal_merge_handoff` or a message to the merge singleton as a substitute. Refusals for moved head/version, duplicate, pending or uncertain delivery are reported to the human and reconciled, never retried automatically. A known failed delivery also needs an explicit instruction before another attempt.
+
+Kanna records `operator-relayed`: you declare that the operator instructed queueing, quoting their words. That is not verified human presence. The server records the task's observed latest stage-run id as corroboration, not proof of who called. Direct TUI speech has no `task_input` row; never fabricate one. This grants no GitHub approval authority. If the review session has ended, resume it with `kanna_resume_task` to continue the conversation; a closed triage parent is not needed.
+
+Two things follow that are worth saying to them plainly if it comes up:
+
+- **Authorizing the merge is not the same as being finished.** Queueing does not close this task, and closing it does not queue anything. They can keep asking you questions after they authorize, and they can close without authorizing.
+- **The decision is pinned to the commit they read.** If the author pushes to the PR afterwards, Kanna refuses the stale decision and the merge agent parks the PR rather than merging a commit nobody reviewed. That is not a bug to work around; it is a fresh read.
+
+## 5. Publish The PR's Identity, If Nobody Did
+
+Kanna's queue tool needs to know *which* pull request this task is about, at *which* commit. When `pr-triage` dispatched you it already recorded that; when the operator created this review themselves, nobody has.
+
+Check first — `kanna_get_task {"task_id": "$KANNA_TASK_ID"}` reports `reviewContext` when one exists. If it is absent, publish it with your completion:
+
+```
+kanna_complete_stage {
+  "task_id": "$KANNA_TASK_ID",
+  "status": "success",
+  "summary": "PR #<n> briefed: ...",
+  "metadata": {
+    "reviewContext": {
+      "prUrl": "<url>",
+      "headRepo": "<owner/name of the head repository, for a fork PR>",
+      "headRef": "<the PR's own head branch>",
+      "headSha": "<the head commit you reviewed>",
+      "baseRef": "<baseRefName>",
+      "baseSha": "<the base commit your diff was read against>",
+      "producingTaskId": "<the Kanna task from the PR body's Kanna-Task trailer, if there is one>"
+    }
+  }
+}
+```
+
+Resolve every field from `gh pr view` and from your own worktree (`git rev-parse HEAD`, `git rev-parse $BASE_REF`) — never from this task's branch name. `headRef` is the branch on the forge; your own `task-*` branch and the local `pr/<n>` ref are not it, and sending either would name something unmergeable.
+
+Publishing this authorizes nothing. It says what you read, so a person can decide about it.
+
+If the context already exists and is still right, leave it alone: refreshing it bumps its version and deliberately invalidates any merge decision the operator has already taken, which would silently un-approve their own work. Refresh it only when the PR has genuinely moved under you and you have re-read it at the new head.
+
 ## Completion
 
 Record the brief's conclusion once, compressed — it is what task detail and the sidebar show, and it is the durable record after this session is gone.

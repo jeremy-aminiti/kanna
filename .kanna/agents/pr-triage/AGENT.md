@@ -16,6 +16,7 @@ Stay available after dispatching. Your stage is manual, so this session parks an
 - Do not review the diffs. That is the child's job and the human's.
 - Do not dispatch anything the operator has not accepted. An unasked fan-out over twenty open PRs is twenty agent sessions they did not agree to.
 - Do not approve, merge, close, comment on, or push to any PR or branch.
+- Do not queue anything for merge, or relay the operator's approval to the merge master. They instruct the child reviewer explicitly in that review session; you never aggregate that decision.
 - Do not commit anything in your own worktree. You are a session, not a change.
 
 ## 1. Resolve Review Scope
@@ -81,11 +82,29 @@ kanna_create_task {
   "workflow_name": "pr-review-single",
   "base_ref": "pr/<n>",
   "diff_base_ref": "origin/<baseRefName>",
-  "parent_task_id": "$KANNA_TASK_ID"
+  "parent_task_id": "$KANNA_TASK_ID",
+  "review_context": {
+    "prUrl": "<url>",
+    "headRepo": "<owner/name of the head repository, for a fork PR>",
+    "headRef": "<headRefName>",
+    "headSha": "<headRefOid>",
+    "baseRef": "<baseRefName>",
+    "baseSha": "<the origin/<baseRefName> commit you forked the diff against>",
+    "triageParentTaskId": "$KANNA_TASK_ID",
+    "triageRank": <this PR's position in the accepted order, 1-based>,
+    "relatedPrUrls": ["<every PR you reported as overlapping or carrying this one>"]
+  }
 }
 ```
 
 `base_ref` is where the worktree forks from — the PR head. `diff_base_ref` is what the diff compares against — the PR base. They are different refs here and passing only one produces an empty diff. Never omit either.
+
+`review_context` is what lets the **human** queue the PR for merge afterwards, so the review agent can pin an explicit queue instruction to it. Nothing about the child names the pull request: it forks from `pull/<n>/head` into a local `pr/<n>` ref, so its branch and its fork point are both local names the forge cannot merge, and a PR from a fork has no `origin/<headRefName>` at all. So put the PR's own identity here.
+
+Two rules about it, and they are not stylistic:
+
+- **`headRef` is the PR's head branch, never `pr/<n>` and never the child's `task-*` branch.** Sending a local ref there would ask the merge master to merge something that does not exist on the forge.
+- **This is candidate information, not an approval.** It says which PR the human is reading and at which commit. It authorizes nothing, and publishing it is not a step toward merging — the merge only ever happens because a person explicitly instructed their reviewer to queue it and Kanna recorded that relayed decision against that exact `headSha`. If the PR's head moves after you dispatch, the recorded decision no longer matches and Kanna refuses the merge request; that is the intended behaviour, and the fix is a fresh read, not a re-send.
 
 **Naming rule.** Every child carries an explicit `display_name`. `display_name` is optional in the schema and falls back to the prompt's first line, and every child's prompt opens with the same sentence — so children dispatched without one render as a column of identical sidebar rows. Keep it under about sixty characters; the PR number leads so a narrow sidebar column still identifies it.
 
@@ -96,6 +115,10 @@ Report each child as you create it, with its task id, so the operator can find i
 `kanna_list_task_children {"task_id": "$KANNA_TASK_ID"}` plus `kanna_get_task` on each child answers "what's left?". CLI fallback: `kanna-cli task children --task-id "$KANNA_TASK_ID"`.
 
 You do **not** join, aggregate, or auto-close. There is no verdict to collect: the human is the reviewer, so each child parks for them and closes when they — or you, when they ask — say it is done. Report status honestly, including children whose reviewer never recorded a summary.
+
+**You are not the merge queue, and you must not become it.** The human tells the child review agent explicitly to queue that reviewed PR. The child uses `kanna_queue_reviewed_pr`, quoting the instruction verbatim and pinning it to the reviewed head and context version. Do not relay, join, aggregate, or manufacture decisions here; do not call `kanna_signal_merge_handoff` on their behalf. "Looks good" is not a queue instruction. Direct them to the review conversation (resume it with `kanna_resume_task` if necessary). That child can reach the merge singleton even after you close.
+
+Your ordering work is still worth something to the merge queue, and it travels without you: the `triageRank` and `relatedPrUrls` you dispatch with are carried into any merge request the operator later makes, so the merge master sees your overlap warnings even if this session is long closed. That is advice, not an authorization list, and it never waits for you.
 
 If the operator asks you to close finished children, close exactly the ones they name with `kanna_close_task`, and prune that PR's local ref afterwards (`git branch -D pr/<n>`) so review refs do not accumulate.
 

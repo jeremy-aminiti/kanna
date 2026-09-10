@@ -343,6 +343,15 @@
     "agentCopied": "Copied!",
     "commandHintPrefix": "Use",
     "commandHintSuffix": "to see available commands.",
+    "reviewMergeTitle": "Reviewed pull request",
+    "reviewMergeReviewed": "{pr} — reviewing {head} into {base}.",
+    "reviewMergeOverlap": "Overlaps or stacks with: {prs}. The merge agent orders by branch topology; these are the ones most likely to collide.",
+    "reviewMergeDelivery": {
+      "pending": "Your merge authorization was recorded but never reported an outcome. Read the merge agent's session and reconcile it — do not send it again.",
+      "delivered": "Request delivered to merge task {mergeTask} on {machine}. The merge agent decides when it is safe to merge.",
+      "failed": "The merge agent did not receive the request: {detail}. Your decision is recorded; sending again delivers the same one.",
+      "uncertain": "Delivery stopped part-way and the merge agent may already hold this request: {detail}. Read that session and reconcile it — do not send it again."
+    },
     "revisionExhaustedTitle": "Automatic revisions exhausted",
     "revisionExhaustedHint": "This task is parked after {rounds} of {limit} automatic revision rounds.",
     "revise": "Revise",

@@ -259,6 +259,130 @@ Merging stays out of both: the merge master owns merging
 ([merge-master.md](./merge-master.md)), and a PR review session never merges,
 extension or not.
 
+## The human's route to the merge queue
+
+The seam above has a second half, and this design originally left it open: the
+human forms a verdict, and then nothing happens. Both review workflows are
+single-stage and manual, so advancing past the only stage just closes the task;
+neither declares an `approve` post. The PR was not marked ready, the merge
+singleton was never told, and the merge had to be arranged by hand.
+
+Closing that gap must not close the one the section above opens deliberately.
+Three shapes were considered:
+
+- **(a) The child tells its parent, and `pr-triage` runs a merge queue.** It
+  fits the hierarchy and puts ordering where the overlap analysis already is.
+  It also contradicts triage's explicit contract — it does not join or
+  aggregate — and it makes shipping depend on a dispatcher staying alive, which
+  a closed triage session or an independently created review does not have.
+- **(b) The child relays an explicit instruction directly. Chosen after the
+  owner's 2026-09-09 correction.** The child carries a verbatim queue instruction
+  through a dedicated, head/version-pinned decision tool, not an inferred
+  verdict through the ordinary policy handoff. This works without triage and
+  records the honest declared origin `operator-relayed`.
+- **(c) A desktop/mobile queue button. Rejected by the owner.** The earlier UI
+  entry point required a control they do not want. Its durable decision and
+  delivery substrate stays; its buttons and action plumbing are removed.
+
+### What the gesture is
+
+The operator tells the review agent to queue this reviewed PR in their live
+or resumed session. The agent calls `kanna_queue_reviewed_pr` once with
+`task_id`, `review_context_version`, `head_sha`, the operator's verbatim
+`instruction`, and an optional summary. It checks that the context still names
+the PR and commit the human reviewed. No confirmation round-trip: report the
+PR, exact head and outcome after acting. "Looks good", agreement, completion,
+idle, and the agent's verdict are never a queue instruction. There is no
+transcript or composer classifier and no fabricated `task_input` row.
+
+Desktop/mobile queue buttons and action plumbing are removed. Read-only review
+context and decision projections remain. Queueing needs the review conversation;
+`kanna_resume_task` recovers a stopped session, without a living triage parent.
+
+Advancing the stage is deliberately *not* this gesture. Advancing means "I am
+done looking", which on these workflows closes the task; making it also mean
+"ship it" would turn ordinary cleanup into shipping. The two are independent in
+both directions: queueing does not close the review, and closing does not
+queue. For the same reason these workflows gain no `approve` post — its
+close-time backstop exists to guarantee a handoff a workflow promised, and here
+there is no such promise to keep.
+
+### What the record is
+
+Two durable records, deliberately separate, because they are different kinds of
+claim:
+
+- **`task_review_context`** — what a task is reviewing: PR URL, head repo/ref,
+  head SHA, base ref and SHA, the producing task when there is one, and
+  triage's rank and overlap set. An agent supplies it, at
+  `kanna_create_task` (triage) or in `kanna_complete_stage` metadata (a
+  standalone reviewer), so it is *candidate information about the forge* and
+  authorizes nothing. It exists because nothing about a review child names its
+  PR: it forks from `pull/<n>/head` into a local `pr/<n>` ref, so its branch and
+  its fork point are both unmergeable local names, and a fork PR has no
+  `origin/<headRefName>` at all. Refreshing it bumps a version.
+- **`human_review_decision`** — the authority. Recorded for the explicit instruction,
+  immutable, and unique per `(task, reviewed head)`, so a duplicate call or a
+  retried request resolves to the same decision instead of a second
+  authorization. It records the PR, the head and base it was taken against, the
+  verbatim instruction, the machine, and the time. Delivery outcome lives
+  beside it, never inside it, so a redelivery never rewrites what was decided.
+
+The server refuses the request when the context version or head SHA the
+operator saw is no longer current, or when the review worktree is checked out
+at a different commit. A PR that moved under its reviewer needs a fresh read,
+not a decision inherited onto a commit nobody saw.
+
+### What the merge master is told
+
+The catalog tool uses the existing human-decision delivery path, with the head and
+base derived server-side from the stored context rather than from the caller —
+so a request cannot name one PR in the instruction and another on the wire.
+Under the compact `MERGE` line it carries `HUMAN-REVIEW-DECISION`,
+`HUMAN-AUTHORIZATION`, and optional `PRODUCING-TASK`, `TRIAGE-RANK` and
+`RELATED-PR` lines, which is what lets a merge master on another machine
+resolve everything without a living triage parent. `merge_signaled_at` is left
+alone: that stamp answers the approve post's "does this task still owe one
+handoff?", a different question on a different workflow.
+
+The merge agent merges the reviewed head under the forge's expected-head
+precondition and **must not change the PR under an old decision** — no rebase,
+force-push, fix, conflict resolution, or retarget. Anything that would produce
+a commit nobody read parks the candidate for a fresh decision. Ordering is
+topology first, then the order humans authorized, with triage rank and overlap
+as advice rather than an authorization list.
+
+### The authority boundary
+
+Stated plainly, because it is the point:
+
+- Only the explicit operator action creates a decision. A stage completion, a
+  Close, a label, a generic `MERGE` message, or an agent reporting that its
+  human seemed happy is not one, and the merge agent must read the durable
+  record rather than infer or manufacture one.
+- The conversation path stamps `operator-relayed`: an agent declares that the
+  operator explicitly instructed queueing and quotes their words. The server
+  stores `deviceProvenance: {channel: "agent-session", observedStageRunId}`
+  from the review task's latest run (null if absent). It does not authenticate
+  the caller as that run or prove human presence. The retained direct API
+  stamps `operator`. Both use the existing declared, unverified trust model;
+  no new authentication root or schema migration is introduced. Direct TUI
+  speech is never fabricated into the input ledger.
+- Delivered, pending and uncertain decisions refuse another conversation call;
+  a strict ledger failure after daemon acknowledgment is uncertain, never safe
+  to resend. The agent reports refusals without retrying or using another path.
+- This authorizes **queueing only**. It submits no GitHub approving review,
+  takes nothing out of draft, and changes no labels — `kn:wip`, `kn:pr-ready`
+  and `kn:claimed` stay repository workflow metadata, never approval evidence.
+  Whether a Kanna gesture should also submit a GitHub approval in the
+  operator's name is deliberately left to the owner; doing it would need
+  explicit authenticated GitHub identity and an honest answer for self-authored
+  PRs, which GitHub refuses.
+- It ships in the base contract, not as an `EXTEND.md` opt-in: the gap it fixes
+  is in Kanna, not in any one repository. `EXTEND.md` may still grant a
+  repository's agents more forge authority, but it cannot relabel an agent's
+  judgment as this human decision.
+
 ## The workspace question
 
 "Their workspace worktree is based on the branch of the PR" is the load-bearing
@@ -509,6 +633,12 @@ coordination; reviewing PRs on repositories Kanna has not imported.
   built-in leaves it undefined and asks; the repo answers by `EXTEND.md`; the
   `setup` agent asks it at import. Kanna's own repo answers "every open PR" and
   that extension is written. See "Defaults, extension, and setup".
+- **How a human's verdict reaches the merge queue (owner directive,
+  2026-09-08).** The owner asked for either the child talking to its parent or
+  the child messaging the merge master directly. Neither: both put merge
+  authority in a session that is deliberately denied it. The operator queues it
+  themselves from the desktop or mobile control, and Kanna records the
+  decision. See "The human's route to the merge queue".
 - **Whether the child may act on the forge** (owner delegated the call).
   Transcription in the built-in, authority by extension, merging never. See
   "What the reviewer may do to the forge".
@@ -538,7 +668,16 @@ useful on its own:
 
 ## Open questions
 
-None outstanding. Every question this design raised has been answered — by the
+- **Should a Kanna merge authorization also submit a GitHub approving review in
+  the operator's name?** As shipped it does not: it authorizes queueing, and
+  GitHub-required approvals still come from eligible humans on GitHub. Saying
+  yes means choosing identity semantics deliberately — an authenticated GitHub
+  identity for the operator rather than the merge agent's `gh` login, review
+  submission pinned to the reviewed head, an honest refusal on self-authored
+  PRs, and partial-failure handling when the approval lands and the queue
+  request does not. This is the owner's call, not the author's.
+
+Otherwise: Every question this design raised has been answered — by the
 owner for scope and the extension rule, and by the author's judgment, at the
 owner's direction, for forge authority, naming, and whether the diff-tool work
 belongs to this effort. What remains is the owner's accept/reject on the design

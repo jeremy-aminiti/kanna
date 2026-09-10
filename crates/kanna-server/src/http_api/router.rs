@@ -264,6 +264,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(complete_stage),
         )
         .route(
+            "/v1/tasks/{task_id}/actions/queue-reviewed-pr",
+            post(super::signal_agent::queue_reviewed_pr),
+        )
+        .route(
             "/v1/tasks/{task_id}/actions/signal-merge-handoff",
             post(signal_merge_handoff),
         )

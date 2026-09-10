@@ -329,6 +329,10 @@ pub(crate) struct CreateTaskRequest {
     pub(crate) base_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) diff_base_ref: Option<String>,
+    /// The pull request a review task reviews. Candidate information about the
+    /// forge; it grants nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) review_context: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -555,6 +559,7 @@ pub(crate) struct TaskCreateOptions {
     pub(crate) workflow_name: Option<String>,
     pub(crate) base_ref: Option<String>,
     pub(crate) diff_base_ref: Option<String>,
+    pub(crate) review_context: Option<Value>,
     pub(crate) agent: Option<String>,
     pub(crate) agent_provider: Option<String>,
     pub(crate) agent_type: Option<String>,

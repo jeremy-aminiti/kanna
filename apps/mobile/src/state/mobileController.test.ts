@@ -2213,6 +2213,124 @@ describe("createMobileController", () => {
     );
   });
 
+  /**
+   * The merge control reads `selectedTaskReviewState`, which only task detail
+   * carries. Two ways it used to go wrong, both of them leaving the operator
+   * able to authorize a head they had already authorized:
+   *
+   * - after a delivered authorization the controller re-read detail through
+   *   the prompt cache, which by then always hit, so the pre-decision detail
+   *   was replayed and the control stayed on offer;
+   * - `setSelectedTask` clears the review state on every selection change, and
+   *   the cache-hit path never put it back, so re-entering the task lost it
+   *   until the app restarted.
+   */
+  describe("review merge state", () => {
+    const REVIEWED_HEAD = "a".repeat(40);
+    const reviewTask: TaskSummary = {
+      id: "task-review",
+      repoId: "repo-1",
+      title: "PR #12 review",
+      prompt: "Review pull request #12",
+      stage: "review"
+    };
+    const otherTask: TaskSummary = {
+      id: "task-other",
+      repoId: "repo-1",
+      title: "Something else",
+      prompt: "Do the other thing",
+      stage: "in progress"
+    };
+    const reviewContext = {
+      version: 1,
+      prUrl: "https://github.com/acme/repo/pull/12",
+      headRef: "feature/x",
+      headSha: REVIEWED_HEAD,
+      baseRef: "main",
+      updatedAt: "2026-09-08T00:00:00Z"
+    };
+    const deliveredDecision = {
+      id: "hrd-1",
+      taskId: "task-review",
+      reviewContextVersion: 1,
+      prUrl: reviewContext.prUrl,
+      headSha: REVIEWED_HEAD,
+      baseRef: "main",
+      actionText: "I reviewed it and authorize the merge.",
+      origin: "operator-relayed",
+      createdAt: "2026-09-08T00:00:00Z",
+      deliveryStatus: "delivered" as const,
+      mergeTaskId: "task-merge",
+      ownerDesktopId: "desktop-1"
+    };
+
+    function createReviewClient(): ClientMock {
+      const client = createClientMock();
+      client.listRecentTasks.mockResolvedValue([reviewTask, otherTask]);
+      client.listRepoTasks.mockResolvedValue([reviewTask, otherTask]);
+      return client;
+    }
+
+    it("projects the relayed decision from task detail without an authorization action", async () => {
+      const store = createSessionStore();
+      const client = createReviewClient();
+      client.getTask = vi.fn(async () => ({
+        ...reviewTask, reviewContext, humanReviewDecision: deliveredDecision
+      }));
+      const controller = createMobileController(client, store);
+      await controller.bootstrap();
+      controller.openTask(reviewTask.id);
+      await flushMicrotasks();
+      expect(store.getState().selectedTaskReviewState).toMatchObject({
+        taskId: reviewTask.id,
+        reviewContext,
+        humanReviewDecision: { id: "hrd-1", deliveryStatus: "delivered", origin: "operator-relayed" }
+      });
+      expect(controller).not.toHaveProperty("queueReviewedPrForMerge");
+    });
+
+    it("restores the review identity when the task is opened again from cache", async () => {
+      const store = createSessionStore();
+      const client = createReviewClient();
+      // The other task's detail read fails, which is ordinary for an offline
+      // owner and leaves the prompt cache still pointing at the review task —
+      // so re-entering it takes the cache-hit path rather than re-fetching.
+      client.getTask = vi.fn(async (taskId: string) => {
+        if (taskId !== reviewTask.id) {
+          throw new Error("owner offline");
+        }
+        return { ...reviewTask, reviewContext };
+      });
+      const controller = createMobileController(client, store);
+
+      await controller.bootstrap();
+      controller.openTask(reviewTask.id);
+      await flushMicrotasks();
+      expect(store.getState().selectedTaskReviewState?.reviewContext).toMatchObject(
+        { prUrl: reviewContext.prUrl, headSha: REVIEWED_HEAD }
+      );
+      const detailReads = client.getTask.mock.calls.length;
+
+      controller.openTask(otherTask.id);
+      await flushMicrotasks();
+      // A review identity belongs to one task and must not follow the
+      // selection to another.
+      expect(store.getState().selectedTaskReviewState).toBeNull();
+
+      controller.openTask(reviewTask.id);
+      await flushMicrotasks();
+      expect(store.getState().selectedTaskReviewState?.reviewContext).toMatchObject(
+        { prUrl: reviewContext.prUrl, headSha: REVIEWED_HEAD }
+      );
+      // Restored from the cache, not by asking the owner again.
+      expect(client.getTask.mock.calls.filter(
+        ([taskId]) => taskId === reviewTask.id
+      )).toHaveLength(
+        detailReads
+      );
+    });
+  });
+
   it("keeps the bounded prompt fallback when owner task detail fails", async () => {
     const promptSnippet = "p".repeat(500);
     const cloudTask: TaskSummary = {

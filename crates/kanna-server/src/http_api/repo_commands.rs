@@ -107,6 +107,7 @@ pub(super) async fn run_repo_command(
             stage: launch.stage,
             base_ref: None,
             diff_base_ref: None,
+            review_context: None,
             agent: launch.agent,
             agent_provider: launch.agent_provider,
             agent_type: launch.agent_type,

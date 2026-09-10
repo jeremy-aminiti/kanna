@@ -4,6 +4,9 @@ import type {
   TaskCreationPhase,
   TaskTerminalStatus
 } from "../state/sessionStore";
+import type {
+  TaskReviewContext
+} from "../lib/api/types";
 import {
   DEFAULT_TASK_QUICK_REPLIES,
   type TaskQuickReply
@@ -37,7 +40,8 @@ const componentMocks = vi.hoisted(() => ({
   onAdvanceTaskStage: vi.fn(),
   onCloseTask: vi.fn(),
   onSendInput: vi.fn(),
-  showTaskActionMenu: vi.fn()
+  showTaskActionMenu: vi.fn(),
+  alert: vi.fn()
 }));
 
 vi.mock("react", async (importActual) => {
@@ -107,6 +111,8 @@ vi.mock("react", async (importActual) => {
 
 vi.mock("react-native", () => ({
   ActivityIndicator: "ActivityIndicator",
+  Alert: { alert: componentMocks.alert },
+  Image: "Image",
   Keyboard: {
     addListener: componentMocks.keyboardAddListener,
     dismiss: componentMocks.keyboardDismiss
@@ -191,6 +197,7 @@ beforeEach(() => {
   componentMocks.onCloseTask.mockReset();
   componentMocks.onSendInput.mockReset();
   componentMocks.showTaskActionMenu.mockReset();
+  componentMocks.alert.mockReset();
 });
 interface ElementNode {
   type: unknown;
@@ -345,7 +352,7 @@ function renderTaskScreen(options: RenderTaskScreenOptions = {}): ElementNode {
     companionEventStatus = "idle",
     onCompanionOpenChange = vi.fn(),
     onSendCompanionEvent = vi.fn(),
-    pendingTaskAction = null
+    pendingTaskAction = null,
   } = options;
 
   hookHarness.callbackIndex = 0;
@@ -580,6 +587,17 @@ describe("TaskScreen", () => {
 
     pressByTestId(tree, "mobile.task-creation.recover");
     expect(onRecoverTaskCreation).toHaveBeenCalledOnce();
+  });
+
+  /** An ordinary task has no pull-request identity, so there is no control. */
+  it("offers no merge control on a task with no published review context", () => {
+    const tree = renderTaskScreen();
+
+    pressByTestId(tree, "mobile.task-more-button");
+    expect(componentMocks.showTaskActionMenu).toHaveBeenCalledWith(
+      { mentionedFilesLabel: "Mentioned Files (0)" },
+      expect.any(Function)
+    );
   });
 
   it("opens the creation-specific task actions for an uncertain workspace", () => {

@@ -540,6 +540,11 @@ export function TaskScreen({
     draftInput: string;
     attachment: PreparedImageAttachment | null;
   } | null>(null);
+  /**
+   * Whether a merge authorization for this task is still waiting on the
+   * server. A ref rather than state: it must gate the very next press, and a
+   * render cannot be relied on to have happened in between.
+   */
   // The composer is one multiline TextInput between a one-line minimum and a
   // five-line maximum, scrolling itself past that. Height is never set from
   // state, so nothing here measures content, defers a stale measurement, or

@@ -750,6 +750,57 @@ describe("QA workflow assets", () => {
     expect(scopeAnswer).not.toContain("docs/task-specs/");
   });
 
+  it("permits explicit conversation relay without inferred approval", () => {
+    const reviewer = readRepoPhrases(".kanna/agents/pr-reviewer/AGENT.md");
+    const triage = readRepoPhrases(".kanna/agents/pr-triage/AGENT.md");
+    const mergeAgent = readRepoPhrases(".kanna/agents/merge/AGENT.md");
+
+    // Only the explicit queue instruction may be relayed; an agent verdict is never authority.
+    for (const [name, body] of [
+      ["pr-reviewer", reviewer],
+      ["pr-triage", triage],
+    ] as const) {
+      expect(body, name).toContain("kanna_queue_reviewed_pr");
+      expect(body, name).not.toContain("Queue for merge");
+      expect(body, name).toContain("kanna_signal_merge_handoff");
+    }
+    expect(reviewer).toContain("Do not approve or merge anything, ever");
+    expect(reviewer).toContain("Never infer authorization");
+    expect(reviewer).toContain("quote their instruction verbatim");
+    expect(reviewer).toContain("Do not ask for another confirmation");
+    expect(reviewer).toContain("operator-relayed");
+    expect(reviewer).toContain("never fabricate one");
+    expect(reviewer).toContain("never retried automatically");
+    expect(triage).toContain("Do not queue anything for merge");
+    expect(triage).toContain("not** join, aggregate, or auto-close");
+
+    // A standalone review has no dispatcher to have carried the PR identity,
+    // so the reviewer publishes it — as candidate information, never approval,
+    // and never from its own branch name.
+    expect(reviewer).toContain("reviewContext");
+    expect(reviewer).toContain("Publishing this authorizes nothing");
+    expect(reviewer).toContain("never from this task's branch name");
+
+    // Triage dispatches the identity and its ordering advice, and is explicit
+    // that a local `pr/<n>` ref is not a mergeable head.
+    expect(triage).toContain("review_context");
+    expect(triage).toContain("candidate information, not an approval");
+    expect(triage).toContain("never `pr/<n>` and never the child's `task-*` branch");
+
+    // The merge master's side of the same contract.
+    expect(mergeAgent).toContain("HUMAN-REVIEW-DECISION");
+    expect(mergeAgent).toContain("names the **review** task, not the task that produced the PR");
+    expect(mergeAgent).toContain("do not change the pull request under an old decision");
+    expect(mergeAgent).toContain("--match-head-commit");
+    expect(mergeAgent).toContain("never manufacture a decision");
+    // Queue authorization only: no GitHub approval, no label mutation.
+    expect(mergeAgent).toContain("It is not a GitHub approving review");
+    expect(mergeAgent).toContain("never evidence that a human approved anything");
+    // Triage rank is advice, not a second queue.
+    expect(mergeAgent).toContain("Topology and dependencies first");
+    expect(mergeAgent).toContain("advice**, not an authorization list");
+  });
+
   it("keeps both deciding reviewers inside the original task scope", () => {
     for (const name of ["review", "qa-dispatcher"]) {
       const agent = readRepoPhrases(`.kanna/agents/${name}/AGENT.md`);

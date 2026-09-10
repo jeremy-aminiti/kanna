@@ -1,6 +1,8 @@
 import { chmod, writeFile } from "node:fs/promises";
 
 export interface ScriptedAgentOptions {
+  /** Explicit fixture command invokes the real catalog tool from the PTY. */
+  reviewedPrQueue?: { cliPath: string; serverUrl: string };
   continuousOutput?: boolean;
   inputTraceFile?: string;
   redactInput?: boolean;
@@ -100,6 +102,14 @@ done
 }
 
 export function scriptedAgentSource(options: ScriptedAgentOptions = {}): string {
+  const reviewedPrQueue = options.reviewedPrQueue
+    ? `case "$line" in
+      QUEUE_REVIEWED_PR:*)
+        ${shellSingleQuote(options.reviewedPrQueue.cliPath)} tool call kanna_queue_reviewed_pr --server-url ${shellSingleQuote(options.reviewedPrQueue.serverUrl)} --json "\${line#QUEUE_REVIEWED_PR:}" 2>&1
+        printf 'SCRIPT_QUEUE_EXIT:%s\\n' "$?"
+        ;;
+    esac`
+    : ":";
   const continuousOutput = options.continuousOutput !== false;
   const inputTrace = options.inputTraceFile
     ? `printf '%s\\000' "$line" >> ${shellSingleQuote(options.inputTraceFile)}`
@@ -276,6 +286,7 @@ while :; do
     fi
 
     ${inputReport}
+    ${reviewedPrQueue}
     case "$line" in
       *relay-fixture-idle*)
         printf 'OpenAI Codex\\r\\nDone.\\r\\n› \\r\\n'
