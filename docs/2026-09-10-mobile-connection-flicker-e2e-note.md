@@ -63,13 +63,17 @@ the missing-Enter symptom is not fixed, not reproduced, and not ruled out
 by any of them.** Composer-readiness detection is now solid (each of runs 2
 and 3 independently falsified a different single-regex approach); the
 remaining gap and its concrete next fix (a `--disable` feature flag, name
-unconfirmed, or a longer wait) are documented in the test file itself. A
-simulator first-attach lane is prepared below with the exact identity and a
-genuine disposable pairing sequence (real `POST /v1/pairing/sessions`, not
-trust-seeding alone) — held on Mac Studio load, not on a person, per the
-owner's lift of recovery-related holds; the still-unknown original incident
-provider/session is a separate information
-gap (owner-only) that does not block either of these independent checks.
+unconfirmed, or a longer wait) are documented in the test file itself. The
+simulator first-attach lane has since run for real (attempt 2, below): the
+`6fee7e01c` scheme fix is now live-confirmed against an actual OS-level
+open, and the real disposable-pairing sequence (`POST /v1/pairing/sessions`
+→ `e2e-trust` → `e2e-pair`) works end to end — but the redraw capture itself
+is still not obtained, blocked by one precisely-identified new gap: Expo's
+own first-run dev-tools tip needs a real tap, and this session's computed
+`click at` was refused by macOS with an Accessibility-permission error
+(`-25204`), not something this session can grant itself. The still-unknown
+original incident provider/session remains a separate information gap
+(owner-only) that does not block either of these independent checks.
 
 ## Flicker: a source-demonstrated overlay bug, not yet a proven cure
 
@@ -498,6 +502,84 @@ repaint *after* the loading overlay has already cleared (the reported
 flicker, and what the fix targets), and whether "after" does not. A result
 either way should update the "hypothesis, not proof" language above rather
 than being silently treated as confirmation.
+
+## iOS simulator lane, attempt 2 — executed, real progress, new concrete blocker
+
+Lane cleared (Studio ~22% busy) and predecessor hold lifted; ran this for
+real, same exact UDID (`1CCF3E78-D553-46A9-A4A3-74F4D1BDE0A4`), with
+`EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED=1` actually set this time (plain
+shell prefix on `./kd mobile run --simulator <udid>`, not the MCP tool call —
+correcting attempt 1's gap). Build succeeded again (`Build Succeeded`, `0
+error(s)`), installed and launched. Same `desktopId:
+desktop-c3dc45eb-35ad-41a3-b447-cd02d45b2d2d`, `environment: development` —
+this worktree's persistent dev DB, confirmed by direct `/v1/status` read, not
+assumed. Registered repo `repo-18d3f3efcc1e6440` (already present from
+attempt 1's persisted DB) and created one fresh disposable scratch task
+(`a987bd3a`), closed and its worktree/branch removed at the end, same as
+attempt 1.
+
+**The `6fee7e01c` scheme fix is now confirmed against a real OS-level open,
+not just unit tests:** `xcrun simctl openurl 1CCF3E78-… "kanna-dev://e2e-trust?…"`
+exited 0 — no more `NSOSStatusErrorDomain -10814`. This is the first live
+confirmation that the fix actually resolves the scheme correctly.
+
+**New, real blocker found and precisely characterized: `xcrun simctl openurl`
+raises a native "Open in 'Kanna Dev'?" confirmation dialog that has no
+`ctx.skip`-style bypass** — this is a genuine OS-level cross-app-open gate,
+and it appeared here **on iOS 18.5**, not only the iOS 26 this task's memory
+notes previously attributed it to; that earlier attribution was too narrow
+and is corrected here. Screenshot: `.tmp/mobile-flicker-capture/screen-02-after-trust-seed.png`
+(not committed).
+
+**Found a real, legitimate way to answer *that specific* dialog, using only
+already-present macOS capabilities (no install):** `osascript -e 'tell
+application "Simulator" to activate'` then `osascript -e 'tell application
+"System Events" to keystroke return'` accepts the dialog's default ("Open")
+button — `keystroke` against a native `UIAlertController`-backed system
+dialog works without any special permission grant. Used this to dismiss
+both the `e2e-trust` and the subsequent `e2e-pair` dialogs. After
+`e2e-trust` alone, the app correctly left the "Connect Kanna on your Mac"
+pairing screen and showed "Tasks" / "No tasks yet" — trust-seeding visibly
+took effect. Sent the real, disposable pairing claim next, exactly as
+planned: `POST /v1/pairing/sessions` → `{"code":"1C52D8","pairingPayload":
+"KANNA1:DESKTOP-C3DC45EB-…:1C52D8", …}`, then `kanna-dev://e2e-pair?payload=<encoded>`
+— exited 0, dialog dismissed the same way.
+
+**Second, different blocker, also now precisely characterized, where the
+attempt stopped:** the task list still read "No tasks yet" after pairing,
+because Expo's own first-run "Dev tools" tip overlay (unrelated to Kanna's
+own code — it is the Expo dev-launcher's onboarding sheet) was still
+covering the bottom of the screen and its "Continue" button is a custom
+in-app view, not a native alert:
+- `keystroke return` against it — no effect (confirmed via screenshot,
+  unchanged). Native-alert default-button activation does not extend to
+  arbitrary app UI.
+- `key code 53` (Escape) — no effect.
+- A computed tap — `System Events`' generic `click at {x, y}` UI-element
+  scripting — failed outright with `execution error: … error -25204`, a
+  macOS Accessibility-permission denial for the process driving this
+  session. This is not a tool this session can install or grant itself; it
+  is a System Settings → Privacy & Security → Accessibility grant, which is
+  the user's call, not an autonomous one.
+
+Screenshots preserved (not committed):
+`.tmp/mobile-flicker-capture/screen-0{2..7}-*.png` — trust-seed dialog,
+post-accept ("Tasks"/"No tasks yet"), post-pair (same, dev-tools overlay
+still present), and the three dismissal attempts (return/click/escape), all
+showing the identical unchanged overlay except where noted.
+
+**Net for attempt 2:** genuine progress over attempt 1 — the scheme fix is
+now live-confirmed, native "Open in…?" dialogs have a real, repeatable,
+permission-free dismissal method, and the real disposable-pairing sequence
+(`POST /v1/pairing/sessions` → `e2e-trust` → `e2e-pair`) works exactly as
+designed end to end. What remains is a single, precisely-identified,
+concrete blocker — not a vague "needs a human": dismissing Expo's own
+first-run dev-tools tip needs either a real tap (Accessibility permission
+granted to enable `click at`, or a human, or Appium) — none available this
+pass. Cleaned up fully: scratch task closed, worktree/branch removed,
+`dev_down` (zero failures), simulator shut down (confirmed via `simctl list
+devices booted` returning empty). This worktree's own git state was not
+touched during any of it.
 
 ## Missing-Enter symptom — correction: the drain-aware fence is gone, not current
 
