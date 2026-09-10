@@ -8,7 +8,7 @@ import {
 } from "../services/desktopServerClient";
 import type { PipelineItem, Repo } from "../types/kanna";
 import { createWorkflowApi } from "./workflow";
-import { createStoreContext, createStoreState } from "./state";
+import { createStoreContext, createStoreState, type KannaSnapshot } from "./state";
 
 const { invokeMock, resolveBaseUrlMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(async () => null),
@@ -47,6 +47,15 @@ function mockDefaultWorkflow() {
   }));
   updateDesktopServerClientHandlersForTests({ fetchRepoWorkflowDefinition });
   return fetchRepoWorkflowDefinition;
+}
+
+function snapshotFor(state: ReturnType<typeof createStoreState>): KannaSnapshot {
+  return {
+    entries: [{ repo: state.repos.value[0]!, items: state.items.value }],
+    taskBlockers: [],
+    worktreePaths: {},
+    settings: {},
+  };
 }
 
 describe("advanceStage durable selection", () => {
@@ -88,6 +97,11 @@ describe("advanceStage durable selection", () => {
       isItemHidden: (item) => item.closed_at != null,
       selectItem,
       reloadSnapshot,
+      waitForAuthoritativeSnapshot: async (predicate) => {
+        const snapshot = snapshotFor(state);
+        expect(await predicate(snapshot)).toBe(true);
+        return snapshot;
+      },
     });
     vi.stubGlobal("fetch", vi.fn(async () => new Response(
       JSON.stringify({ taskId: "task-source" }),
@@ -130,6 +144,11 @@ describe("advanceStage durable selection", () => {
       sortedItemsForCurrentRepo: computed(() => [source]),
       persistSelection,
       reloadSnapshot,
+      waitForAuthoritativeSnapshot: async (predicate) => {
+        const snapshot = snapshotFor(state);
+        expect(await predicate(snapshot)).toBe(true);
+        return snapshot;
+      },
     });
     vi.stubGlobal("fetch", vi.fn(async () => new Response(
       JSON.stringify({ taskId: "task-source" }),

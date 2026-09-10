@@ -13,6 +13,12 @@ interface OptimisticItemOverlay {
   apply: (snapshot: KannaSnapshot) => KannaSnapshot;
 }
 
+interface AuthoritativeSnapshotWaiter {
+  predicate: (snapshot: KannaSnapshot) => boolean | Promise<boolean>;
+  resolve: (snapshot: KannaSnapshot) => void;
+  reject: (error: unknown) => void;
+}
+
 export interface QueryState<T> {
   data: Ref<T> | ComputedRef<T>;
   pending: Ref<boolean>;
@@ -36,6 +42,9 @@ export interface QueriesApi {
   items: QueryState<PipelineItem[]>;
   loadInitialData: () => Promise<void>;
   reloadSnapshot: (options?: ReloadSnapshotOptions) => Promise<void>;
+  waitForAuthoritativeSnapshot: (
+    predicate: (snapshot: KannaSnapshot) => boolean | Promise<boolean>,
+  ) => Promise<KannaSnapshot>;
   applyTaskStateChange: (change: TaskStateChange) => boolean;
   withOptimisticItemOverlay: <T>(input: {
     key: string;
@@ -63,6 +72,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
   const optimisticItems = ref<OptimisticItemOverlay[]>([]);
   const refreshRunId = ref(0);
   let taskStateGeneration = 0;
+  const authoritativeSnapshotWaiters = new Set<AuthoritativeSnapshotWaiter>();
   const recentTaskStateChanges = new Map<
     string,
     { generation: number; change: TaskStateChange }
@@ -105,6 +115,36 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       context.state.items.value,
       options,
     );
+  }
+
+  async function evaluateAuthoritativeSnapshotWaiter(
+    waiter: AuthoritativeSnapshotWaiter,
+    snapshot: KannaSnapshot,
+  ): Promise<void> {
+    try {
+      if (!await waiter.predicate(snapshot)) return;
+      if (!authoritativeSnapshotWaiters.delete(waiter)) return;
+      waiter.resolve(snapshot);
+    } catch (error) {
+      if (!authoritativeSnapshotWaiters.delete(waiter)) return;
+      waiter.reject(error);
+    }
+  }
+
+  function settleAuthoritativeSnapshotWaiters(snapshot: KannaSnapshot): void {
+    for (const waiter of [...authoritativeSnapshotWaiters]) {
+      void evaluateAuthoritativeSnapshotWaiter(waiter, snapshot);
+    }
+  }
+
+  function waitForAuthoritativeSnapshot(
+    predicate: (snapshot: KannaSnapshot) => boolean | Promise<boolean>,
+  ): Promise<KannaSnapshot> {
+    return new Promise((resolve, reject) => {
+      const waiter = { predicate, resolve, reject };
+      authoritativeSnapshotWaiters.add(waiter);
+      void evaluateAuthoritativeSnapshotWaiter(waiter, baseSnapshot.value);
+    });
   }
 
   async function reconcileMissingRepoState(
@@ -246,6 +286,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       baseSnapshot.value = snapshot;
       applySnapshotSettingsToState(context.state, snapshot.settings);
       syncSnapshot({ authoritative: true });
+      settleAuthoritativeSnapshotWaiters(snapshot);
       for (const [taskId, recent] of recentTaskStateChanges) {
         if (recent.generation <= taskStateGeneration) recentTaskStateChanges.delete(taskId);
       }
@@ -392,6 +433,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     },
     loadInitialData,
     reloadSnapshot,
+    waitForAuthoritativeSnapshot,
     applyTaskStateChange,
     withOptimisticItemOverlay,
   };

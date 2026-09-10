@@ -773,6 +773,43 @@ describe("kanna query snapshot regressions", () => {
     expect(queries.snapshot.error.value).toBeNull();
   });
 
+  it("resolves an authoritative snapshot barrier only when a matching reload lands", async () => {
+    const repo = mockState.makeRepo();
+    let item = mockState.makeItem({ stage: "plan" });
+    const fetchSnapshot = vi.fn(async (): Promise<KannaSnapshot> => ({
+      entries: [{ repo, items: [item] }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
+    const state = createStoreState();
+    const context = createStoreContext(state, { error: vi.fn(), warning: vi.fn() } as never, {
+      fetchSnapshot,
+    });
+    const queries = createQueriesApi(context);
+    await queries.reloadSnapshot();
+
+    let resolved = false;
+    const barrier = queries.waitForAuthoritativeSnapshot((snapshot) =>
+      snapshot.entries[0]?.items[0]?.stage === "in progress"
+    ).then((snapshot) => {
+      resolved = true;
+      return snapshot;
+    });
+
+    await queries.reloadSnapshot();
+    expect(resolved).toBe(false);
+
+    item = { ...item, stage: "in progress", branch: "task-item-1-2" };
+    await queries.reloadSnapshot();
+    const settled = await barrier;
+
+    expect(settled.entries[0]?.items[0]).toMatchObject({
+      stage: "in progress",
+      branch: "task-item-1-2",
+    });
+  });
+
   it("keeps a stale snapshot unpublished while the newer reload remains pending", async () => {
     const older = deferred<KannaSnapshot>();
     const newer = deferred<KannaSnapshot>();

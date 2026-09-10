@@ -644,6 +644,21 @@ describe("Sidebar", () => {
     expect(title.attributes("title")).toBe("... Commit generated changes");
   });
 
+  it("renders a transition-in-flight prefix while a stage advance is pending", () => {
+    const wrapper = mountSidebar([
+      item("task-1", {
+        display_name: "Build pending task",
+        stage: "in progress",
+        stage_advance_pending: true,
+        stage_advance_from: "plan",
+      }),
+    ]);
+
+    const title = wrapper.get(".workflow-item .item-title");
+    expect(title.text()).toBe("... Build pending task");
+    expect(title.attributes("title")).toBe("... Build pending task");
+  });
+
   it("renders pinned task titles without retired post-action prefixes", () => {
     const wrapper = mountSidebar([
       item("task-1", {

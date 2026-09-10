@@ -2,13 +2,11 @@ import type { AgentDefinition, WorkflowDefinition } from "../../../../packages/c
 import {
   fetchDesktopRepoAgentDefinition,
   fetchDesktopRepoWorkflowDefinition,
+  fetchDesktopTaskDetail,
 } from "../services/desktopServerClient";
 import { postDesktopTaskAction } from "../services/desktopTaskActions";
 import { requireService, type AdvanceStageOptions, type KannaSnapshot, type StoreContext } from "./state";
 import { debugLog } from "../utils/debugLog";
-
-const STAGE_ADVANCE_RECONCILE_TIMEOUT_MS = 15_000;
-const STAGE_ADVANCE_RECONCILE_RETRY_MS = 100;
 
 export interface WorkflowApi {
   loadWorkflow: (repoId: string, workflowName: string) => Promise<WorkflowDefinition>;
@@ -19,10 +17,6 @@ export interface WorkflowApi {
 }
 
 export type AdvanceStageResult = "advanced" | "ignored" | "failed";
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export interface RequestRevisionOptions {
   targetStage: string;
@@ -115,6 +109,7 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
 
   async function withOptimisticStageAdvance<T>(
     taskId: string,
+    sourceStageName: string,
     nextStageName: string | null,
     pendingPostName: string | null,
     run: () => Promise<T>,
@@ -138,6 +133,8 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
                       }
                     : {
                         stage: nextStageName ?? candidate.stage,
+                        stage_advance_pending: true,
+                        stage_advance_from: sourceStageName,
                         activity: "working" as const,
                       }),
                 }
@@ -153,12 +150,15 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
   }
 
   function stageAdvanceSnapshotCaughtUp(
+    snapshot: KannaSnapshot,
     taskId: string,
     nextStageName: string | null,
     pendingPostName: string | null,
     closesOnSuccess: boolean,
   ): boolean {
-    const item = context.state.items.value.find((candidate) => candidate.id === taskId);
+    const item = snapshot.entries
+      .flatMap((entry) => entry.items)
+      .find((candidate) => candidate.id === taskId);
     if (!item || item.closed_at != null) return true;
     if (closesOnSuccess) return false;
     if (pendingPostName) {
@@ -175,23 +175,58 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
     nextStageName: string | null,
     pendingPostName: string | null,
     closesOnSuccess: boolean,
+    initialTransitionRevision: string | null,
   ): Promise<void> {
     const reloadSnapshot = requireService(context.services.reloadSnapshot, "reloadSnapshot");
-    const deadline = Date.now() + STAGE_ADVANCE_RECONCILE_TIMEOUT_MS;
-    while (true) {
-      await reloadSnapshot();
-      if (stageAdvanceSnapshotCaughtUp(taskId, nextStageName, pendingPostName, closesOnSuccess)) return;
-      if (Date.now() >= deadline) {
-        console.warn("[workflow:advanceStage] snapshot did not catch up before timeout", {
+    const waitForAuthoritativeSnapshot = requireService(
+      context.services.waitForAuthoritativeSnapshot,
+      "waitForAuthoritativeSnapshot",
+    );
+    await reloadSnapshot();
+
+    let failureMessage: string | null = null;
+    const settledSnapshot = await waitForAuthoritativeSnapshot(async (snapshot) => {
+      if (
+        stageAdvanceSnapshotCaughtUp(
+          snapshot,
           taskId,
           nextStageName,
           pendingPostName,
           closesOnSuccess,
-        });
-        return;
+        )
+      ) return true;
+      const item = snapshot.entries
+        .flatMap((entry) => entry.items)
+        .find((candidate) => candidate.id === taskId);
+      if ((item?.transition_revision ?? null) === initialTransitionRevision) return false;
+
+      // The successor run is inserted immediately before its daemon spawn,
+      // while the stage itself moves only after SessionCreated. A snapshot in
+      // that narrow window is still pending, not a failure. Only the run's
+      // durable failed verdict may end the projection without the stage move.
+      const detail = await fetchDesktopTaskDetail(taskId);
+      const latestRun = detail.latestRun;
+      if (
+        latestRun
+        && latestRun.id === item?.transition_revision
+        && latestRun.status === "failed"
+      ) {
+        failureMessage = latestRun.summary
+          ?? `Stage advance failed; task remained at ${detail.stage ?? "its current stage"}.`;
+        return true;
       }
-      await sleep(STAGE_ADVANCE_RECONCILE_RETRY_MS);
-    }
+      return false;
+    });
+    if (
+      stageAdvanceSnapshotCaughtUp(
+        settledSnapshot,
+        taskId,
+        nextStageName,
+        pendingPostName,
+        closesOnSuccess,
+      )
+    ) return;
+    throw new Error(failureMessage ?? "Stage advance failed before the target stage became durable.");
   }
 
   async function loadWorkflow(repoId: string, workflowName: string): Promise<WorkflowDefinition> {
@@ -221,6 +256,7 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
     const item = context.state.items.value.find((candidate) => candidate.id === taskId);
     if (!item) return "ignored";
     if (item.closed_at != null) return "ignored";
+    if (item.stage_advance_pending) return "ignored";
     // Single-flight: while a post (e.g. approve) runs, an ordinary repeated
     // advance would hit the backend's running-post override and transition
     // the stage before the post finishes its work. Only the post's own
@@ -231,6 +267,7 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
     }
     const sourceTaskIsSelected = requireService(context.services.selectedTaskId, "selectedTaskId").value === item.id;
     const fallbackSelectionId = computeNextVisibleItemId(item.id);
+    const initialTransitionRevision = item.transition_revision ?? null;
     const { nextStageName, pendingPostName, closesOnSuccess } = await resolveStageAdvanceProjection(item);
     debugLog("[workflow:advanceStage] selection policy", {
       taskId,
@@ -245,7 +282,7 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
     });
 
     try {
-      return await withOptimisticStageAdvance(taskId, nextStageName, pendingPostName, async () => {
+      return await withOptimisticStageAdvance(taskId, item.stage, nextStageName, pendingPostName, async () => {
         const response = await postDesktopTaskAction(taskId, "advance-stage", {
           source: "operator",
         });
@@ -258,7 +295,13 @@ export function createWorkflowApi(context: StoreContext): WorkflowApi {
           throw new Error(message);
         }
         const result = await response.json() as TaskActionResponse;
-        await waitForStageAdvanceSnapshot(result.taskId, nextStageName, pendingPostName, closesOnSuccess);
+        await waitForStageAdvanceSnapshot(
+          result.taskId,
+          nextStageName,
+          pendingPostName,
+          closesOnSuccess,
+          initialTransitionRevision,
+        );
 
         // Durable tasks: an in-workflow advance transitions the SAME task in
         // place, so the user's selection stays put. Only when the advance

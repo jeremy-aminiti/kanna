@@ -193,6 +193,9 @@ export interface StoreServices {
   windowWorkspace?: WindowWorkspaceController;
   loadInitialData?: () => Promise<void>;
   reloadSnapshot?: (options?: ReloadSnapshotOptions) => Promise<void>;
+  waitForAuthoritativeSnapshot?: (
+    predicate: (snapshot: KannaSnapshot) => boolean | Promise<boolean>,
+  ) => Promise<KannaSnapshot>;
   applyTaskStateChange?: (change: TaskStateChange) => boolean;
   fetchSnapshot?: () => Promise<KannaSnapshot>;
   withOptimisticItemOverlay?: <T>(input: {

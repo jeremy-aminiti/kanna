@@ -33,6 +33,7 @@ export const useKannaStore = defineStore("kanna", () => {
 
   services.loadInitialData = queries.loadInitialData;
   services.reloadSnapshot = queries.reloadSnapshot;
+  services.waitForAuthoritativeSnapshot = queries.waitForAuthoritativeSnapshot;
   services.applyTaskStateChange = queries.applyTaskStateChange;
   services.withOptimisticItemOverlay = queries.withOptimisticItemOverlay;
   services.selectedRepo = selection.selectedRepo;

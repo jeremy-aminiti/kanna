@@ -391,7 +391,8 @@
   },
   "taskHeader": {
     "branchLabel": "브랜치:",
-    "prPrefix": "PR #"
+    "prPrefix": "PR #",
+    "stageAdvancePending": "단계 변경 처리 중"
   },
   "app": {
     "selectRepoFirst": "먼저 저장소를 선택하세요",

@@ -111,6 +111,29 @@ describe("TaskHeader", () => {
     expect(wrapper.findAll(".meta-item.port")).toHaveLength(5);
   });
 
+  it("distinguishes a projected stage from a durable stage change", async () => {
+    const { default: TaskHeader } = await import("../TaskHeader.vue");
+    const wrapper = mount(TaskHeader, {
+      props: {
+        item: makeItem({
+          stage: "in progress",
+          stage_advance_pending: true,
+          stage_advance_from: "plan",
+        }),
+      },
+      global: {
+        mocks: {
+          $t: (key: string, fallback?: string) => fallback ?? key,
+        },
+      },
+    });
+
+    const badge = wrapper.get(".stage-badge");
+    expect(badge.text()).toBe("plan → in progress…");
+    expect(badge.classes()).toContain("stage-badge-pending");
+    expect(badge.attributes("title")).toBe("taskHeader.stageAdvancePending");
+  });
+
   it("renders port badges in ascending numeric order", async () => {
     const { default: TaskHeader } = await import("../TaskHeader.vue");
     const wrapper = mount(TaskHeader, {
