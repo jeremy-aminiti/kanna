@@ -1031,9 +1031,8 @@ mod tests {
                         .into_iter()
                         .collect(),
                 },
-                DaemonCommand::SubmitInputIfSession {
-                    expected_pid, data, ..
-                } if expected_pid != 4242 => DaemonEvent::Error {
+                DaemonCommand::SubmitInputIfSession { expected_pid, .. }
+                    if expected_pid != 4242 => DaemonEvent::Error {
                     code: Some(DaemonErrorCode::SessionIncarnationMismatch),
                     message: "the fake session incarnation changed".to_string(),
                 },
