@@ -88,7 +88,7 @@ def _sysroot_repository_impl(repository_ctx):
         repository_ctx.file(".unpack/{}/.keep".format(stem), "")
         result = repository_ctx.execute(
             [zig, "ar", "x", deb],
-            working_directory = unpack,
+            working_directory = str(unpack),
             quiet = True,
         )
         if result.return_code:
