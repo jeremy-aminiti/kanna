@@ -560,8 +560,12 @@ pub(crate) async fn handle_command(
                         }
                         None => headless_terminal::HeadlessTerminal::new(cols, rows, 10_000),
                     };
-                    let headless_terminal = match headless_terminal {
-                        Ok(headless_terminal) => headless_terminal,
+                    let terminals = headless_terminal.and_then(|headless_terminal| {
+                        headless_terminal::HeadlessTerminal::new_notice_projection(cols, rows)
+                            .map(|notice_terminal| (headless_terminal, notice_terminal))
+                    });
+                    let (headless_terminal, notice_terminal) = match terminals {
+                        Ok(terminals) => terminals,
                         Err(e) => {
                             drop(mgr);
                             let evt = error_event(
@@ -575,6 +579,7 @@ pub(crate) async fn handle_command(
                     let handle = Arc::new(SessionHandle::new(SessionRecord {
                         pty: pty_session,
                         headless_terminal,
+                        notice_terminal,
                         stream_control: Some(stream_control.clone()),
                         agent_provider,
                         // Unknown until the probe answers, which is a

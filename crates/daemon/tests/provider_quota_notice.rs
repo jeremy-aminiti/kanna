@@ -83,6 +83,15 @@ struct DaemonHandle {
     dir: PathBuf,
 }
 
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 impl DaemonHandle {
     fn start(label: &str) -> Self {
         let instance = TEST_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -135,6 +144,39 @@ impl DaemonHandle {
             writer: stream,
             pending_line: String::new(),
         }
+    }
+
+    fn handoff(&mut self) {
+        let mut successor = ChildGuard(
+            Command::new(PathBuf::from(env!("CARGO_BIN_EXE_kanna-daemon")))
+                .env("KANNA_DAEMON_DIR", &self.dir)
+                .spawn()
+                .expect("start successor from the same trusted parent"),
+        );
+        let deadline = Instant::now() + EVENTUAL;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "successor did not complete handoff"
+            );
+            assert!(
+                successor.0.try_wait().unwrap().is_none(),
+                "successor exited during handoff"
+            );
+            let published = std::fs::read_to_string(self.dir.join("daemon.pid"))
+                .ok()
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+                == Some(successor.0.id());
+            if published && UnixStream::connect(&self.socket_path).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        while self.child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "old daemon retained ownership");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::mem::swap(&mut self.child, &mut successor.0);
     }
 }
 
@@ -384,9 +426,23 @@ impl GatedNoticeSession {
              case \"$phase\" in \
              startup) printf '\\r\\nfresh-startup-marker\\r\\n' ;; \
              quoted) {} ;; \
+             partial) printf '%s' '{}' ;; \
+             finish) printf '%s\\r\\n' '{}' ;; \
              refusal) printf '\\r\\n'; {} ;; \
              *) exit 2 ;; esac; done",
             paint_lines(quoted),
+            capture
+                .frame
+                .join("\r\n")
+                .split_once("limit")
+                .unwrap()
+                .0
+                .replace('\'', "'\\''"),
+            format!(
+                "limit{}",
+                capture.frame.join("\r\n").split_once("limit").unwrap().1
+            )
+            .replace('\'', "'\\''"),
             paint_lines(&capture.frame),
         );
         control.send(&json!({
@@ -493,8 +549,24 @@ impl GatedNoticeSession {
         assert_eq!(snapshot["snapshot"]["rows"], rows);
     }
 
+    fn handoff(&mut self) {
+        self._daemon.handoff();
+        self.control = self._daemon.connect();
+        self.subscriber = self._daemon.connect();
+        self.subscriber.send(&json!({ "type": "Subscribe" }));
+        self.subscriber.wait_for("Ok", &mut self.events);
+        self.subscriber.send(&json!({
+            "type": "ObserveSnapshot", "session_id": self.session_id,
+        }));
+        self.subscriber.wait_for("Snapshot", &mut self.events);
+    }
+
     fn assert_current_refusal(&mut self, capture: &Capture) {
         self.release("refusal");
+        self.assert_refusal_announced(capture);
+    }
+
+    fn assert_refusal_announced(&mut self, capture: &Capture) {
         self.await_output(capture.frame.last().unwrap());
         if notices(&self.events).is_empty() {
             self.events.extend(
@@ -538,6 +610,73 @@ impl GatedNoticeSession {
             "refusal keeps runtime idle: {session:?}"
         );
     }
+}
+
+/// The optional snapshot must carry a clean projection through the actual
+/// authenticated daemon-to-daemon transfer, even when the primary holds a seed.
+#[test]
+fn same_pty_handoff_keeps_seed_separate_and_preserves_partial_current_output() {
+    let capture = capture("claude");
+    for phase in ["seed", "startup", "partial"] {
+        let mut fixture = GatedNoticeSession::start(
+            &format!("notice-handoff-{phase}"),
+            &capture,
+            120,
+            &capture.frame,
+            &[],
+        );
+        if phase == "startup" {
+            fixture.release("startup");
+            fixture.await_output("fresh-startup-marker");
+        } else if phase == "partial" {
+            fixture.release("partial");
+            fixture.await_output("You've reached your Fable ");
+        }
+        fixture.settle();
+        fixture.assert_no_notice("seed/current partial before handoff");
+        fixture.handoff();
+        fixture.settle();
+        fixture.assert_no_notice("same-PTY projection after handoff");
+        fixture.assert_snapshot_contains("reached your Fable limit");
+        if phase == "partial" {
+            // Continue the same logical row after adoption: an empty new
+            // projection would lose the prefix and fail the positive assertion.
+            fixture.release("finish");
+            fixture.assert_refusal_announced(&capture);
+        } else {
+            fixture.assert_current_refusal(&capture);
+        }
+    }
+}
+
+#[test]
+fn handoff_after_a_published_refusal_allows_at_most_one_reannouncement() {
+    let capture = capture("claude");
+    let mut fixture = GatedNoticeSession::start(
+        "notice-handoff-published",
+        &capture,
+        120,
+        &["preserved-history-marker".to_string()],
+        &[],
+    );
+    fixture.assert_current_refusal(&capture);
+    fixture.handoff();
+    fixture.settle();
+    let first_window = notices(&fixture.events).len();
+    assert!(
+        (1..=2).contains(&first_window),
+        "one per daemon incarnation: {:?}",
+        fixture.events
+    );
+    fixture.settle();
+    assert_eq!(
+        notices(&fixture.events).len(),
+        first_window,
+        "no repeated settled-frame notice"
+    );
+    fixture.assert_snapshot_contains("preserved-history-marker");
+    // Recovery idempotence belongs to the real server consumer, not this
+    // daemon subscriber. Its separate control must count durable recovery rows.
 }
 
 impl Drop for GatedNoticeSession {

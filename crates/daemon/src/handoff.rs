@@ -1131,6 +1131,7 @@ pub(crate) async fn handle_handoff(
                     rows,
                     cols,
                     snapshot,
+                    notice_snapshot: parts.notice_snapshot,
                     agent_provider: parts.agent_provider,
                     cli_version: parts.cli_version.as_ref().map(ToString::to_string),
                     status: parts.status,
@@ -1234,6 +1235,7 @@ pub(crate) async fn handle_handoff(
             rows: 0,
             cols: 0,
             snapshot: None,
+            notice_snapshot: None,
             agent_provider: Some(record.provider),
             // Headless agent sessions classify from provider events, not from
             // rendered chrome, so no rule set is selected for them.
