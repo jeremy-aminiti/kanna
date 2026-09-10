@@ -586,10 +586,7 @@ async fn run_import(
         .map_err(|error| format!("db error: {error}"))?
         .is_some_and(|transfer| {
             transfer.local_task_id.as_deref() == Some(local_task_id.as_str())
-                && matches!(
-                    transfer.status.as_str(),
-                    "awaiting_acknowledgment" | "importing"
-                )
+                && transfer.status == "awaiting_acknowledgment"
         });
     if !marked && !already_awaiting {
         return Err(format!(
