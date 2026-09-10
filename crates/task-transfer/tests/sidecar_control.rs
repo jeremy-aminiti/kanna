@@ -1,3 +1,6 @@
+#[path = "support/sidecar.rs"]
+mod sidecar;
+
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use kanna_task_transfer::crypto::{
@@ -10,36 +13,16 @@ use kanna_task_transfer::protocol::{
 };
 use kanna_task_transfer::registry::PeerRegistry;
 use serde_json::json;
-use std::io::{BufRead, BufReader as StdBufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc as std_mpsc;
+use sidecar::SidecarProcess;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify};
 
-/// How long a control response may take to come back from the out-of-process
-/// sidecar. Every use is a liveness wait — the failure it guards is a response
-/// that never arrives — so it is deliberately far above the milliseconds a
-/// healthy round trip takes, leaving room for a box running several suites.
-const CONTROL_RESPONSE_WAIT: Duration = Duration::from_secs(10);
-
-struct SidecarProcess {
-    child: Child,
-    stdin: ChildStdin,
-}
-
-impl Drop for SidecarProcess {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
     let temp = tempfile::tempdir().unwrap();
-    let registry_dir = temp.path().join("registry");
+    let registry_dir = sidecar::registry_dir(temp.path());
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let target_identity = TransferIdentity::generate();
@@ -160,55 +143,33 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         while handlers.join_next().await.is_some() {}
     });
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_kanna-task-transfer"))
-        .env("KANNA_TRANSFER_ROOT", temp.path())
-        .env("KANNA_TRANSFER_REGISTRY_DIR", &registry_dir)
-        .env("KANNA_TRANSFER_PEER_ID", "peer-primary")
-        .env("KANNA_TRANSFER_DISPLAY_NAME", "Primary")
-        .env("KANNA_TRANSFER_DISCOVERY", "registry")
-        .env("KANNA_TRANSFER_PORT", "0")
-        .env("KANNA_TRANSFER_CONTROL_MAX_IN_FLIGHT", "3")
-        .env("KANNA_TRANSFER_MARK_READ_CONTROL_MAX_IN_FLIGHT", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
-    let stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (response_tx, response_rx) = std_mpsc::channel();
-    std::thread::spawn(move || {
-        for line in StdBufReader::new(stdout).lines() {
-            let line = line.unwrap();
-            if let Ok(response) = serde_json::from_str::<ControlResponse>(&line) {
-                response_tx.send(response).unwrap();
-            }
-        }
+    let mut sidecar = SidecarProcess::spawn(temp.path(), |command| {
+        command
+            .env("KANNA_TRANSFER_CONTROL_MAX_IN_FLIGHT", "3")
+            .env("KANNA_TRANSFER_MARK_READ_CONTROL_MAX_IN_FLIGHT", "1");
     });
-    let mut sidecar = SidecarProcess { child, stdin };
 
-    write_control(
-        &mut sidecar.stdin,
-        &ControlRequest::MarkPeerTaskRead {
-            request_id: "mark".into(),
-            target_peer_id: "peer-target".into(),
-            task_id: "task-unread".into(),
-            expected_activity_revision: 7,
-        },
+    sidecar.write_control(&ControlRequest::MarkPeerTaskRead {
+        request_id: "mark".into(),
+        target_peer_id: "peer-target".into(),
+        task_id: "task-unread".into(),
+        expected_activity_revision: 7,
+    });
+    assert_eq!(
+        sidecar
+            .expect_alive("mark-read never reached the peer", peer_event_rx.recv())
+            .await
+            .as_deref(),
+        Some("mark-started")
     );
-    assert_eq!(peer_event_rx.recv().await.as_deref(), Some("mark-started"));
-    write_control(
-        &mut sidecar.stdin,
-        &ControlRequest::MarkPeerTaskRead {
-            request_id: "mark-overload".into(),
-            target_peer_id: "peer-target".into(),
-            task_id: "task-unread".into(),
-            expected_activity_revision: 7,
-        },
-    );
-    let overloaded = response_rx
-        .recv_timeout(CONTROL_RESPONSE_WAIT)
-        .expect("excess mark-read control did not receive bounded backpressure");
+    sidecar.write_control(&ControlRequest::MarkPeerTaskRead {
+        request_id: "mark-overload".into(),
+        target_peer_id: "peer-target".into(),
+        task_id: "task-unread".into(),
+        expected_activity_revision: 7,
+    });
+    let overloaded =
+        sidecar.next_response("excess mark-read control did not receive bounded backpressure");
     assert!(
         matches!(
             overloaded,
@@ -219,37 +180,40 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         ),
         "unexpected overload response: {overloaded:?}",
     );
-    write_control(
-        &mut sidecar.stdin,
-        &ControlRequest::SendPeerSessionInput {
-            request_id: "input-first".into(),
-            target_peer_id: "peer-target".into(),
-            session_id: "task-unread".into(),
-            data: b"first".to_vec(),
-            submission_boundary: false,
-            control_input: false,
-        },
-    );
-    write_control(
-        &mut sidecar.stdin,
-        &ControlRequest::SendPeerSessionInput {
-            request_id: "input-second".into(),
-            target_peer_id: "peer-target".into(),
-            session_id: "task-unread".into(),
-            data: b"second".to_vec(),
-            submission_boundary: false,
-            control_input: false,
-        },
-    );
-    write_control(
-        &mut sidecar.stdin,
-        &ControlRequest::ListPeerTaskSnapshots {
-            request_id: "refresh".into(),
-        },
-    );
+    sidecar.write_control(&ControlRequest::SendPeerSessionInput {
+        request_id: "input-first".into(),
+        target_peer_id: "peer-target".into(),
+        session_id: "task-unread".into(),
+        data: b"first".to_vec(),
+        submission_boundary: false,
+        control_input: false,
+    });
+    sidecar.write_control(&ControlRequest::SendPeerSessionInput {
+        request_id: "input-second".into(),
+        target_peer_id: "peer-target".into(),
+        session_id: "task-unread".into(),
+        data: b"second".to_vec(),
+        submission_boundary: false,
+        control_input: false,
+    });
+    sidecar.write_control(&ControlRequest::ListPeerTaskSnapshots {
+        request_id: "refresh".into(),
+    });
     let mut started = vec![
-        peer_event_rx.recv().await.unwrap(),
-        peer_event_rx.recv().await.unwrap(),
+        sidecar
+            .expect_alive(
+                "first admitted operation never reached the peer",
+                peer_event_rx.recv(),
+            )
+            .await
+            .unwrap(),
+        sidecar
+            .expect_alive(
+                "second admitted operation never reached the peer",
+                peer_event_rx.recv(),
+            )
+            .await
+            .unwrap(),
     ];
     started.sort_unstable();
     assert_eq!(started, vec!["input:first", "snapshot-started"]);
@@ -259,19 +223,15 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
             .is_err(),
         "second terminal input overtook the first response",
     );
-    write_control(
-        &mut sidecar.stdin,
-        &ControlRequest::ResizePeerSession {
-            request_id: "ordinary-overload".into(),
-            target_peer_id: "peer-target".into(),
-            session_id: "task-unread".into(),
-            cols: 100,
-            rows: 30,
-        },
-    );
-    let ordinary_overload = response_rx
-        .recv_timeout(CONTROL_RESPONSE_WAIT)
-        .expect("excess ordinary control did not receive bounded backpressure");
+    sidecar.write_control(&ControlRequest::ResizePeerSession {
+        request_id: "ordinary-overload".into(),
+        target_peer_id: "peer-target".into(),
+        session_id: "task-unread".into(),
+        cols: 100,
+        rows: 30,
+    });
+    let ordinary_overload =
+        sidecar.next_response("excess ordinary control did not receive bounded backpressure");
     assert!(
         matches!(
             ordinary_overload,
@@ -285,15 +245,9 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
     first_input_release.notify_one();
     snapshot_release.notify_one();
 
-    let first = response_rx
-        .recv_timeout(CONTROL_RESPONSE_WAIT)
-        .expect("terminal control waited behind stalled mark-read");
-    let second = response_rx
-        .recv_timeout(CONTROL_RESPONSE_WAIT)
-        .expect("LAN refresh waited behind stalled mark-read");
-    let third = response_rx
-        .recv_timeout(CONTROL_RESPONSE_WAIT)
-        .expect("second terminal input did not run after the first response");
+    let first = sidecar.next_response("terminal control waited behind stalled mark-read");
+    let second = sidecar.next_response("LAN refresh waited behind stalled mark-read");
+    let third = sidecar.next_response("second terminal input did not run after the first response");
     let mut completed_ids = vec![control_response_id(&first), control_response_id(&second)];
     completed_ids.push(control_response_id(&third));
     completed_ids.sort_unstable();
@@ -301,32 +255,48 @@ async fn stalled_mark_read_does_not_monopolize_sidecar_control() {
         completed_ids,
         vec!["input-first", "input-second", "refresh"]
     );
-    assert_eq!(peer_event_rx.recv().await.as_deref(), Some("input:second"));
+    assert_eq!(
+        sidecar
+            .expect_alive(
+                "queued terminal input never reached the peer",
+                peer_event_rx.recv()
+            )
+            .await
+            .as_deref(),
+        Some("input:second")
+    );
 
     // The 2000ms lower-layer deadline asserted below is the one under test;
     // this outer wait only has to outlast it by enough that load cannot fire
     // it first.
-    let mark = response_rx
-        .recv_timeout(CONTROL_RESPONSE_WAIT)
-        .expect("mark-read did not finish at its lower-layer deadline");
+    let mark = sidecar.next_response("mark-read did not finish at its lower-layer deadline");
     assert_eq!(control_response_id(&mark), "mark");
     assert!(
         matches!(mark, ControlResponse::Error { ref message, .. } if message.contains("timed out after 2000ms")),
         "unexpected mark-read response: {mark:?}",
     );
     assert_eq!(
-        tokio::time::timeout(CONTROL_RESPONSE_WAIT, peer_event_rx.recv())
-            .await
-            .expect("stalled peer work survived mark-read timeout"),
+        sidecar
+            .expect_alive(
+                "stalled peer work survived mark-read timeout",
+                peer_event_rx.recv()
+            )
+            .await,
         Some("mark-closed".into()),
     );
-    peer_server.await.unwrap();
+    sidecar
+        .expect_alive(
+            "peer server never saw every admitted operation",
+            peer_server,
+        )
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sidecar_fails_closed_in_both_shipped_v4_terminal_input_directions() {
     let temp = tempfile::tempdir().unwrap();
-    let registry_dir = temp.path().join("registry");
+    let registry_dir = sidecar::registry_dir(temp.path());
     let shipped_v4_target_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let target_identity = TransferIdentity::generate();
     let target_public_key = public_key_to_string(&target_identity.public_key);
@@ -379,71 +349,42 @@ async fn sidecar_fails_closed_in_both_shipped_v4_terminal_input_directions() {
             .unwrap();
     }
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_kanna-task-transfer"))
-        .env("KANNA_TRANSFER_ROOT", temp.path())
-        .env("KANNA_TRANSFER_REGISTRY_DIR", &registry_dir)
-        .env("KANNA_TRANSFER_PEER_ID", "peer-primary")
-        .env("KANNA_TRANSFER_DISPLAY_NAME", "Primary")
-        .env("KANNA_TRANSFER_DISCOVERY", "registry")
-        .env("KANNA_TRANSFER_PORT", "0")
-        .env("KANNA_DAEMON_DIR", temp.path().join("no-daemon"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
-    let stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (response_tx, response_rx) = std_mpsc::channel();
-    std::thread::spawn(move || {
-        for line in StdBufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            if let Ok(response) = serde_json::from_str::<ControlResponse>(&line) {
-                if response_tx.send(response).is_err() {
-                    break;
-                }
-            }
-        }
+    let mut sidecar = SidecarProcess::spawn(temp.path(), |command| {
+        command.env("KANNA_DAEMON_DIR", temp.path().join("no-daemon"));
     });
-    let mut sidecar = SidecarProcess { child, stdin };
 
     // Liveness: a freshly spawned sidecar either advertises its listener or
-    // never does. Two seconds was a wall-clock guess at how long spawning a
-    // binary and writing a registry entry takes on an idle box.
-    let primary_entry = tokio::time::timeout(CONTROL_RESPONSE_WAIT, async {
-        loop {
-            if let Some(entry) = registry
-                .list_peers("")
-                .unwrap()
-                .into_iter()
-                .find(|entry| entry.peer_id == "peer-primary")
-            {
-                break entry;
+    // never does — and a sidecar that refused to start never will, which the
+    // wait reports instead of running out its deadline.
+    let primary_entry = sidecar
+        .expect_alive("current sidecar did not advertise its listener", async {
+            loop {
+                if let Some(entry) = registry
+                    .list_peers("")
+                    .unwrap()
+                    .into_iter()
+                    .find(|entry| entry.peer_id == "peer-primary")
+                {
+                    break entry;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("current sidecar did not advertise its listener");
+        })
+        .await;
 
     for (request_id, data, submission_boundary, control_input) in [
         ("outbound-boundary", b"\r".to_vec(), true, false),
         ("outbound-control", b"\x1b[<65;1;1M".to_vec(), false, true),
     ] {
-        write_control(
-            &mut sidecar.stdin,
-            &ControlRequest::SendPeerSessionInput {
-                request_id: request_id.into(),
-                target_peer_id: "peer-v4-target".into(),
-                session_id: "task-with-draft".into(),
-                data,
-                submission_boundary,
-                control_input,
-            },
-        );
-        let response = response_rx
-            .recv_timeout(CONTROL_RESPONSE_WAIT)
-            .unwrap_or_else(|error| panic!("no control response for {request_id}: {error}"));
+        sidecar.write_control(&ControlRequest::SendPeerSessionInput {
+            request_id: request_id.into(),
+            target_peer_id: "peer-v4-target".into(),
+            session_id: "task-with-draft".into(),
+            data,
+            submission_boundary,
+            control_input,
+        });
+        let response = sidecar.next_response(&format!("no control response for {request_id}"));
         assert!(
             matches!(
                 response,
@@ -535,61 +476,26 @@ async fn sidecar_fails_closed_in_both_shipped_v4_terminal_input_directions() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abandoning_a_transfer_reports_cleanup_failure_over_the_control_channel() {
     let temp = tempfile::tempdir().unwrap();
-    let registry_dir = temp.path().join("registry");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_kanna-task-transfer"))
-        .env("KANNA_TRANSFER_ROOT", temp.path())
-        .env("KANNA_TRANSFER_REGISTRY_DIR", &registry_dir)
-        .env("KANNA_TRANSFER_PEER_ID", "peer-primary")
-        .env("KANNA_TRANSFER_DISPLAY_NAME", "Primary")
-        .env("KANNA_TRANSFER_DISCOVERY", "registry")
-        .env("KANNA_TRANSFER_PORT", "0")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
-    let stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (response_tx, response_rx) = std_mpsc::channel();
-    std::thread::spawn(move || {
-        for line in StdBufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            if let Ok(response) = serde_json::from_str::<ControlResponse>(&line) {
-                let _ = response_tx.send(response);
-            }
-        }
-    });
-    let mut sidecar = SidecarProcess { child, stdin };
-    let next_response = |request_id: &str| {
-        let response = response_rx
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap_or_else(|error| panic!("no control response for {request_id}: {error}"));
-        assert_eq!(control_response_id(&response), request_id);
-        response
-    };
+    let mut sidecar = SidecarProcess::spawn(temp.path(), |_| {});
 
     let staged = temp.path().join("session.tar.gz");
     std::fs::write(&staged, b"session").unwrap();
-    write_control(
-        &mut sidecar.stdin,
-        &ControlRequest::StageTransferArtifact {
-            request_id: "stage".into(),
-            transfer_id: "transfer-abandon".into(),
-            artifact_id: "claude-session".into(),
-            path: staged.to_string_lossy().into_owned(),
-            owned: true,
-        },
-    );
-    next_response("stage");
-    write_control(
-        &mut sidecar.stdin,
-        &ControlRequest::FetchTransferArtifact {
-            request_id: "fetch".into(),
-            transfer_id: "transfer-abandon".into(),
-            artifact_id: "claude-session".into(),
-        },
-    );
-    let ControlResponse::FetchTransferArtifact { path, .. } = next_response("fetch") else {
+    sidecar.write_control(&ControlRequest::StageTransferArtifact {
+        request_id: "stage".into(),
+        transfer_id: "transfer-abandon".into(),
+        artifact_id: "claude-session".into(),
+        path: staged.to_string_lossy().into_owned(),
+        owned: true,
+    });
+    expect_response(&mut sidecar, "stage");
+    sidecar.write_control(&ControlRequest::FetchTransferArtifact {
+        request_id: "fetch".into(),
+        transfer_id: "transfer-abandon".into(),
+        artifact_id: "claude-session".into(),
+    });
+    let ControlResponse::FetchTransferArtifact { path, .. } =
+        expect_response(&mut sidecar, "fetch")
+    else {
         panic!("expected the staged artifact's managed path");
     };
 
@@ -599,28 +505,22 @@ async fn abandoning_a_transfer_reports_cleanup_failure_over_the_control_channel(
     std::fs::remove_file(&owned_artifact).unwrap();
     std::fs::create_dir(&owned_artifact).unwrap();
 
-    write_control(
-        &mut sidecar.stdin,
-        &ControlRequest::AbandonOutgoingTransfer {
-            request_id: "abandon-blocked".into(),
-            transfer_id: "transfer-abandon".into(),
-        },
-    );
-    let blocked = next_response("abandon-blocked");
+    sidecar.write_control(&ControlRequest::AbandonOutgoingTransfer {
+        request_id: "abandon-blocked".into(),
+        transfer_id: "transfer-abandon".into(),
+    });
+    let blocked = expect_response(&mut sidecar, "abandon-blocked");
     assert!(
         matches!(blocked, ControlResponse::Error { .. }),
         "abandon reported success over state it could not delete: {blocked:?}",
     );
 
     std::fs::remove_dir(&owned_artifact).unwrap();
-    write_control(
-        &mut sidecar.stdin,
-        &ControlRequest::AbandonOutgoingTransfer {
-            request_id: "abandon-retry".into(),
-            transfer_id: "transfer-abandon".into(),
-        },
-    );
-    let retried = next_response("abandon-retry");
+    sidecar.write_control(&ControlRequest::AbandonOutgoingTransfer {
+        request_id: "abandon-retry".into(),
+        transfer_id: "transfer-abandon".into(),
+    });
+    let retried = expect_response(&mut sidecar, "abandon-retry");
     assert!(
         matches!(retried, ControlResponse::AbandonOutgoingTransfer { .. }),
         "the undeleted artifact was forgotten instead of retried: {retried:?}",
@@ -629,23 +529,15 @@ async fn abandoning_a_transfer_reports_cleanup_failure_over_the_control_channel(
 
     // A transfer this sidecar never reserved is still a no-op, not an error the
     // renderer would have to tell the operator about.
-    write_control(
-        &mut sidecar.stdin,
-        &ControlRequest::AbandonOutgoingTransfer {
-            request_id: "abandon-unknown".into(),
-            transfer_id: "transfer-never-reserved".into(),
-        },
-    );
-    let unknown = next_response("abandon-unknown");
+    sidecar.write_control(&ControlRequest::AbandonOutgoingTransfer {
+        request_id: "abandon-unknown".into(),
+        transfer_id: "transfer-never-reserved".into(),
+    });
+    let unknown = expect_response(&mut sidecar, "abandon-unknown");
     assert!(
         matches!(unknown, ControlResponse::AbandonOutgoingTransfer { .. }),
         "abandoning an unknown transfer was not a no-op: {unknown:?}",
     );
-}
-
-fn write_control(stdin: &mut ChildStdin, request: &ControlRequest) {
-    writeln!(stdin, "{}", serde_json::to_string(request).unwrap()).unwrap();
-    stdin.flush().unwrap();
 }
 
 async fn send_raw_peer_value(endpoint: &str, request: &serde_json::Value) -> PeerResponse {
@@ -703,6 +595,13 @@ fn seal_sidecar_request(
         &serde_json::Value::Object(payload),
     )
     .unwrap()
+}
+
+/// The next control response, asserting it answers the request just written.
+fn expect_response(sidecar: &mut SidecarProcess, request_id: &str) -> ControlResponse {
+    let response = sidecar.next_response(&format!("no control response for {request_id}"));
+    assert_eq!(control_response_id(&response), request_id);
+    response
 }
 
 fn control_response_id(response: &ControlResponse) -> &str {
