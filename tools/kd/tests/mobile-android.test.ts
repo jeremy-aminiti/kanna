@@ -43,7 +43,8 @@ describe("Android emulator mobile runtime", () => {
     });
     expect(buildAndroidRunCommand({
       repoRoot: "/repo",
-      serial: "emulator-5554",
+      deviceName: "Medium_Phone_API_36.1",
+      packageId: "build.kanna.app.dev",
       metroPort: 8082,
       appEnv: "dev",
       tools: {
@@ -52,7 +53,12 @@ describe("Android emulator mobile runtime", () => {
         emulator: "/sdk/emulator/emulator"
       }
     })).toMatchObject({
-      args: ["--dir", "/repo/apps/mobile", "android", "--device", "emulator-5554", "--port", "8082"],
+      args: [
+        "--dir", "/repo/apps/mobile", "android",
+        "--device", "Medium_Phone_API_36.1",
+        "--app-id", "build.kanna.app.dev",
+        "--port", "8082"
+      ],
       env: {
         KANNA_APP_ENV: "dev",
         ANDROID_HOME: "/sdk",

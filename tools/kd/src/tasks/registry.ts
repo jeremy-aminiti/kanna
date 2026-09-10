@@ -1689,7 +1689,8 @@ async function executeAndroidEmulatorRun(
 
   const run = buildAndroidRunCommand({
     repoRoot: executor.context.repoRoot,
-    serial: target.device.serial,
+    deviceName: target.device.name,
+    packageId: identity.packageId,
     metroPort,
     appEnv: identity.appEnv,
     tools: target.tools

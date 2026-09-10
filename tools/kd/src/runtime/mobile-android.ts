@@ -264,7 +264,8 @@ export function buildAndroidPrebuildCommand(input: {
 
 export function buildAndroidRunCommand(input: {
   repoRoot: string;
-  serial: string;
+  deviceName: string;
+  packageId: string;
   metroPort: number;
   appEnv: string;
   tools: AndroidSdkTools;
@@ -276,7 +277,9 @@ export function buildAndroidRunCommand(input: {
       join(input.repoRoot, "apps", "mobile"),
       "android",
       "--device",
-      input.serial,
+      input.deviceName,
+      "--app-id",
+      input.packageId,
       "--port",
       String(input.metroPort)
     ],
