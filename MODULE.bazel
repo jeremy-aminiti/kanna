@@ -252,13 +252,13 @@ ubuntu_sysroot_repository(
 )
 
 register_toolchains(
-    "//tools/bazel:linux_arm64_cc_on_linux_arm64",
-    "//tools/bazel:linux_arm64_cc_on_linux_x86_64",
-    "//tools/bazel:linux_arm64_cc_on_macos_arm64",
+    "//:linux_arm64_cc_on_linux_arm64",
+    "//:linux_arm64_cc_on_linux_x86_64",
+    "//:linux_arm64_cc_on_macos_arm64",
     "//tools/bazel:linux_arm64_zig_target_toolchain",
-    "//tools/bazel:linux_x86_64_cc_on_linux_arm64",
-    "//tools/bazel:linux_x86_64_cc_on_linux_x86_64",
-    "//tools/bazel:linux_x86_64_cc_on_macos_arm64",
+    "//:linux_x86_64_cc_on_linux_arm64",
+    "//:linux_x86_64_cc_on_linux_x86_64",
+    "//:linux_x86_64_cc_on_macos_arm64",
     "//tools/bazel:linux_x86_64_zig_target_toolchain",
 )
 

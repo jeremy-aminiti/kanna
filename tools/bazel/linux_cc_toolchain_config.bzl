@@ -20,9 +20,9 @@ def _exec_path(file):
     return file.short_path
 
 def _generated_tool_path(file):
-    # cc_toolchain resolves relative tool paths from this package, while
-    # generated wrappers live under the exec root's bazel-out tree.
-    return "../../" + file.path
+    # Toolchains are instantiated in the repository root, so Bazel resolves
+    # this generated bazel-out path directly from the execution root.
+    return file.path
 
 def _zig_cc_wrapper_impl(ctx):
     zig_toolchain = ctx.toolchains["@rules_zig//zig:toolchain_type"].zigtoolchaininfo
