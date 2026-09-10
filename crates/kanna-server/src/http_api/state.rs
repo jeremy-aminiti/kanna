@@ -36,8 +36,18 @@ pub(super) struct TunneledHttpInvoke;
 /// the request entered the Axum router (for example, an authenticated relay
 /// tunnel). This is deliberately distinct from `TunneledHttpInvoke`: the
 /// latter records transport provenance but grants no authority by itself.
-#[derive(Clone, Copy)]
-pub(super) struct AuthenticatedHttpInvoke;
+///
+/// Both fields are `None` for a dispatch with no relay account/desktop
+/// context to report (e.g. a local in-process authenticated dispatch).
+/// `source_desktop_id` is populated only from the relay's own
+/// connection-bound, desktop-secret-verified identity (`desktopRouting`
+/// capability v2 or later) - never from anything a caller could claim about
+/// itself - so its presence is exactly as trustworthy as `account_uid`.
+#[derive(Clone)]
+pub(super) struct AuthenticatedHttpInvoke {
+    pub(super) account_uid: Option<String>,
+    pub(super) source_desktop_id: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct AppState {

@@ -442,6 +442,7 @@ async fn run_relay_loop_with_timing(
                             RelayMessage::Invoke {
                                 id: RelayId::String(id.clone()),
                                 desktop_id: None,
+                                source_desktop_id: None,
                                 request: RelayInvoke::Command {
                                     command: "list_active_desktops".to_string(),
                                     args: serde_json::json!({}),
@@ -459,6 +460,7 @@ async fn run_relay_loop_with_timing(
                             RelayMessage::Invoke {
                                 id: RelayId::String(id.clone()),
                                 desktop_id: None,
+                                source_desktop_id: None,
                                 request: RelayInvoke::Command {
                                     command: "list_repo_singletons".to_string(),
                                     args: serde_json::json!({
@@ -480,6 +482,7 @@ async fn run_relay_loop_with_timing(
                             RelayMessage::Invoke {
                                 id: RelayId::String(id.clone()),
                                 desktop_id: None,
+                                source_desktop_id: None,
                                 request: RelayInvoke::Command {
                                     command: "claim_repo_singleton".to_string(),
                                     args: serde_json::json!({
@@ -503,6 +506,7 @@ async fn run_relay_loop_with_timing(
                             RelayMessage::Invoke {
                                 id: RelayId::String(id.clone()),
                                 desktop_id: None,
+                                source_desktop_id: None,
                                 request: RelayInvoke::Command {
                                     command: "release_repo_singleton_reservation".to_string(),
                                     args: serde_json::json!({
@@ -527,6 +531,7 @@ async fn run_relay_loop_with_timing(
                             RelayMessage::Invoke {
                                 id: RelayId::String(id.clone()),
                                 desktop_id: Some(desktop_id),
+                                source_desktop_id: None,
                                 request: RelayInvoke::Http { method, path, body },
                             },
                             PendingDesktopRequest::Invoke { response },
@@ -598,7 +603,12 @@ async fn run_relay_loop_with_timing(
                     };
 
                     match parsed {
-                        RelayMessage::Invoke { id, request, .. } => match request {
+                        RelayMessage::Invoke {
+                            id,
+                            request,
+                            source_desktop_id,
+                            ..
+                        } => match request {
                             RelayInvoke::Command { command, args } => {
                                 log::info!("Invoke #{}: {}", id, command);
 
@@ -813,6 +823,7 @@ async fn run_relay_loop_with_timing(
                                         path,
                                         body,
                                         authenticated_user_id: authenticated_user_id.clone(),
+                                        source_desktop_id: source_desktop_id.clone(),
                                     },
                                 )
                                 .await
@@ -1441,6 +1452,10 @@ pub(crate) struct RelayHttpInvokeRequest {
     pub(crate) path: String,
     pub(crate) body: serde_json::Value,
     pub(crate) authenticated_user_id: Option<String>,
+    /// The relay-attested source desktop, threaded straight from
+    /// `RelayMessage::Invoke::source_desktop_id` - see that field's own doc
+    /// comment for the trust boundary.
+    pub(crate) source_desktop_id: Option<String>,
 }
 
 /// Separate budgets keep long-poll task event watches from consuming every
@@ -1479,6 +1494,7 @@ pub(crate) async fn dispatch_relay_http_invoke(
         path,
         body,
         authenticated_user_id,
+        source_desktop_id,
     } = request;
     let permit = match invoke_permits.for_path(&path).try_acquire_owned() {
         Ok(permit) => permit,
@@ -1501,7 +1517,12 @@ pub(crate) async fn dispatch_relay_http_invoke(
                 match authenticated_user_id {
                     Some(actor) => {
                         http_api::dispatch_authenticated_relay_http_invoke(
-                            http_state, actor, &method, &path, body,
+                            http_state,
+                            actor,
+                            source_desktop_id,
+                            &method,
+                            &path,
+                            body,
                         )
                         .await
                     }

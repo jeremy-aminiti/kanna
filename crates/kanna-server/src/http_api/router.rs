@@ -603,7 +603,7 @@ pub async fn dispatch_http_invoke(
     path: &str,
     body: serde_json::Value,
 ) -> HttpInvokeResponse {
-    dispatch_http_invoke_with_access(state, method, path, body, false, None).await
+    dispatch_http_invoke_with_access(state, method, path, body, false, None, None).await
 }
 
 pub async fn dispatch_authenticated_http_invoke(
@@ -612,17 +612,27 @@ pub async fn dispatch_authenticated_http_invoke(
     path: &str,
     body: serde_json::Value,
 ) -> HttpInvokeResponse {
-    dispatch_http_invoke_with_access(state, method, path, body, true, None).await
+    dispatch_http_invoke_with_access(state, method, path, body, true, None, None).await
 }
 
 pub async fn dispatch_authenticated_relay_http_invoke(
     state: Arc<AppState>,
     actor: String,
+    source_desktop_id: Option<String>,
     method: &str,
     path: &str,
     body: serde_json::Value,
 ) -> HttpInvokeResponse {
-    dispatch_http_invoke_with_access(state, method, path, body, true, Some(actor)).await
+    dispatch_http_invoke_with_access(
+        state,
+        method,
+        path,
+        body,
+        true,
+        Some(actor),
+        source_desktop_id,
+    )
+    .await
 }
 
 async fn dispatch_http_invoke_with_access(
@@ -632,6 +642,7 @@ async fn dispatch_http_invoke_with_access(
     body: serde_json::Value,
     authenticated_file_access: bool,
     authenticated_human_actor: Option<String>,
+    source_desktop_id: Option<String>,
 ) -> HttpInvokeResponse {
     let method = match method.parse::<axum::http::Method>() {
         Ok(method) => method,
@@ -692,12 +703,14 @@ async fn dispatch_http_invoke_with_access(
         .insert(axum::extract::ConnectInfo(invoke_peer));
     request.extensions_mut().insert(TunneledHttpInvoke);
     if authenticated_file_access {
-        request.extensions_mut().insert(AuthenticatedHttpInvoke);
+        request.extensions_mut().insert(AuthenticatedHttpInvoke {
+            account_uid: authenticated_human_actor,
+            source_desktop_id,
+        });
         request
             .extensions_mut()
             .insert(super::task_files::AuthenticatedTaskFileAccess);
     }
-    let _ = authenticated_human_actor;
 
     match router(state).oneshot(request).await {
         Ok(response) => response_to_http_invoke(response).await,
