@@ -516,11 +516,11 @@ mod tests {
             .expect("confirm");
 
         assert!(store.outbound_grant_for("desktop-b", 1_000).is_some());
-        let just_before_expiry = 1_000 + LEASE_MS;
+        let just_before_expiry = 1_000 + LEASE_MS - 1;
         assert!(store
             .outbound_grant_for("desktop-b", just_before_expiry)
             .is_some());
-        let after_expiry = 1_000 + LEASE_MS + 1;
+        let after_expiry = 1_000 + LEASE_MS;
         assert!(
             store
                 .outbound_grant_for("desktop-b", after_expiry)
@@ -578,12 +578,12 @@ mod tests {
         assert_eq!(store.inbound[0].account_uid, "uid-1");
         assert_eq!(store.outbound.len(), 1);
         assert_eq!(store.outbound[0].account_uid, "uid-1");
-        assert_eq!(store.pending.len(), 1);
-        assert_eq!(store.pending[0].account_uid, "uid-2");
-        // desktop-d's pending record belongs to uid-2 and must have been
-        // dropped even though it never had an outbound grant to accompany
-        // it - pending records are trust in progress, not merely metadata.
-        assert!(store.pending.iter().all(|p| p.account_uid == "uid-1"));
+        // desktop-b's pending record was already consumed by confirm_outbound
+        // above; desktop-d's belongs to uid-2 and must have been dropped by
+        // retain_account even though it never had an outbound grant to
+        // accompany it - pending records are trust in progress, not merely
+        // metadata, so nothing uid-2-scoped should survive.
+        assert!(store.pending.is_empty(), "{:?}", store.pending);
     }
 
     #[test]

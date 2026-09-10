@@ -4,42 +4,59 @@
 //! Distinct from every other identity in this crate: `pairing::PairingStore`
 //! holds mobile/manual pairing secrets, `machine_trust::MachineTrustStore`
 //! holds automatic same-account bearer grants, and this module holds neither
-//! a secret nor a grant - it holds the keypair and self-signed certificate a
-//! relay-authenticated bootstrap attests to a same-account sibling as this
-//! desktop's trust anchor. A sibling that later dials this desktop over LAN
-//! pins its outbound connection to exactly this certificate (never system
-//! roots, never TOFU, never the Bonjour-discovered address itself) - see
-//! `http_api::invoke_desktop`'s documented TLS-client stub for where that
-//! pinning eventually happens.
+//! a secret nor a grant - it holds a private CA certificate and the leaf
+//! server certificate it issues, per the accepted architecture: standard
+//! rustls verification against a target-specific `RootCertStore`, never a
+//! custom certificate verifier. A relay-authenticated bootstrap attests the
+//! CA certificate to a same-account sibling as this desktop's trust anchor;
+//! that sibling's outbound TLS client trusts only that one CA (never system
+//! roots, never TOFU, never the Bonjour-discovered address itself) and does
+//! ordinary WebPKI chain validation plus standard hostname verification
+//! against the leaf's SAN. A single self-signed certificate reused as both
+//! its own trust anchor and the presented leaf was deliberately rejected:
+//! whether a length-0 "leaf is the anchor" chain validates under standard
+//! WebPKI rules without a CA basic-constraint depends on library internals
+//! this module has no business depending on. A CA cert with
+//! `IsCa::Ca(BasicConstraints::Unconstrained)` signing a separate leaf with
+//! `desktop_id` as its SAN is the textbook case every standard X.509
+//! validator is built to handle - see `lan_tls`, which is the only module
+//! that reads this identity to build rustls configs.
 //!
 //! The identity is generated once and persisted; it must not regenerate on
-//! an ordinary restart; a previously-bootstrapped sibling's pinned trust
+//! an ordinary restart - a previously-bootstrapped sibling's pinned trust
 //! anchor would silently stop matching, and every outbound grant pointing at
 //! it would need re-bootstrapping for no reason connected to any actual
 //! compromise or rotation. It regenerates only when the persisted identity
 //! is missing or fails to parse - the same fail-closed-on-corruption stance
-//! `machine_trust::MachineTrustStore::load_fail_closed` takes, not a
-//! silent repair.
+//! `machine_trust::MachineTrustStore::load_fail_closed` takes, not a silent
+//! repair.
 
+use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-/// This desktop's LAN TLS identity: a self-signed certificate and the
-/// private key that signed it, both PEM-encoded exactly as `rcgen`/
-/// `rustls-pemfile` already expect.
+/// This desktop's LAN TLS identity: the private CA certificate a sibling
+/// pins as its trust anchor, and the leaf server certificate/key this
+/// desktop's own listener presents on the handshake. All three are
+/// PEM-encoded exactly as `rcgen`/`rustls-pemfile` already expect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanTlsIdentity {
-    pub certificate_pem: String,
-    pub private_key_pem: String,
+    /// Attested to a sibling via the relay bootstrap; never presented on the
+    /// wire during an ordinary TLS handshake itself.
+    pub ca_certificate_pem: String,
+    /// Presented by this desktop's LAN listener as its leaf certificate.
+    pub leaf_certificate_pem: String,
+    pub leaf_private_key_pem: String,
 }
 
 /// Loads the persisted identity, generating and persisting a new one only if
 /// none exists yet or the persisted file fails to parse as a well-formed
-/// identity. `desktop_id` becomes the certificate's subject alternative name,
-/// so a caller pinning to this certificate can also assert *which* desktop
-/// it expected to reach - the identity binds a specific desktop_id, not just
-/// "some same-account sibling".
+/// identity. `desktop_id` becomes the leaf certificate's subject alternative
+/// name, so a client pinning to the CA can also assert *which* desktop it
+/// expected to reach via standard hostname verification against that SAN -
+/// the identity binds a specific desktop_id, not just "some same-account
+/// sibling holding some CA-issued cert".
 pub fn load_or_create(path: &Path, desktop_id: &str) -> Result<LanTlsIdentity, String> {
     if let Some(identity) = try_load(path)? {
         return Ok(identity);
@@ -66,27 +83,60 @@ fn try_load(path: &Path) -> Result<Option<LanTlsIdentity>, String> {
         )
     })?;
     Ok(Some(LanTlsIdentity {
-        certificate_pem: identity.certificate_pem,
-        private_key_pem: identity.private_key_pem,
+        ca_certificate_pem: identity.ca_certificate_pem,
+        leaf_certificate_pem: identity.leaf_certificate_pem,
+        leaf_private_key_pem: identity.leaf_private_key_pem,
     }))
 }
 
 fn generate(desktop_id: &str) -> Result<LanTlsIdentity, String> {
-    let key_pair =
-        rcgen::KeyPair::generate().map_err(|error| format!("failed to generate LAN TLS key: {error}"))?;
-    let mut params = rcgen::CertificateParams::new(vec![sanitize_san(desktop_id)])
-        .map_err(|error| format!("failed to build LAN TLS certificate params: {error}"))?;
-    params.distinguished_name = rcgen::DistinguishedName::new();
+    let (ca_certificate_pem, ca_cert, ca_key) = generate_ca()?;
+    let (leaf_certificate_pem, leaf_private_key_pem) =
+        generate_leaf(desktop_id, &ca_cert, &ca_key)?;
+    Ok(LanTlsIdentity {
+        ca_certificate_pem,
+        leaf_certificate_pem,
+        leaf_private_key_pem,
+    })
+}
+
+fn generate_ca() -> Result<(String, rcgen::Certificate, KeyPair), String> {
+    let mut params = CertificateParams::new(Vec::new())
+        .map_err(|error| format!("failed to build LAN TLS CA params: {error}"))?;
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.distinguished_name = DistinguishedName::new();
     params
         .distinguished_name
-        .push(rcgen::DnType::CommonName, desktop_id);
+        .push(DnType::CommonName, "Kanna LAN Machine-Invoke CA");
+    let key_pair =
+        KeyPair::generate().map_err(|error| format!("failed to generate LAN TLS CA key: {error}"))?;
     let certificate = params
         .self_signed(&key_pair)
-        .map_err(|error| format!("failed to self-sign LAN TLS certificate: {error}"))?;
-    Ok(LanTlsIdentity {
-        certificate_pem: certificate.pem(),
-        private_key_pem: key_pair.serialize_pem(),
-    })
+        .map_err(|error| format!("failed to self-sign LAN TLS CA certificate: {error}"))?;
+    let pem = certificate.pem();
+    Ok((pem, certificate, key_pair))
+}
+
+fn generate_leaf(
+    desktop_id: &str,
+    ca_cert: &rcgen::Certificate,
+    ca_key: &KeyPair,
+) -> Result<(String, String), String> {
+    let mut params = CertificateParams::new(vec![sanitize_san(desktop_id)])
+        .map_err(|error| format!("failed to build LAN TLS leaf params: {error}"))?;
+    params.distinguished_name = DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, desktop_id);
+    params
+        .extended_key_usages
+        .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+    let key_pair = KeyPair::generate()
+        .map_err(|error| format!("failed to generate LAN TLS leaf key: {error}"))?;
+    let certificate = params
+        .signed_by(&key_pair, ca_cert, ca_key)
+        .map_err(|error| format!("failed to sign LAN TLS leaf certificate: {error}"))?;
+    Ok((certificate.pem(), key_pair.serialize_pem()))
 }
 
 /// A certificate SAN must be a valid DNS name; a desktop_id is an opaque
@@ -111,11 +161,12 @@ fn sanitize_san(desktop_id: &str) -> String {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedIdentity {
-    certificate_pem: String,
-    private_key_pem: String,
+    ca_certificate_pem: String,
+    leaf_certificate_pem: String,
+    leaf_private_key_pem: String,
 }
 
-/// Atomically persists the identity as 0600 - it contains a private key,
+/// Atomically persists the identity as 0600 - it contains private keys,
 /// never group/other-readable, matching `machine_trust::MachineTrustStore`'s
 /// persistence stance for the same reason.
 fn save(path: &Path, identity: &LanTlsIdentity) -> Result<(), String> {
@@ -124,8 +175,9 @@ fn save(path: &Path, identity: &LanTlsIdentity) -> Result<(), String> {
             .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
     }
     let body = serde_json::to_string_pretty(&PersistedIdentity {
-        certificate_pem: identity.certificate_pem.clone(),
-        private_key_pem: identity.private_key_pem.clone(),
+        ca_certificate_pem: identity.ca_certificate_pem.clone(),
+        leaf_certificate_pem: identity.leaf_certificate_pem.clone(),
+        leaf_private_key_pem: identity.leaf_private_key_pem.clone(),
     })
     .map_err(|error| format!("failed to serialize LAN TLS identity: {error}"))?;
     let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
@@ -160,12 +212,21 @@ mod tests {
     }
 
     #[test]
-    fn generates_a_parseable_pem_certificate_and_key() {
+    fn generates_a_parseable_pem_ca_and_leaf() {
         let identity = generate("desktop-1").expect("generate identity");
-        assert!(identity.certificate_pem.starts_with("-----BEGIN CERTIFICATE-----"));
         assert!(identity
-            .private_key_pem
+            .ca_certificate_pem
+            .starts_with("-----BEGIN CERTIFICATE-----"));
+        assert!(identity
+            .leaf_certificate_pem
+            .starts_with("-----BEGIN CERTIFICATE-----"));
+        assert!(identity
+            .leaf_private_key_pem
             .starts_with("-----BEGIN PRIVATE KEY-----"));
+        assert_ne!(
+            identity.ca_certificate_pem, identity.leaf_certificate_pem,
+            "the CA and the leaf it issues must be distinct certificates"
+        );
     }
 
     #[test]
@@ -208,6 +269,8 @@ mod tests {
         // characters SAN DNS names cannot), and generation must not fail on
         // one just because it does not already look like a hostname.
         let identity = generate("desktop_with_underscore!").expect("generate identity");
-        assert!(identity.certificate_pem.starts_with("-----BEGIN CERTIFICATE-----"));
+        assert!(identity
+            .leaf_certificate_pem
+            .starts_with("-----BEGIN CERTIFICATE-----"));
     }
 }
