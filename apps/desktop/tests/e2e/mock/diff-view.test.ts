@@ -70,6 +70,31 @@ async function openDiffModal(client: WebDriverClient): Promise<void> {
   await client.waitForElement(".diff-view", 5_000);
 }
 
+async function activateMainTab(
+  client: WebDriverClient,
+  id: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const clicked = await client.executeSync<boolean>(
+    `const tab = document.querySelector('[data-testid="main-tab-' + ${JSON.stringify(id)} + '"]');
+     if (!(tab instanceof HTMLElement)) return false;
+     tab.click();
+     return true;`,
+  );
+  if (!clicked) throw new Error(`main tab not found: ${id}`);
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const active = await client.executeSync<boolean>(
+      `return document.querySelector('[data-testid="main-tab-' + ${JSON.stringify(id)} + '"]')
+        ?.getAttribute('aria-selected') === 'true';`,
+    );
+    if (active) return;
+    await sleep(100);
+  }
+  throw new Error(`main tab did not become active: ${id}`);
+}
+
 /**
  * Drop the selected view's remembered diff state so the next open is a genuine
  * first open. `currentDiffViewKey` and `diffViewStates` live on the
@@ -1392,9 +1417,8 @@ describe("diff view", () => {
   it("refreshes an open Branch diff after the task branch history is rewritten", async () => {
     const worktreePath = await getSelectedWorktreePath(client, testRepoPath);
     const setupBeforeScript = [
-      "cat > e2e-branch-refresh-before.txt <<'EOF'",
-      "branch refresh before rebase marker",
-      "EOF",
+      "i=1; while [ \"$i\" -le 180 ]; do printf 'branch refresh before context %03d\\n' \"$i\"; i=$((i + 1)); done > e2e-branch-refresh-before.txt",
+      "printf 'branch refresh before rebase marker\\n' >> e2e-branch-refresh-before.txt",
       "git add e2e-branch-refresh-before.txt",
       "git commit -m 'e2e branch refresh before rewrite'",
     ].join("\n");
@@ -1413,6 +1437,55 @@ describe("diff view", () => {
         `return text.includes("branch refresh before rebase marker");`,
       );
 
+      await waitForDiffScrollHeight(client, 1_000);
+      await client.executeSync(buildGlobalKeydownScript({ key: "/" }));
+      await client.waitForElement(".diff-view .search-input", 2_000);
+      await client.executeSync(
+        `const input = document.querySelector('.diff-view .search-input');
+         if (!(input instanceof HTMLInputElement)) return false;
+         input.value = 'branch refresh before';
+         input.dispatchEvent(new Event('input', { bubbles: true }));
+         return true;`,
+      );
+      await sleep(200);
+      const unchangedStateBefore = await client.executeSync<{ scrollTop: number; query: string } | null>(
+        `const container = document.querySelector('.diff-container');
+         const input = document.querySelector('.diff-view .search-input');
+         if (!(container instanceof HTMLElement) || !(input instanceof HTMLInputElement)) return null;
+         container.scrollTop = Math.min(480, container.scrollHeight - container.clientHeight);
+         container.dispatchEvent(new Event('scroll', { bubbles: true }));
+         window.__KANNA_DIFF_UNCHANGED_CONTAINER__ = container;
+         return { scrollTop: container.scrollTop, query: input.value };`,
+      );
+      expect(unchangedStateBefore).not.toBeNull();
+      expect(unchangedStateBefore!.scrollTop).toBeGreaterThan(0);
+
+      // Exercise the real tab controller: focus arrives while Diff is retained
+      // behind Agent, then returning to an unchanged patch keeps the same DOM
+      // node, scroll offset, and search selection.
+      await activateMainTab(client, "agent");
+      await client.executeSync("window.dispatchEvent(new Event('focus')); return true;");
+      await activateMainTab(client, "diff");
+      await sleep(500);
+      const unchangedStateAfter = await client.executeSync<{
+        sameContainer: boolean;
+        scrollTop: number;
+        query: string | null;
+      }>(
+        `const container = document.querySelector('.diff-container');
+         const input = document.querySelector('.diff-view .search-input');
+         return {
+           sameContainer: container === window.__KANNA_DIFF_UNCHANGED_CONTAINER__,
+           scrollTop: container instanceof HTMLElement ? container.scrollTop : -1,
+           query: input instanceof HTMLInputElement ? input.value : null,
+         };`,
+      );
+      expect(unchangedStateAfter.sameContainer).toBe(true);
+      expect(unchangedStateAfter.scrollTop).toBe(unchangedStateBefore!.scrollTop);
+      expect(unchangedStateAfter.query).toBe(unchangedStateBefore!.query);
+
+      await activateMainTab(client, "agent");
+
       await tauriInvoke(client, "run_script", {
         script: [
           'git reset --hard "$KANNA_E2E_DIFF_BASELINE_REF"',
@@ -1429,7 +1502,10 @@ describe("diff view", () => {
         },
       });
 
+      // The same hidden focus signal must become a freshness check when Diff
+      // returns, and replace the now-stale patch after the history rewrite.
       await client.executeSync("window.dispatchEvent(new Event('focus'));");
+      await activateMainTab(client, "diff");
       const refreshedText = await waitForDiffText(
         client,
         `return text.includes("branch refresh after rebase marker")
