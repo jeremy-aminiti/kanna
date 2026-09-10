@@ -250,7 +250,10 @@ jobs:
       - name: Install the built package via apt (no dev packages)
         run: |
           set -x
-          deb="$(ls .build/linux-package/out/*.deb)"
+          # apt-get install treats a path with no leading `./` or `/` as a
+          # package *name* to resolve from the repo, not a local file -- the
+          # leading `./` is what tells it this is a .deb on disk.
+          deb="./$(ls .build/linux-package/out/*.deb)"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends "$deb"
 
