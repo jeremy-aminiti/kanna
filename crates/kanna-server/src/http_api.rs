@@ -11,6 +11,7 @@ mod e2e_mobile_controls;
 mod e2e_sql;
 pub(crate) mod event_subscriptions;
 mod harness_wake;
+pub(crate) mod invoke_desktop;
 mod ksp;
 mod lan_trust;
 mod machine_stats;

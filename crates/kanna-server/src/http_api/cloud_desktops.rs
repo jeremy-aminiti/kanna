@@ -1,5 +1,5 @@
 use super::lan_trust::DesktopLocalAccess;
-use super::state::{AppState, HttpInvokeResponse};
+use super::state::AppState;
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -70,28 +70,43 @@ pub(super) async fn list_cloud_desktops(
     })
 }
 
+/// `HttpInvokeResponse`'s fields plus which transport actually served this
+/// call. A separate response shape rather than a new field on
+/// `HttpInvokeResponse` itself: that struct has a dozen other construction
+/// sites across this crate that have nothing to do with desktop-to-desktop
+/// routing, and none of them need to grow a route to reason about.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MachineInvokeHttpResponse {
+    status: u16,
+    body: Option<serde_json::Value>,
+    error: Option<String>,
+    /// "local" | "lan" | "relay" - see `invoke_desktop::RouteProvenance`.
+    route: &'static str,
+}
+
 pub(super) async fn invoke_cloud_desktop(
     _access: DesktopLocalAccess,
     State(state): State<Arc<AppState>>,
     Path(desktop_id): Path<String>,
     Json(request): Json<MachineInvokeRequest>,
-) -> Result<Json<HttpInvokeResponse>, (axum::http::StatusCode, String)> {
+) -> Result<Json<MachineInvokeHttpResponse>, (axum::http::StatusCode, String)> {
     validate_invoke_request(&desktop_id, &request)?;
-    let response = if desktop_id == state.config().desktop_id {
-        super::routes::dispatch_authenticated_http_invoke(
-            state,
-            &request.method,
-            &request.path,
-            request.body,
-        )
-        .await
-    } else {
-        state
-            .invoke_relay_desktop(desktop_id, request.method, request.path, request.body)
-            .await
-            .map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error))?
-    };
-    Ok(Json(response))
+    let routed = super::invoke_desktop::invoke_desktop(
+        state,
+        desktop_id,
+        request.method,
+        request.path,
+        request.body,
+    )
+    .await
+    .map_err(|error| (axum::http::StatusCode::BAD_GATEWAY, error))?;
+    Ok(Json(MachineInvokeHttpResponse {
+        status: routed.response.status,
+        body: routed.response.body,
+        error: routed.response.error,
+        route: routed.route.as_str(),
+    }))
 }
 
 fn validate_invoke_request(
