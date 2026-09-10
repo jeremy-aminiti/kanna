@@ -379,7 +379,11 @@ async fn run_push(state: &Arc<AppState>, work: &Value) -> Result<(), Result<Stri
     .await;
     if result.is_err() {
         if let Err(error) = &result {
-            if error.contains("legacy payload") || error.contains("task-bundle admission") {
+            if error.contains("legacy payload")
+                || error.contains("task-bundle admission")
+                || error.contains("did not prove transfer admission")
+                || error.contains("did not durably admit transfer payload")
+            {
                 match state.transfer_work().open_db() {
                     Ok(db) => {
                         if let Err(mark_error) =
