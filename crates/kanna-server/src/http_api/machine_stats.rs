@@ -699,7 +699,8 @@ async fn gather_remote_detailed_stats(state: &Arc<AppState>) -> MachineStatsResp
         requests.push(async move {
             let result = tokio::time::timeout(
                 REMOTE_STATS_TIMEOUT,
-                state.invoke_relay_desktop(
+                super::invoke_desktop::invoke_desktop(
+                    state.clone(),
                     machine_id.clone(),
                     "GET".into(),
                     "/v1/machine-stats?localOnly=true&detailed=true".into(),
@@ -707,7 +708,7 @@ async fn gather_remote_detailed_stats(state: &Arc<AppState>) -> MachineStatsResp
                 ),
             )
             .await;
-            let result = match result {
+            let result = match result.map(|result| result.map(|routed| routed.response)) {
                 Err(_) => Err("machine-stats request timed out".into()),
                 Ok(Err(error)) => Err(error),
                 Ok(Ok(response)) if response.status == 200 => response

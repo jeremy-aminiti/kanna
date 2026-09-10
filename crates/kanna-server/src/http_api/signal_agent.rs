@@ -1012,15 +1012,16 @@ pub(super) async fn signal_agent_request(
             local_repo_id,
         }) => {
             let path = format!("/v1/tasks/{}/input", encode_path_segment(&task_id));
-            let response = state
-                .invoke_relay_desktop(
-                    machine_id.clone(),
-                    "POST".to_string(),
-                    path,
-                    serde_json::json!({ "input": message, "strictRecording": strict_recording }),
-                )
-                .await
-                .map_err(|error| remote_singleton_unreachable(&machine_id, &task_id, error))?;
+            let response = super::invoke_desktop::invoke_desktop(
+                state.clone(),
+                machine_id.clone(),
+                "POST".to_string(),
+                path,
+                serde_json::json!({ "input": message, "strictRecording": strict_recording }),
+            )
+            .await
+            .map_err(|error| remote_singleton_unreachable(&machine_id, &task_id, error))?
+            .response;
             if response.status != axum::http::StatusCode::NO_CONTENT.as_u16() {
                 let detail = response
                     .error
@@ -1093,28 +1094,29 @@ pub(super) async fn signal_agent_request(
                             )
                         })?
                 } else {
-                    let response = state
-                        .invoke_relay_desktop(
-                            claim.machine_id.clone(),
-                            "POST".to_string(),
+                    let response = super::invoke_desktop::invoke_desktop(
+                        state.clone(),
+                        claim.machine_id.clone(),
+                        "POST".to_string(),
+                        format!(
+                            "/v1/tasks/{}/actions/release-closed-singleton-reservation",
+                            encode_path_segment(&claim.task_id)
+                        ),
+                        serde_json::Value::Null,
+                    )
+                    .await
+                    .map_err(|error| {
+                        singleton_lookup_uncertain(
+                            &repo_id,
+                            &agent,
+                            &claim.machine_id,
                             format!(
-                                "/v1/tasks/{}/actions/release-closed-singleton-reservation",
-                                encode_path_segment(&claim.task_id)
+                                "reservation {} cannot be verified: {error}",
+                                claim.task_id
                             ),
-                            serde_json::Value::Null,
                         )
-                        .await
-                        .map_err(|error| {
-                            singleton_lookup_uncertain(
-                                &repo_id,
-                                &agent,
-                                &claim.machine_id,
-                                format!(
-                                    "reservation {} cannot be verified: {error}",
-                                    claim.task_id
-                                ),
-                            )
-                        })?;
+                    })?
+                    .response;
                     if response.status != axum::http::StatusCode::OK.as_u16() {
                         return Err(singleton_lookup_uncertain(
                             &repo_id,
@@ -1162,17 +1164,18 @@ pub(super) async fn signal_agent_request(
             }
             "owned" if claim.machine_id != state.config.desktop_id => {
                 let path = format!("/v1/tasks/{}/input", encode_path_segment(&claim.task_id));
-                let response = state
-                    .invoke_relay_desktop(
-                        claim.machine_id.clone(),
-                        "POST".to_string(),
-                        path,
+                let response = super::invoke_desktop::invoke_desktop(
+                    state.clone(),
+                    claim.machine_id.clone(),
+                    "POST".to_string(),
+                    path,
                     serde_json::json!({ "input": message, "strictRecording": strict_recording }),
-                    )
-                    .await
-                    .map_err(|error| {
-                        remote_singleton_unreachable(&claim.machine_id, &claim.task_id, error)
-                    })?;
+                )
+                .await
+                .map_err(|error| {
+                    remote_singleton_unreachable(&claim.machine_id, &claim.task_id, error)
+                })?
+                .response;
                 if response.status == axum::http::StatusCode::NO_CONTENT.as_u16() {
                     // The owner's repository id was never observed on this
                     // path — the claim record names a machine and a task, not
@@ -1378,15 +1381,16 @@ async fn resolve_singleton_owner(
         if machine_id == state.config.desktop_id {
             continue;
         }
-        let response = state
-            .invoke_relay_desktop(
-                machine_id.clone(),
-                "GET".to_string(),
-                path.clone(),
-                serde_json::Value::Null,
-            )
-            .await
-            .map_err(|error| singleton_lookup_uncertain(repo_id, agent, &machine_id, error))?;
+        let response = super::invoke_desktop::invoke_desktop(
+            state.clone(),
+            machine_id.clone(),
+            "GET".to_string(),
+            path.clone(),
+            serde_json::Value::Null,
+        )
+        .await
+        .map_err(|error| singleton_lookup_uncertain(repo_id, agent, &machine_id, error))?
+        .response;
         if response.status != axum::http::StatusCode::OK.as_u16() {
             return Err(singleton_lookup_uncertain(
                 repo_id,
@@ -1485,15 +1489,16 @@ async fn observed_owner_repo_id(
         encode_path_segment(remote_url_hash),
         encode_path_segment(agent)
     );
-    let response = state
-        .invoke_relay_desktop(
-            machine_id.to_string(),
-            "GET".to_string(),
-            path,
-            serde_json::Value::Null,
-        )
-        .await
-        .ok()?;
+    let response = super::invoke_desktop::invoke_desktop(
+        state.clone(),
+        machine_id.to_string(),
+        "GET".to_string(),
+        path,
+        serde_json::Value::Null,
+    )
+    .await
+    .ok()?
+    .response;
     if response.status != axum::http::StatusCode::OK.as_u16() {
         return None;
     }

@@ -1984,9 +1984,15 @@ fn spawn_aggregate_wait(
                 .map_err(|(status, error)| aggregate_machine_wait_error(status, error))
         } else {
             let path = aggregate_query_path(&query);
-            match state
-                .invoke_relay_desktop(waited_machine_id, "GET".to_string(), path, Value::Null)
-                .await
+            match super::invoke_desktop::invoke_desktop(
+                state.clone(),
+                waited_machine_id,
+                "GET".to_string(),
+                path,
+                Value::Null,
+            )
+            .await
+            .map(|routed| routed.response)
             {
                 Ok(response) if (200..300).contains(&response.status) => {
                     response.body.ok_or_else(|| {

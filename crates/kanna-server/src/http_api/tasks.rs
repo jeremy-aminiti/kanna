@@ -286,14 +286,15 @@ pub(super) async fn get_task(
                     }
                     let encoded_task_id = encode_path_segment(&task_id);
                     let path = format!("/v1/tasks/{encoded_task_id}?localOnly=true");
-                    if let Ok(response) = state
-                        .invoke_relay_desktop(
-                            machine_id.clone(),
-                            "GET".to_string(),
-                            path,
-                            serde_json::Value::Null,
-                        )
-                        .await
+                    if let Ok(response) = super::invoke_desktop::invoke_desktop(
+                        state.clone(),
+                        machine_id.clone(),
+                        "GET".to_string(),
+                        path,
+                        serde_json::Value::Null,
+                    )
+                    .await
+                    .map(|routed| routed.response)
                     {
                         if response.status == axum::http::StatusCode::OK.as_u16() {
                             return Err((
@@ -677,14 +678,15 @@ async fn aggregate_get_tasks(
                     continue;
                 }
                 response.scope.machine_ids.push(machine_id.clone());
-                match state
-                    .invoke_relay_desktop(
-                        machine_id.clone(),
-                        "GET".to_string(),
-                        remote_path.clone(),
-                        serde_json::Value::Null,
-                    )
-                    .await
+                match super::invoke_desktop::invoke_desktop(
+                    state.clone(),
+                    machine_id.clone(),
+                    "GET".to_string(),
+                    remote_path.clone(),
+                    serde_json::Value::Null,
+                )
+                .await
+                .map(|routed| routed.response)
                 {
                     Ok(remote) if remote.status == 200 => match remote.body {
                         Some(body) => match serde_json::from_value::<GetTasksResponse>(body) {
@@ -768,14 +770,15 @@ async fn aggregate_task_summaries(
                 if machine_id == state.config.desktop_id {
                     continue;
                 }
-                match state
-                    .invoke_relay_desktop(
-                        machine_id.clone(),
-                        "GET".to_string(),
-                        remote_path.clone(),
-                        serde_json::Value::Null,
-                    )
-                    .await
+                match super::invoke_desktop::invoke_desktop(
+                    state.clone(),
+                    machine_id.clone(),
+                    "GET".to_string(),
+                    remote_path.clone(),
+                    serde_json::Value::Null,
+                )
+                .await
+                .map(|routed| routed.response)
                 {
                     Ok(response) if response.status == 200 => match response.body {
                         Some(body) => match serde_json::from_value::<
