@@ -58,7 +58,7 @@ def _zig_cc_wrapper_impl(ctx):
     wrapper = ctx.actions.declare_file(ctx.label.name)
     ctx.actions.write(
         wrapper,
-        "#!/bin/sh\nset -eu\nzig=\"$PWD/{}\"\nsysroot=\"$PWD/{}\"\n{}\n".format(
+        "#!/bin/sh\nset -eu\nzig=\"$PWD/{}\"\nsysroot=\"$PWD/{}\"\ncache=\"${{TMPDIR:-$PWD/.zig-cache}}\"\nmkdir -p \"$cache/global\" \"$cache/local\"\nexport ZIG_GLOBAL_CACHE_DIR=\"$cache/global\"\nexport ZIG_LOCAL_CACHE_DIR=\"$cache/local\"\n{}\n".format(
             zig,
             sysroot,
             command,
