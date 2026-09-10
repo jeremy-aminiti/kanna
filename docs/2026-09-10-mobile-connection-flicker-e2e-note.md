@@ -73,7 +73,11 @@ own first-run dev-tools tip needs a real tap, and this session's computed
 `click at` was refused by macOS with an Accessibility-permission error
 (`-25204`), not something this session can grant itself. The still-unknown
 original incident provider/session remains a separate information gap
-(owner-only) that does not block either of these independent checks.
+(owner-only) that does not block either of these independent checks. A
+separate status investigation (`85cf3efb`) is noted as read-only for now —
+this task's flicker/missing-Enter scope is unchanged by it, and any reuse
+between the two is a coordination question, not something to fold in here
+unilaterally.
 
 ## Flicker: a source-demonstrated overlay bug, not yet a proven cure
 
@@ -558,9 +562,33 @@ in-app view, not a native alert:
 - A computed tap — `System Events`' generic `click at {x, y}` UI-element
   scripting — failed outright with `execution error: … error -25204`, a
   macOS Accessibility-permission denial for the process driving this
-  session. This is not a tool this session can install or grant itself; it
-  is a System Settings → Privacy & Security → Accessibility grant, which is
-  the user's call, not an autonomous one.
+  session.
+
+**Checked before treating that as human-only, per instruction, rather than
+assumed:** searched this session's available tools for a supported native
+computer-use/click capability separate from `osascript`/System Events
+(`ToolSearch` for `computer`/`screen_click`/`mouse`/`ui_automation`/
+`accessibility`). The only "computer use"-shaped tool present is
+`mcp__claude-in-chrome__computer` — its own description scopes it to "a
+mouse and keyboard to interact with a web browser" and requires a browser
+`tabId`; it has no path to a native macOS app window (Simulator.app is not
+a Chrome tab). No other session tool exists that could click here without
+the same Accessibility gate. Also checked, read-only, which process that
+gate applies to, rather than guessing: `ps` on this shell's full ancestry
+resolves to `/bin/zsh` → the `claude` CLI → `kanna-daemon` →
+`kanna-desktop`, rooted at **`/Applications/Kanna Staging.app`** — macOS's
+TCC "responsible process" resolution attributes an Accessibility check for
+any subprocess in that tree to that root app bundle, which is the
+mechanism, not a guess. Tried to confirm directly from TCC's own records
+(read-only: `log show --predicate 'subsystem == "com.apple.TCC"'` returned
+nothing observable, and `sqlite3 -readonly` against the per-user
+`TCC.db`'s `kTCCServiceAccessibility` rows returned zero entries — exit 0,
+genuinely empty, not an error) — consistent with **Kanna Staging.app never
+having been added to the Accessibility list at all** (a -25204 refusal for
+an app with no entry, rather than one explicitly denied), but not a
+line-item confirmation of the exact display name TCC would show. No
+permission was requested, granted, or otherwise changed by any of this
+checking.
 
 Screenshots preserved (not committed):
 `.tmp/mobile-flicker-capture/screen-0{2..7}-*.png` — trust-seed dialog,
@@ -568,18 +596,29 @@ post-accept ("Tasks"/"No tasks yet"), post-pair (same, dev-tools overlay
 still present), and the three dismissal attempts (return/click/escape), all
 showing the identical unchanged overlay except where noted.
 
-**Net for attempt 2:** genuine progress over attempt 1 — the scheme fix is
-now live-confirmed, native "Open in…?" dialogs have a real, repeatable,
-permission-free dismissal method, and the real disposable-pairing sequence
-(`POST /v1/pairing/sessions` → `e2e-trust` → `e2e-pair`) works exactly as
-designed end to end. What remains is a single, precisely-identified,
-concrete blocker — not a vague "needs a human": dismissing Expo's own
-first-run dev-tools tip needs either a real tap (Accessibility permission
-granted to enable `click at`, or a human, or Appium) — none available this
-pass. Cleaned up fully: scratch task closed, worktree/branch removed,
-`dev_down` (zero failures), simulator shut down (confirmed via `simctl list
-devices booted` returning empty). This worktree's own git state was not
-touched during any of it.
+**Net for attempt 2 — pairing/scheme outcomes stand as passed, only the
+final visual step is blocked:** the scheme fix is live-confirmed (`exit 0`
+on a real `simctl openurl`, no more `-10814`), native "Open in…?" dialogs
+have a real, repeatable, permission-free dismissal method
+(`keystroke return`), and the real disposable-pairing sequence (`POST
+/v1/pairing/sessions` → `e2e-trust` → `e2e-pair`) both completed
+successfully end to end — none of that is in question. What remains is
+exactly one step: dismissing Expo's own first-run dev-tools tip, which
+needs a real tap this session's tools cannot deliver. **The dev/simulator
+stack was torn down at the end of this attempt** (scratch task closed and
+its worktree/branch removed, `dev_down` — zero failures, simulator shut
+down, confirmed via `simctl list devices booted` returning empty) — so
+there is currently no running dialog for anyone to dismiss. The manual step,
+for whenever the stack is next brought up for this same check: either grant
+`Kanna Staging.app` Accessibility access (System Settings → Privacy &
+Security → Accessibility) so `click at` can complete this and future
+capture attempts unattended, or — needing no permission change at all —
+have a person tap "Open" on the two "Open in 'Kanna Dev'?" prompts (or let
+this session's `keystroke return` continue answering those, as it did here)
+and tap "Continue" once on the Expo dev-tools tip; the app then shows the
+selected task's terminal directly, since the trust/pair seeding already
+presets it. This worktree's own git state was not touched during any of
+it.
 
 ## Missing-Enter symptom — correction: the drain-aware fence is gone, not current
 
