@@ -1534,13 +1534,28 @@ mod tests {
 /// The fake daemon proves finalization's *ordering* logic. It cannot prove the
 /// two things this file exists for: that the CR/paste-framed bytes the
 /// production write path constructs actually reach a real terminal's child
-/// process the way an agent CLI would read them, and that a real PID fence,
-/// a real forced exit, and a real permission-prompt frame drive the same
-/// verdicts end to end. `kanna-daemon`'s own `authorize_spawn` accepts a
-/// connection from this test binary without any negotiation dance because
-/// this test binary is that daemon's live direct parent — the same trust
-/// the desktop app gets, and the same reason `crates/daemon/tests/reconnect.rs`
-/// and `detection_rules.rs` can send `Spawn` directly.
+/// process, and that a real PID fence, a real forced exit, and a real
+/// permission-prompt frame drive the same verdicts end to end.
+/// `kanna-daemon`'s own `authorize_spawn` accepts a connection from this test
+/// binary without any negotiation dance because this test binary is that
+/// daemon's live direct parent — the same trust the desktop app gets, and
+/// the same reason `crates/daemon/tests/reconnect.rs` and
+/// `detection_rules.rs` can send `Spawn` directly.
+///
+/// **Scope this module does not claim.** A negotiated pty is a byte pipe with
+/// a line discipline in front of it, not a transparent wire: the child's
+/// shell `read` builtin observes whatever that discipline hands it after
+/// canonical-mode processing, not the raw bytes the daemon wrote. In
+/// particular the trailing CR every write ends with is consumed as `read`'s
+/// line terminator, not captured as a literal byte in what a test asserts on
+/// — what these tests can and do prove about it is that exactly one shell
+/// line was produced per logical write, not that a specific `\r` byte
+/// survived untouched. And the child's printed frames are synthetic patterns
+/// built to match this repo's own bundled Codex detection rules
+/// (`crates/daemon/src/detection/rules.json`) closely enough to drive the
+/// real classifier the way a real Codex session's screen would — they are
+/// not a claim that an installed Codex or Claude CLI parses these bytes the
+/// same way. That is `tests/cli-contract`'s job and stays out of this file.
 ///
 /// The child is a `/bin/sh -c` script using only POSIX builtins (`printf`,
 /// `read`, `sleep`, `exit`) so it never depends on `PATH` or anything the
@@ -1551,6 +1566,19 @@ mod tests {
 /// moment that frame is observed rather than waiting out a quiet-refresh
 /// timer (`crates/daemon/src/session.rs`) — which is what keeps these tests
 /// bounded in real time instead of racing a multi-second heuristic.
+///
+/// **Proving a negative.** A script that never reads its own stdin (a bare
+/// `sleep`, or a one-shot `read` that already returned) cannot tell this test
+/// anything: an empty log file next to it proves only that the script never
+/// logs, not that nothing reached the PTY. Every test that asserts an absence
+/// therefore gives its child a loop that keeps reading and logging every
+/// line for the test's whole life, and follows its negative assertion with
+/// [`assert_only_control_probe_was_received`] — a real delivery, through the
+/// same production `try_submit_task_input_if_session` path, sent after the
+/// code under test has already run and waited for deterministically. Seeing
+/// the probe's own line, and only the probe's own line, in the log is what
+/// proves both that the reader was alive the whole time and that nothing
+/// else arrived before it.
 ///
 /// No production code changes with this module: it drives
 /// `finalize_source_session`, `run_sequence` and `inject` exactly as
@@ -1659,12 +1687,17 @@ mod real_daemon_tests {
             let mut command = StdCommand::new(resolve_daemon_binary());
             command.env("KANNA_DAEMON_DIR", dir.to_str().expect("utf-8 daemon dir"));
             let child = command.spawn().expect("failed to start a real kanna-daemon");
+            // Own the child in the RAII guard *before* the readiness wait
+            // below, not after: `Child`'s own `Drop` does not kill the
+            // process, so a timeout panic here would otherwise leak a real
+            // daemon process that nothing ever reaps.
+            let daemon = Self { child, dir };
 
             for _ in 0..100 {
                 let pid_matches = std::fs::read_to_string(&pid_path)
                     .ok()
                     .and_then(|pid| pid.trim().parse::<u32>().ok())
-                    == Some(child.id());
+                    == Some(daemon.child.id());
                 if pid_matches && UnixStream::connect(&socket_path).is_ok() {
                     break;
                 }
@@ -1674,12 +1707,12 @@ mod real_daemon_tests {
                 std::fs::read_to_string(&pid_path)
                     .ok()
                     .and_then(|pid| pid.trim().parse::<u32>().ok())
-                    == Some(child.id())
+                    == Some(daemon.child.id())
                     && UnixStream::connect(&socket_path).is_ok(),
                 "real daemon was not ready at {socket_path:?}"
             );
 
-            Self { child, dir }
+            daemon
         }
 
         fn dir_str(&self) -> String {
@@ -1855,6 +1888,45 @@ mod real_daemon_tests {
             .await;
     }
 
+    /// The deterministic barrier a negative assertion needs: sends one known
+    /// control message through the exact same production
+    /// `try_submit_task_input_if_session` path the finalizer itself uses,
+    /// fenced to `real_pid`, then waits for that one line to appear in the
+    /// log and asserts it is the *only* line there.
+    ///
+    /// This only proves anything against a child whose script is a loop that
+    /// keeps reading and logging every line for the test's whole life --
+    /// against a `sleep`-only or already-returned one-shot `read` script, the
+    /// probe itself would never be logged either, and this call would hang
+    /// until its own timeout rather than silently pass. Waiting for the
+    /// probe's own line is the barrier: a single reader drains the PTY's
+    /// bytes in the order they arrived, so anything the code under test
+    /// wrongly wrote earlier is already in the file by the time the probe's
+    /// line shows up.
+    async fn assert_only_control_probe_was_received(
+        daemon: &RealDaemon,
+        real_pid: u32,
+        log_path: &Path,
+    ) {
+        const PROBE: &str = "CONTROL-PROBE-ONLY-LINE";
+        let mut client = daemon.connect().await;
+        // `TaskInputError` carries no `Debug` impl (production code only ever
+        // matches its variants), so this reports failure without formatting it.
+        if try_submit_task_input_if_session(&mut client, SESSION, real_pid, PROBE)
+            .await
+            .is_err()
+        {
+            panic!("the control probe itself must reach the real, still-live session");
+        }
+        let lines = wait_for_log_lines(log_path, 1, Duration::from_secs(10)).await;
+        assert_eq!(
+            lines,
+            vec![PROBE.to_string()],
+            "the real child's reader was alive (the control probe proves that) but the log held \
+             more than just the probe -- something else reached the real PTY first: {lines:?}",
+        );
+    }
+
     /// The whole point of this file: a fast, legitimate preparation turn that
     /// never shows an "esc to interrupt" busy frame at all -- the session's
     /// only observed status is the `Idle` composer it reaches right after
@@ -1863,13 +1935,18 @@ mod real_daemon_tests {
     /// this is the real-daemon proof of that, not a restatement of the fake
     /// test with the same name.
     ///
-    /// It is also the one test in this file that proves the CR/paste framing
+    /// It is also the one test in this file that proves the paste framing
     /// itself: `WRAP_UP_MESSAGE` is 277 bytes with no embedded newline, over
     /// `PASTE_FRAMING_MIN_LEN` (256), so once the child's real
     /// `\x1b[?2004h` has been parsed by the daemon's real terminal emulator,
     /// the production write path must wrap it in `\x1b[200~` / `\x1b[201~`
-    /// before the trailing CR -- and the child logs exactly the bytes it
-    /// read, not a summary of them.
+    /// before the trailing CR. What the log then holds is what the child's
+    /// `read -r` actually assembled: the literal paste markers survive
+    /// untouched (they are ordinary bytes to the pty's line discipline), but
+    /// the trailing CR itself is consumed as `read`'s line terminator, not
+    /// captured as a byte -- so this proves one shell line was produced per
+    /// logical write and that the paste markers travelled with it, not that
+    /// a specific `\r` byte was seen on the other side.
     #[tokio::test]
     async fn fast_preparation_without_busy_is_paste_framed_and_reaches_a_clean_quit() {
         let daemon = RealDaemon::start("fast-idle");
@@ -1927,9 +2004,10 @@ exit 0
 
     /// A session already parked on a real permission-prompt frame -- matched
     /// by the daemon's own bundled `common/waiting/permission-prompt` rule,
-    /// not a fabricated status -- must never be typed into. This is the
-    /// strongest form of that proof available: the log file the real child
-    /// would have appended to if anything reached it stays untouched.
+    /// not a fabricated status -- must never be typed into. The child is a
+    /// loop that logs every line it ever reads, so the negative assertion
+    /// below is backed by [`assert_only_control_probe_was_received`] rather
+    /// than an empty log file a non-reading script could never have falsified.
     #[tokio::test]
     async fn a_real_permission_prompt_is_never_typed_into() {
         let daemon = RealDaemon::start("real-waiting");
@@ -1937,9 +2015,11 @@ exit 0
         let script = "\
 printf '\\033[?2004h'
 printf '\\r\\ndo you want to allow this command to run?\\r\\n'
-sleep 60
+while IFS= read -r line; do
+  printf '%s\\n' \"$line\" >> \"$KANNA_TEST_LOG\"
+done
 ";
-        spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+        let real_pid = spawn_pty_session(&daemon, SESSION, script, &log_path).await;
 
         {
             let mut client = daemon.connect().await;
@@ -1962,12 +2042,9 @@ sleep 60
             .degraded_reason
             .expect("a session parked on a real permission prompt reported clean finalization");
         assert!(reason.contains("permission prompt"), "{reason}");
-        assert!(
-            std::fs::read_to_string(&log_path).unwrap_or_default().is_empty(),
-            "the transfer typed at a real permission prompt",
-        );
         assert_eq!(phases(&state), vec!["degraded"]);
 
+        assert_only_control_probe_was_received(&daemon, real_pid, &log_path).await;
         kill_session_best_effort(&daemon, SESSION).await;
     }
 
@@ -1976,15 +2053,18 @@ sleep 60
     /// session's -- the shape a same-id replacement leaves behind -- proves
     /// the real daemon actually enforces `SessionIncarnationMismatch` on
     /// `SubmitInputIfSession`, not merely that `inject`'s match arms compile.
+    /// The child is a loop reader so [`assert_only_control_probe_was_received`]
+    /// can back the negative assertion with a real, ordered proof rather than
+    /// an empty file.
     #[tokio::test]
     async fn a_stale_pid_is_fenced_by_the_real_daemon() {
         let daemon = RealDaemon::start("real-pid-fence");
         let log_path = daemon.dir.join("child-consumed.log");
         let script = "\
 printf '\\033[?2004h'
-IFS= read -r prep
-printf '%s\\n' \"$prep\" >> \"$KANNA_TEST_LOG\"
-sleep 60
+while IFS= read -r line; do
+  printf '%s\\n' \"$line\" >> \"$KANNA_TEST_LOG\"
+done
 ";
         let real_pid = spawn_pty_session(&daemon, SESSION, script, &log_path).await;
 
@@ -1996,11 +2076,8 @@ sleep 60
             matches!(result, Injected::SessionGone),
             "a stale pid was not fenced against the real session"
         );
-        assert!(
-            std::fs::read_to_string(&log_path).unwrap_or_default().is_empty(),
-            "input reached the real PTY despite the pid fence",
-        );
 
+        assert_only_control_probe_was_received(&daemon, real_pid, &log_path).await;
         kill_session_best_effort(&daemon, SESSION).await;
     }
 
@@ -2060,15 +2137,21 @@ sleep 60
     /// A crash can leave `WRAP_UP_PHASE` claimed with no durable delivery
     /// outcome. Against a real, live, present session this proves the claim
     /// is checked before the daemon connection for submission is ever opened:
-    /// nothing reaches the real PTY, because `inject` never gets that far.
+    /// nothing reaches the real PTY, because `inject` never gets that far. The
+    /// child is a loop reader so [`assert_only_control_probe_was_received`]
+    /// can back that with a real, ordered proof rather than an empty file a
+    /// `sleep`-only script could never have falsified.
     #[tokio::test]
     async fn a_preclaimed_wrap_up_against_a_real_session_never_touches_the_real_pty() {
         let daemon = RealDaemon::start("real-preclaimed");
         let log_path = daemon.dir.join("child-consumed.log");
-        // Never expected to receive anything: the claim below must short
-        // circuit before any daemon connection for submission is opened.
-        let script = "sleep 60\n";
-        spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+        let script = "\
+printf '\\033[?2004h'
+while IFS= read -r line; do
+  printf '%s\\n' \"$line\" >> \"$KANNA_TEST_LOG\"
+done
+";
+        let real_pid = spawn_pty_session(&daemon, SESSION, script, &log_path).await;
 
         let state = state_for(&daemon, "desktop-finalize-real-preclaimed");
         open_db(&state)
@@ -2078,15 +2161,12 @@ sleep 60
 
         let outcome = run_sequence(&state, &work_item(), SESSION, Some("codex")).await;
 
-        assert!(
-            std::fs::read_to_string(&log_path).unwrap_or_default().is_empty(),
-            "a claimed phase was resent to the real PTY",
-        );
         let reason = outcome
             .degraded_reason
             .expect("an unproved phase claim reported clean finalization");
         assert!(reason.contains("no quit command was sent"), "{reason}");
 
+        assert_only_control_probe_was_received(&daemon, real_pid, &log_path).await;
         kill_session_best_effort(&daemon, SESSION).await;
     }
 
