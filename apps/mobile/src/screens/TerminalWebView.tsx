@@ -38,6 +38,7 @@ import {
   buildTerminalResizeScript
 } from "./buildTerminalDocument";
 import { planTerminalMutation } from "./terminalMutation";
+import { isTerminalTransportGap } from "./terminalReconnectPresentation";
 import {
   DEFAULT_TERMINAL_BOTTOM_INSET,
   getTerminalSelectionToolbarTop
@@ -145,6 +146,26 @@ export function TerminalWebViewComponent({
   const bridgeReadyRef = useRef(false);
   const pendingScriptsRef = useRef<string[]>([]);
   const pendingTerminalStateRef = useRef<PendingTerminalState | null>(null);
+  // Whether the most recently injected replace painted a real grid worth
+  // clearing the loading overlay for. A "connecting" or "restarting" replace
+  // with no output is the transport-gap placeholder text written into xterm
+  // itself (see getStatusCopy) — the same fact the overlay already shows.
+  //
+  // Deliberately a single slot, not a revision-keyed map: the bridge only
+  // ever has one outstanding replace whose ack matters. Each new replace call
+  // (including a same-revision one — e.g. the empty-buffer "connecting" ->
+  // "restarting" transitions a busy attach cycles through before any content
+  // arrives, still one epoch, still no bump) overwrites this and re-injects,
+  // so it always reflects what is actually on screen right now. Reading it on
+  // ack without clearing makes a duplicate or re-scheduled ack for the same
+  // outstanding revision (the bridge's own `scheduleTerminalContentReady`
+  // compares by value, not by call, so two same-revision replaces queued
+  // close together can each post their own ack) idempotent instead of
+  // defaulting to "ready" on the second one — and it never grows.
+  const pendingContentReadyRef = useRef<{
+    contentRevision: number;
+    countsAsRenderedGrid: boolean;
+  } | null>(null);
   const previousTaskIdRef = useRef<string | null>(null);
   const previousOutputRef = useRef<TerminalOutputLike>(EMPTY_TERMINAL_OUTPUT);
   const previousOutputEpochRef = useRef(0);
@@ -284,11 +305,19 @@ export function TerminalWebViewComponent({
     pendingTerminalStateRef.current = latestTerminalStateRef.current;
   };
 
+  const isTransportGapPlaceholder = (terminalState: PendingTerminalState) =>
+    isTerminalTransportGap(terminalState.status) &&
+    terminalOutputLength(terminalState.output) === 0;
+
   const replaceTerminalState = (terminalState: PendingTerminalState) => {
     if (!bridgeReadyRef.current) {
       queueTerminalState();
       return;
     }
+    pendingContentReadyRef.current = {
+      contentRevision: terminalState.contentRevision,
+      countsAsRenderedGrid: !isTransportGapPlaceholder(terminalState)
+    };
     webViewRef.current?.injectJavaScript(
       buildTerminalReplaceScript(terminalState)
     );
@@ -386,6 +415,7 @@ export function TerminalWebViewComponent({
       setSelectionCopyError(null);
       setSelectionCopyPending(false);
       previousTaskIdRef.current = taskId;
+      pendingContentReadyRef.current = null;
       setHasRenderedTerminalContent(false);
       setRenderedOutputEpoch(null);
       const sourceSnapshot = terminalOutputSource?.getSnapshot();
@@ -601,8 +631,18 @@ export function TerminalWebViewComponent({
         Number.isSafeInteger(payload.contentRevision) &&
         payload.contentRevision === activeOutputEpochRef.current
       ) {
+        // Not cleared on read: a duplicate or re-scheduled ack for this same
+        // outstanding revision must resolve the same way every time, not fall
+        // back to the "no record" default on its second arrival.
+        const countsAsRenderedGrid =
+          pendingContentReadyRef.current?.contentRevision ===
+          payload.contentRevision
+            ? pendingContentReadyRef.current.countsAsRenderedGrid
+            : true;
         setRenderedOutputEpoch(payload.contentRevision);
-        setHasRenderedTerminalContent(true);
+        if (countsAsRenderedGrid) {
+          setHasRenderedTerminalContent(true);
+        }
       }
       return;
     }
@@ -627,6 +667,10 @@ export function TerminalWebViewComponent({
     const terminalState =
       pendingTerminalStateRef.current ?? latestTerminalStateRef.current;
     pendingTerminalStateRef.current = null;
+    pendingContentReadyRef.current = {
+      contentRevision: terminalState.contentRevision,
+      countsAsRenderedGrid: !isTransportGapPlaceholder(terminalState)
+    };
     webViewRef.current?.injectJavaScript(
       buildTerminalReplaceScript(terminalState)
     );
@@ -760,6 +804,7 @@ export function TerminalWebViewComponent({
         originWhitelist={["*"]}
         onLoadStart={() => {
           bridgeReadyRef.current = false;
+          pendingContentReadyRef.current = null;
           setRenderedOutputEpoch(null);
           setHasRenderedTerminalContent(false);
           selectionContextRef.current.version += 1;
