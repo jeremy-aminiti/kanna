@@ -942,9 +942,19 @@ None of this changed the two cases' pass/fail assertions.
 **Run 6** (`CODEX INSTRUMENTED OBSERVATION LANE CLEAR`, authorized for the
 short-message case only; artifacts under `.tmp/codex-run-artifacts/`, not
 committed): the intended `vitest ... -t "<name>"` invocation did not restrict
-to that one case — both cases ran (a harness/CLI-invocation defect in the
-run command, not authorized scope; noted here for the record, not
-re-attempted). Both failed identically, at the same 30s busy-phase-start
+to that one case. **Correction** (an earlier account of this run understated
+its scope as "both cases ran"; re-read directly from the retained raw log,
+`.tmp/codex-logical-submission-run-6.log`, not committed): the invocation's
+arg-forwarding defect made it run the entire live suite, not just this
+file's two cases — `Test Files 7 failed | 16 passed (23)`,
+`Tests 10 failed | 77 passed | 4 skipped (91)`, `Duration 941.62s`,
+overall `exit code 1`, including unrelated OpenCode/model-id live tests.
+This was a harness/CLI-invocation defect in the run command, not authorized
+scope; noted here for the record, not re-attempted; the unrelated failures
+it surfaced (OpenCode flags/exec-json/MCP-flags/model-ids) are pre-existing
+live-suite state, not a product finding of this task and not investigated
+here. Both of *this file's* two cases failed identically, at the same 30s
+busy-phase-start
 check as run 5, `exit code 1`. Checkpoints for the short case:
 `codex-spawned` 19:14:10.819Z, `composer-ready` 19:14:11.829Z — under a
 second later, because `--yolo` skips the directory-trust prompt entirely
