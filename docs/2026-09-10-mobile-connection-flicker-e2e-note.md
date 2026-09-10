@@ -86,14 +86,48 @@ on-device pass shows the redraw is still visible, or shows more than the two
 phases traced here, that conclusion is wrong and needs revisiting — it is not
 being asserted as settled.
 
-**Deployed-OTA provenance — explicitly unknown, not inferred from dates:**
-the OTA manifest timestamp (2026-09-09T09:33:19.447Z) and the reconnect
-commit's date (2026-09-09) are close, which is suggestive, not proof of
-identity. No bundle hash, manifest asset list, or build-source record was
-read to confirm the deployed mobile JS at that OTA actually contains
-490c9120c/1f3379eee rather than, say, a commit shortly before or after it on
-the same day. That provenance check was not done in this session and this
-note does not claim it was.
+**Deployed-OTA provenance — now established by content, not by date.** A
+follow-up pass read the actual manifest and bundle, not the timestamp
+coincidence: `curl` (public, read-only, the same headers `kd`'s own
+`manifestCurl` helper in `tools/kd/src/runtime/mobile-ota.ts` uses — no
+gcloud, no publish) against the staging relay's public `/ota/manifest`
+endpoint with `expo-runtime-version: 2.2.3` and `expo-channel-name: staging`
+returned a manifest whose `id` and `createdAt` are exactly
+`3b64331c-4609-beba-25f3-d8a3397150d9` /`2026-09-09T09:33:19.447Z` — the
+channel pointer for runtime `2.2.3` has not moved since, so this is the
+owner's exact deployed update, not an inference. Its `launchAsset` (Hermes
+bytecode, `.hbc`) was then downloaded from the manifest's own asset URL
+(also public) and grepped for markers unique to 490c9120c/1f3379eee:
+`isTerminalTransportGap`, `resolveTerminalPresentationStatus`,
+`TERMINAL_RECONNECT_GRACE_MS`, `renderedOutputEpoch`, `beginTaskTerminal`,
+and the literal string `Connecting to desktop daemon...` all appear in the
+downloaded bytecode (Hermes keeps string/property-name literals intact even
+though local variable names get stripped, which is exactly the pattern
+observed: `reattachesSameTask`, a function-local name, does not appear, but
+every exported/property-accessed identifier and every literal UI string
+does). As a negative control, none of today's not-yet-published fix's own
+identifiers (`pendingContentReadyRef`, `isTransportGapPlaceholder`,
+`countsAsRenderedGrid`) appear in that same bundle, which is exactly what
+should be true for an update published the day before this fix was written.
+**This establishes the deployed OTA the owner was running does contain
+490c9120c/1f3379eee's reconnect-overlay code** — it does not by itself
+establish that this is what the owner saw (see above: unit-test evidence
+only, no on-device reproduction). Exact commands, for reproducibility (raw
+manifest and a byte count for each marker are in `.tmp/`, not committed):
+
+```
+curl --fail --silent --show-error \
+  -H 'expo-protocol-version: 1' -H 'expo-platform: ios' \
+  -H 'expo-runtime-version: 2.2.3' -H 'expo-channel-name: staging' \
+  'https://relay-staging.kanna.build/ota/manifest'
+# -> multipart body, JSON part: {"id":"3b64331c-4609-beba-25f3-d8a3397150d9", ...}
+
+curl --fail --silent --show-error \
+  'https://relay-staging.kanna.build/ota/assets?key=<launchAsset.key from manifest>&runtimeVersion=2.2.3&platform=ios' \
+  -o launchAsset.hbc
+grep -ac 'isTerminalTransportGap' launchAsset.hbc   # 1
+grep -ac 'pendingContentReadyRef' launchAsset.hbc   # 0 (today's fix, not yet published)
+```
 
 ## Fix (bounded, no new timer, no masking beyond correcting the overlay predicate)
 
@@ -149,14 +183,81 @@ Not executed: any simulator, device, or real WebView render. `cargo`/native/
 emulator gates were not invoked in this session per the task's execution
 hold.
 
-## Human/isolated visual pass — next action, held pending authorization
+## iOS simulator first-attach before/after comparison — ready to run, held
 
 Per `AGENTS.md` this is a UI-feel change and simulator verification is
-necessary but not sufficient on its own; it wants an on-device look. That is
-the next action for this symptom, not "fixed." This session did not attempt
-a simulator run — the task's execution hold covers native/mobile/emulator
-gates — and stands ready for an authorized isolated visual verification pass
-rather than treating a human pass as a generic, indefinite blocker.
+necessary but not sufficient on its own; it wants an on-device look. Not run
+this session — the task's execution hold covers native/mobile/emulator
+launches. This is the exact, ready-to-run procedure for when it lifts, using
+only tools already installed and already working on this Mac Studio (per
+prior sessions' own notes: iOS simulator builds succeed here; `kd mobile run
+--simulator "iPhone 17 Pro"` is a known-working device name/build on this
+machine) — nothing native needs building, since the fix is JS-only.
+
+**1. Bring up the simulator dev stack, with the existing E2E terminal
+instrumentation enabled** (the same `EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED`
+flag the E2E harness itself sets in `apps/mobile/e2e/helpers/metro.ts`; it
+also gates `webviewDebuggingEnabled`, so without it Safari's Web Inspector
+cannot attach to the terminal WebView at all):
+
+```
+EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED=1 ./kd mobile run --simulator "iPhone 17 Pro"
+```
+
+`kd`'s dev-window construction (`tools/kd/src/runtime/dev-plan.ts`) prefixes
+specific `EXPO_PUBLIC_*` keys onto the Metro command but never clears the
+inherited shell environment first, so an exported var should reach Metro and
+get inlined into the served JS the normal way — **unconfirmed by execution;
+verify it took before relying on it** (open Safari → Develop → [simulator] →
+find the Kanna WebView in the list; if it's not listed, the flag did not
+reach Metro and the app needs a reload after fixing that before continuing).
+
+**2. Capture frame-accurate evidence of the redraw itself** — a standard,
+always-available Xcode CLI tool, no Appium and no human required for the
+capture step itself (only for judging the result, which a person or a later
+frame-diff pass can do from the file):
+
+```
+xcrun simctl io booted recordVideo --codec=h264 .tmp/mobile-first-attach-<before|after>.mov &
+RECORD_PID=$!
+# ... attach to a task terminal for the first time here (fresh app launch or
+#     a task never opened this session, so beginTaskTerminal's empty/connecting
+#     seed genuinely runs) ...
+sleep 8
+kill $RECORD_PID
+```
+
+**3. Capture the instrumented counts** (richer than the video alone):
+Safari's Web Inspector console, attached to the terminal WebView found in
+step 1, can read `document.querySelector('[data-testid]')`-style state, or —
+simpler, since the app already renders it — the accessibility value text
+nodes `terminal-loading-indications:<N>` (from `TerminalWebView`'s own
+`loadingIndicationCount`, already wired to increment exactly once per
+overlay-raise) and the `terminal-inspection` JSON blob (`frameCount` and
+other fields from `buildTerminalDocument.ts`'s existing diagnostics) are
+visible in the accessibility tree / DOM without adding any new
+instrumentation. This step needs a person (or Appium, previously blocked
+here per `docs/2026-09-09-mobile-terminal-reconnect-e2e-note.md`) driving
+Safari's GUI — there is no CLI-scriptable Safari Web Inspector automation in
+this repo today — so it is secondary evidence, not the primary ready-to-run
+capture.
+
+**4. Before/after, same app instance, JS-only so no rebuild between states:**
+
+```
+git stash push -u -m "mobile-flicker-before-state"   # isolate: pre-fix TerminalWebView.tsx
+# reload the app fully (not Fast Refresh — a state-preserving refresh would
+# skip beginTaskTerminal's fresh-connect path entirely) and repeat steps 2-3
+# labelled "before"
+git stash pop
+# reload again, repeat steps 2-3 labelled "after"
+```
+
+Compare: whether the "before" recording/counts show a visible content
+repaint *after* the loading overlay has already cleared (the reported
+flicker, and what the fix targets), and whether "after" does not. A result
+either way should update the "hypothesis, not proof" language above rather
+than being silently treated as confirmation.
 
 ## Missing-Enter symptom — correction: the drain-aware fence is gone, not current
 
@@ -203,41 +304,134 @@ gate) in `crates/daemon/tests/reconnect.rs`:**
 
 These three tests target exactly the failure mode reported (Enter lost to a
 busy/slow-consuming terminal, for both a short unframed message and a large
-paste-framed one) and, by their bodies, assert the current single-write
-design does not reproduce it. **This was established by reading the test
-source, not by running it** — `cargo test` was not invoked this session
-because the native gate is held. Whether these tests currently pass is
-therefore unconfirmed by execution; it is inferred from the code being
-internally consistent with its own assertions. This is not the same as
-verifying the fix — the moment the hold lifts, `cargo test -p kanna-daemon
---test reconnect a_submission_boundary_is_written_even_while_the_terminal_repaints
-a_long_single_line_logical_message_survives_the_pty_queue_split
-a_never_settling_terminal_takes_every_delivery` (and the mobile-shared HTTP
-route's own coverage in `crates/kanna-server/src/http_api/tests/input.rs`)
-should be run and its exact exit reported before treating this symptom as
-resolved.
+paste-framed one), and by their bodies assert the current single-write design
+does not reproduce it — **but only for what they actually exercise: that the
+right bytes, in the right order, reach the PTY's read side.**
+`SLOW_DRAINING_CHILD`/`NEVER_SETTLING_CHILD` are shell scripts using `dd`,
+`od`, and `stty -icanon`/`min 1 time 0` — a controlled, synthetic reader that
+proves byte *delivery and ordering* survive a busy screen and a fragmented
+kernel-queue split. **They do not, and cannot, prove that a real agent CLI's
+own input parser treats the CR immediately following the closing paste marker
+as a submission while that CLI is itself mid-paste-consumption or
+mid-repaint.** A real TUI's bracketed-paste handling, composer/readline state
+machine, and redraw scheduling are its own code, not this test's shell
+scripts — a bug there (e.g. the parser samples "am I still in paste mode" a
+frame late, or the redraw loop transiently ignores stdin) would not show up
+in these tests at all. **Even a full pass of all three, run to completion,
+does not resolve the owner's symptom** — it only rules out a defect in the
+daemon's own byte-framing and write-ordering, which is a real thing to rule
+out, not the whole question. This was also **not run this session** — reading
+the test bodies is what supports the framing above, not an executed pass;
+`cargo test` was not invoked because the native gate is held. The corrected
+invocation for when it lifts (the three names must go after `--`; multiple
+bare positional `TESTNAME` args before it are not valid `cargo test` syntax):
 
-Mobile's ordinary composer Send still routes through the identical,
+```
+cargo test -p kanna-daemon --test reconnect -- \
+  a_submission_boundary_is_written_even_while_the_terminal_repaints \
+  a_long_single_line_logical_message_survives_the_pty_queue_split \
+  a_never_settling_terminal_takes_every_delivery
+```
+
+(libtest runs any test whose name contains any of the given filters — this
+matches those three and nothing else in `reconnect.rs`.) The mobile-shared
+HTTP route's own coverage in `crates/kanna-server/src/http_api/tests/input.rs`
+is a separate, additional check, not a substitute for the above.
+
+**A second, independent gap: the live CLI-contract harness's existing
+`submit()` helper no longer matches the current daemon contract at all.**
+`tests/cli-contract/helpers/pty.ts::PtySession.submit()` — used today by
+`tests/live/opencode-injected-input.test.ts` and
+`opencode-tui-status-markers.test.ts`, the only existing tests that drive a
+*real* agent CLI's TUI for input submission — implements "write text, wait
+150ms, then write `\r` as a separate call," citing
+`crates/kanna-server/src/http_api/task_input.rs` and
+`LOGICAL_INPUT_SUBMIT_DELAY_MS` in its own doc comment. Read directly:
+`task_input.rs::try_submit_task_input_to_session` no longer does any of that
+— it forwards the raw message to the daemon via
+`send_logical_session_input` with no `\r` appended at all, and the daemon's
+`logical_message_bytes` is what appends `\r` and paste-frames, in one buffer,
+with no wait. `LOGICAL_INPUT_SUBMIT_DELAY_MS` still exists but is now only
+the pacing gap *between two separate delivered messages*, not a per-message
+CR delay. So the one existing live-CLI test that pins real submission
+behavior is pinning a contract the server stopped implementing on
+2026-09-08/09 — it currently proves something about a two-write, delayed-CR
+policy that is not what ships. Whether it still happens to pass (OpenCode may
+well tolerate either shape) is unconfirmed and beside the point: it is not
+evidence about the *current* policy either way.
+
+**Planned, not executed, bounded reproduction — provider unspecified,
+runnable across all four live-tested CLIs so the owner's answer (still
+pending) selects which result matters rather than this note guessing:**
+1. Add `PtySession.submitLogical(text, { bracketedPasteMode })` mirroring
+   `logical_message_bytes` exactly — one `write()` of paste-begin + text +
+   paste-end + `\r` when framing applies (≥256 bytes or a newline, and the
+   terminal advertised the mode), else text + `\r` as one write, no
+   intervening wait. This replaces the stale 150ms-then-separate-write
+   `submit()` for any new test, rather than extending a helper that already
+   contradicts the contract it claims to pin.
+2. Reuse the existing per-CLI availability/binary-discovery helpers
+   (`findClaudeBinary`, `findCodexBinary`, `findCopilotBinary`,
+   `findOpenCodeBinary` — already used by `helpers/*-availability.ts`) and
+   `startPtySession` (already generic over `command`/`args`, not
+   OpenCode-specific) to drive each installed CLI's interactive TUI, skipping
+   any not installed — the same pattern `opencode-injected-input.test.ts`
+   already uses, not a new harness.
+3. Two scenarios per CLI, both while the CLI is actively busy/mid-turn
+   (start a long-running step first, as
+   `opencode-injected-input.test.ts`'s "quits immediately when the agent is
+   mid-turn" test already does, then inject during it — this is what makes it
+   a reproduction of "the terminal is repainting," not an idle-composer
+   happy path):
+   a. A short (<256 bytes, no newline) message — unframed, matching what a
+      short mobile Send actually puts on the wire.
+   b. A message shaped like `incident_shaped_message()` from
+      `reconnect.rs` (same size class as the owner's original 1,227-byte
+      report) — paste-framed, fragmenting across the CLI's own read calls.
+   Assert, per CLI, that the message is actually *acted on* (a marker file
+   written, or equivalent), the way `opencode-injected-input.test.ts`
+   already does — not merely that bytes reached the pty, which is what
+   `reconnect.rs` already covers.
+4. Not run this session: spawning and waiting on real CLI turns is slow
+   (the existing OpenCode tests carry 300s timeouts) and this task's
+   execution hold was read as covering exactly this class of "spawn a real
+   external process and wait on it" check, not only `cargo`/emulator. Ready
+   to write and run on authorization; if the owner names a specific
+   provider/session first, scenario (2) narrows to just that CLI rather than
+   all four.
+
+**Raw on-screen direct-typing is not ruled out either, and not for the reason
+this note previously gave.** `sendTaskTerminalInput` → raw KSP bytes forwards
+literal keystrokes with no synthesized `\r`, which is true, but that does not
+exempt it: a real CLI's own input queue or composer state machine could still
+mis-order or drop a keypress arriving mid-repaint independent of anything the
+daemon synthesizes — that is a CLI-side parser risk, not a daemon-synthesis
+risk, and synthesizing nothing does not prove the CLI itself handled the
+keystroke correctly. This path is untested by everything cited above (all of
+it is about the *logical*-input write path) and remains open.
+
+Mobile's ordinary composer Send routes through the identical,
 platform-agnostic `POST /v1/tasks/{id}/input` (`TaskScreen.tsx` →
 `mobileController.sendTaskInput` → `client.sendTaskInput` →
-`lanTransport.ts`/`remoteTransport.ts`), so it inherits whatever this design
-provides or lacks — no mobile-specific bypass was found. Mobile's on-screen
-direct-typing path (`sendTaskTerminalInput` → raw KSP bytes) is a separate,
-literal-keystroke-forwarding mechanism with no synthesized `\r`, so it is not
-subject to the same class of race.
+`lanTransport.ts`/`remoteTransport.ts`) — that much routing is confirmed by
+reading the client code — so whatever the daemon's logical-input path
+provides or lacks, mobile inherits it; no mobile-specific bypass was found.
+That is a routing fact, not a submission-outcome fact.
 
 **Net position: not fixed, not confirmed reproducing, not ruled out.** The
-current design is architecturally different from — not a continuation of —
-the mechanism this note previously (incorrectly) credited, and existing
-targeted tests, on paper, assert it does not reproduce the reported failure
-mode. That is source reconciliation and existing-contract review, not proof
-by execution or by device reproduction. No fix was authored for this symptom
-because no currently-reproducing defect was located by either means. Closing
-this fully needs: (a) running the targeted `cargo test` subset above and
-reporting its exact exit, and (b) the owner's affected session/provider/
-timestamp so the actual daemon write timeline for that specific delivery can
-be inspected — the method PR #1314 itself used to establish causation the
-first time.
+current daemon design is architecturally different from — not a continuation
+of — the mechanism this note previously (incorrectly) credited. Existing
+`reconnect.rs` tests, on paper, assert the daemon's own byte-framing survives
+the reported conditions, which is real but partial: it says nothing about
+whether a live CLI's parser actually treats that CR as submit, and the one
+existing live-CLI submission test pins a stale, no-longer-shipped contract.
+No fix was authored for this symptom because no currently-reproducing defect
+was located by any means available here. Closing this fully needs, in order
+of what it would actually settle: (a) the owner's affected session/provider/
+timestamp — still pending, not invented here — so the real daemon write
+timeline for that delivery can be read directly; (b) running the corrected
+`cargo test` subset above; (c) the planned live-CLI reproduction against
+whichever provider(s) the owner's answer implicates.
 
 ## Overlap — corrected
 
@@ -248,10 +442,19 @@ main (reviewed directly) is `crates/kanna-server/src/http_api.rs`,
 `crates/kanna-server/src/transfer_engine/{finalize,push}.rs`, and two docs —
 six files, none in `crates/daemon/`. An earlier draft of this note incorrectly
 said it was actively iterating in `session.rs`; that was wrong and is
-corrected here. There is no file-level overlap between that task's diff and
-either the flicker fix (`apps/mobile/src/screens/TerminalWebView.{tsx,test.tsx}`,
-this session's only edits) or the missing-Enter investigation (which only read
-`crates/daemon/src/session.rs` and `crates/daemon/tests/reconnect.rs`, and
-edited neither). Task `ed245f68` (Android emulator/pairing) touches
-`TaskScreen.tsx` and `taskComposerKeyboard.ts` but not `TerminalWebView.tsx`
-or `terminalReconnectPresentation.ts` — also confirmed no overlap.
+corrected here. There is no file-level *edit* overlap between that task's diff and either the
+flicker fix (`apps/mobile/src/screens/TerminalWebView.{tsx,test.tsx}`, this
+session's only edits) or the missing-Enter investigation (which read
+`crates/daemon/src/session.rs`, `crates/daemon/tests/reconnect.rs`,
+`crates/kanna-server/src/http_api/task_input.rs`, and
+`tests/cli-contract/helpers/pty.ts`, editing none of them). One *read*
+overlap is worth flagging even though it changed nothing: `b1d685b7` is
+actively iterating on `crates/kanna-server/src/http_api/task_input.rs`
+itself, so `try_submit_task_input_to_session`'s current body, read here to
+establish the "no separate CR write, no wait" finding above, may already be
+mid-change under that task's own work — worth re-confirming against
+`b1d685b7`'s eventual committed state rather than assuming this note's
+reading of that file stays current. Task `ed245f68` (Android emulator/
+pairing) touches `TaskScreen.tsx` and `taskComposerKeyboard.ts` but not
+`TerminalWebView.tsx` or `terminalReconnectPresentation.ts` — also confirmed
+no overlap.
