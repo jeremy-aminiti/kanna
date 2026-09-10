@@ -232,7 +232,7 @@ pub async fn import_transfer(
 }
 
 #[derive(Debug)]
-enum ImportFailure {
+pub(crate) enum ImportFailure {
     Retry(String),
     Terminal(String),
 }
@@ -281,7 +281,11 @@ async fn run_import(
         ));
     }
 
-    let payload = if local_task_id.is_some() {
+    let persisted_manifest = db
+        .transferred_task_manifest(transfer_id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let has_manifest = persisted_manifest.is_some();
+    let payload = if local_task_id.is_some() || has_manifest {
         stored
     } else {
         let finalized = control::finalize_from_source(state, transfer_id).await?;
@@ -320,7 +324,30 @@ async fn run_import(
         payload
     };
 
-    if local_task_id.is_none() {
+    let destination_task_id = persisted_manifest
+        .as_ref()
+        .and_then(|(_, _, _, task_id, _)| task_id.clone())
+        .or_else(|| local_task_id.clone())
+        .unwrap_or_else(|| session::destination_task_id(transfer_id));
+    if persisted_manifest
+        .as_ref()
+        .is_some_and(|(_, _, _, bound, _)| {
+            bound
+                .as_deref()
+                .zip(local_task_id.as_deref())
+                .is_some_and(|(bound, local)| bound != local)
+        })
+    {
+        return Err(ImportFailure::Terminal(format!(
+            "incoming transfer {transfer_id} has conflicting persisted task identities"
+        )));
+    }
+    let needs_preparation = db
+        .transferred_task_manifest_content_commitment(transfer_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .is_none();
+
+    if needs_preparation {
         // A payload that promises a resumable session and ships no way to
         // resume it must not be imported: minting a fresh session here is what
         // silently left the conversation behind on the source machine.
@@ -333,13 +360,36 @@ async fn run_import(
         )
         .map_err(|missing| ImportFailure::Terminal(missing.0))?;
 
-        let (repo_id, repo_path, imported_refs) =
-            acquire_repo(state, transfer_id, &payload).await?;
-        let imported_inputs = fetch_task_input_ledger(state, transfer_id, &payload).await?;
         // The destination task id — and therefore its worktree — is
         // deterministic before creation, which is what lets the transcript be
         // re-keyed to the destination slug before the agent spawns `--resume`.
-        let destination_task_id = session::destination_task_id(transfer_id);
+        let (repo_id, repo_path, imported_refs) =
+            acquire_repo(state, transfer_id, &destination_task_id, &payload).await?;
+        #[cfg(test)]
+        if serde_json::from_str::<Value>(&work.payload_json)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("interruptAfterAcquisition")
+                    .and_then(Value::as_bool)
+            })
+            == Some(true)
+            && db
+                .read_transfer_work_observation(&work.id, "test-interrupted-after-acquisition")
+                .map_err(|error| format!("db error: {error}"))?
+                .is_none()
+        {
+            db.record_transfer_work_observation(
+                &work.id,
+                "test-interrupted-after-acquisition",
+                Some(&repo_id),
+            )
+            .map_err(|error| format!("db error: {error}"))?;
+            return Err(ImportFailure::Retry(
+                "test interruption after durable repository acquisition".into(),
+            ));
+        }
+        let imported_inputs = fetch_task_input_ledger(state, transfer_id, &payload).await?;
         let destination_worktree =
             session::destination_worktree_path(&repo_path, &destination_task_id);
         db.upsert_transferred_task_manifest(
@@ -369,6 +419,7 @@ async fn run_import(
             .await,
             destination_task_id.clone(),
             imported_inputs,
+            payload.clone(),
         )
         .await
         .map_err(|(status, message)| {
@@ -389,29 +440,26 @@ async fn run_import(
         .map_err(|error| {
             ImportFailure::Terminal(format!("transfer manifest admission failed: {error}"))
         })?;
-        let destination_branch = format!("task-{}", local_task_id.as_deref().unwrap_or_default());
-        let history_proved = {
-            let (repo_path, expected_head, destination_branch) = (
-                repo_path.clone(),
-                expected_head.to_string(),
-                destination_branch.clone(),
-            );
-            super::run_blocking("transferred task history verification", move || {
-                super::git::commit_is_ancestor(&repo_path, &expected_head, &destination_branch)
-            })
-            .await?
-        };
-        if !history_proved {
-            return Err(ImportFailure::Terminal(format!(
-                "destination task branch {destination_branch} does not contain transferred head {expected_head}"
-            )));
+        #[cfg(test)]
+        if serde_json::from_str::<Value>(&work.payload_json)
+            .ok()
+            .and_then(|value| value.get("interruptAfterSpawn").and_then(Value::as_bool))
+            == Some(true)
+            && db
+                .read_transfer_work_observation(&work.id, "test-interrupted-after-spawn")
+                .map_err(|error| format!("db error: {error}"))?
+                .is_none()
+        {
+            db.record_transfer_work_observation(
+                &work.id,
+                "test-interrupted-after-spawn",
+                local_task_id.as_deref(),
+            )
+            .map_err(|error| format!("db error: {error}"))?;
+            return Err(ImportFailure::Retry(
+                "test interruption after verified task spawn".into(),
+            ));
         }
-
-        db.mark_transferred_task_manifest_prepared(transfer_id)
-            .map_err(|error| {
-                ImportFailure::Terminal(format!("transfer manifest preparation failed: {error}"))
-            })?;
-
         if !db
             .mark_incoming_transfer_importing(
                 transfer_id,
@@ -426,6 +474,58 @@ async fn run_import(
         }
     }
 
+    // A crash after the immutable proof was committed but before the daemon
+    // spawn returned leaves the transfer row without local_task_id. Re-enter
+    // the existing requested-id repair owner without re-fetching artifacts or
+    // revalidating the now-live mutable task snapshot.
+    if !needs_preparation && local_task_id.is_none() {
+        let (repo_id, head_oid, _, bound_task, state_name) = db
+            .transferred_task_manifest(transfer_id)
+            .map_err(|error| format!("db error: {error}"))?
+            .ok_or_else(|| format!("transfer manifest missing: {transfer_id}"))?;
+        if bound_task.as_deref() != Some(destination_task_id.as_str()) || state_name != "prepared" {
+            return Err(ImportFailure::Terminal(format!(
+                "transfer manifest task binding mismatch: {transfer_id}"
+            )));
+        }
+        let transfer_root = format!("refs/kanna/transfers/{transfer_id}/{head_oid}");
+        let created = crate::http_api::create_transferred_task_in_process(
+            Arc::clone(state),
+            build_create_request(
+                state,
+                transfer_id,
+                &repo_id,
+                &payload,
+                Some((
+                    format!("{transfer_root}/head"),
+                    format!("{transfer_root}/base"),
+                )),
+                payload.task.resume_session_id.clone(),
+            )
+            .await,
+            destination_task_id.clone(),
+            Vec::new(),
+            payload.clone(),
+        )
+        .await
+        .map_err(|(status, message)| {
+            format!("failed to repair the transferred task ({status}): {message}")
+        })?;
+        local_task_id = Some(created.task_id);
+        if !db
+            .mark_incoming_transfer_importing(
+                transfer_id,
+                local_task_id.as_deref().unwrap_or_default(),
+                ENGINE_CLAIM_TOKEN,
+            )
+            .map_err(|error| format!("db error: {error}"))?
+        {
+            return Err(
+                format!("failed to claim repaired task for transfer: {transfer_id}").into(),
+            );
+        }
+    }
+
     let local_task_id = local_task_id
         .ok_or_else(|| format!("incoming transfer has no local task: {transfer_id}"))?;
 
@@ -435,7 +535,7 @@ async fn run_import(
         .transferred_task_manifest_content_commitment(transfer_id)
         .map_err(|error| format!("db error: {error}"))?;
     if persisted_commitment.is_none() {
-        verify_persisted_task_bundle(state, &payload, &local_task_id, transfer_id).await?;
+        verify_persisted_task_bundle(state, &payload, &local_task_id, transfer_id, None).await?;
     }
     let destination_repo_id;
     if let Some((repo_id, _, _, bound_task, state_name)) = db
@@ -445,9 +545,8 @@ async fn run_import(
         if bound_task.as_deref() != Some(local_task_id.as_str()) {
             return Err(format!("transfer manifest task binding mismatch: {transfer_id}").into());
         }
-        if state_name == "importing" {
-            db.mark_transferred_task_manifest_prepared(transfer_id)
-                .map_err(|error| format!("db error: {error}"))?;
+        if state_name != "prepared" {
+            return Err(format!("transfer manifest {transfer_id} is not durably prepared").into());
         }
         destination_repo_id = repo_id;
     } else {
@@ -515,11 +614,12 @@ async fn run_import(
     Ok(())
 }
 
-async fn verify_persisted_task_bundle(
+pub(crate) async fn verify_persisted_task_bundle(
     state: &Arc<AppState>,
     payload: &OutgoingTransferPayload,
     local_task_id: &str,
     transfer_id: &str,
+    imported_inputs: Option<&[crate::db::ImportedTaskInput]>,
 ) -> Result<(), ImportFailure> {
     let db = state.transfer_work().open_db()?;
     let item = db
@@ -530,10 +630,33 @@ async fn verify_persisted_task_bundle(
                 "transferred task {local_task_id} disappeared before integrity verification"
             ))
         })?;
-    if item.stage.as_deref() != Some(payload.task.stage.as_str()) {
+    let manifest = db
+        .transferred_task_manifest(transfer_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| {
+            ImportFailure::Terminal(format!(
+                "transferred task {local_task_id} has no acquisition manifest"
+            ))
+        })?;
+    if manifest.0 != item.repo_id
+        || manifest.3.as_deref() != Some(local_task_id)
+        || !matches!(manifest.4.as_str(), "importing" | "prepared")
+    {
         return Err(ImportFailure::Terminal(format!(
-            "transferred task {local_task_id} stage does not match the source context"
+            "transferred task {local_task_id} does not match its acquisition manifest"
         )));
+    }
+    if item.stage.as_deref() != Some(payload.task.stage.as_str()) {
+        let imported_stage_ran = db
+            .list_stage_runs_for_task(local_task_id)
+            .map_err(|error| format!("db error: {error}"))?
+            .iter()
+            .any(|run| run.stage == payload.task.stage);
+        if !imported_stage_ran {
+            return Err(ImportFailure::Terminal(format!(
+                "transferred task {local_task_id} stage does not match the source context"
+            )));
+        }
     }
     if item.pipeline_def.as_deref() != payload.task.workflow_definition.as_deref() {
         return Err(ImportFailure::Terminal(format!(
@@ -557,6 +680,13 @@ async fn verify_persisted_task_bundle(
         payload.task.base_oid.as_deref().ok_or_else(|| {
             ImportFailure::Terminal("task bundle has no expected review base".into())
         })?;
+    if manifest.1 != expected_head || manifest.2 != expected_base {
+        return Err(ImportFailure::Terminal(format!(
+            "transferred task {local_task_id} manifest OIDs do not match the source snapshot"
+        )));
+    }
+    let expected_head_owned = expected_head.to_string();
+    let transfer_id_owned = transfer_id.to_string();
     let (repo_path, task_id, branch, base_ref, db_path) = (
         repo.path.clone(),
         local_task_id.to_string(),
@@ -578,7 +708,16 @@ async fn verify_persisted_task_bundle(
                 .as_deref()
                 .ok_or_else(|| "transferred task has no persisted review base ref".to_string())?;
             let base_oid = super::git::commit_oid(std::path::Path::new(&repo_path), base)?;
-            Ok::<_, String>((tip.commit, base_oid))
+            if !super::git::commit_is_ancestor(&repo_path, &expected_head_owned, &tip.branch)? {
+                return Err(format!(
+                    "destination task branch {} does not contain transferred head {}",
+                    tip.branch, expected_head_owned
+                ));
+            }
+            let private_head =
+                format!("refs/kanna/transfers/{transfer_id_owned}/{expected_head_owned}/head");
+            let imported_head = super::git::commit_oid(&repo_path, &private_head)?;
+            Ok::<_, String>((imported_head, base_oid))
         })
         .await?;
     if actual_head != expected_head || actual_base != expected_base {
@@ -588,19 +727,29 @@ async fn verify_persisted_task_bundle(
     }
 
     drop(db);
-    let imported = fetch_task_input_ledger(state, transfer_id, payload).await?;
+    let fetched_inputs;
+    let imported = if let Some(imported) = imported_inputs {
+        imported
+    } else {
+        fetched_inputs = fetch_task_input_ledger(state, transfer_id, payload).await?;
+        &fetched_inputs
+    };
     let verify_db = state.transfer_work().open_db()?;
     let existing = verify_db
         .list_all_task_inputs(local_task_id)
         .map_err(|error| format!("db error: {error}"))?;
-    if existing.len() != imported.len()
-        || existing.iter().zip(imported.iter()).any(|(row, expected)| {
-            row.stage != expected.stage
-                || row.source != expected.source
-                || row.message != expected.message
-                || row.delivered_at != expected.delivered_at
-                || row.origin.as_ref() != Some(&expected.origin)
-        })
+    let imported_existing: Vec<_> = existing.iter().filter(|row| row.origin.is_some()).collect();
+    if imported_existing.len() != imported.len()
+        || imported_existing
+            .iter()
+            .zip(imported.iter())
+            .any(|(row, expected)| {
+                row.stage != expected.stage
+                    || row.source != expected.source
+                    || row.message != expected.message
+                    || row.delivered_at != expected.delivered_at
+                    || row.origin.as_ref() != Some(&expected.origin)
+            })
     {
         return Err(ImportFailure::Terminal(format!(
             "transferred task {local_task_id} durable input history does not match the source ledger"
@@ -661,7 +810,7 @@ async fn verify_persisted_task_bundle(
             cloud_task_id: &payload.task.cloud_task_id,
             head_oid: &actual_head,
             base_oid: &actual_base,
-            stage: item.stage.as_deref().unwrap_or_default(),
+            stage: &payload.task.stage,
             workflow_definition: item.pipeline_def.as_deref(),
             // The artifact checksum already verified byte-for-byte against the
             // fetched ledger above (`decode_task_input_ledger`'s own sha256
@@ -674,9 +823,19 @@ async fn verify_persisted_task_bundle(
             history: &read_back_history,
         })
         .map_err(ImportFailure::Terminal)?;
-    verify_db
-        .set_transferred_task_manifest_content_commitment(transfer_id, &content_commitment)
+    let completed = verify_db
+        .complete_transferred_task_manifest_preparation(transfer_id, &content_commitment)
         .map_err(|error| format!("db error: {error}"))?;
+    if !completed {
+        let persisted = verify_db
+            .transferred_task_manifest_content_commitment(transfer_id)
+            .map_err(|error| format!("db error: {error}"))?;
+        if persisted.as_deref() != Some(content_commitment.as_str()) {
+            return Err(ImportFailure::Terminal(format!(
+                "transfer manifest {transfer_id} could not record its prepared proof"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -704,6 +863,7 @@ fn assert_payload_matches_reservation(
 async fn acquire_repo(
     state: &Arc<AppState>,
     transfer_id: &str,
+    destination_task_id: &str,
     payload: &OutgoingTransferPayload,
 ) -> Result<(String, PathBuf, Option<(String, String)>), ImportFailure> {
     let repo_name = payload.repo.name.clone().unwrap_or_else(|| "repo".into());
@@ -712,6 +872,88 @@ async fn acquire_repo(
         .default_branch
         .clone()
         .unwrap_or_else(|| "main".into());
+    let expected_head = payload
+        .task
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| ImportFailure::Terminal("task bundle has no expected head".into()))?;
+    let expected_base =
+        payload.task.base_oid.as_deref().ok_or_else(|| {
+            ImportFailure::Terminal("task bundle has no expected review base".into())
+        })?;
+
+    // Repository acquisition is durable transfer state, not a fresh search on
+    // every attempt. Once chosen, retries must reuse this exact repository or
+    // fail closed; otherwise a no-repo destination allocates one empty clone
+    // per crash and can never reconcile the deterministic task id.
+    if let Some((repo_id, head_oid, base_oid, bound_task, _)) = state
+        .transfer_work()
+        .open_db()?
+        .transferred_task_manifest(transfer_id)
+        .map_err(|error| format!("db error: {error}"))?
+    {
+        if head_oid != expected_head
+            || base_oid != expected_base
+            || bound_task.as_deref() != Some(destination_task_id)
+        {
+            return Err(ImportFailure::Terminal(format!(
+                "transfer manifest acquisition binding mismatch: {transfer_id}"
+            )));
+        }
+        let repo = state
+            .transfer_work()
+            .open_db()?
+            .get_repo(&repo_id)
+            .map_err(|error| format!("db error: {error}"))?
+            .ok_or_else(|| {
+                ImportFailure::Terminal(format!(
+                    "transfer manifest repository disappeared: {repo_id}"
+                ))
+            })?;
+        let repo_path = PathBuf::from(repo.path);
+        let imported_ref =
+            Some(import_verified_task_bundle(state, transfer_id, payload, &repo_path).await?);
+        return Ok((repo_id, repo_path, imported_ref));
+    }
+
+    // A pre-manifest crash from an older destination may already have made
+    // the deterministic task durable. Its repository is then the acquisition
+    // identity; searching or allocating again would make repair impossible.
+    if let Some(item) = state
+        .transfer_work()
+        .open_db()?
+        .get_pipeline_item(destination_task_id)
+        .map_err(|error| format!("db error: {error}"))?
+    {
+        let repo = state
+            .transfer_work()
+            .open_db()?
+            .get_repo(&item.repo_id)
+            .map_err(|error| format!("db error: {error}"))?
+            .ok_or_else(|| {
+                ImportFailure::Terminal(format!(
+                    "existing transferred task repository disappeared: {}",
+                    item.repo_id
+                ))
+            })?;
+        state
+            .transfer_work()
+            .open_db()?
+            .upsert_transferred_task_manifest(
+                transfer_id,
+                &item.repo_id,
+                Some(destination_task_id),
+                expected_head,
+                expected_base,
+            )
+            .map_err(|error| {
+                ImportFailure::Terminal(format!("transfer manifest admission failed: {error}"))
+            })?;
+        let repo_path = PathBuf::from(repo.path);
+        let imported_ref =
+            Some(import_verified_task_bundle(state, transfer_id, payload, &repo_path).await?);
+        return Ok((item.repo_id, repo_path, imported_ref));
+    }
 
     // Runs `git remote get-url` once per registered repo, so it is blocking
     // work proportional to how many repos this machine has.
@@ -730,6 +972,19 @@ async fn acquire_repo(
     };
     if let Some((repo_id, repo_path)) = matched {
         let repo_path = PathBuf::from(repo_path);
+        state
+            .transfer_work()
+            .open_db()?
+            .upsert_transferred_task_manifest(
+                transfer_id,
+                &repo_id,
+                Some(destination_task_id),
+                expected_head,
+                expected_base,
+            )
+            .map_err(|error| {
+                ImportFailure::Terminal(format!("transfer manifest admission failed: {error}"))
+            })?;
         let imported_ref = if payload.repo.mode == RepoAcquisitionMode::TaskBundle {
             Some(import_verified_task_bundle(state, transfer_id, payload, &repo_path).await?)
         } else {
@@ -814,6 +1069,19 @@ async fn acquire_repo(
         })
         .await?
     };
+    state
+        .transfer_work()
+        .open_db()?
+        .upsert_transferred_task_manifest(
+            transfer_id,
+            &repo_id,
+            Some(destination_task_id),
+            expected_head,
+            expected_base,
+        )
+        .map_err(|error| {
+            ImportFailure::Terminal(format!("transfer manifest admission failed: {error}"))
+        })?;
     let imported_ref = if payload.repo.mode == RepoAcquisitionMode::TaskBundle {
         Some(import_verified_task_bundle(state, transfer_id, payload, &repo_path).await?)
     } else {
@@ -1578,6 +1846,25 @@ mod tests {
         }
     }
 
+    struct Item4HomeGuard(Option<String>);
+
+    impl Item4HomeGuard {
+        fn set(path: &Path) -> Self {
+            let prior = std::env::var("HOME").ok();
+            std::env::set_var("HOME", path);
+            Self(prior)
+        }
+    }
+
+    impl Drop for Item4HomeGuard {
+        fn drop(&mut self) {
+            match self.0.as_deref() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
     fn new_test_work_queue(label: &str) -> Arc<crate::transfer_engine::queue::TransferWorkQueue> {
         let db_path = crate::test_paths::unique_test_path_string(&format!(
             "kanna-transfer-item4-work-{label}"
@@ -2002,6 +2289,7 @@ mod tests {
         registry_dir: PathBuf,
         destination_root: PathBuf,
         destination_peer_id: String,
+        source_peer_id: String,
         source_task_id: String,
     }
 
@@ -2105,6 +2393,7 @@ mod tests {
             registry_dir,
             destination_root,
             destination_peer_id,
+            source_peer_id,
             source_task_id,
         }
     }
@@ -2376,9 +2665,6 @@ mod tests {
                     &"b".repeat(40),
                 )
                 .expect("upsert manifest");
-                assert!(db
-                    .mark_transferred_task_manifest_prepared(transfer_id)
-                    .expect("mark prepared"));
                 // Deliberately no content commitment persisted.
                 db.insert_task_transfer(&item4_new_task_transfer(
                     transfer_id,
@@ -2392,10 +2678,15 @@ mod tests {
             },
         );
 
-        let work = work_item("import:transfer-item4-unverified");
-        let failure = run_import(&state, &work, transfer_id)
-            .await
-            .expect_err("a stage mismatch must refuse the import");
+        let parsed = payload::parse_outgoing_transfer_payload(&item4_task_bundle_payload_json(
+            "task-item4-source",
+            "review",
+        ))
+        .expect("payload");
+        let failure =
+            verify_persisted_task_bundle(&state, &parsed, local_task_id, transfer_id, Some(&[]))
+                .await
+                .expect_err("a stage mismatch must refuse the import");
         let ImportFailure::Terminal(reason) = failure else {
             panic!("expected a terminal verification failure: {failure:?}");
         };
@@ -2477,11 +2768,11 @@ mod tests {
         let failure = run_import(&state, &work, transfer_id)
             .await
             .expect_err("a manifest proven for a different task must refuse this retry");
-        let ImportFailure::Retry(reason) = failure else {
-            panic!("expected the existing binding-mismatch guard: {failure:?}");
+        let ImportFailure::Terminal(reason) = failure else {
+            panic!("expected a terminal persisted-identity mismatch: {failure:?}");
         };
         assert!(
-            reason.contains("transfer manifest task binding mismatch"),
+            reason.contains("conflicting persisted task identities"),
             "{reason}"
         );
 
@@ -2496,5 +2787,447 @@ mod tests {
             Some("commitment-for-task-a"),
             "task A's proof must be untouched by task B's rejected attempt"
         );
+    }
+
+    async fn read_import_test_daemon_command(
+        reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+        writer: &mut tokio::net::unix::OwnedWriteHalf,
+    ) -> kanna_daemon::protocol::Command {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).await.unwrap() > 0);
+            let command: kanna_daemon::protocol::Command =
+                serde_json::from_str(line.trim()).unwrap();
+            let response = match command {
+                kanna_daemon::protocol::Command::NegotiateProtectedInput { .. } => {
+                    Some(kanna_daemon::protocol::Event::ProtectedInputReady {
+                        version: kanna_daemon::protocol::PROTECTED_INPUT_PROTOCOL_VERSION,
+                    })
+                }
+                kanna_daemon::protocol::Command::NegotiateRawInput { .. } => {
+                    Some(kanna_daemon::protocol::Event::RawInputReady {
+                        version: kanna_daemon::protocol::RAW_INPUT_PROTOCOL_VERSION,
+                    })
+                }
+                other => return other,
+            };
+            writer
+                .write_all(
+                    format!("{}\n", serde_json::to_string(&response.unwrap()).unwrap()).as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    fn init_import_source_repo(path: &Path) -> (String, String, PathBuf, String) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        std::fs::create_dir_all(path.join(".kanna/workflows")).unwrap();
+        std::fs::create_dir_all(path.join(".kanna/test-provider-bin")).unwrap();
+        let workflow = serde_json::json!({
+            "name": "single-reviewer",
+            "stages": [{
+                "name": "in progress",
+                "prompt": "$TASK_PROMPT",
+                "policy": { "transition": "manual" }
+            }]
+        })
+        .to_string();
+        std::fs::write(
+            path.join(".kanna/workflows/single-reviewer.json"),
+            &workflow,
+        )
+        .unwrap();
+        std::fs::write(
+            path.join(".kanna/config.json"),
+            serde_json::json!({
+                "workspace": { "path": { "prepend": [".kanna/test-provider-bin"] } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let provider = path.join(".kanna/test-provider-bin/claude");
+        std::fs::write(&provider, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(path.join("README.md"), "base\n").unwrap();
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Transfer Test"]);
+        run(&["add", "."]);
+        run(&["commit", "-m", "base"]);
+        let base = super::super::git::commit_oid(path, "main").unwrap();
+        run(&["checkout", "-b", "task-source"]);
+        std::fs::write(path.join("task.txt"), "unpublished\n").unwrap();
+        run(&["add", "task.txt"]);
+        run(&["commit", "-m", "unpublished task work"]);
+        let head = super::super::git::commit_oid(path, "task-source").unwrap();
+        let bundle = path.join("transfer.bundle");
+        run(&[
+            "bundle",
+            "create",
+            bundle.to_str().unwrap(),
+            "refs/heads/task-source",
+            "refs/heads/main",
+        ]);
+        (head, base, bundle, workflow)
+    }
+
+    /// The no-repository path used by the real incident: the destination
+    /// durably binds its newly allocated repository before the next fallible
+    /// operation. A simulated process interruption then re-enters `run_import`
+    /// and must reuse that exact repo/path, finish the task, prove the complete
+    /// snapshot before Spawn, and acknowledge over the real paired sidecars.
+    #[tokio::test]
+    async fn interrupted_new_repo_acquisition_reuses_one_manifest_binding_and_converges() {
+        use tokio::io::{AsyncWriteExt, BufReader};
+
+        let _guard = crate::test_sidecar_guard().await;
+        let _env_guard = Item4EnvVarGuard::capture();
+        let destination_home =
+            crate::test_paths::unique_test_dir("kanna-transfer-acquisition-home");
+        std::fs::create_dir_all(&destination_home).unwrap();
+        let _home_guard = Item4HomeGuard::set(&destination_home);
+
+        let reservation = establish_real_transfer_reservation("acquisition-retry").await;
+        let source_repo = crate::test_paths::unique_test_dir("kanna-transfer-acquisition-source");
+        let (head_oid, base_oid, bundle_path, workflow_definition) =
+            init_import_source_repo(&source_repo);
+        let source_input = crate::db::TaskInputRecord {
+            id: 1,
+            task_id: reservation.source_task_id.clone(),
+            run_id: Some("source-run".into()),
+            stage: Some("in progress".into()),
+            source: "manager".into(),
+            message: "preserve this imported directive".into(),
+            delivered_at: "2026-09-10 12:00:00".into(),
+            origin: None,
+        };
+        let ledger_bytes = payload::encode_task_input_ledger(
+            &[source_input],
+            &reservation.source_peer_id,
+            &reservation.source_task_id,
+        )
+        .unwrap();
+        let ledger_path = source_repo.join(payload::TASK_INPUT_LEDGER_FILENAME);
+        std::fs::write(&ledger_path, &ledger_bytes).unwrap();
+        for (artifact_id, path) in [
+            ("acquisition-bundle", bundle_path.as_path()),
+            ("acquisition-inputs", ledger_path.as_path()),
+        ] {
+            reservation
+                .source
+                .control(
+                    "stage-artifact",
+                    serde_json::json!({
+                        "transferId": reservation.transfer_id,
+                        "artifactId": artifact_id,
+                        "path": path,
+                        "owned": false,
+                    }),
+                )
+                .await
+                .expect("stage source artifact");
+        }
+
+        let destination_task_id = session::destination_task_id(&reservation.transfer_id);
+        let payload_json = serde_json::json!({
+            "target_peer_id": reservation.destination_peer_id.clone(),
+            "task": {
+                "cloud_task_id": format!("cloud-{}", reservation.transfer_id),
+                "source_peer_id": reservation.source_peer_id.clone(),
+                "source_task_id": reservation.source_task_id.clone(),
+                "local_task_id": destination_task_id.clone(),
+                "resume_session_id": null,
+                "prompt": "resume the transferred agent",
+                "stage": "in progress",
+                "branch": "task-source",
+                "head_oid": head_oid.clone(),
+                "base_oid": base_oid.clone(),
+                "workflow_definition": workflow_definition.clone(),
+                "history": [{
+                    "sequence": 0,
+                    "origin_peer_id": reservation.source_peer_id.clone(),
+                    "origin_task_id": reservation.source_task_id.clone(),
+                    "origin_run_id": "source-run",
+                    "stage": "in progress",
+                    "kind": "main",
+                    "agent": "implement",
+                    "result": "source result",
+                    "finished_at": "2026-09-10 11:59:00"
+                }],
+                "pipeline": "single-reviewer",
+                "agent_type": "pty",
+                "agent_provider": "claude"
+            },
+            "repo": {
+                "mode": "task-bundle",
+                "name": "Acquisition Retry",
+                "path": source_repo.to_string_lossy(),
+                "default_branch": "main",
+                "bundle": {
+                    "artifact_id": "acquisition-bundle",
+                    "filename": "transfer.bundle",
+                    "ref_name": "refs/heads/task-source",
+                    "base_ref_name": "refs/heads/main"
+                }
+            },
+            "input_ledger": {
+                "artifact_id": "acquisition-inputs",
+                "filename": payload::TASK_INPUT_LEDGER_FILENAME,
+                "sha256": payload::sha256_hex(&ledger_bytes),
+                "count": 1
+            },
+            "artifacts": []
+        });
+        let config = item4_test_config("acquisition-retry-server");
+        std::fs::create_dir_all(&config.daemon_dir).unwrap();
+        {
+            let db = crate::db::Db::open_for_tests(&config.db_path).unwrap();
+            db.insert_task_transfer(&crate::db::NewTaskTransfer {
+                id: reservation.transfer_id.clone(),
+                direction: "incoming".into(),
+                status: "pending".into(),
+                source_peer_id: Some(reservation.source_peer_id.clone()),
+                target_peer_id: Some(reservation.destination_peer_id.clone()),
+                source_desktop_id: None,
+                target_desktop_id: None,
+                source_task_id: Some(reservation.source_task_id.clone()),
+                local_task_id: Some(destination_task_id.clone()),
+                error: None,
+                payload_json: Some(payload_json.to_string()),
+            })
+            .unwrap();
+            db.enqueue_transfer_work(
+                "import:acquisition-retry",
+                super::super::queue::KIND_IMPORT,
+                Some(&reservation.transfer_id),
+                r#"{"interruptAfterAcquisition":true,"interruptAfterSpawn":true}"#,
+            )
+            .unwrap();
+        }
+        let destination = reservation
+            .spawn_destination("acquisition-retry-dest")
+            .await;
+        let state = Arc::new(AppState::with_transfer_sidecar_for_test(
+            config.clone(),
+            destination,
+        ));
+        let work = TransferWorkItem {
+            id: "import:acquisition-retry".into(),
+            kind: super::super::queue::KIND_IMPORT.into(),
+            transfer_id: Some(reservation.transfer_id.clone()),
+            payload_json: r#"{"interruptAfterAcquisition":true,"interruptAfterSpawn":true}"#.into(),
+            attempts: 1,
+        };
+        let first = run_import(&state, &work, &reservation.transfer_id).await;
+        assert!(
+            matches!(first, Err(ImportFailure::Retry(ref reason)) if reason.contains("test interruption")),
+            "unexpected first attempt: {first:?}"
+        );
+        let first_binding = state
+            .transfer_work()
+            .open_db()
+            .unwrap()
+            .transferred_task_manifest(&reservation.transfer_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first_binding.3.as_deref(),
+            Some(destination_task_id.as_str())
+        );
+        let acquired_path = state
+            .transfer_work()
+            .open_db()
+            .unwrap()
+            .get_repo(&first_binding.0)
+            .unwrap()
+            .unwrap()
+            .path;
+        assert_ne!(
+            std::fs::canonicalize(&acquired_path).unwrap(),
+            std::fs::canonicalize(&source_repo).unwrap(),
+            "the regression must exercise a newly allocated destination repository"
+        );
+        assert_eq!(
+            state
+                .transfer_work()
+                .open_db()
+                .unwrap()
+                .list_repos_for_maintenance()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let socket_path = kanna_runtime_defaults::socket_path(Path::new(&config.daemon_dir));
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let daemon_db_path = config.db_path.clone();
+        let transfer_id_for_daemon = reservation.transfer_id.clone();
+        let task_id_for_daemon = destination_task_id.clone();
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let command = read_import_test_daemon_command(&mut reader, &mut write_half).await;
+            let session_id = match command {
+                kanna_daemon::protocol::Command::Spawn { session_id, .. } => session_id,
+                other => panic!("expected recovery Spawn, got {other:?}"),
+            };
+            let db = crate::db::Db::open(&daemon_db_path).unwrap();
+            assert!(
+                db.transferred_task_manifest_content_commitment(&transfer_id_for_daemon)
+                    .unwrap()
+                    .is_some(),
+                "Spawn preceded the durable imported-snapshot proof"
+            );
+            db.record_task_input(
+                &task_id_for_daemon,
+                crate::db::TaskInputSource::Manager,
+                "destination directive after first Spawn",
+            )
+            .unwrap()
+            .expect("record destination-local directive");
+            db.update_pipeline_item_stage(&task_id_for_daemon, "review")
+                .unwrap();
+            let worktree = db
+                .get_task_worktree_path(&task_id_for_daemon)
+                .unwrap()
+                .expect("destination worktree");
+            std::fs::write(
+                Path::new(&worktree).join("destination-progress.txt"),
+                "local\n",
+            )
+            .unwrap();
+            for args in [
+                vec!["add", "destination-progress.txt"],
+                vec!["commit", "-m", "destination progress after transfer"],
+            ] {
+                let output = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&worktree)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&kanna_daemon::protocol::Event::SessionCreated {
+                            session_id
+                        })
+                        .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let second = run_import(&state, &work, &reservation.transfer_id).await;
+        assert!(
+            matches!(second, Err(ImportFailure::Retry(ref reason)) if reason.contains("after verified task spawn")),
+            "the injected spawn-to-ack interruption did not fire: {second:?}"
+        );
+        daemon.await.unwrap();
+
+        // Recreate both destination server state and its sidecar process. The
+        // immutable commitment must authorize only the ack replay; it must not
+        // compare or erase the destination work committed after Spawn.
+        drop(state);
+        let restarted_destination = reservation
+            .spawn_destination("acquisition-retry-restarted")
+            .await;
+        let restarted_state = Arc::new(AppState::with_transfer_sidecar_for_test(
+            config.clone(),
+            restarted_destination,
+        ));
+        let third = run_import(&restarted_state, &work, &reservation.transfer_id).await;
+        assert!(third.is_ok(), "restart did not converge: {third:?}");
+
+        let proof_db = restarted_state.transfer_work().open_db().unwrap();
+        let persisted_commitment = proof_db
+            .transferred_task_manifest_content_commitment(&reservation.transfer_id)
+            .unwrap()
+            .expect("persisted commitment");
+        let destination_repo_id = proof_db
+            .transferred_task_manifest(&reservation.transfer_id)
+            .unwrap()
+            .unwrap()
+            .0;
+        drop(proof_db);
+        assert_real_ack_values(
+            &reservation,
+            &destination_task_id,
+            &persisted_commitment,
+            &destination_repo_id,
+        )
+        .await;
+
+        let db = restarted_state.transfer_work().open_db().unwrap();
+        let second_binding = db
+            .transferred_task_manifest(&reservation.transfer_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second_binding.0, first_binding.0);
+        assert_eq!(second_binding.3, first_binding.3);
+        assert_eq!(db.list_repos_for_maintenance().unwrap().len(), 1);
+        assert!(db
+            .get_pipeline_item(&destination_task_id)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            db.get_pipeline_item(&destination_task_id)
+                .unwrap()
+                .unwrap()
+                .stage
+                .as_deref(),
+            Some("review")
+        );
+        let inputs = db.list_all_task_inputs(&destination_task_id).unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].message, "preserve this imported directive");
+        assert!(inputs[0].origin.is_some());
+        assert_eq!(inputs[1].message, "destination directive after first Spawn");
+        assert!(inputs[1].origin.is_none());
+        let history = db.transferred_task_history(&destination_task_id).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].origin_run_id, "source-run");
+        let destination_worktree = db
+            .get_task_worktree_path(&destination_task_id)
+            .unwrap()
+            .unwrap();
+        assert!(Path::new(&destination_worktree)
+            .join("destination-progress.txt")
+            .exists());
+        assert_eq!(
+            db.get_task_transfer(&reservation.transfer_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed"
+        );
+
+        let _ = std::fs::remove_dir_all(destination_home);
+        let _ = std::fs::remove_dir_all(source_repo);
     }
 }

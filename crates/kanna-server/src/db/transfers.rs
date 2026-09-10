@@ -143,10 +143,17 @@ impl Db {
         head_oid: &str,
         base_oid: &str,
     ) -> Result<(), rusqlite::Error> {
-        if let Some((_, existing_head, existing_base, _, _)) =
+        if let Some((existing_repo, existing_head, existing_base, existing_task, _)) =
             self.transferred_task_manifest(transfer_id)?
         {
-            if existing_head != head_oid || existing_base != base_oid {
+            if existing_repo != repo_id
+                || existing_head != head_oid
+                || existing_base != base_oid
+                || existing_task
+                    .as_deref()
+                    .zip(local_task_id)
+                    .is_some_and(|(existing, requested)| existing != requested)
+            {
                 return Err(rusqlite::Error::InvalidParameterName(
                     "conflicting transferred task manifest".into(),
                 ));
@@ -157,9 +164,7 @@ impl Db {
              (transfer_id,repo_id,local_task_id,head_oid,base_oid,state)
              VALUES (?,?,?,?,?,'importing')
              ON CONFLICT(transfer_id) DO UPDATE SET
-               repo_id=excluded.repo_id, local_task_id=COALESCE(excluded.local_task_id, transferred_task_manifest.local_task_id),
-               head_oid=CASE WHEN transferred_task_manifest.head_oid=excluded.head_oid THEN transferred_task_manifest.head_oid ELSE transferred_task_manifest.head_oid END,
-               base_oid=CASE WHEN transferred_task_manifest.base_oid=excluded.base_oid THEN transferred_task_manifest.base_oid ELSE transferred_task_manifest.base_oid END",
+               local_task_id=COALESCE(transferred_task_manifest.local_task_id, excluded.local_task_id)",
             (transfer_id, repo_id, local_task_id, head_oid, base_oid),
         )?;
         Ok(())
@@ -226,6 +231,22 @@ impl Db {
             "UPDATE transferred_task_manifest
              SET content_commitment = ?
              WHERE transfer_id = ? AND state = 'prepared' AND content_commitment IS NULL",
+            (content_commitment, transfer_id),
+        )? == 1)
+    }
+
+    /// Atomically makes a transfer eligible to execute and records the
+    /// destination-computed proof that justified that transition. A manifest
+    /// is never observably `prepared` without its immutable commitment.
+    pub fn complete_transferred_task_manifest_preparation(
+        &self,
+        transfer_id: &str,
+        content_commitment: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        Ok(self.conn.execute(
+            "UPDATE transferred_task_manifest
+             SET state = 'prepared', prepared_at = datetime('now'), content_commitment = ?
+             WHERE transfer_id = ? AND state = 'importing' AND content_commitment IS NULL",
             (content_commitment, transfer_id),
         )? == 1)
     }
