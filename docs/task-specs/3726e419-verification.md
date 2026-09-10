@@ -140,6 +140,32 @@ replacement for the failed canonical gate. The sole remaining acceptance gap is
 one released canonical `CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 ./kd test all`
 result; merge remains held pending that gate's reconciliation.
 
+## Final lane reconciliation at `2722f0304`
+
+The original canonical `./kd test all` remains an **exit 1** result; it is not
+retroactively recorded as passing. Its Rust lane failed at
+`daemon_lifecycle::tests::production_spawn_path_publishes_identity_for_kd_cleanup`,
+and its mock-E2E lane was never entered. The retained binary reproduced that
+unit test successfully (**1/1**), after which the canonical replacement Rust
+lane, `CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 ./kd test rust`, completed with
+exit **0** (`Canonical Rust tests passed`).
+
+The separately released full mock-E2E lane then completed **47 of 48** targets
+and exited **1** only at `mock/terminal-output-performance.test.ts` with
+`terminal buffer not registered`. The exact-head focused replacement was run
+once with `CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1` against the canonical
+`mock/terminal-output-performance.test.ts` target. Before assertions, the
+runner verified task `3726e419`, worktree `task-3726e419-13`, branch
+`remote-task-graph-verification`, commit `2722f0304`, and the matching native
+title. It exited **0**: **1 file / 3 tests passed**. Artifacts are
+`.tmp/3726e419-final-terminal-output-performance-2722f0304.{log,exit}`.
+
+The completed replacement Rust and focused terminal results account for the
+only failed or unentered canonical lanes without rerunning the already-passed
+workspace or Bazel lanes. All owned mock-E2E resources were removed. This is
+ready for independent merge-master acceptance; it is not a claim that the
+historical canonical whole-gate invocation itself passed.
+
 ## Original focused-control procedure
 
 The unresolved full-gate failures require paired controls on the default branch
