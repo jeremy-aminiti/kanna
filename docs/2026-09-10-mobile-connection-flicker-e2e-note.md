@@ -2,6 +2,35 @@
 
 Date: 2026-09-10 · Task: 41d28cff · Host: Mac Studio
 
+## Reconciled with main (Android dev-client PR #1419)
+
+PR #1419 (`3f9520ae2`, parent `90fd52ee4`, reviewed `9beb64caa`) merged into
+main independently of this task and was reconciled in here by merging
+`origin/main` (commit `a2ee21013`) after committing the candidate above — no
+conflicts. Its diff (`apps/mobile/src/screens/TaskScreen.tsx`,
+`taskComposerKeyboard.ts`, `crates/kanna-server/src/http_api/ksp.rs`, plus
+`tools/kd/` and docs) touches `TaskScreen.tsx` only in two places: routing
+`Keyboard.addListener` event names through `taskKeyboardEventNames(Platform.OS)`
+(Android/iOS use different keyboard event names) and making the composer
+chrome's `onLayout` idempotent (`setComposerTop` only fires on an actual `y`
+change). Neither hunk is near, or changes props passed to,
+`<TerminalWebView>` — confirmed by reading the diff directly, not inferred.
+No touch to `TerminalWebView.tsx`, `TerminalWebView.test.tsx`,
+`terminalReconnectPresentation.ts`, or `buildTerminalDocument.ts`. The
+overlay-gating fix's lifecycle assumptions (`taskChanged` detection via
+`previousTaskIdRef`, the props `TerminalWebView` consumes) are unaffected by
+this merge.
+
+This PR (native Android/emulator work, merged 2026-09-10) has no bearing on
+the owner's iOS OTA `2.2.3` (manifest `2026-09-09T09:33:19.447Z`) symptoms
+report — it did not exist, let alone ship, at that time; nothing in this note
+attributes either reported symptom to it.
+
+Re-verified after the merge on the reconciled tree: `pnpm exec tsc --noEmit`
+→ exit 0; full mobile `vitest` suite → exit 0, 1952 passed, 3 pre-existing
+skips (up from 1945/1945 pre-merge, matching the tests PR #1419 itself
+added). Raw logs refreshed in `.tmp/`.
+
 ## What this note is for
 
 The owner reported (2026-09-10) quick full-screen redraws for the first few
