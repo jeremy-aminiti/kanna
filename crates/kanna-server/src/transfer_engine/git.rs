@@ -218,31 +218,21 @@ pub fn import_task_bundle_refs(
     let transfer_root = format!("refs/kanna/transfers/{transfer_id}/{expected_head_oid}");
     let head_ref = format!("{transfer_root}/head");
     let base_ref = format!("{transfer_root}/base");
-    for (reference, expected) in [
-        (&head_ref, expected_head_oid),
-        (&base_ref, expected_base_oid),
-    ] {
-        if let Ok(existing) = git(
-            repo_path,
-            &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-        ) {
-            if existing != expected {
-                return Err(format!("transfer ref rebinding refused for {reference}: existing {existing}, requested {expected}"));
-            }
-        }
-    }
+    let staging_root = format!("{transfer_root}/staging");
+    let staging_head = format!("{staging_root}/head");
+    let staging_base = format!("{staging_root}/base");
     let bundle_path = bundle_path
         .to_str()
         .ok_or_else(|| "bundle path is not valid unicode".to_string())?;
-    let head_refspec = format!("{source_head_ref}:{head_ref}");
-    let base_refspec = format!("{source_base_ref}:{base_ref}");
+    let head_refspec = format!("{source_head_ref}:{staging_head}");
+    let base_refspec = format!("{source_base_ref}:{staging_base}");
     git(
         repo_path,
         &["fetch", bundle_path, &head_refspec, &base_refspec],
     )?;
     for (label, reference, expected) in [
-        ("head", head_ref.as_str(), expected_head_oid),
-        ("base", base_ref.as_str(), expected_base_oid),
+        ("head", staging_head.as_str(), expected_head_oid),
+        ("base", staging_base.as_str(), expected_base_oid),
     ] {
         let imported = git(
             repo_path,
@@ -253,6 +243,17 @@ pub fn import_task_bundle_refs(
                 "transferred task {label} mismatch: expected {expected}, imported {imported}"
             ));
         }
+    }
+    for (reference, staging) in [(&head_ref, &staging_head), (&base_ref, &staging_base)] {
+        let old = git(
+            repo_path,
+            &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+        )
+        .ok()
+        .unwrap_or_else(|| "0".into());
+        git(repo_path, &["update-ref", reference, staging, &old]).map_err(|error| {
+            format!("transfer ref publication refused for {reference}: {error}")
+        })?;
     }
     Ok((head_ref, base_ref))
 }
