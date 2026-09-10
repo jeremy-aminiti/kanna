@@ -407,3 +407,41 @@ Focused command once capacity allows (unchanged from the prior round):
 `CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 cargo test -p kanna-server --bin
 kanna-server task_events:: -- --test-threads=1`, then the
 `event_subscriptions::outage_isolation_tests` filter.
+
+## Merge complete: tuning's accepted checkpoint (2026-09-10)
+
+Authorized and merged: `task-5edc81f8-5` at `27cf52c364adf80dbf1ec6bdb5053dfcea71496d`
+(tuning's source review accepted head `5226be1cb`, already carrying a
+conflict-free merge of `origin/main` `3f9520ae2`) is now part of this
+branch's history (merge commit `3f9ba7998`). Four real conflicts, resolved
+by hand and verified by careful reading (not compilation — no cargo launch
+this round, per standing capacity instructions): the bootstrap `collect()`/
+`accept_page` call site and `batch_complete`'s OR-condition (both simple,
+anticipated substitutions against signature changes), a two-line comment
+above `until()`, and `kanna_read_event_subscription`'s catalog description.
+Everything else — `step()`'s full native-call-chain restructuring, the new
+`WatchFixture::request_with`/`new_with`, tuning's own two new tests, all of
+this task's own additions (`connect_repo_peers`,
+`new_with_healthy_sibling_and_excluded_peer`, `restart`, both integration
+tests) — merged with **zero** textual conflict; read in full afterward to
+confirm the combination is semantically correct, not merely absent of
+markers.
+
+The previously-deferred compact-response decision is now real code, not
+just a plan: `compact()` gained a top-level `staleMachines` field
+(`row.stale_machines`, unconditionally visible, even when `pending` is
+`null`). `docs/kanna-server-boundary.md` — the canonical, AGENTS.md-listed
+doc for this surface — now documents both the compact-response addition and
+(newly, since it had never been recorded there before) the outage-isolation
+contract itself: per-peer fault isolation, the local-vs-remote distinction,
+`stale_machines`/`staleMachines` de-duplication by machine id, and
+checkpoint preservation across recovery.
+
+Sibling's `docs/2026-09-10-repo-subscription-remote-fault-pauses-all-legs-limitation.md`
+landed via the merge (it now exists on this branch, historical/untouched);
+it describes the bug this task's merged work resolves and is safe to
+remove or mark resolved in a later, separate pass — not done here to avoid
+editing a doc this task did not author beyond what reconciliation required.
+
+Head is `3f9ba7998`. Still not run: `cargo build`/`test`/`clippy`/`fmt` on
+the merged tree — everything above is verified by manual reading only.
