@@ -18,7 +18,8 @@ def _exec_path(file):
     return file.short_path
 
 def _zig_cc_wrapper_impl(ctx):
-    zig = _exec_path(ctx.file.zig)
+    zig_toolchain = ctx.toolchains["@rules_zig//zig:toolchain_type"].zigtoolchaininfo
+    zig = _exec_path(zig_toolchain.zig_files[0])
     marker = _exec_path(ctx.file.sysroot_marker)
     sysroot = marker[:-len("/.kanna-sysroot")]
     if ctx.attr.mode == "cc":
@@ -61,9 +62,8 @@ def _zig_cc_wrapper_impl(ctx):
         executable = wrapper,
         files = depset([wrapper]),
         runfiles = ctx.runfiles(
-            files = [wrapper],
+            files = [wrapper] + zig_toolchain.zig_files,
             transitive_files = depset(transitive = [
-                ctx.attr.zig_files.files,
                 ctx.attr.sysroot_files.files,
             ]),
         ),
@@ -78,9 +78,8 @@ zig_cc_wrapper = rule(
         "sysroot_files": attr.label(mandatory = True),
         "sysroot_marker": attr.label(mandatory = True, allow_single_file = True),
         "target": attr.string(mandatory = True),
-        "zig": attr.label(mandatory = True, allow_single_file = True),
-        "zig_files": attr.label(mandatory = True),
     },
+    toolchains = ["@rules_zig//zig:toolchain_type"],
 )
 
 def _zig_cc_toolchain_config_impl(ctx):
@@ -146,7 +145,7 @@ zig_cc_toolchain_config = rule(
     },
 )
 
-def zig_linux_cc_toolchain(name, zig, zig_files, target, target_cpu, multiarch, sysroot, sysroot_marker, exec_compatible_with, target_compatible_with):
+def zig_linux_cc_toolchain(name, target, target_cpu, multiarch, sysroot, sysroot_marker, exec_compatible_with, target_compatible_with):
     wrappers = {}
     for mode in ("cc", "ar", "nm", "objcopy", "strip"):
         wrapper = name + "_" + mode
@@ -157,14 +156,15 @@ def zig_linux_cc_toolchain(name, zig, zig_files, target, target_cpu, multiarch, 
             sysroot_files = sysroot,
             sysroot_marker = sysroot_marker,
             target = target,
-            zig = zig,
-            zig_files = zig_files,
         )
         wrappers[mode] = ":" + wrapper
 
     native.filegroup(
         name = name + "_all_files",
-        srcs = wrappers.values() + [zig_files, sysroot],
+        srcs = wrappers.values() + [
+            "@rules_zig//zig:resolved_toolchain",
+            sysroot,
+        ],
     )
     zig_cc_toolchain_config(
         name = name + "_config",
@@ -203,10 +203,10 @@ def zig_linux_cc_toolchain(name, zig, zig_files, target, target_cpu, multiarch, 
 
 def zig_linux_cc_toolchains(name, target, target_cpu, multiarch, sysroot, sysroot_marker, target_compatible_with):
     """Declare one target toolchain for each supported execution host."""
-    for exec_name, zig_repo, exec_constraints in (
-        ("macos_arm64", "@zig_0.15.2_aarch64-macos", ["@platforms//cpu:aarch64", "@platforms//os:osx"]),
-        ("linux_x86_64", "@zig_0.15.2_x86_64-linux", ["@platforms//cpu:x86_64", "@platforms//os:linux"]),
-        ("linux_arm64", "@zig_0.15.2_aarch64-linux", ["@platforms//cpu:aarch64", "@platforms//os:linux"]),
+    for exec_name, exec_constraints in (
+        ("macos_arm64", ["@platforms//cpu:aarch64", "@platforms//os:osx"]),
+        ("linux_x86_64", ["@platforms//cpu:x86_64", "@platforms//os:linux"]),
+        ("linux_arm64", ["@platforms//cpu:aarch64", "@platforms//os:linux"]),
     ):
         zig_linux_cc_toolchain(
             name = "{}_on_{}".format(name, exec_name),
@@ -217,6 +217,4 @@ def zig_linux_cc_toolchains(name, target, target_cpu, multiarch, sysroot, sysroo
             target = target,
             target_compatible_with = target_compatible_with,
             target_cpu = target_cpu,
-            zig = zig_repo + "//:zig",
-            zig_files = zig_repo + "//:zig_toolchain",
         )
