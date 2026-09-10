@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -69,6 +69,17 @@ export function logicalMessageBytes(text: string, bracketedPasteMode: boolean): 
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Whether `pid` is still alive, checked by exact pid (`kill -0`) — never a
+ * name/command match. */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Strip ANSI/OSC noise so TUI output can be pattern-matched. */
@@ -230,8 +241,69 @@ export class PtySession {
     return this.exitCode;
   }
 
+  /** pid of the PTY-bridge process itself — not the real agent CLI, which
+   * `pty.fork()` makes a direct child of the bridge, not of this Node
+   * process. See {@link killTreeAndVerify}. */
+  get pid(): number | undefined {
+    return this.child.pid;
+  }
+
   kill(): void {
     if (!this.closed) this.child.kill("SIGKILL");
+  }
+
+  /**
+   * Kills this session's PTY-bridge process, then verifies — rather than
+   * assumes — that the real agent CLI process died with it. `pty-bridge.py`
+   * uses `pty.fork()`, which makes the agent CLI a direct child of the
+   * bridge process, not of this one; closing the PTY master when the bridge
+   * dies usually delivers a SIGHUP that takes the CLI down too, but "usually"
+   * is not verified. This finds the bridge's direct children by exact pid
+   * (`pgrep -P <bridgePid>`, never a name/command match), kills the bridge,
+   * gives the hang-up a moment to propagate, and force-kills by exact pid
+   * anything still alive afterward — so cleanup never depends on an assumed
+   * signal cascade.
+   */
+  async killTreeAndVerify(graceMs = 500): Promise<{
+    bridgePid: number | undefined;
+    childPids: number[];
+    forceKilled: number[];
+    stillAlive: number[];
+  }> {
+    const bridgePid = this.child.pid;
+    let childPids: number[] = [];
+    if (bridgePid !== undefined) {
+      try {
+        childPids = execFileSync("pgrep", ["-P", String(bridgePid)], { encoding: "utf8" })
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0)
+          .map((line) => Number(line));
+      } catch {
+        // pgrep exits non-zero when the bridge has no children left — the
+        // common, healthy case, not an error.
+        childPids = [];
+      }
+    }
+
+    this.kill();
+    await sleep(graceMs);
+
+    const forceKilled: number[] = [];
+    for (const pid of childPids) {
+      if (isPidAlive(pid)) {
+        try {
+          process.kill(pid, "SIGKILL");
+          forceKilled.push(pid);
+        } catch {
+          // Exited between the liveness check and the kill — fine.
+        }
+      }
+    }
+    if (forceKilled.length > 0) await sleep(150);
+
+    const stillAlive = childPids.filter((pid) => isPidAlive(pid));
+    return { bridgePid, childPids, forceKilled, stillAlive };
   }
 }
 

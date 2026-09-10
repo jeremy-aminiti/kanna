@@ -245,17 +245,26 @@ function summarizeRolloutStructurally(path: string, markers: string[]): RolloutL
  * teardown, before either temp dir is removed, so nothing is lost to
  * cleanup. Read-only with respect to CODEX_HOME: copies only the rollout
  * `.jsonl` file(s), never `auth.json`, never the directory itself. */
+interface ProcessCleanupReport {
+  bridgePid: number | undefined;
+  childPids: number[];
+  forceKilled: number[];
+  stillAlive: number[];
+}
+
 function captureArtifacts(
   setup: CodexTuiSetup,
   label: string,
   checkpoints: Checkpoint[],
   markers: string[],
+  processCleanup: ProcessCleanupReport,
 ): void {
   const runDir = join(ARTIFACTS_ROOT, `${new Date().toISOString().replace(/[:.]/g, "-")}-${label}`);
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, "output.txt"), setup.session.output);
   writeFileSync(join(runDir, "raw-output.txt"), setup.session.rawOutput);
   writeFileSync(join(runDir, "checkpoints.json"), JSON.stringify(checkpoints, null, 2));
+  writeFileSync(join(runDir, "process-cleanup.json"), JSON.stringify(processCleanup, null, 2));
   const rolloutFiles = findRolloutFiles(setup.codexHome);
   writeFileSync(join(runDir, "rollout-files-found.json"), JSON.stringify(rolloutFiles, null, 2));
   rolloutFiles.forEach((path, i) => {
@@ -430,14 +439,31 @@ async function teardown(
   label: string,
   checkpoints: Checkpoint[],
   markers: string[],
-): Promise<void> {
-  // Only this test's own PTY child — nothing else on the machine.
-  setup.session.kill();
-  // Capture before removing either temp dir — this is the one place the
-  // rollout file and full output would otherwise be lost to cleanup.
-  captureArtifacts(setup, label, checkpoints, markers);
-  await removeDir(setup.cwd);
-  await removeDir(setup.codexHome);
+): Promise<ProcessCleanupReport> {
+  // Only this test's own PTY child — nothing else on the machine. Kills the
+  // bridge and verifies (force-killing by exact pid if needed) that the real
+  // agent CLI process it forked died too, rather than assuming the wrapper's
+  // exit implies it.
+  const processCleanup = await setup.session.killTreeAndVerify();
+  if (processCleanup.stillAlive.length > 0) {
+    console.error(
+      `teardown for "${label}": pid(s) ${processCleanup.stillAlive.join(", ")} survived both the ` +
+      "bridge kill and a follow-up SIGKILL — see process-cleanup.json.",
+    );
+  }
+  try {
+    // Capture before removing either temp dir — this is the one place the
+    // rollout file and full output would otherwise be lost to cleanup.
+    // Guarded: a capture failure (e.g. an unreadable rollout file) must
+    // never skip the temp-dir removal below.
+    captureArtifacts(setup, label, checkpoints, markers, processCleanup);
+  } catch (error) {
+    console.error(`artifact capture failed for "${label}" — cleanup proceeds regardless:`, error);
+  } finally {
+    await removeDir(setup.cwd);
+    await removeDir(setup.codexHome);
+  }
+  return processCleanup;
 }
 
 async function requireEnvironment(ctx: { skip: (reason?: string) => void }): Promise<boolean> {
@@ -530,6 +556,10 @@ async function runSubmissionCase(
     }
   } finally {
     record("teardown-start");
+    // process-cleanup.json (written inside teardown, alongside the other
+    // artifacts) is the durable record of forceKilled/stillAlive — read
+    // that rather than a checkpoint here, since teardown captures artifacts
+    // before this function could append to the in-memory array anyway.
     await teardown(setup, label, checkpoints, markers);
   }
 }
