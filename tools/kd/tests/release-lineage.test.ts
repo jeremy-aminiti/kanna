@@ -536,8 +536,8 @@ describe("released-series detection", () => {
 
 describe("release policy", () => {
   it("defaults to a 24 hour production soak", () => {
-    expect(DEFAULT_RELEASE_POLICY).toEqual({ productionSoakHours: 24 });
-    expect(parseReleasePolicy({}, "policy")).toEqual({ productionSoakHours: 24 });
+    expect(DEFAULT_RELEASE_POLICY.productionSoakHours).toBe(24);
+    expect(parseReleasePolicy({}, "policy")).toEqual(DEFAULT_RELEASE_POLICY);
   });
 
   it("accepts an explicit window, including zero", () => {
@@ -557,9 +557,9 @@ describe("release policy", () => {
   it("reads the repository file and falls back to defaults when absent", async () => {
     const root = await mkdtemp(join(tmpdir(), "kd-release-policy-"));
     try {
-      expect(readReleasePolicy(root)).toEqual({ productionSoakHours: 24 });
+      expect(readReleasePolicy(root)).toEqual(DEFAULT_RELEASE_POLICY);
       await writeFile(join(root, "release-policy.json"), '{"$schema":"./release-policy.schema.json","productionSoakHours":48}\n');
-      expect(readReleasePolicy(root)).toEqual({ productionSoakHours: 48 });
+      expect(readReleasePolicy(root)).toEqual({ ...DEFAULT_RELEASE_POLICY, productionSoakHours: 48 });
       await writeFile(join(root, "release-policy.json"), "{ nope\n");
       expect(() => readReleasePolicy(root)).toThrow(/is not valid JSON/);
     } finally {

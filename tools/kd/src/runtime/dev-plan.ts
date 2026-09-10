@@ -8,7 +8,6 @@ import {
   type KdEnvironmentProfile
 } from "./environment";
 import { selectPreferredLanAddress } from "./lan-address";
-import { accessSync, constants, readdirSync } from "node:fs";
 
 export interface DevWindow {
   name: string;
@@ -27,7 +26,6 @@ export interface BuildDevPlanInput {
   /** Defaults to the host platform; injectable so both branches are testable. */
   platform?: NodeJS.Platform;
   /** Defaults to probing `/dev/dri`; injectable for the same reason. */
-  canUseDrmRenderNode?: () => boolean;
   desktopSecretEnv?: NodeJS.ProcessEnv;
   mobile: boolean;
   emulators: boolean;
@@ -185,45 +183,21 @@ function relayFirebaseEnv(input: BuildDevPlanInput): Record<string, string | und
 }
 
 /**
- * Whether this user can open a DRM render node.
- *
- * WebKitGTK's default renderer wants one. Where it cannot get one — a VM with
- * no passthrough, or a user outside the `render` group — the WebProcess never
- * starts: the UI process blocks writing to a socket whose peer never appears,
- * so the app runs with no window at all and says nothing about why. There is
- * no error to read, which is why this is a capability check rather than a
- * message match.
- */
-function hasDrmRenderNode(): boolean {
-  try {
-    return readdirSync("/dev/dri")
-      .filter((entry) => entry.startsWith("renderD"))
-      .some((entry) => {
-        try {
-          accessSync(`/dev/dri/${entry}`, constants.R_OK | constants.W_OK);
-          return true;
-        } catch {
-          return false;
-        }
-      });
-  } catch {
-    return false;
-  }
-}
-
-/**
  * The Linux-only environment the desktop window needs beyond the display
- * session it inherits. Empty on a machine whose GPU WebKit can actually use,
- * so this never downgrades a working renderer.
+ * session it inherits.
+ *
+ * The DMA-BUF decision itself is **not** made here any more. It lives in the
+ * desktop binary (`apps/desktop/src-tauri/src/linux_graphics.rs`), because an
+ * installed Kanna never goes through `kd`, and a render-node-less machine that
+ * did not get the variable would run a live app with no window. `kd` keeps only
+ * the job the binary cannot do for itself: carrying an operator's explicit
+ * setting into the tmux window, where a respawn would otherwise drop it.
  */
 export function linuxDesktopWebkitEnv(input: BuildDevPlanInput): Record<string, string> {
   const platform = input.platform ?? process.platform;
   if (platform !== "linux") return {};
-  if (input.env.WEBKIT_DISABLE_DMABUF_RENDERER) {
-    return { WEBKIT_DISABLE_DMABUF_RENDERER: input.env.WEBKIT_DISABLE_DMABUF_RENDERER };
-  }
-  const canUseRenderNode = input.canUseDrmRenderNode ?? hasDrmRenderNode;
-  return canUseRenderNode() ? {} : { WEBKIT_DISABLE_DMABUF_RENDERER: "1" };
+  const explicit = input.env.WEBKIT_DISABLE_DMABUF_RENDERER;
+  return explicit ? { WEBKIT_DISABLE_DMABUF_RENDERER: explicit } : {};
 }
 
 function e2eEnv(input: BuildDevPlanInput): Record<string, string | undefined> {

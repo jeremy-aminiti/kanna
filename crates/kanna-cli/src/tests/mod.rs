@@ -218,6 +218,12 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("exclude_task_ids", "exclude_task_ids"),
                     ("local_only", "local_only"),
                     ("delivery", "delivery"),
+                    ("diagnostic", "diagnostic"),
+                    ("event_types", "event_types"),
+                    ("exclude_event_types", "exclude_event_types"),
+                    ("quiet_ms", "quiet_ms"),
+                    ("max_hold_ms", "max_hold_ms"),
+                    ("min_admission_interval_ms", "min_admission_interval_ms"),
                 ],
             },
         ),
@@ -228,6 +234,7 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                 param_args: &[
                     ("subscription_id", "subscription_id"),
                     ("acknowledge_batch_id", "acknowledge_batch_id"),
+                    ("diagnostic", "diagnostic"),
                 ],
             },
         ),
@@ -235,7 +242,10 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_unsubscribe_events",
             TypedToolSurface {
                 command_path: &["task", "unsubscribe-events"],
-                param_args: &[("subscription_id", "subscription_id")],
+                param_args: &[
+                    ("subscription_id", "subscription_id"),
+                    ("diagnostic", "diagnostic"),
+                ],
             },
         ),
         (

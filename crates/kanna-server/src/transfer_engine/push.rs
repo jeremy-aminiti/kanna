@@ -800,9 +800,10 @@ async fn run_finalization(
         )
         .map_err(|error| format!("db error: {error}"))?;
 
-    // notify → idle → quit → exit. Artifacts are staged only after this
-    // returns, so the transcript includes the wrap-up and the Codex rollout is
-    // final rather than mid-write.
+    // submit → observed busy → settled idle → quit → exit. Artifacts are staged
+    // only after this returns, so a clean transcript includes the wrap-up and
+    // the Codex rollout is final rather than mid-write. A degraded path still
+    // stages what exists before any later source teardown.
     let finalization_outcome = finalize::finalize_source_session(
         state,
         work,
@@ -995,6 +996,8 @@ mod tests {
             provider_session_id: provider_session_id.map(str::to_string),
             cwd: Some("/repo/.kanna-worktrees/task-1".into()),
             resumed_from_run_id: None,
+            replaces_run_id: None,
+            no_work_termination: None,
             resume_fallback_reason: None,
             completion_transition: None,
             trigger: "unspecified".into(),

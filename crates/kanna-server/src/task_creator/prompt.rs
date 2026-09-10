@@ -310,3 +310,53 @@ pub(super) fn build_stage_prompt(
 
     sections.join("\n\n")
 }
+
+/// Prompt for a recovery that follows a *recorded success* but could not
+/// restore the conversation that produced it.
+///
+/// The resumable case gets the stage's own conversation back and needs no
+/// instructions. This is the other one: no transcript, or the provider
+/// rejected the resume, so the replacement is a fresh conversation with no
+/// memory of the finished turn. Handing it the ordinary stage prompt — the
+/// implement agent's "Implement the requested task in this worktree", the pr
+/// agent's "Create a PR for the work on branch $BRANCH" — tells an agent that
+/// already finished to do the work again and record a second verdict. The
+/// recorded result is restated instead, because a fresh conversation has no
+/// other way to know what it already did.
+pub(super) fn build_completed_stage_recovery_prompt(
+    stage_name: &str,
+    reason: &str,
+    recorded_result: Option<&str>,
+    original_task_prompt: &str,
+) -> String {
+    let mut parts = vec![format!(
+        "Kanna recovered this task after its terminal session ended. The previous \
+         conversation could not be restored: {}.",
+        reason.trim()
+    )];
+    parts.push(format!(
+        "The `{}` stage has ALREADY completed and recorded its verdict. Do not do that \
+         work again, and do not record a stage verdict again — it is already recorded, and \
+         repeating it would overwrite a finished result with a duplicate.",
+        stage_name.trim()
+    ));
+    if let Some(result) = recorded_result.map(str::trim).filter(|r| !r.is_empty()) {
+        parts.push(format!(
+            "This is what that completed run recorded, restated because this conversation \
+             has no memory of it:\n{result}"
+        ));
+    }
+    parts.push(
+        "You are picking up after that completed stage, not starting it. Read the current \
+         state of the worktree if you need context, then continue from there or wait for \
+         further instruction. Nothing below is a new instruction to execute."
+            .to_string(),
+    );
+    if !original_task_prompt.trim().is_empty() {
+        parts.push(format!(
+            "Task reminder (context only):\n{}",
+            original_task_prompt.trim()
+        ));
+    }
+    parts.join("\n\n")
+}

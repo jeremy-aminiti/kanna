@@ -1444,6 +1444,7 @@ pub(in crate::task_creator) fn prepare_stage_run_spawn(
         feedback,
         provider_session_id,
         resumed_from_run_id,
+        replaces_run_id: None,
         resume_fallback_reason: None,
         cwd: worktree_path,
         env: spawn_env,

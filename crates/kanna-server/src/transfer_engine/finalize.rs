@@ -10,32 +10,29 @@
 //! task could be finalized at all. On 2026-08-06 that is exactly what happened:
 //! `[handoff] adopted session …` at 10:43, the signal refused at 13:43.
 //!
-//! Injected input has none of that constraint. `Command::SubmitInput` accepts a
-//! logical message for any live session, adopted or not, and queues it behind
-//! any raw terminal draft. So finalization *asks* the agent to stop instead of
-//! signalling it:
+//! Injected input has none of that constraint. `Command::SubmitInputIfSession`
+//! accepts a logical message for an adopted session while fencing it to the PTY
+//! process observed at attach. So finalization *asks* the agent to stop instead
+//! of signalling it:
 //!
-//! 1. inject a wrap-up message through the daemon-owned logical input queue;
-//! 2. wait for the session to reach `Idle` — the composer-free state — and to
-//!    stay there, off the daemon `StatusChanged` stream the server already
-//!    consumes;
+//! 1. inject a wrap-up message and wait for the daemon's delivery acknowledgement;
+//! 2. use the existing settled-`Idle` policy on the daemon `StatusChanged`
+//!    stream before sending anything else;
 //! 3. inject the provider's quit command (`/exit`, `/quit` for Codex);
 //! 4. wait for the daemon `Exit`.
 //!
-//! Only then are artifacts staged, which is also what fixes Codex: its rollout
-//! under `~/.codex/sessions` is nameable long before the process exits but is
-//! still growing at that point, so the old mid-session staging shipped a
-//! truncated conversation (pinned by
+//! On the clean path, only then are artifacts staged, which is also what fixes
+//! Codex: its rollout under `~/.codex/sessions` is nameable long before the
+//! process exits but is still growing at that point, so the old mid-session
+//! staging shipped a truncated conversation (pinned by
 //! `tests/cli-contract/tests/live/codex-rollout-timing.test.ts`).
 //!
-//! Step 2 is load-bearing rather than decorative: the quit command preempts an
-//! agent that is mid-turn (pinned against OpenCode in
-//! `opencode-injected-input.test.ts`), so quitting before the agent is idle
-//! truncates the very wrap-up the transfer is trying to capture. And *reaching*
-//! `Idle` is not the same as being finished — the daemon can publish it inside
-//! its own gap between a logical message and CR, or between two turns of a
-//! 500 ms-throttled detector — so the status has to hold for a settle window
-//! before the quit goes out ([`IDLE_SETTLE`], [`IDLE_EDGE_SETTLE`]).
+//! Step 2 is a sequencing heuristic, not a provider acknowledgement: daemon
+//! status has no input identity and a fast turn may never publish `Busy`. It is
+//! retained because the quit command preempts a mid-turn agent (pinned against
+//! OpenCode in `opencode-injected-input.test.ts`). What finalization can prove
+//! locally is narrower: only a fresh daemon acknowledgement permits this attempt
+//! to continue; a pre-existing phase claim or uncertain reply does not.
 //!
 //! **`Waiting` is not `Idle`, and nothing may be typed while it holds.** It
 //! means the agent is parked on a permission prompt, which consumes the next
@@ -74,7 +71,7 @@
 //!   destroy a live agent for a transfer that may still fail.
 
 use crate::db::{TaskEventKind, TransferWorkItem};
-use crate::http_api::{try_submit_task_input, AppState, TaskInputError};
+use crate::http_api::{try_submit_task_input_if_session, AppState, TaskInputError};
 use kanna_agent_protocol::AgentProvider;
 use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent, SessionStatus};
 use std::str::FromStr;
@@ -115,35 +112,19 @@ const WRAP_UP_MESSAGE: &str = "This task is being transferred to another machine
 const WRAP_UP_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How long a session that is *already* `Idle` may stay silent before the
-/// wrap-up is treated as finished.
+/// existing completion policy lets finalization proceed.
 ///
-/// The daemon only publishes status *changes*, so an agent whose turn is too
-/// short to be observed as `Busy` (detection is 500 ms-throttled) produces no
-/// event at all — waiting for an `Idle` edge that will never come would burn
-/// the whole wrap-up budget on the fastest possible case. Silence while idle is
-/// therefore its own answer. Long enough that an agent still thinking about how
-/// to start is not mistaken for one that has finished.
+/// The daemon only publishes status changes, so a turn shorter than its
+/// detector interval can produce no `Busy` edge. This is deliberately a
+/// heuristic, not proof that a particular input was parsed or completed.
 const IDLE_SETTLE: Duration = Duration::from_secs(20);
 
-/// How long a session that was *seen going* `Idle` may stay silent before the
-/// wrap-up is treated as finished.
+/// How long an observed `Idle` edge must hold before finalization proceeds.
 ///
-/// Shorter than [`IDLE_SETTLE`] because an observed transition is real evidence
-/// where silence is only the absence of it — but not zero, which is what taking
-/// the edge as the answer amounted to. Two `Idle` edges mean nothing about the
-/// wrap-up:
-///
-/// - the daemon writes a logical message and its Enter separately, with a
-///   150 ms pause, and can publish `Idle` inside that gap — the session is idle
-///   because the message has not been submitted yet;
-/// - busy detection is 500 ms-throttled, so an agent that pauses between turns
-///   can be published as `Idle` mid-work.
-///
-/// Either one let `/exit` preempt the very wrap-up the transfer exists to
-/// capture, while the finalization still reported `cleanlyFinalized: true`. A
-/// window of four detection intervals is long enough for a turn that has really
-/// started to be published as `Busy` and reset it, and costs under 1% of
-/// [`WRAP_UP_TIMEOUT`] when the agent genuinely was done.
+/// Short idle repaints can occur between stretches of one turn, so an edge uses
+/// a settle window rather than releasing the quit immediately. Like
+/// [`IDLE_SETTLE`], this is existing sequencing policy rather than causal input
+/// acknowledgement.
 const IDLE_EDGE_SETTLE: Duration = Duration::from_secs(2);
 
 /// How long the agent gets to exit after the quit command.
@@ -241,14 +222,6 @@ async fn run_sequence(
     task_id: &str,
     agent_provider: Option<&str>,
 ) -> SourceFinalization {
-    let provider = agent_provider
-        .and_then(|provider| AgentProvider::from_str(provider).ok())
-        // The task row is written by Kanna's own spawn path, so an unparsable
-        // provider means the row is corrupt rather than that a new CLI shipped.
-        // `/exit` is the majority command; guessing it beats not trying.
-        .unwrap_or(AgentProvider::Claude);
-    let quit_command = provider.quit_command();
-
     let mut observer = match SessionObserver::attach(&state.config().daemon_dir, task_id).await {
         Ok(observer) => observer,
         Err(error) => {
@@ -260,6 +233,53 @@ async fn run_sequence(
         }
     };
     if !observer.present {
+        // A vanished session is clean only when no lifecycle effect was
+        // claimed ambiguously.  If a prior attempt claimed preparation or
+        // quit and crashed before recording its outcome, absence cannot prove
+        // that the bytes were never delivered; upgrading that state to clean
+        // would both hide uncertainty and permit an unsafe retry.
+        let ambiguous_phase = match open_db(state) {
+            Ok(db) => {
+                let mut found = None;
+                for phase in [WRAP_UP_PHASE, QUIT_PHASE] {
+                    match db.read_transfer_work_observation(&work.id, phase) {
+                        Ok(Some(_)) => {
+                            found = Some(phase);
+                            break;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            return degraded(
+                                state,
+                                task_id,
+                                format!(
+                                    "could not establish finalization phase {phase} after session disappearance: {error}"
+                                ),
+                            );
+                        }
+                    }
+                }
+                found
+            }
+            Err(error) => {
+                return degraded(
+                    state,
+                    task_id,
+                    format!(
+                        "could not inspect finalization phase history after session disappearance: {error}"
+                    ),
+                );
+            }
+        };
+        if let Some(phase) = ambiguous_phase {
+            return degraded(
+                state,
+                task_id,
+                format!(
+                    "the source agent session disappeared while finalization phase {phase} had no durable delivery outcome"
+                ),
+            );
+        }
         // Nothing to wrap up: the conversation on disk is already whole, which
         // is the state this whole sequence exists to reach.
         record_phase(state, task_id, "already-exited", None);
@@ -281,15 +301,57 @@ async fn run_sequence(
         );
     }
 
+    let provider = match agent_provider.and_then(|provider| AgentProvider::from_str(provider).ok()) {
+        Some(provider) => provider,
+        None => {
+            return degraded(
+                state,
+                task_id,
+                format!(
+                    "the source agent provider {:?} is unavailable, so no quit command can be chosen safely",
+                    agent_provider
+                ),
+            )
+        }
+    };
+    let quit_command = provider.quit_command();
+    let Some(session_pid) = observer.pid else {
+        return degraded(
+            state,
+            task_id,
+            "the source agent session was listed without a PTY process id".to_string(),
+        );
+    };
+
     // 1. Wrap-up.
-    match inject(state, work, task_id, WRAP_UP_PHASE, WRAP_UP_MESSAGE).await {
-        Injected::Sent | Injected::AlreadySent => {
+    match inject(
+        state,
+        work,
+        task_id,
+        session_pid,
+        WRAP_UP_PHASE,
+        WRAP_UP_MESSAGE,
+    )
+    .await
+    {
+        Injected::Sent => {
             record_phase(state, task_id, "wrap-up-sent", None);
         }
-        Injected::SessionGone => {
-            record_phase(state, task_id, "already-exited", None);
-            return SourceFinalization::default();
-        }
+        Injected::SessionGone => match source_session_is_absent(state, task_id).await {
+            Ok(true) => {
+                record_phase(state, task_id, "already-exited", None);
+                return SourceFinalization::default();
+            }
+            Ok(false) => {
+                return degraded(
+                    state,
+                    task_id,
+                    "the source agent session changed before the wrap-up could be delivered"
+                        .to_string(),
+                )
+            }
+            Err(reason) => return degraded(state, task_id, reason),
+        },
         Injected::Failed(reason) => {
             return degraded(
                 state,
@@ -297,19 +359,37 @@ async fn run_sequence(
                 format!("the source agent could not be asked to wrap up: {reason}"),
             );
         }
+        Injected::DeliveryUnknown(reason) => {
+            return degraded(
+                state,
+                task_id,
+                format!(
+                    "the source agent's wrap-up delivery is uncertain, so no quit command was sent: {reason}"
+                ),
+            );
+        }
     }
 
-    // 2. Idle.
+    // 2. Existing settled-idle sequencing policy. Daemon status carries no
+    // input identity, so this is deliberately not called proof of preparation.
     match observer
         .wait_for_idle(WRAP_UP_TIMEOUT, IDLE_SETTLE, IDLE_EDGE_SETTLE)
         .await
     {
         IdleOutcome::Idle => record_phase(state, task_id, "idle", None),
-        IdleOutcome::Exited => {
+        IdleOutcome::Exited { killed: false } => {
             // The agent ended its own session while wrapping up. That is the
             // destination state, reached without the quit command.
             record_phase(state, task_id, "exited", None);
             return SourceFinalization::default();
+        }
+        IdleOutcome::Exited { killed: true } => {
+            return degraded(
+                state,
+                task_id,
+                "the source agent was forcibly killed while finalization was waiting for it"
+                    .to_string(),
+            )
         }
         IdleOutcome::TimedOut(status) => {
             let detail = match status {
@@ -335,17 +415,34 @@ async fn run_sequence(
     let recovery_snapshot = super::push::session_recovery_snapshot(state, task_id).await;
 
     // 4. Quit.
-    match inject(state, work, task_id, QUIT_PHASE, quit_command).await {
-        Injected::Sent | Injected::AlreadySent => {
+    match inject(state, work, task_id, session_pid, QUIT_PHASE, quit_command).await {
+        Injected::Sent => {
             record_phase(state, task_id, "quit-sent", Some(quit_command));
         }
-        Injected::SessionGone => {
-            record_phase(state, task_id, "exited", None);
-            return SourceFinalization {
-                degraded_reason: None,
-                recovery_snapshot,
-            };
-        }
+        Injected::SessionGone => match source_session_is_absent(state, task_id).await {
+            Ok(true) => {
+                record_phase(state, task_id, "exited", None);
+                return SourceFinalization {
+                    degraded_reason: None,
+                    recovery_snapshot,
+                };
+            }
+            Ok(false) => {
+                let mut outcome = degraded(
+                    state,
+                    task_id,
+                    "the source agent session changed before the quit command could be delivered"
+                        .to_string(),
+                );
+                outcome.recovery_snapshot = recovery_snapshot;
+                return outcome;
+            }
+            Err(reason) => {
+                let mut outcome = degraded(state, task_id, reason);
+                outcome.recovery_snapshot = recovery_snapshot;
+                return outcome;
+            }
+        },
         Injected::Failed(reason) => {
             let mut outcome = degraded(
                 state,
@@ -357,27 +454,66 @@ async fn run_sequence(
             outcome.recovery_snapshot = recovery_snapshot;
             return outcome;
         }
+        Injected::DeliveryUnknown(reason) => {
+            let mut outcome = degraded(
+                state,
+                task_id,
+                format!(
+                    "delivery of the source agent's {quit_command} command is uncertain: {reason}"
+                ),
+            );
+            outcome.recovery_snapshot = recovery_snapshot;
+            return outcome;
+        }
     }
 
     // 5. Exit.
-    if observer.wait_for_exit(QUIT_EXIT_TIMEOUT).await {
-        record_phase(state, task_id, "exited", None);
-        SourceFinalization {
-            degraded_reason: None,
-            recovery_snapshot,
+    match observer.wait_for_exit(QUIT_EXIT_TIMEOUT).await {
+        ExitOutcome::Exited { killed: false } => {
+            record_phase(state, task_id, "exited", None);
+            SourceFinalization {
+                degraded_reason: None,
+                recovery_snapshot,
+            }
         }
-    } else {
-        let mut outcome = degraded(
-            state,
-            task_id,
-            format!(
-                "the source agent did not exit within {}s of {quit_command}",
-                QUIT_EXIT_TIMEOUT.as_secs(),
-            ),
-        );
-        outcome.recovery_snapshot = recovery_snapshot;
-        outcome
+        ExitOutcome::Exited { killed: true } => {
+            let mut outcome = degraded(
+                state,
+                task_id,
+                "the source agent was forcibly killed after the quit command was delivered"
+                    .to_string(),
+            );
+            outcome.recovery_snapshot = recovery_snapshot;
+            outcome
+        }
+        ExitOutcome::TimedOut => {
+            let mut outcome = degraded(
+                state,
+                task_id,
+                format!(
+                    "the source agent did not exit within {}s of {quit_command}",
+                    QUIT_EXIT_TIMEOUT.as_secs(),
+                ),
+            );
+            outcome.recovery_snapshot = recovery_snapshot;
+            outcome
+        }
     }
+}
+
+/// A fenced submission reports both an absent session and a same-id PTY
+/// replacement as `SessionNotFound` to ordinary task-input callers. Finalization
+/// may call the former clean but must degrade the latter, so refresh the daemon
+/// snapshot before deciding. The check never types into either incarnation.
+async fn source_session_is_absent(state: &Arc<AppState>, task_id: &str) -> Result<bool, String> {
+    SessionObserver::attach(&state.config().daemon_dir, task_id)
+        .await
+        .map(|observer| !observer.present)
+        .map_err(|error| {
+            format!(
+                "the source agent session disappeared during finalization and its current state could not be confirmed: {error}"
+            )
+        })
 }
 
 fn degraded(state: &Arc<AppState>, task_id: &str, reason: String) -> SourceFinalization {
@@ -411,26 +547,30 @@ fn record_phase(state: &Arc<AppState>, task_id: &str, phase: &str, detail: Optio
 
 enum Injected {
     Sent,
-    /// An earlier attempt of this work item already typed it.
-    AlreadySent,
+    /// The phase is claimed or the daemon round trip was lost, so delivery may
+    /// have happened but neither submission nor non-delivery is proven.
+    DeliveryUnknown(String),
     SessionGone,
     Failed(String),
 }
 
-/// Types one message into the session, at most once for the life of the work
-/// item.
+/// Submits one message to the observed PTY incarnation, at most once for the
+/// life of the work item.
 ///
 /// The claim is taken before the write and given back only when the write
 /// definitely did not land. `TaskInputError::Uncertain` means the message bytes
-/// reached the PTY but the Enter's response was lost, so the claim is kept: a
+/// may have reached the PTY before the response was lost, so the claim is kept: a
 /// retry that re-typed a wrap-up (or a second `/exit`) would corrupt the
-/// composer of an agent that already has the first one.
+/// composer of an agent that already has the first one. Neither uncertainty nor
+/// an existing claim is success: only a fresh daemon acknowledgement may let
+/// this attempt observe preparation completion and send the quit command.
 /// `Other` does release: nothing reached the terminal, so re-claiming and
 /// retrying is both safe and the only way the message ever arrives.
 async fn inject(
     state: &Arc<AppState>,
     work: &TransferWorkItem,
     task_id: &str,
+    expected_pid: u32,
     phase: &str,
     message: &str,
 ) -> Injected {
@@ -441,7 +581,11 @@ async fn inject(
             .map_err(|error| format!("db error: {error}"))
     }) {
         Ok(true) => {}
-        Ok(false) => return Injected::AlreadySent,
+        Ok(false) => {
+            return Injected::DeliveryUnknown(format!(
+                "an earlier attempt claimed {phase}, but no durable observation proves what reached the terminal"
+            ))
+        }
         Err(error) => return Injected::Failed(error),
     }
     let release = |reason: String| {
@@ -460,14 +604,14 @@ async fn inject(
             Ok(daemon) => daemon,
             Err(error) => return release(format!("daemon error: {error}")),
         };
-    // The logical-input path every other Kanna message uses, which writes the
-    // message and its submission boundary as one write.
-    match try_submit_task_input(&mut daemon, task_id, message).await {
+    // Keep the ordinary always-submit logical-input behavior, but fence this
+    // lifecycle command to the PTY incarnation the observer attached to.
+    match try_submit_task_input_if_session(&mut daemon, task_id, expected_pid, message).await {
         Ok(()) => Injected::Sent,
         Err(TaskInputError::SessionNotFound) => Injected::SessionGone,
         Err(TaskInputError::Uncertain(reason)) => {
             log::warn!("transfer finalization {phase} for {task_id} may have landed: {reason}");
-            Injected::Sent
+            Injected::DeliveryUnknown(reason)
         }
         Err(TaskInputError::Other(reason)) => release(reason),
     }
@@ -475,9 +619,16 @@ async fn inject(
 
 enum IdleOutcome {
     Idle,
-    Exited,
+    Exited {
+        killed: bool,
+    },
     /// Carries the status it gave up on, which decides how the ladder reports.
     TimedOut(SessionStatus),
+}
+
+enum ExitOutcome {
+    Exited { killed: bool },
+    TimedOut,
 }
 
 /// A read-only view of one session's daemon event stream.
@@ -504,6 +655,7 @@ struct SessionObserver {
     session_id: String,
     status: SessionStatus,
     present: bool,
+    pid: Option<u32>,
 }
 
 impl SessionObserver {
@@ -530,6 +682,7 @@ impl SessionObserver {
             session_id: session_id.to_string(),
             status: SessionStatus::Idle,
             present: false,
+            pid: None,
         };
         // Everything ahead of the session list is either the Subscribe ack or a
         // pushed event; both are folded in before the list overwrites them.
@@ -548,6 +701,7 @@ impl SessionObserver {
                     {
                         observer.present = true;
                         observer.status = session.status;
+                        observer.pid = Some(session.pid);
                     }
                     listed = true;
                 }
@@ -586,17 +740,7 @@ impl SessionObserver {
         }
     }
 
-    /// Waits for the session to be idle *and stay* idle.
-    ///
-    /// Two windows, because the two ways of learning that a turn is over carry
-    /// different weight. A session that was already idle when the observer
-    /// attached has only silence to go on and waits `settle` for it; a session
-    /// seen transitioning to `Idle` has evidence and waits the shorter
-    /// `edge_settle` — but it does wait, because an `Idle` published during the
-    /// wrap-up's own injection, or between two turns of a throttled detector,
-    /// says nothing about the wrap-up being finished. Either window is restarted
-    /// by any further event about this session, so an agent that goes back to
-    /// work is not reported idle.
+    /// Waits for the existing settled-idle completion policy.
     async fn wait_for_idle(
         &mut self,
         budget: Duration,
@@ -605,18 +749,7 @@ impl SessionObserver {
     ) -> IdleOutcome {
         let start = tokio::time::Instant::now();
         let deadline = start + budget;
-        // Silence is measured from the last event *about this session*, not
-        // from the last event read. The subscription is machine-wide, so a
-        // second agent on the box emits status changes continuously; timing the
-        // window from reads would mean it never elapses there, and the "idle
-        // silence is its own answer" fallback would never fire — a source whose
-        // post-wrap-up turn was too short to be seen as busy would wait out the
-        // whole budget and degrade a shutdown that was fine.
         let mut silent_since = start;
-        // Set once this session has been *seen* going idle, which is what buys
-        // the shorter window. Never unset: an agent that goes busy and idle
-        // again has been seen twice over, and the window is measured from the
-        // last event either way.
         let mut idle_edge_seen = false;
         loop {
             let now = tokio::time::Instant::now();
@@ -624,13 +757,10 @@ impl SessionObserver {
                 return IdleOutcome::TimedOut(self.status);
             }
             let settled_at = silent_since + if idle_edge_seen { edge_settle } else { settle };
-            // Silence only means "finished" for a session that is already idle;
-            // anything else is the agent still at it, and waits out the budget.
-            let idle = self.status == SessionStatus::Idle;
-            if idle && now >= settled_at {
+            if self.status == SessionStatus::Idle && now >= settled_at {
                 return IdleOutcome::Idle;
             }
-            let wake = if idle {
+            let wake = if self.status == SessionStatus::Idle {
                 settled_at.min(deadline)
             } else {
                 deadline
@@ -641,50 +771,49 @@ impl SessionObserver {
                         silent_since = tokio::time::Instant::now();
                     }
                     match event {
-                        // An idle edge is not the answer on its own; it starts
-                        // the shorter settle window, which the loop head reads.
                         DaemonEvent::StatusChanged {
                             ref session_id,
                             status: SessionStatus::Idle,
                             ..
                         } if *session_id == self.session_id => {
                             idle_edge_seen = true;
-                            continue;
                         }
-                        DaemonEvent::Exit { ref session_id, .. }
-                            if *session_id == self.session_id =>
-                        {
-                            return IdleOutcome::Exited
+                        DaemonEvent::Exit {
+                            ref session_id,
+                            killed,
+                            ..
+                        } if *session_id == self.session_id => {
+                            return IdleOutcome::Exited { killed };
                         }
-                        _ => continue,
+                        _ => {}
                     }
                 }
-                // The daemon connection dropped. Nothing further can be
-                // observed, so report the last status seen rather than claiming
-                // an idleness nobody witnessed.
                 Ok(Err(_)) => return IdleOutcome::TimedOut(self.status),
-                // A window elapsed; the loop head decides which one it was.
                 Err(_) => continue,
             }
         }
     }
 
-    async fn wait_for_exit(&mut self, budget: Duration) -> bool {
+    async fn wait_for_exit(&mut self, budget: Duration) -> ExitOutcome {
         let observe = async {
             loop {
                 let Ok(event) = self.reader.read_event().await else {
-                    return false;
+                    return ExitOutcome::TimedOut;
                 };
                 self.absorb(&event);
-                if matches!(
-                    &event,
-                    DaemonEvent::Exit { session_id, .. } if *session_id == self.session_id
-                ) {
-                    return true;
+                if let DaemonEvent::Exit {
+                    session_id, killed, ..
+                } = event
+                {
+                    if session_id == self.session_id {
+                        return ExitOutcome::Exited { killed };
+                    }
                 }
             }
         };
-        tokio::time::timeout(budget, observe).await.unwrap_or(false)
+        tokio::time::timeout(budget, observe)
+            .await
+            .unwrap_or(ExitOutcome::TimedOut)
     }
 }
 
@@ -707,8 +836,7 @@ mod tests {
     /// assertions are on this transcript, not on the return value.
     #[derive(Debug, Default)]
     struct DaemonLog {
-        /// Every `Input` payload written to the session, in order. The helper
-        /// sends text and CR separately, so a submitted message is two entries.
+        /// Every fenced logical message accepted for the session, in order.
         inputs: Vec<String>,
         /// How many inputs had arrived when `Idle` was published.
         inputs_at_idle: Option<usize>,
@@ -903,7 +1031,15 @@ mod tests {
                         .into_iter()
                         .collect(),
                 },
-                DaemonCommand::SubmitInput { data, .. } => match submit_refusal {
+                DaemonCommand::SubmitInputIfSession { expected_pid, .. }
+                    if expected_pid != 4242 =>
+                {
+                    DaemonEvent::Error {
+                        code: Some(DaemonErrorCode::SessionIncarnationMismatch),
+                        message: "the fake session incarnation changed".to_string(),
+                    }
+                }
+                DaemonCommand::SubmitInputIfSession { data, .. } => match submit_refusal {
                     Some(code) => DaemonEvent::Error {
                         code: Some(code),
                         message: "the fake daemon refused this submission".to_string(),
@@ -995,12 +1131,7 @@ mod tests {
         .collect()
     }
 
-    /// The regression test for the sequence's whole reason to exist.
-    ///
-    /// `/exit` preempts an agent that is mid-turn, so a quit sent while the
-    /// session is `Busy` throws away the wrap-up the transfer is trying to
-    /// capture. The wrap-up goes out, nothing else may be typed until the
-    /// daemon reports `Idle`, and only then does the quit command follow.
+    /// The existing settled-idle policy keeps `/exit` from preempting a turn.
     #[tokio::test]
     async fn the_quit_command_is_never_typed_while_the_agent_is_busy() {
         let daemon = FakeDaemon::start("busy-then-idle", Some(SessionStatus::Busy));
@@ -1084,63 +1215,105 @@ mod tests {
         );
     }
 
-    /// The `Idle` the daemon publishes while it submits the wrap-up is not the
-    /// end of the wrap-up.
-    ///
-    /// The daemon writes the accepted message, pauses so its CR registers as a
-    /// discrete Enter, and only then writes that CR. The session is legitimately
-    /// idle across that gap, so a transient `Idle` edge still cannot release the
-    /// quit. The quit waits for the status to *hold*.
+    /// The task id can be rebound to a replacement PTY after observation. The
+    /// pid fence keeps the lifecycle command off that replacement, and the
+    /// fresh session snapshot keeps the refusal from masquerading as a cleanly
+    /// exited source.
     #[tokio::test]
-    async fn an_idle_published_while_the_wrap_up_is_submitted_does_not_release_the_quit() {
-        let daemon = FakeDaemon::start("idle-mid-injection", Some(SessionStatus::Busy));
-        let state = state_for(&daemon, "desktop-finalize-mid-injection");
-
-        let sequence = tokio::spawn({
-            let state = Arc::clone(&state);
-            async move {
-                finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("claude"))
-                    .await
-            }
-        });
-
-        // Acceptance precedes the daemon-owned delayed Enter, so the session
-        // can publish an idle edge after this command is acknowledged.
-        daemon.wait_for_inputs(1).await;
-        daemon.status(SessionStatus::Idle);
-
-        // The Enter lands, the agent takes the message and starts the wrap-up.
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        daemon.status(SessionStatus::Busy);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(
-            daemon.inputs().len(),
-            1,
-            "the quit was released by an idle published mid-injection: {:?}",
-            daemon.inputs(),
+    async fn a_replaced_session_is_fenced_and_degrades_instead_of_looking_exited() {
+        let daemon = FakeDaemon::start_refusing(
+            "session-replaced",
+            Some(SessionStatus::Idle),
+            Some(DaemonErrorCode::SessionIncarnationMismatch),
         );
-        assert_eq!(
-            daemon.inputs_at_idle(),
-            Some(1),
-            "the idle under test was not the one inside the injection",
+        let state = state_for(&daemon, "desktop-finalize-session-replaced");
+
+        let outcome = run_sequence(&state, &work_item(), SESSION, Some("claude")).await;
+
+        assert!(daemon.inputs().is_empty(), "replacement PTY received input");
+        let reason = outcome
+            .degraded_reason
+            .expect("a replaced live session reported clean finalization");
+        assert!(reason.contains("session changed"), "{reason}");
+        assert_eq!(phases(&state), vec!["degraded"]);
+    }
+
+    /// The quit command uses the same incarnation fence as preparation; a
+    /// replacement cannot receive a lifecycle command from the old run.
+    #[tokio::test]
+    async fn a_replaced_session_is_fenced_for_quit_too() {
+        let daemon = FakeDaemon::start("quit-session-replaced", Some(SessionStatus::Idle));
+        let state = state_for(&daemon, "desktop-finalize-quit-session-replaced");
+
+        let result = inject(&state, &work_item(), SESSION, 7, QUIT_PHASE, "/exit").await;
+
+        assert!(matches!(result, Injected::SessionGone));
+        assert!(daemon.inputs().is_empty(), "replacement PTY received quit");
+    }
+
+    /// A crash can leave the at-most-once phase claimed before any daemon
+    /// acknowledgement was recorded. That prevents a blind resend, but is not
+    /// evidence that preparation was submitted and cannot release a quit.
+    #[tokio::test]
+    async fn a_preclaimed_wrap_up_is_unknown_not_submitted() {
+        let daemon = FakeDaemon::start("preclaimed", Some(SessionStatus::Idle));
+        let state = state_for(&daemon, "desktop-finalize-preclaimed");
+        open_db(&state)
+            .expect("db")
+            .claim_transfer_work_phase(&work_item().id, WRAP_UP_PHASE)
+            .expect("claim preparation phase");
+
+        let outcome = run_sequence(&state, &work_item(), SESSION, Some("claude")).await;
+
+        assert!(daemon.inputs().is_empty(), "a claimed phase was resent");
+        let reason = outcome
+            .degraded_reason
+            .expect("an unproved phase claim reported clean finalization");
+        assert!(reason.contains("no quit command was sent"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn an_absent_session_after_an_ambiguous_claim_degrades() {
+        let daemon = FakeDaemon::start("absent-after-claim", None);
+        let state = state_for(&daemon, "desktop-finalize-absent-after-claim");
+        open_db(&state)
+            .expect("db")
+            .claim_transfer_work_phase(&work_item().id, WRAP_UP_PHASE)
+            .expect("claim preparation phase");
+
+        let outcome = run_sequence(&state, &work_item(), SESSION, Some("claude")).await;
+        let reason = outcome
+            .degraded_reason
+            .expect("ambiguous finalization was upgraded to clean");
+        assert!(reason.contains("disappeared"), "{reason}");
+        assert!(phases(&state).contains(&"degraded".to_string()));
+    }
+
+    /// Losing the daemon response after a write is also not success. The phase
+    /// stays claimed so recovery cannot duplicate it, while the quit remains
+    /// fenced behind proof that this delivery completed.
+    #[tokio::test]
+    async fn an_uncertain_wrap_up_keeps_its_claim_and_never_sends_quit() {
+        let daemon = FakeDaemon::start_refusing(
+            "uncertain",
+            Some(SessionStatus::Idle),
+            Some(DaemonErrorCode::WriteFailed),
         );
+        let state = state_for(&daemon, "desktop-finalize-uncertain");
 
-        // The real end of the turn.
-        daemon.status(SessionStatus::Idle);
-        daemon.wait_for_inputs(2).await;
-        daemon.exit();
+        let outcome = run_sequence(&state, &work_item(), SESSION, Some("claude")).await;
 
-        let outcome = sequence.await.expect("sequence");
+        assert!(!outcome.cleanly_finalized());
         assert!(
-            outcome.cleanly_finalized(),
-            "a sequence that ran to completion reported degraded: {:?}",
-            outcome.degraded_reason,
+            daemon.inputs().is_empty(),
+            "a quit followed uncertain input"
         );
-        assert_eq!(
-            daemon.inputs()[1],
-            "/exit",
-            "the quit command was not what followed the wrap-up: {:?}",
-            daemon.inputs(),
+        assert!(
+            !open_db(&state)
+                .expect("db")
+                .claim_transfer_work_phase(&work_item().id, WRAP_UP_PHASE)
+                .expect("claim state"),
+            "uncertain delivery was released for a blind resend"
         );
     }
 
@@ -1148,7 +1321,7 @@ mod tests {
     /// the provider registry rather than hard-coding one command.
     #[tokio::test]
     async fn the_quit_command_comes_from_the_task_s_provider() {
-        let daemon = FakeDaemon::start("codex-quit", Some(SessionStatus::Busy));
+        let daemon = FakeDaemon::start("codex-quit", Some(SessionStatus::Idle));
         let state = state_for(&daemon, "desktop-finalize-codex");
 
         let sequence = tokio::spawn({
@@ -1160,12 +1333,36 @@ mod tests {
         });
 
         daemon.wait_for_inputs(1).await;
+        daemon.status(SessionStatus::Busy);
         daemon.status(SessionStatus::Idle);
         daemon.wait_for_inputs(2).await;
         daemon.exit();
         sequence.await.expect("sequence");
 
         assert_eq!(daemon.inputs()[1], "/quit");
+    }
+
+    /// `/exit` belongs to four providers and therefore cannot identify a task's
+    /// provider. A missing or future provider value degrades without guessing a
+    /// command or changing the source session.
+    #[tokio::test]
+    async fn an_unknown_provider_is_never_guessed_from_a_quit_command() {
+        let daemon = FakeDaemon::start("unknown-provider", Some(SessionStatus::Idle));
+        let state = state_for(&daemon, "desktop-finalize-unknown-provider");
+
+        let outcome = run_sequence(
+            &state,
+            &work_item(),
+            SESSION,
+            Some("provider-from-a-newer-server"),
+        )
+        .await;
+
+        assert!(daemon.inputs().is_empty());
+        let reason = outcome
+            .degraded_reason
+            .expect("an unknown provider reported clean finalization");
+        assert!(reason.contains("no quit command can be chosen safely"));
     }
 
     /// A task whose agent already stopped has nothing to wrap up: the
@@ -1245,7 +1442,7 @@ mod tests {
         let outcome = observer
             .wait_for_idle(
                 Duration::from_millis(400),
-                Duration::from_millis(50),
+                Duration::from_millis(20),
                 Duration::from_millis(20),
             )
             .await;
@@ -1291,125 +1488,6 @@ mod tests {
         assert_eq!(phases(&state), vec!["degraded"]);
     }
 
-    /// The daemon publishes status *changes*. An agent whose turn is over
-    /// before the 500 ms-throttled detector ever calls it busy emits no event
-    /// at all, so waiting for an `Idle` edge would burn the entire wrap-up
-    /// budget on the fastest possible case. Silence *while idle* is the answer.
-    #[tokio::test]
-    async fn silence_from_an_idle_session_counts_as_a_finished_turn() {
-        let daemon = FakeDaemon::start("idle-silence", Some(SessionStatus::Idle));
-        let mut observer = observer_for(&daemon).await;
-
-        let outcome = observer
-            .wait_for_idle(
-                Duration::from_secs(5),
-                Duration::from_millis(50),
-                Duration::from_millis(20),
-            )
-            .await;
-
-        assert!(
-            matches!(outcome, IdleOutcome::Idle),
-            "idle silence was not read as idle"
-        );
-    }
-
-    /// …and it is silence *from this session* that counts.
-    ///
-    /// The daemon writes every session's status changes to every subscriber, so
-    /// a machine running a second agent puts a steady stream of unrelated
-    /// events on this observer's connection. Timing the settle window from the
-    /// last read rather than the last event about this session means it never
-    /// elapses there: the fallback above stops firing, and a source whose
-    /// post-wrap-up turn was too short to be seen as busy waits out the entire
-    /// budget before degrading a shutdown that was fine.
-    #[tokio::test]
-    async fn another_session_s_traffic_does_not_hold_the_settle_window_open() {
-        let daemon = FakeDaemon::start("idle-noise", Some(SessionStatus::Idle));
-        let mut observer = observer_for(&daemon).await;
-
-        // Faster than the settle window, so under the old rule every read reset
-        // it and only the budget could end the wait.
-        let noise = daemon.events.clone();
-        let ticker = tokio::spawn(async move {
-            loop {
-                let _ = noise.send(DaemonEvent::StatusChanged {
-                    session_id: "task-someone-else".to_string(),
-                    status: SessionStatus::Busy,
-                    waiting_prompt_snippet: None,
-                });
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        });
-
-        let outcome = observer
-            .wait_for_idle(
-                Duration::from_secs(3),
-                Duration::from_millis(400),
-                Duration::from_millis(400),
-            )
-            .await;
-        ticker.abort();
-
-        assert!(
-            matches!(outcome, IdleOutcome::Idle),
-            "another session's events kept the settle window open, so this one \
-             never read as idle",
-        );
-    }
-
-    /// An `Idle` *edge* is evidence, not a verdict.
-    ///
-    /// Busy detection is 500 ms-throttled, so an agent that pauses between two
-    /// stretches of its own work can be published as `Idle` mid-turn. Returning
-    /// on the first edge typed `/exit` at an agent that was still going —
-    /// truncating the very wrap-up the sequence exists to capture, and reporting
-    /// the finalization clean. The edge starts the shorter settle window
-    /// instead, and the return to `Busy` cancels it.
-    #[tokio::test]
-    async fn an_idle_edge_that_goes_back_to_busy_is_not_a_finished_turn() {
-        let daemon = FakeDaemon::start("idle-blip", Some(SessionStatus::Busy));
-        let mut observer = observer_for(&daemon).await;
-        daemon.status(SessionStatus::Idle);
-        daemon.status(SessionStatus::Busy);
-
-        let outcome = observer
-            .wait_for_idle(
-                Duration::from_millis(400),
-                // Long enough that only the edge window could end this wait, so
-                // a pass cannot come from the already-idle fallback.
-                Duration::from_secs(30),
-                Duration::from_millis(100),
-            )
-            .await;
-
-        assert!(
-            matches!(outcome, IdleOutcome::TimedOut(SessionStatus::Busy)),
-            "an idle blip inside a turn was read as a finished turn",
-        );
-    }
-
-    /// Silence from a session that is still working is not the same answer:
-    /// it keeps waiting until the budget is spent, then degrades.
-    #[tokio::test]
-    async fn silence_from_a_busy_session_is_not_a_finished_turn() {
-        let daemon = FakeDaemon::start("busy-silence", Some(SessionStatus::Busy));
-        let mut observer = observer_for(&daemon).await;
-
-        let outcome = observer
-            .wait_for_idle(
-                Duration::from_millis(250),
-                Duration::from_millis(50),
-                Duration::from_millis(20),
-            )
-            .await;
-
-        assert!(matches!(
-            outcome,
-            IdleOutcome::TimedOut(SessionStatus::Busy)
-        ));
-    }
-
     /// The destination waits out this whole sequence over a single peer
     /// request, so the sequence has to fit inside what that request allows.
     ///
@@ -1447,6 +1525,710 @@ mod tests {
         assert!(
             window - shutdown >= Duration::from_secs(120),
             "no room left in the finalization window for staging the session artifacts",
+        );
+    }
+}
+
+/// Cross-process regression coverage for [`finalize_source_session`] against a
+/// real `kanna-daemon` executable and a real PTY child, not the scripted
+/// in-process [`tests::FakeDaemon`] above.
+///
+/// The fake daemon proves finalization's *ordering* logic. It cannot prove the
+/// two things this file exists for: that the CR/paste-framed bytes the
+/// production write path constructs actually reach a real terminal's child
+/// process, and that a real PID fence, a real forced exit, and a real
+/// permission-prompt frame drive the same verdicts end to end.
+/// `kanna-daemon`'s own `authorize_spawn` accepts a connection from this test
+/// binary without any negotiation dance because this test binary is that
+/// daemon's live direct parent — the same trust the desktop app gets, and
+/// the same reason `crates/daemon/tests/reconnect.rs` and
+/// `detection_rules.rs` can send `Spawn` directly.
+///
+/// **Scope this module does not claim.** A negotiated pty is a byte pipe with
+/// a line discipline in front of it, not a transparent wire: the child's
+/// shell `read` builtin observes whatever that discipline hands it after
+/// canonical-mode processing, not the raw bytes the daemon wrote. In
+/// particular the trailing CR every write ends with is consumed as `read`'s
+/// line terminator, not captured as a literal byte in what a test asserts on
+/// — what these tests can and do prove about it is that exactly one shell
+/// line was produced per logical write, not that a specific `\r` byte
+/// survived untouched. And the child's printed frames are synthetic patterns
+/// built to match this repo's own bundled Codex detection rules
+/// (`crates/daemon/src/detection/rules.json`) closely enough to drive the
+/// real classifier the way a real Codex session's screen would — they are
+/// not a claim that an installed Codex or Claude CLI parses these bytes the
+/// same way. That is `tests/cli-contract`'s job and stays out of this file.
+///
+/// The child is a `/bin/sh -c` script using only POSIX builtins (`printf`,
+/// `read`, `sleep`, `exit`) so it never depends on `PATH` or anything the
+/// daemon's environment override might drop. It is deliberately built on the
+/// `codex` provider: `codex/idle/composer` classifies off one textual rule
+/// (`lastNonEmptyLine` starts with `›`) and, unlike Claude,
+/// `allows_output_triggered_idle` lets a Codex session publish `Idle` the
+/// moment that frame is observed rather than waiting out a quiet-refresh
+/// timer (`crates/daemon/src/session.rs`) — which is what keeps these tests
+/// bounded in real time instead of racing a multi-second heuristic.
+///
+/// **Proving a negative.** A script that never reads its own stdin (a bare
+/// `sleep`, or a one-shot `read` that already returned) cannot tell this test
+/// anything: an empty log file next to it proves only that the script never
+/// logs, not that nothing reached the PTY. Every test that asserts an absence
+/// therefore gives its child a loop that keeps reading and logging every
+/// line for the test's whole life, and follows its negative assertion with
+/// [`assert_only_control_probe_was_received`] — a real delivery, through the
+/// same production `try_submit_task_input_if_session` path, sent after the
+/// code under test has already run and waited for deterministically. Seeing
+/// the probe's own line, and only the probe's own line, in the log is what
+/// proves both that the reader was alive the whole time and that nothing
+/// else arrived before it.
+///
+/// No production code changes with this module: it drives
+/// `finalize_source_session`, `run_sequence` and `inject` exactly as
+/// `tests::FakeDaemon` does, over the real `crate::daemon_client::DaemonClient`
+/// production code already uses.
+#[cfg(test)]
+mod real_daemon_tests {
+    use super::*;
+    use kanna_daemon::protocol::SessionInfo;
+    use std::collections::HashMap;
+    use std::os::unix::net::UnixStream;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command as StdCommand};
+    use std::time::Instant;
+
+    const SESSION: &str = "task-finalize-real";
+
+    /// Finds the compiled `kanna-daemon` executable this test can spawn.
+    ///
+    /// `kanna-daemon` is an ordinary `path` dependency of this crate
+    /// (`crates/kanna-server/Cargo.toml`), not a `[[bin]]` artifact
+    /// dependency, so Cargo never populates `CARGO_BIN_EXE_kanna-daemon` for
+    /// this crate's own test binaries the way it does inside
+    /// `crates/daemon/tests/*.rs`, which belong to the daemon's own package.
+    /// `KANNA_DAEMON_TEST_BIN` is the explicit override for a caller that
+    /// built the daemon somewhere non-standard; otherwise this locates the
+    /// binary the same way Cargo already laid it out. Measured directly
+    /// against this workspace's actual `.cargo/config.toml`: `build-dir`
+    /// (`.build/cargo-build`) and `target-dir` (`.build`) are split, so this
+    /// test binary itself compiles under
+    /// `.build/cargo-build/<profile>/deps/<this test>` while a named
+    /// `[[bin]]` like `kanna-daemon` is copied to `.build/<profile>/` --
+    /// *not* to a sibling of this test binary's own directory. The profile
+    /// name (the directory that holds `deps/`) is the one thing shared by
+    /// both layouts, so it locates `kanna-daemon` under the workspace's
+    /// fixed `target-dir` rather than by walking up from wherever the test
+    /// harness happened to land. The plain sibling-of-this-binary layout is
+    /// kept as a fallback in case `build-dir` is ever unset.
+    fn resolve_daemon_binary() -> PathBuf {
+        if let Ok(path) = std::env::var("KANNA_DAEMON_TEST_BIN") {
+            let path = PathBuf::from(path);
+            assert!(
+                path.is_file(),
+                "KANNA_DAEMON_TEST_BIN does not name a file: {path:?}"
+            );
+            return path;
+        }
+        let exe = std::env::current_exe().expect("this test binary's own path");
+        let profile_dir = exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("test binary has a profile directory two levels up from itself");
+        let mut candidates = Vec::new();
+        if let Some(profile) = profile_dir.file_name() {
+            let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .expect("crates/kanna-server has a workspace root two levels up");
+            candidates.push(repo_root.join(".build").join(profile).join("kanna-daemon"));
+        }
+        candidates.push(profile_dir.join("kanna-daemon"));
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| {
+                panic!(
+                    "kanna-daemon binary not found next to this test binary ({exe:?}); build it \
+                     first with `cargo build -p kanna-daemon` (it shares this workspace's \
+                     target-dir with kanna-server), or set KANNA_DAEMON_TEST_BIN to an \
+                     already-built binary's path"
+                )
+            })
+    }
+
+    /// A real `kanna-daemon` child process, listening on its own socket
+    /// directory. Never scripted: every reply in these tests came from the
+    /// daemon actually running the command.
+    struct RealDaemon {
+        child: Child,
+        dir: PathBuf,
+    }
+
+    impl Drop for RealDaemon {
+        fn drop(&mut self) {
+            // Best-effort: a test that already asserted on the daemon's own
+            // exit, or one whose child process outlived an assertion failure,
+            // must not panic again on the way out.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_file(kanna_runtime_defaults::socket_path(&self.dir));
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl RealDaemon {
+        /// `label` only has to be unique within one test; `crate::test_paths`
+        /// already makes the directory unique across every concurrent test
+        /// and every concurrent worktree's gate on this machine.
+        fn start(label: &str) -> Self {
+            let dir = crate::test_paths::unique_test_dir(&format!("kanna-finalize-real-{label}"));
+            let socket_path = kanna_runtime_defaults::socket_path(&dir);
+            let _ = std::fs::remove_file(&socket_path);
+            let pid_path = dir.join("daemon.pid");
+            let _ = std::fs::remove_file(&pid_path);
+
+            let mut command = StdCommand::new(resolve_daemon_binary());
+            command.env("KANNA_DAEMON_DIR", dir.to_str().expect("utf-8 daemon dir"));
+            let child = command
+                .spawn()
+                .expect("failed to start a real kanna-daemon");
+            // Own the child in the RAII guard *before* the readiness wait
+            // below, not after: `Child`'s own `Drop` does not kill the
+            // process, so a timeout panic here would otherwise leak a real
+            // daemon process that nothing ever reaps.
+            let daemon = Self { child, dir };
+
+            for _ in 0..100 {
+                let pid_matches = std::fs::read_to_string(&pid_path)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+                    == Some(daemon.child.id());
+                if pid_matches && UnixStream::connect(&socket_path).is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(
+                std::fs::read_to_string(&pid_path)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+                    == Some(daemon.child.id())
+                    && UnixStream::connect(&socket_path).is_ok(),
+                "real daemon was not ready at {socket_path:?}"
+            );
+
+            daemon
+        }
+
+        fn dir_str(&self) -> String {
+            self.dir.to_string_lossy().to_string()
+        }
+
+        async fn connect(&self) -> crate::daemon_client::DaemonClient {
+            crate::daemon_client::DaemonClient::connect(&self.dir_str())
+                .await
+                .expect("connect to the real daemon")
+        }
+    }
+
+    async fn list_sessions(client: &mut crate::daemon_client::DaemonClient) -> Vec<SessionInfo> {
+        match client
+            .send_command(&DaemonCommand::List)
+            .await
+            .expect("List round trip against the real daemon")
+        {
+            DaemonEvent::SessionList { sessions } => sessions,
+            other => panic!("unexpected reply to List: {other:?}"),
+        }
+    }
+
+    async fn wait_for_status(
+        client: &mut crate::daemon_client::DaemonClient,
+        session_id: &str,
+        expected: SessionStatus,
+        timeout: Duration,
+    ) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let sessions = list_sessions(client).await;
+            if let Some(session) = sessions
+                .iter()
+                .find(|session| session.session_id == session_id)
+            {
+                if session.status == expected {
+                    return;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "session {session_id} never reached {expected:?} on the real daemon"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Spawns the controlled PTY child for `session_id` and returns the real
+    /// PID the daemon reports for it, straight off `List` — never invented,
+    /// which is what makes the PID-fence tests below a real proof rather than
+    /// a restatement of a constant.
+    async fn spawn_pty_session(
+        daemon: &RealDaemon,
+        session_id: &str,
+        script: &str,
+        log_path: &Path,
+    ) -> u32 {
+        let mut client = daemon.connect().await;
+        let mut env = HashMap::new();
+        env.insert(
+            "KANNA_TEST_LOG".to_string(),
+            log_path.to_string_lossy().to_string(),
+        );
+        let command = DaemonCommand::Spawn {
+            session_id: session_id.to_string(),
+            executable: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+            cwd: "/tmp".to_string(),
+            env,
+            cols: 120,
+            rows: 40,
+            agent_provider: Some(AgentProvider::Codex),
+            agent_executable: None,
+            terminal_prelude: None,
+            operator_input_only: false,
+        };
+        match client
+            .send_command(&command)
+            .await
+            .expect("Spawn round trip against the real daemon")
+        {
+            DaemonEvent::SessionCreated {
+                session_id: created,
+            } => assert_eq!(created, session_id),
+            other => panic!("unexpected reply to Spawn: {other:?}"),
+        }
+        list_sessions(&mut client)
+            .await
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .expect("the just-spawned session is listed")
+            .pid
+    }
+
+    /// What the real child actually consumed, one logical message per line, in
+    /// the order it read them off its own stdin -- proof of delivery that
+    /// crossed a real PTY, not a scripted acknowledgement.
+    async fn wait_for_log_lines(path: &Path, count: usize, timeout: Duration) -> Vec<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let lines: Vec<String> = std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            if lines.len() >= count {
+                return lines;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the real child never logged {count} consumed line(s); saw {lines:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    fn work_item() -> TransferWorkItem {
+        TransferWorkItem {
+            id: "finalize:transfer-real-1".to_string(),
+            kind: super::super::queue::KIND_FINALIZE.to_string(),
+            transfer_id: Some("transfer-real-1".to_string()),
+            payload_json: "{}".to_string(),
+            attempts: 1,
+        }
+    }
+
+    fn state_for(daemon: &RealDaemon, label: &str) -> Arc<AppState> {
+        let daemon_dir = daemon.dir_str();
+        crate::http_api::test_state_with_daemon_dir(label, label, &daemon_dir, |db| {
+            db.insert_test_repo("repo-finalize-real", "Finalize Real Repo")
+                .expect("repo");
+            db.insert_test_pipeline_item(
+                SESSION,
+                "repo-finalize-real",
+                "finalize me for real",
+                None,
+                "in progress",
+                "2026-09-09 00:00:00",
+            )
+            .expect("task");
+            db.enqueue_transfer_work(&work_item().id, "finalize", None, "{}")
+                .expect("queue the finalize work item");
+        })
+    }
+
+    fn phases(state: &Arc<AppState>) -> Vec<String> {
+        let db = open_db(state).expect("db");
+        let head = db.latest_task_event_seq().expect("head");
+        db.list_task_events(
+            &crate::db::TaskEventScope::Tasks(vec![SESSION.into()]),
+            0,
+            head,
+            64,
+        )
+        .expect("events")
+        .into_iter()
+        .filter(|event| event.event_type == "task.transfer_finalizing")
+        .map(|event| {
+            event.payload["phase"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+    }
+
+    async fn kill_session_best_effort(daemon: &RealDaemon, session_id: &str) {
+        let mut client = daemon.connect().await;
+        let _ = client
+            .send_command(&DaemonCommand::Kill {
+                session_id: session_id.to_string(),
+            })
+            .await;
+    }
+
+    /// The deterministic barrier a negative assertion needs: sends one known
+    /// control message through the exact same production
+    /// `try_submit_task_input_if_session` path the finalizer itself uses,
+    /// fenced to `real_pid`, then waits for that one line to appear in the
+    /// log and asserts it is the *only* line there.
+    ///
+    /// This only proves anything against a child whose script is a loop that
+    /// keeps reading and logging every line for the test's whole life --
+    /// against a `sleep`-only or already-returned one-shot `read` script, the
+    /// probe itself would never be logged either, and this call would hang
+    /// until its own timeout rather than silently pass. Waiting for the
+    /// probe's own line is the barrier: a single reader drains the PTY's
+    /// bytes in the order they arrived, so anything the code under test
+    /// wrongly wrote earlier is already in the file by the time the probe's
+    /// line shows up.
+    async fn assert_only_control_probe_was_received(
+        daemon: &RealDaemon,
+        real_pid: u32,
+        log_path: &Path,
+    ) {
+        const PROBE: &str = "CONTROL-PROBE-ONLY-LINE";
+        let mut client = daemon.connect().await;
+        // `TaskInputError` carries no `Debug` impl (production code only ever
+        // matches its variants), so this reports failure without formatting it.
+        if try_submit_task_input_if_session(&mut client, SESSION, real_pid, PROBE)
+            .await
+            .is_err()
+        {
+            panic!("the control probe itself must reach the real, still-live session");
+        }
+        let lines = wait_for_log_lines(log_path, 1, Duration::from_secs(10)).await;
+        assert_eq!(
+            lines,
+            vec![PROBE.to_string()],
+            "the real child's reader was alive (the control probe proves that) but the log held \
+             more than just the probe -- something else reached the real PTY first: {lines:?}",
+        );
+    }
+
+    /// The whole point of this file: a fast, legitimate preparation turn that
+    /// never shows an "esc to interrupt" busy frame at all -- the session's
+    /// only observed status is the `Idle` composer it reaches right after
+    /// reading the wrap-up -- still reaches a real, separate quit and a real,
+    /// voluntary process exit. `finalize_source_session` never required Busy;
+    /// this is the real-daemon proof of that, not a restatement of the fake
+    /// test with the same name.
+    ///
+    /// It is also the one test in this file that proves the paste framing
+    /// itself: `WRAP_UP_MESSAGE` is 277 bytes with no embedded newline, over
+    /// `PASTE_FRAMING_MIN_LEN` (256), so once the child's real
+    /// `\x1b[?2004h` has been parsed by the daemon's real terminal emulator,
+    /// the production write path must wrap it in `\x1b[200~` / `\x1b[201~`
+    /// before the trailing CR. What the log then holds is what the child's
+    /// `read -r` actually assembled: the literal paste markers survive
+    /// untouched (they are ordinary bytes to the pty's line discipline), but
+    /// the trailing CR itself is consumed as `read`'s line terminator, not
+    /// captured as a byte -- so this proves one shell line was produced per
+    /// logical write and that the paste markers travelled with it, not that
+    /// a specific `\r` byte was seen on the other side.
+    #[tokio::test]
+    async fn fast_preparation_without_busy_is_paste_framed_and_reaches_a_clean_quit() {
+        let daemon = RealDaemon::start("fast-idle");
+        let log_path = daemon.dir.join("child-consumed.log");
+        let script = "\
+printf '\\033[?2004h'
+IFS= read -r prep
+printf '%s\\n' \"$prep\" >> \"$KANNA_TEST_LOG\"
+printf '\\r\\nUnderstood, wrapping up now.\\r\\n'
+printf '\\r\\n\\342\\200\\272 \\r\\n'
+IFS= read -r quit
+printf '%s\\n' \"$quit\" >> \"$KANNA_TEST_LOG\"
+exit 0
+";
+        spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+        // Real VT state, not something this test can force synchronously: give
+        // the daemon's terminal emulator time to have actually parsed the
+        // bracketed-paste DECSET the child just wrote before the wrap-up below
+        // is constructed.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let state = state_for(&daemon, "desktop-finalize-real-fast");
+        let outcome =
+            finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("codex"))
+                .await;
+
+        assert!(
+            outcome.cleanly_finalized(),
+            "a real fast turn with no observed Busy chrome reported degraded: {:?}",
+            outcome.degraded_reason,
+        );
+
+        let lines = wait_for_log_lines(&log_path, 2, Duration::from_secs(10)).await;
+        assert!(
+            lines[0].starts_with("\u{1b}[200~") && lines[0].ends_with("\u{1b}[201~"),
+            "the wrap-up did not reach the real child paste-framed: {:?}",
+            lines[0],
+        );
+        assert!(
+            lines[0].contains("transferred to another machine"),
+            "the framed wrap-up lost its text crossing the real PTY: {:?}",
+            lines[0],
+        );
+        assert_eq!(
+            lines[1], "/quit",
+            "the quit command the real child actually consumed was not exactly /quit \
+             (also proving the short command was NOT paste-framed): {:?}",
+            lines[1],
+        );
+        assert_eq!(
+            phases(&state),
+            vec!["wrap-up-sent", "idle", "quit-sent", "exited"],
+        );
+    }
+
+    /// A session already parked on a real permission-prompt frame -- matched
+    /// by the daemon's own bundled `common/waiting/permission-prompt` rule,
+    /// not a fabricated status -- must never be typed into. The child is a
+    /// loop that logs every line it ever reads, so the negative assertion
+    /// below is backed by [`assert_only_control_probe_was_received`] rather
+    /// than an empty log file a non-reading script could never have falsified.
+    #[tokio::test]
+    async fn a_real_permission_prompt_is_never_typed_into() {
+        let daemon = RealDaemon::start("real-waiting");
+        let log_path = daemon.dir.join("child-consumed.log");
+        let script = "\
+printf '\\033[?2004h'
+printf '\\r\\ndo you want to allow this command to run?\\r\\n'
+while IFS= read -r line; do
+  printf '%s\\n' \"$line\" >> \"$KANNA_TEST_LOG\"
+done
+";
+        let real_pid = spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+
+        {
+            let mut client = daemon.connect().await;
+            wait_for_status(
+                &mut client,
+                SESSION,
+                SessionStatus::Waiting,
+                Duration::from_secs(10),
+            )
+            .await;
+        }
+
+        let state = state_for(&daemon, "desktop-finalize-real-waiting");
+        let outcome =
+            finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("codex"))
+                .await;
+
+        assert!(!outcome.cleanly_finalized());
+        let reason = outcome
+            .degraded_reason
+            .expect("a session parked on a real permission prompt reported clean finalization");
+        assert!(reason.contains("permission prompt"), "{reason}");
+        assert_eq!(phases(&state), vec!["degraded"]);
+
+        assert_only_control_probe_was_received(&daemon, real_pid, &log_path).await;
+        kill_session_best_effort(&daemon, SESSION).await;
+    }
+
+    /// `inject` fences every lifecycle write to the PID `SessionObserver`
+    /// observed. Calling it directly with a PID that is not this real
+    /// session's -- the shape a same-id replacement leaves behind -- proves
+    /// the real daemon actually enforces `SessionIncarnationMismatch` on
+    /// `SubmitInputIfSession`, not merely that `inject`'s match arms compile.
+    /// The child is a loop reader so [`assert_only_control_probe_was_received`]
+    /// can back the negative assertion with a real, ordered proof rather than
+    /// an empty file.
+    #[tokio::test]
+    async fn a_stale_pid_is_fenced_by_the_real_daemon() {
+        let daemon = RealDaemon::start("real-pid-fence");
+        let log_path = daemon.dir.join("child-consumed.log");
+        let script = "\
+printf '\\033[?2004h'
+while IFS= read -r line; do
+  printf '%s\\n' \"$line\" >> \"$KANNA_TEST_LOG\"
+done
+";
+        let real_pid = spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+
+        let state = state_for(&daemon, "desktop-finalize-real-pid-fence");
+        let stale_pid = real_pid.wrapping_add(1);
+        let result = inject(
+            &state,
+            &work_item(),
+            SESSION,
+            stale_pid,
+            QUIT_PHASE,
+            "/exit",
+        )
+        .await;
+
+        assert!(
+            matches!(result, Injected::SessionGone),
+            "a stale pid was not fenced against the real session"
+        );
+
+        assert_only_control_probe_was_received(&daemon, real_pid, &log_path).await;
+        kill_session_best_effort(&daemon, SESSION).await;
+    }
+
+    /// No session at all -- the real daemon's own `List` legitimately reports
+    /// it absent, not a fake `listed: None`. Nothing to wrap up: the
+    /// conversation on disk is already whole.
+    #[tokio::test]
+    async fn an_absent_real_session_finalizes_clean_without_typing_into_anything() {
+        let daemon = RealDaemon::start("real-absent");
+        let state = state_for(&daemon, "desktop-finalize-real-absent");
+
+        let outcome =
+            finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("codex"))
+                .await;
+
+        assert!(outcome.cleanly_finalized(), "{:?}", outcome.degraded_reason);
+        assert_eq!(phases(&state), vec!["already-exited"]);
+    }
+
+    /// `face01227` fixed a swallowed-error defect in exactly this branch: a DB
+    /// failure while checking ambiguous phase history after a session
+    /// disappeared used to be discarded by `.ok()`, so `ambiguous_phase` read
+    /// as `None` and finalization reported clean even though the read never
+    /// actually proved anything -- silently permitting an unsafe retry after
+    /// a crash the DB itself could no longer attest to. This corrupts the
+    /// real sqlite file backing a live `AppState` so the failure the fix
+    /// handles is a real one, not an injected mock error.
+    #[tokio::test]
+    async fn a_real_db_read_error_after_disappearance_degrades_rather_than_reading_clean() {
+        let daemon = RealDaemon::start("real-db-error");
+        let state = state_for(&daemon, "desktop-finalize-real-db-error");
+
+        // The session is absent (never spawned) -- the shape the swallowed
+        // error used to hide. Pull the schema out from under the connection
+        // `open_db` is about to make, so the ambiguous-phase read this branch
+        // performs fails for real.
+        let db_path = state.config().db_path.clone();
+        std::fs::write(&db_path, b"not a sqlite database").expect("corrupt the real db file");
+
+        let outcome =
+            finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("codex"))
+                .await;
+
+        assert!(
+            !outcome.cleanly_finalized(),
+            "a real DB read failure after disappearance was swallowed into a clean finalization",
+        );
+        let reason = outcome
+            .degraded_reason
+            .expect("a real DB read failure reported clean finalization");
+        assert!(
+            reason.contains("after session disappearance"),
+            "the degraded reason does not name the read failure: {reason}",
+        );
+    }
+
+    /// A crash can leave `WRAP_UP_PHASE` claimed with no durable delivery
+    /// outcome. Against a real, live, present session this proves the claim
+    /// is checked before the daemon connection for submission is ever opened:
+    /// nothing reaches the real PTY, because `inject` never gets that far. The
+    /// child is a loop reader so [`assert_only_control_probe_was_received`]
+    /// can back that with a real, ordered proof rather than an empty file a
+    /// `sleep`-only script could never have falsified.
+    #[tokio::test]
+    async fn a_preclaimed_wrap_up_against_a_real_session_never_touches_the_real_pty() {
+        let daemon = RealDaemon::start("real-preclaimed");
+        let log_path = daemon.dir.join("child-consumed.log");
+        let script = "\
+printf '\\033[?2004h'
+while IFS= read -r line; do
+  printf '%s\\n' \"$line\" >> \"$KANNA_TEST_LOG\"
+done
+";
+        let real_pid = spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+
+        let state = state_for(&daemon, "desktop-finalize-real-preclaimed");
+        open_db(&state)
+            .expect("db")
+            .claim_transfer_work_phase(&work_item().id, WRAP_UP_PHASE)
+            .expect("claim preparation phase");
+
+        let outcome = run_sequence(&state, &work_item(), SESSION, Some("codex")).await;
+
+        let reason = outcome
+            .degraded_reason
+            .expect("an unproved phase claim reported clean finalization");
+        assert!(reason.contains("no quit command was sent"), "{reason}");
+
+        assert_only_control_probe_was_received(&daemon, real_pid, &log_path).await;
+        kill_session_best_effort(&daemon, SESSION).await;
+    }
+
+    /// The agent acknowledges the quit command but does not actually exit --
+    /// finalization's own `wait_for_exit` budget is 60s, so this test instead
+    /// forces the real daemon to `Kill` the real child the moment it observes
+    /// the quit line landed, and asserts on the `killed: true` `Exit` that
+    /// real kill produces. No process outside this test's own fixture is
+    /// touched.
+    #[tokio::test]
+    async fn a_real_forced_kill_after_quit_is_recorded_as_a_degraded_finalization() {
+        let daemon = RealDaemon::start("real-forced-exit");
+        let log_path = daemon.dir.join("child-consumed.log");
+        let script = "\
+printf '\\033[?2004h'
+IFS= read -r prep
+printf '%s\\n' \"$prep\" >> \"$KANNA_TEST_LOG\"
+printf '\\r\\nUnderstood, wrapping up now.\\r\\n'
+printf '\\r\\n\\342\\200\\272 \\r\\n'
+IFS= read -r quit
+printf '%s\\n' \"$quit\" >> \"$KANNA_TEST_LOG\"
+sleep 60
+";
+        spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let state = state_for(&daemon, "desktop-finalize-real-forced-exit");
+        let sequence = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("codex"))
+                    .await
+            }
+        });
+
+        // The real signal to intervene is the child having actually consumed
+        // the quit command, not a fixed sleep guessing when that happened.
+        wait_for_log_lines(&log_path, 2, Duration::from_secs(15)).await;
+        kill_session_best_effort(&daemon, SESSION).await;
+
+        let outcome = sequence.await.expect("finalization sequence task");
+        assert!(!outcome.cleanly_finalized());
+        let reason = outcome
+            .degraded_reason
+            .expect("a forced kill after quit reported clean finalization");
+        assert!(
+            reason.contains("forcibly killed") && reason.contains("after the quit command"),
+            "{reason}",
         );
     }
 }

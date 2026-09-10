@@ -1185,3 +1185,106 @@ async fn task_watch_sends_its_exclusions_on_every_poll() {
     assert_eq!(rows[0]["taskId"], "child-a");
     assert_eq!(rows[1]["watchOutcome"], "actionable");
 }
+
+#[tokio::test]
+async fn subscribe_events_posts_diagnostic_filters_and_timing_overrides_in_the_request_body() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let response = http_json_response("200 OK", &serde_json::json!({"id": "sub-1"}).to_string());
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let args = serde_json::json!({
+        "task_id": "task-123",
+        "task_ids": Vec::<String>::new(),
+        "exclude_task_ids": Vec::<String>::new(),
+        "local_only": false,
+        "delivery": "input",
+        "diagnostic": true,
+        "event_types": ["run.finished"],
+        "exclude_event_types": ["task.activity_changed"],
+        "quiet_ms": 30_000,
+        "max_hold_ms": 120_000,
+        "min_admission_interval_ms": 60_000,
+    });
+    call_catalog_tool_with_task_id(&base_url, &catalog, "kanna_subscribe_events", &args, None)
+        .await
+        .expect("subscribe-events catalog call");
+    let request = handle.await.unwrap();
+
+    assert!(request.starts_with("POST /v1/event-subscriptions HTTP/1.1"));
+    assert!(
+        request.contains(
+            r#"{"delivery":"input","diagnostic":true,"eventTypes":["run.finished"],"excludeEventTypes":["task.activity_changed"],"excludeTaskIds":[],"localOnly":false,"maxHoldMs":120000,"minAdmissionIntervalMs":60000,"quietMs":30000,"taskId":"task-123","taskIds":[]}"#
+        ),
+        "{request}"
+    );
+}
+
+#[tokio::test]
+async fn subscribe_events_omits_timing_overrides_and_filters_when_not_specified() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let response = http_json_response("200 OK", &serde_json::json!({"id": "sub-1"}).to_string());
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let args = serde_json::json!({
+        "task_id": "task-123",
+        "task_ids": Vec::<String>::new(),
+        "exclude_task_ids": Vec::<String>::new(),
+        "local_only": false,
+        "delivery": "input",
+        "diagnostic": false,
+    });
+    call_catalog_tool_with_task_id(&base_url, &catalog, "kanna_subscribe_events", &args, None)
+        .await
+        .expect("subscribe-events catalog call");
+    let request = handle.await.unwrap();
+
+    assert!(
+        request.contains(
+            r#"{"delivery":"input","diagnostic":false,"excludeTaskIds":[],"localOnly":false,"taskId":"task-123","taskIds":[]}"#
+        ),
+        "{request}"
+    );
+    assert!(!request.contains("quietMs"), "{request}");
+    assert!(!request.contains("maxHoldMs"), "{request}");
+    assert!(!request.contains("minAdmissionIntervalMs"), "{request}");
+    assert!(!request.contains("eventTypes"), "{request}");
+}
+
+#[tokio::test]
+async fn read_event_subscription_posts_diagnostic_in_the_request_body() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let response = http_json_response("200 OK", &serde_json::json!({"id": "sub-1"}).to_string());
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let args = serde_json::json!({"subscription_id": "sub-1", "diagnostic": true});
+    call_catalog_tool_with_task_id(
+        &base_url,
+        &catalog,
+        "kanna_read_event_subscription",
+        &args,
+        None,
+    )
+    .await
+    .expect("read-event-subscription catalog call");
+    let request = handle.await.unwrap();
+
+    assert!(request.starts_with("POST /v1/event-subscriptions/sub-1/read HTTP/1.1"));
+    assert!(request.contains(r#"{"diagnostic":true}"#), "{request}");
+}
+
+#[tokio::test]
+async fn unsubscribe_events_places_diagnostic_on_the_query_string_not_the_body() {
+    let catalog = kanna_tool_catalog::bundled_catalog();
+    let response = http_json_response("200 OK", &serde_json::json!({"id": "sub-1"}).to_string());
+    let (base_url, handle) = serve_single_http_response(response).await;
+
+    let args = serde_json::json!({"subscription_id": "sub-1", "diagnostic": true});
+    call_catalog_tool_with_task_id(&base_url, &catalog, "kanna_unsubscribe_events", &args, None)
+        .await
+        .expect("unsubscribe-events catalog call");
+    let request = handle.await.unwrap();
+
+    assert!(request
+        .starts_with("POST /v1/event-subscriptions/sub-1/unsubscribe?diagnostic=true HTTP/1.1"));
+    assert!(!request.contains(r#"{"diagnostic":true}"#), "{request}");
+}

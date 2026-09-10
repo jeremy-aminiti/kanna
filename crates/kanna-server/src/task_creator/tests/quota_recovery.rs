@@ -335,6 +335,135 @@ fn events_of(db: &Db, kind: &str) -> Vec<serde_json::Value> {
     .collect()
 }
 
+/// Drive one `actions/resume` for the quota fixture's task against a daemon
+/// that records rather than executes, and return what it was asked to spawn.
+async fn quota_resume_round(
+    config: &Config,
+) -> (axum::http::StatusCode, Vec<kanna_daemon::protocol::Command>) {
+    let daemon = super::spawn_recording_fake_daemon(config.daemon_dir.clone(), false).await;
+    let app = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+        config.clone(),
+    )));
+    let response = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::post(format!("/v1/tasks/{TASK_ID}/actions/resume"))
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let commands = daemon.await.unwrap();
+    (response.status(), commands)
+}
+
+/// The quota producer, driven for real, between a recorded success and a later
+/// recovery.
+///
+/// A succeeded, a recovery of A is running, the provider refuses that turn for
+/// spent quota and the real watcher replaces it. The refused row recorded no
+/// agent turn, so a later recovery must still reach A's verdict. Nothing here
+/// writes the classification: it has to come from the quota producer, so
+/// reverting that call to `finish_stage_run` must break this test.
+#[tokio::test]
+async fn a_real_quota_replacement_stays_transparent_to_a_later_recovery() {
+    let config = test_config("quota-recovery-chain");
+    let (repo_root, db) = init_quota_fixture("quota-recovery-chain", &config);
+
+    // A: the stage's real verdict.
+    insert_running_review_run(&db, &repo_root, "run-succeeded", "claude", None, None);
+    db.finish_stage_run(
+        "run-succeeded",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"the review passed before the outage"}"#),
+        None,
+    )
+    .unwrap();
+
+    // B: a real recovery of A, so its lineage comes from production code.
+    let (status, _) = quota_resume_round(&config).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let recovery = loop {
+        let run = db.latest_stage_run(TASK_ID).unwrap().unwrap();
+        if run.id != "run-succeeded" {
+            break run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        recovery.replaces_run_id.as_deref(),
+        Some("run-succeeded"),
+        "the recovery must be linked to the success by production, not by this test"
+    );
+    let feedback_before = recovery.feedback.clone();
+
+    // The provider refuses B for spent quota; the real watcher replaces it.
+    let state = crate::http_api::AppState::new(config.clone());
+    let replacements = state.session_replacements();
+    let fake_daemon = spawn_fake_daemon_for_rejection(
+        config.daemon_dir.clone(),
+        vec![fable_rejection(TASK_ID)],
+        1,
+    )
+    .await;
+    run_watcher(&state, &replacements).await;
+    let _ = fake_daemon.await.unwrap();
+
+    let refused = db.stage_run(&recovery.id).unwrap().unwrap();
+    assert_eq!(refused.status, "failed");
+    assert_eq!(
+        refused.no_work_termination.as_deref(),
+        Some(crate::db::no_work_termination::QUOTA_REPLACEMENT),
+        "the real quota producer must persist its classification: {refused:?}"
+    );
+    assert_eq!(
+        refused.feedback, feedback_before,
+        "the replacement leaves the attempt's retained feedback exactly as it was"
+    );
+
+    // C, the fallback candidate, then loses its session too.
+    let fallback = db
+        .list_stage_runs_for_task(TASK_ID)
+        .unwrap()
+        .into_iter()
+        .find(|run| run.status == "running")
+        .expect("the quota fallback candidate");
+    let (status, commands) = quota_resume_round(&config).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let command_line = commands
+        .iter()
+        .find_map(|command| match command {
+            kanna_daemon::protocol::Command::Spawn { args, .. } => args.last().cloned(),
+            _ => None,
+        })
+        .expect("replacement spawn command");
+    assert!(
+        command_line.contains("ALREADY completed and recorded its verdict"),
+        "a quota refusal is not a task verdict, so D must still reach A: {command_line}"
+    );
+    assert!(
+        command_line.contains("the review passed before the outage"),
+        "A's exact recorded result must reach D: {command_line}"
+    );
+    assert!(
+        !command_line.contains("Review $BRANCH") && !command_line.contains("Review it."),
+        "no ordinary stage instructions after a recorded success: {command_line}"
+    );
+    assert_eq!(
+        fallback.no_work_termination, None,
+        "the fallback itself recorded nothing yet; only the refused row is classified"
+    );
+
+    let original = db.stage_run("run-succeeded").unwrap().unwrap();
+    assert_eq!(original.status, "succeeded");
+    assert!(original
+        .result
+        .as_deref()
+        .unwrap()
+        .contains("the review passed before the outage"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 /// The regression itself: the leading candidate is refused before it has done
 /// anything, and the stage's *next* candidate starts once — same task, same
 /// stage, same workspace, carrying its own model and effort from its own

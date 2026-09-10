@@ -717,6 +717,98 @@ describe("kd CLI", () => {
     }
   });
 
+  /**
+   * The Linux commands the workflow, the ship runbook and the evidence doc all
+   * name. They were unrouted once, so `./kd build linux-package` answered
+   * `Unknown command` while three documents said it was how you build a
+   * package — a failure nothing else in the repository could catch, because the
+   * registry task existed and its own tests passed.
+   */
+  describe("the Linux packaging commands", () => {
+    it("routes build linux-package with its defaults", () => {
+      expect(parseCliArgs(["build", "linux-package"])).toEqual({
+        taskId: "build.linux-package",
+        input: { channel: "staging", skipBuild: false, allowAuditFindings: false }
+      });
+    });
+
+    it("routes build linux-package with every flag", () => {
+      expect(
+        parseCliArgs([
+          "build", "linux-package",
+          "--channel", "production",
+          "--architecture", "arm64",
+          "--version", "1.2.3",
+          "--staging-iteration", "4",
+          "--skip-build",
+          "--allow-audit-findings"
+        ])
+      ).toEqual({
+        taskId: "build.linux-package",
+        input: {
+          channel: "production",
+          architecture: "arm64",
+          version: "1.2.3",
+          stagingIteration: 4,
+          skipBuild: true,
+          allowAuditFindings: true
+        }
+      });
+    });
+
+    it("rejects values the registry task would reject anyway, at the argv", () => {
+      expect(() => parseCliArgs(["build", "linux-package", "--channel", "beta"])).toThrow(/--channel must be one of/);
+      expect(() => parseCliArgs(["build", "linux-package", "--architecture", "ppc64"])).toThrow(/--architecture must be one of/);
+      expect(() => parseCliArgs(["build", "linux-package", "--staging-iteration", "0"])).toThrow(/positive integer/);
+      expect(() => parseCliArgs(["build", "linux-package", "--channel"])).toThrow(/--channel requires a value/);
+      expect(() => parseCliArgs(["build", "linux-package", "--nope"])).toThrow(/does not accept --nope/);
+    });
+
+    it("routes test linux-installed with both artifacts", () => {
+      expect(
+        parseCliArgs([
+          "test", "linux-installed",
+          "--old-artifact", "/tmp/a.deb",
+          "--new-artifact", "/tmp/b.deb",
+          "--channel", "staging"
+        ])
+      ).toEqual({
+        taskId: "test.linux-installed",
+        input: { channel: "staging", oldArtifact: "/tmp/a.deb", newArtifact: "/tmp/b.deb" }
+      });
+    });
+
+    /**
+     * A run given one package would exercise the install half and report a pass
+     * for the upgrade gate Phase 1 deferred to this phase, so the argv refuses
+     * it rather than letting the lane discover it later.
+     */
+    it("refuses a single-package run", () => {
+      expect(() => parseCliArgs(["test", "linux-installed", "--old-artifact", "/tmp/a.deb"])).toThrow(
+        /requires --new-artifact/
+      );
+      expect(() => parseCliArgs(["test", "linux-installed", "--new-artifact", "/tmp/b.deb"])).toThrow(
+        /requires --old-artifact/
+      );
+      expect(() => parseCliArgs(["test", "linux-installed"])).toThrow(/requires --old-artifact/);
+    });
+
+    it("lists both commands in kd help", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        await runCli(["--help"]);
+        const top = log.mock.calls.map((call) => String(call[0])).join("\n");
+        expect(top).toContain("build linux-package");
+
+        log.mockClear();
+        await runCli(["test", "--help"]);
+        expect(log.mock.calls.map((call) => String(call[0])).join("\n")).toContain("test linux-installed");
+      } finally {
+        log.mockRestore();
+      }
+    });
+  });
+
   it("parses dev up with mobile and emulators flags", () => {
     expect(parseCliArgs(["dev", "up", "--mobile", "--emulators", "--seed"])).toEqual({
       taskId: "dev.up",

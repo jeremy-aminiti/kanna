@@ -4,6 +4,7 @@ mod daemon_client;
 mod daemon_lifecycle;
 #[cfg(debug_assertions)]
 mod dev_url;
+pub mod linux_graphics;
 mod macos;
 mod menu;
 mod menu_accelerators;
@@ -90,8 +91,19 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build());
+        .plugin(tauri_plugin_process::init());
+
+    // Linux updates belong to the package manager, so the self-updater is not
+    // registered at all there. Hiding a button would leave the capability
+    // present: a renderer bug, or anything that reached `plugin:updater`,
+    // could still download and install over a dpkg-managed installation —
+    // replacing files the package manager believes it owns and leaving the
+    // machine unable to upgrade itself afterwards. Not registering the plugin
+    // makes that unreachable rather than merely unclicked.
+    #[cfg(not(target_os = "linux"))]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
 
     #[cfg(debug_assertions)]
     {
@@ -346,6 +358,7 @@ pub fn run() {
             commands::fs::write_text_file,
             commands::fs::which_binary,
             commands::fs::read_env_var,
+            commands::linux_package::linux_package_status,
             commands::fs::append_log,
             commands::fs::get_app_data_dir,
             commands::fs::get_app_build_info,

@@ -454,6 +454,112 @@ function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
   };
 }
 
+/**
+ * `kd build linux-package` and `kd test linux-installed`.
+ *
+ * Dedicated parsers rather than `parseFlagInput`, which only knows a fixed set
+ * of value-taking flags; teaching it six more would change how every other
+ * command reads its argv. This is the same shape `parseRemoteE2eInput` uses.
+ */
+function takeValue(rest: string[], index: number, flag: string): string {
+  const value = rest[index + 1];
+  if (!value || value.startsWith("--")) {
+    throw new Error(`${flag} requires a value`);
+  }
+  return value;
+}
+
+const LINUX_CHANNELS = ["production", "staging"];
+const LINUX_ARCHITECTURES = ["x86_64", "arm64"];
+
+function parseLinuxPackageInput(rest: string[]): ParsedCliCommand {
+  const input: Record<string, unknown> = { channel: "staging", skipBuild: false, allowAuditFindings: false };
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index] as string;
+    switch (arg) {
+      case "--channel": {
+        const value = takeValue(rest, index, arg);
+        if (!LINUX_CHANNELS.includes(value)) {
+          throw new Error(`--channel must be one of ${LINUX_CHANNELS.join(", ")}`);
+        }
+        input.channel = value;
+        index += 1;
+        break;
+      }
+      case "--architecture": {
+        const value = takeValue(rest, index, arg);
+        if (!LINUX_ARCHITECTURES.includes(value)) {
+          throw new Error(`--architecture must be one of ${LINUX_ARCHITECTURES.join(", ")}`);
+        }
+        input.architecture = value;
+        index += 1;
+        break;
+      }
+      case "--version": {
+        input.version = takeValue(rest, index, arg);
+        index += 1;
+        break;
+      }
+      case "--staging-iteration": {
+        const value = takeValue(rest, index, arg);
+        const iteration = Number(value);
+        if (!Number.isInteger(iteration) || iteration < 1) {
+          throw new Error("--staging-iteration must be a positive integer");
+        }
+        input.stagingIteration = iteration;
+        index += 1;
+        break;
+      }
+      case "--skip-build":
+        input.skipBuild = true;
+        break;
+      case "--allow-audit-findings":
+        input.allowAuditFindings = true;
+        break;
+      default:
+        throw new Error(`build linux-package does not accept ${arg}`);
+    }
+  }
+  return { taskId: "build.linux-package", input };
+}
+
+function parseLinuxInstalledInput(rest: string[]): ParsedCliCommand {
+  const input: Record<string, unknown> = { channel: "production" };
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index] as string;
+    switch (arg) {
+      case "--old-artifact":
+        input.oldArtifact = takeValue(rest, index, arg);
+        index += 1;
+        break;
+      case "--new-artifact":
+        input.newArtifact = takeValue(rest, index, arg);
+        index += 1;
+        break;
+      case "--channel": {
+        const value = takeValue(rest, index, arg);
+        if (!LINUX_CHANNELS.includes(value)) {
+          throw new Error(`--channel must be one of ${LINUX_CHANNELS.join(", ")}`);
+        }
+        input.channel = value;
+        index += 1;
+        break;
+      }
+      default:
+        throw new Error(`test linux-installed does not accept ${arg}`);
+    }
+  }
+  // Both are required by the lane itself: a run given one package would
+  // exercise the install half and report a pass for the upgrade gate.
+  for (const required of ["oldArtifact", "newArtifact"] as const) {
+    if (typeof input[required] !== "string") {
+      const flag = required === "oldArtifact" ? "--old-artifact" : "--new-artifact";
+      throw new Error(`test linux-installed requires ${flag}: the lane upgrades between two real packages`);
+    }
+  }
+  return { taskId: "test.linux-installed", input };
+}
+
 function parseRemoteDoctorInput(rest: string[]): ParsedCliCommand {
   const [first, ...remaining] = rest;
   if (first !== "--remote") {
@@ -870,6 +976,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   if (group === "build" && command === "sidecars") {
     return { taskId: "build.sidecars", input: {} };
   }
+  if (group === "build" && command === "linux-package") {
+    return parseLinuxPackageInput(rest);
+  }
   // TEMPORARY COMPATIBILITY SHIM — remove once no branch predating the kache
   // migration is still open.
   //
@@ -943,6 +1052,9 @@ export function parseCliArgs(args: string[]): ParsedCliCommand {
   }
   if (group === "test" && command === "headless-worker") {
     return { taskId: "test.headless-worker", input: {} };
+  }
+  if (group === "test" && command === "linux-installed") {
+    return parseLinuxInstalledInput(rest);
   }
   if (group === "test" && command === "desktop-e2e") {
     return { taskId: "test.desktop-e2e", input: {} };
@@ -1061,6 +1173,7 @@ const helpTopics: Record<string, string[]> = {
     "  clean [--all] [--dry] [--shared-rust-build]",
     "  build desktop",
     "  build sidecars",
+    "  build linux-package [--channel production|staging] [--architecture x86_64|arm64] [--version X.Y.Z] [--staging-iteration <n>] [--skip-build] [--allow-audit-findings]",
     "  rust-cache install|status",
     "  release ship [--staging|--production] [--dry-run] [--release] [--major|--minor|--patch] [--arm64|--x86_64] [--rollback-to <version>] [--branch main|release/X.Y]",
     "  release promote <staging-version> [--dry-run] [--arm64|--x86_64] [--override-soak <reason>]",
@@ -1431,7 +1544,21 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Commands:",
     "  build desktop",
-    "  build sidecars"
+    "  build sidecars",
+    "  build linux-package"
+  ],
+  "build linux-package": [
+    "Usage: kd build linux-package [--channel production|staging] [--architecture x86_64|arm64]",
+    "                              [--version X.Y.Z] [--staging-iteration <n>] [--skip-build]",
+    "                              [--allow-audit-findings]",
+    "",
+    "Build one architecture's Linux .deb. Compiles, audits every shipped artifact's",
+    "ELF closure against packaging/linux/runtime-policy.json, derives Depends from",
+    "what survives, then packages. Linux host only: it reads real ELF headers and",
+    "calls dpkg-deb.",
+    "",
+    "--allow-audit-findings is for local iteration only. It marks the result",
+    "auditOverridden, and such an artifact must never be published."
   ],
   "build desktop": [
     "Usage: kd build desktop",
@@ -1617,6 +1744,7 @@ const helpTopics: Record<string, string[]> = {
     "Commands:",
     "  test all",
     "  test rust",
+    "  test linux-installed --old-artifact <deb> --new-artifact <deb> [--channel production|staging]",
     "  test desktop-e2e",
     "  test desktop-e2e-operator",
     "  test desktop-mock-e2e",
@@ -1637,6 +1765,17 @@ const helpTopics: Record<string, string[]> = {
     "Usage: kd test rust",
     "",
     "Run workspace Rust tests with daemon integration tests serialized."
+  ],
+  "test linux-installed": [
+    "Usage: kd test linux-installed --old-artifact <deb> --new-artifact <deb>",
+    "                               [--channel production|staging]",
+    "",
+    "Install a built .deb, run the worker under systemd --user, then upgrade to a",
+    "second package with a live agent session and prove the session survived.",
+    "",
+    "Both packages are required: a run given one would exercise the install half",
+    "and report a pass for the upgrade gate. Needs a Linux host where the test",
+    "user can become root."
   ],
   "test headless-worker": [
     "Usage: kd test headless-worker",

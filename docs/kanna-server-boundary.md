@@ -1294,13 +1294,22 @@ A push cannot ship a conversation the source agent is still writing to, so the
 engine shuts that agent down first — by **typing at it**, not by signalling it
 (`transfer_engine/finalize.rs`):
 
-1. inject a wrap-up message through the same two-step input helper every other
-   Kanna input path uses (`task_input.rs`: the text as one write, 150 ms, then a
-   lone CR so it registers as a discrete Enter);
-2. wait for the daemon to report the session `Idle` — `Waiting` is a permission
-   prompt, not idleness;
+1. inject a wrap-up message through the same logical-input helper every other
+   Kanna input path uses, fenced to the PTY process observed at attach; current
+   daemons write the message and its trailing CR as one buffer and acknowledge
+   only after all of it reaches the PTY;
+2. apply the existing settled-`Idle` sequencing policy on the daemon's status
+   stream — status carries no input identity and is not proof of submission or
+   provider completion; `Waiting` is a permission prompt;
 3. inject the provider's quit command (`AgentProvider::quit_command`);
 4. wait for the daemon `Exit`, and only then stage artifacts.
+
+The durable at-most-once phase claim is crash protection, not delivery proof.
+If recovery finds the wrap-up phase already claimed, or the daemon response was
+lost after a possible write, finalization does not resend or treat the phase as
+success: it records a degraded result. A fresh acknowledgement is still only
+the responding daemon's delivery contract; provider parsing and completion are
+not inferred from it.
 
 Nothing is typed while the session is `Waiting`. Step 3 gets that from step 2 —
 it is only reached on `Idle` — but step 1 has nothing in front of it, so the
@@ -1316,9 +1325,10 @@ The old mechanism was a `SIGINT` and a 1500 ms wait, and it could not work on
 any session the daemon had **adopted** through a handoff: the daemon refuses
 signals for a child it never forked, because the pid cannot be pinned across
 `kill(2)`. Every session older than the running daemon is adopted, so after
-every app upgrade no pre-existing task could be finalized. `Command::Input` has
-no such ownership check, which is what makes injection the mechanism that works
-where signalling cannot (pinned in `crates/daemon/tests/handoff.rs`).
+every app upgrade no pre-existing task could be finalized. Fenced
+`Command::SubmitInputIfSession` has no child-ownership check and verifies the
+observed PTY pid instead, which is what makes injection work where signalling
+cannot (pinned in `crates/daemon/tests/handoff.rs`).
 
 Each step appends `task.transfer_finalizing` to the task event feed with a
 `payload.phase`, because a wrap-up is legitimately minutes of latency and has to

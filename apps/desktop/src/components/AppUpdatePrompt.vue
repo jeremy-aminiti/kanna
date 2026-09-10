@@ -11,6 +11,7 @@ const props = defineProps<{
 
 const {
   status,
+  packageStatus,
   updateVersion,
   releaseNotes,
   publishedAt,
@@ -29,6 +30,14 @@ const isAvailable = computed(() => status.value === "available");
 const isDownloading = computed(() => status.value === "downloading");
 const isReadyToRestart = computed(() => status.value === "readyToRestart");
 const isError = computed(() => status.value === "error");
+/**
+ * The Linux states. Kept separate from `isAvailable` on purpose: that headline
+ * sits above an Install button the app can honour, and here it cannot — the
+ * upgrade belongs to apt. Showing the same words with a different button is how
+ * a person ends up believing they clicked something.
+ */
+const isPackageManagerUpdate = computed(() => status.value === "packageManagerUpdate");
+const isPackageManagerUnknown = computed(() => status.value === "packageManagerUnknown");
 
 const progressText = computed(() => {
   if (contentLength.value == null || contentLength.value <= 0) {
@@ -60,12 +69,14 @@ async function restartUpdate() {
               <template v-if="isAvailable">{{ t("app.update.available") }}</template>
               <template v-else-if="isDownloading">{{ t("app.update.downloading") }}</template>
               <template v-else-if="isReadyToRestart">{{ t("app.update.readyToRestart") }}</template>
+              <template v-else-if="isPackageManagerUpdate">{{ t("app.update.packageManagerUpdate") }}</template>
+              <template v-else-if="isPackageManagerUnknown">{{ t("app.update.packageManagerUnknown") }}</template>
               <template v-else-if="isError">{{ t("app.update.error") }}</template>
             </h2>
           </div>
         </div>
         <button
-          v-if="isAvailable || isError"
+          v-if="isAvailable || isError || isPackageManagerUpdate || isPackageManagerUnknown"
           class="update-prompt__icon-button"
           type="button"
           :aria-label="t('actions.dismiss')"
@@ -98,6 +109,24 @@ async function restartUpdate() {
 
         <template v-else-if="isReadyToRestart">
           <p class="update-prompt__notes">{{ t("app.update.restartReady") }}</p>
+        </template>
+
+        <template v-else-if="isPackageManagerUpdate">
+          <p class="update-prompt__notes">{{ t("app.update.packageManagerHint") }}</p>
+          <p v-if="packageStatus?.installedVersion" class="update-prompt__notes">
+            {{ t("app.update.packageManagerInstalled", { version: packageStatus.installedVersion }) }}
+          </p>
+          <p v-if="packageStatus?.candidateVersion" class="update-prompt__notes">
+            {{ t("app.update.packageManagerCandidate", { version: packageStatus.candidateVersion }) }}
+          </p>
+          <p class="update-prompt__notes update-prompt__command" data-testid="update-package-command">
+            {{ t("app.update.packageManagerCommand", { package: packageStatus?.packageName ?? "kanna" }) }}
+          </p>
+        </template>
+
+        <template v-else-if="isPackageManagerUnknown">
+          <p class="update-prompt__notes">{{ t("app.update.packageManagerUnknownHint") }}</p>
+          <p v-if="packageStatus?.detail" class="update-prompt__notes">{{ packageStatus.detail }}</p>
         </template>
 
         <template v-else-if="isError">
@@ -152,9 +181,10 @@ async function restartUpdate() {
           {{ t("app.update.retry") }}
         </button>
         <button
-          v-if="isAvailable || isError"
+          v-if="isAvailable || isError || isPackageManagerUpdate || isPackageManagerUnknown"
           class="update-prompt__button"
           type="button"
+          data-testid="update-dismiss-button"
           @click="dismissUpdate"
         >
           {{ t("actions.dismiss") }}
@@ -206,6 +236,12 @@ async function restartUpdate() {
   margin-top: 4px;
   font-size: 16px;
   line-height: 1.25;
+}
+
+.update-prompt__command {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  user-select: text;
+  overflow-wrap: anywhere;
 }
 
 .update-prompt__status {
