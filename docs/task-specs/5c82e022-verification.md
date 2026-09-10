@@ -236,3 +236,15 @@ resize, or relaxing the test assertion. The full log and actual exit file are
 failed test. No new screenshot was produced because the failure occurred before
 the target's capture points. The runner stopped both tmux sessions, relay, and
 Firebase emulator; direct checks found no owned session remaining.
+
+## Pending native-focus diagnostic wiring
+
+The next approved focused native run will retain the current behavior but add
+test-only observations around each existing `plugin:window|set_focus` request:
+native `plugin:window|is_focused` immediately before and after the request,
+the scoped Tauri `tauri://focus` / `tauri://blur` events registered before it,
+and the existing DOM and terminal-input focus values. The listener cleanup is
+part of the same test helper. This distinguishes a native window-focus event
+failure from a WebView-only focus discrepancy without adding a production
+focus command, resize, timer, or ownership exception. It is source-ready only;
+no native execution was performed for this instrumentation.

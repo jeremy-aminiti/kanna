@@ -23,6 +23,15 @@ interface RenderedTerminal extends Dimensions {
   markerRendered: boolean;
 }
 
+interface FocusObservation {
+  documentHasFocus: boolean;
+  focusEvents: boolean[];
+  nativeFocusError: string | null;
+  nativeFocusedAfter: boolean | null;
+  nativeFocusedBefore: boolean | null;
+  terminalHasFocus: boolean;
+}
+
 let fixtureRepoPath = "";
 let primaryRepoId = "";
 let ownerDesktopId = "";
@@ -171,28 +180,73 @@ async function waitForOwnerAndRenderer(
 }
 
 async function focusTerminal(client: WebDriverClient, ownerTaskId: string): Promise<void> {
-  const nativeFocus = await client.executeAsync<string>(`
+  const focusState = await client.executeAsync<FocusObservation>(`
     const done = arguments[arguments.length - 1];
-    Promise.resolve(window.__TAURI_INTERNALS__?.invoke("plugin:window|set_focus", { label: "main" }))
-      .then(() => done("ok"), (error) => done("error:" + String(error)));
-  `);
-  if (nativeFocus !== "ok") {
-    throw new Error(`native main-window focus failed: ${nativeFocus}`);
-  }
-  await sleep(500);
-  const focusState = await client.executeSync<{ documentHasFocus: boolean; terminalHasFocus: boolean }>(`
-    window.focus();
-    const remote = document.querySelector(
-      ".cloud-terminal-shell[data-owner-task-id=" + JSON.stringify(${JSON.stringify(ownerTaskId)}) + "] .xterm-helper-textarea",
-    );
-    const local = document.querySelector(".main-panel .terminal-container .xterm-helper-textarea");
-    const input = remote instanceof HTMLElement ? remote : local;
-    if (input instanceof HTMLElement) input.focus();
-    return {
-      documentHasFocus: document.hasFocus(),
-      terminalHasFocus: document.activeElement === input,
+    void (async () => {
+    const internals = window.__TAURI_INTERNALS__;
+    const label = internals?.metadata?.currentWindow?.label;
+    if (!internals || typeof label !== "string" || label.length === 0) {
+      done({ nativeFocusError: "current native window label unavailable" });
+      return;
+    }
+    const focusEvents = [];
+    const listeners = [];
+    const listen = async (event, focused) => {
+      const handler = internals.transformCallback(() => focusEvents.push(focused), false);
+      const eventId = await internals.invoke("plugin:event|listen", {
+        event,
+        target: { kind: "Window", label },
+        handler,
+      });
+      listeners.push({ event, eventId, handler });
     };
+    const cleanup = async () => {
+      await Promise.all(listeners.map(async ({ event, eventId, handler }) => {
+        internals.unregisterCallback?.(handler);
+        await internals.invoke("plugin:event|unlisten", { event, eventId });
+      }));
+    };
+    let result;
+    try {
+      await Promise.all([
+        listen("tauri://focus", true),
+        listen("tauri://blur", false),
+      ]);
+      const nativeFocusedBefore = await internals.invoke("plugin:window|is_focused", { label });
+      let nativeFocusError = null;
+      try {
+        await internals.invoke("plugin:window|set_focus", { label });
+      } catch (error) {
+        nativeFocusError = String(error);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      window.focus();
+      const remote = document.querySelector(
+        ".cloud-terminal-shell[data-owner-task-id=" + JSON.stringify(${JSON.stringify(ownerTaskId)}) + "] .xterm-helper-textarea",
+      );
+      const local = document.querySelector(".main-panel .terminal-container .xterm-helper-textarea");
+      const input = remote instanceof HTMLElement ? remote : local;
+      if (input instanceof HTMLElement) input.focus();
+      const nativeFocusedAfter = await internals.invoke("plugin:window|is_focused", { label });
+      result = {
+        documentHasFocus: document.hasFocus(),
+        focusEvents,
+        nativeFocusError,
+        nativeFocusedAfter,
+        nativeFocusedBefore,
+        terminalHasFocus: document.activeElement === input,
+      };
+    } catch (error) {
+      result = { nativeFocusError: String(error) };
+    } finally {
+      await cleanup();
+    }
+    done(result);
+    })();
   `);
+  if (focusState.nativeFocusError) {
+    throw new Error(`native main-window focus failed: ${JSON.stringify(focusState)}`);
+  }
   if (!focusState.documentHasFocus || !focusState.terminalHasFocus) {
     throw new Error(`foreground terminal focus was not established: ${JSON.stringify(focusState)}`);
   }
