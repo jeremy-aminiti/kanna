@@ -649,6 +649,244 @@ printf 'retained' > resume-proof.txt
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+/// The transcript preflight fails, so there is no conversation to reopen — but
+/// the stage's verdict is already recorded. Before the succeeded-run fix this
+/// case was unreachable (the route refused it); making it reachable must not
+/// mean handing a finished agent the ordinary stage instructions and letting it
+/// do the work a second time.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn succeeded_recovery_without_a_transcript_does_not_replay_the_finished_stage() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-succeeded-no-transcript");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"merged the queue and recorded the verdict"}"#),
+        None,
+    )
+    .unwrap();
+    // Deliberately no transcript: an empty config dir is what a preflight
+    // failure looks like from `claude_transcript_exists`.
+    let config_dir = repo_root.join("empty-claude-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    write_fresh_claude_probe(&worktree);
+
+    let fake_daemon = spawn_recovery_fake_daemon(config.daemon_dir.clone()).await;
+    let (response, commands) = {
+        let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+        let app = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+            config.clone(),
+        )));
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::post("/v1/tasks/recovery-task/actions/resume")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let commands = fake_daemon.await.unwrap();
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        (response, commands)
+    };
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+    let command_line = commands
+        .iter()
+        .find_map(|command| match command {
+            kanna_daemon::protocol::Command::Spawn { args, .. } => args.last(),
+            _ => None,
+        })
+        .expect("replacement spawn command");
+    assert!(
+        !command_line.contains("--resume"),
+        "there is no transcript to reopen: {command_line}"
+    );
+    assert!(
+        command_line.contains("ALREADY completed and recorded its verdict"),
+        "a fresh conversation after a recorded success must be told not to redo it: {command_line}"
+    );
+    assert!(
+        command_line.contains("merged the queue and recorded the verdict"),
+        "the fresh conversation has no memory, so the recorded result must be restated: {command_line}"
+    );
+    assert!(
+        !command_line.contains("Implement the requested task in this worktree"),
+        "ordinary stage execution instructions must not be issued as success recovery: {command_line}"
+    );
+
+    // The original success survives untouched.
+    let finished = db.stage_run("run-killed-mid-turn").unwrap().unwrap();
+    assert_eq!(finished.status, "succeeded");
+    assert!(finished
+        .result
+        .as_deref()
+        .unwrap()
+        .contains("merged the queue and recorded the verdict"));
+
+    let run = loop {
+        let run = db.latest_stage_run("recovery-task").unwrap().unwrap();
+        if run.id != "run-killed-mid-turn" {
+            break run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        run.resume_fallback_reason.as_deref(),
+        Some("no claude CLI transcript for the previous session")
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// The other exit from the same change: the transcript passes preflight, the
+/// resume launches, and Claude rejects the session. That relaunch is forced
+/// fresh, so it lands on the same fallback and must keep the same no-redo
+/// semantics — the ancestor run, not the rejected recovery run, holds the
+/// verdict.
+#[tokio::test]
+async fn rejected_resume_after_a_success_verdict_keeps_the_no_redo_instruction() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-rejected-succeeded");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"shipped the release and recorded it"}"#),
+        None,
+    )
+    .unwrap();
+    // The recovery run this fix creates: running, resuming the succeeded run.
+    db.insert_stage_run(NewStageRun {
+        id: "run-resume-attempt",
+        task_id: "recovery-task",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: Some(RECOVERY_MODEL),
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("recovery-task"),
+        provider_session_id: Some(RECOVERY_SESSION_ID),
+        cwd: Some(worktree.to_string_lossy().as_ref()),
+        resumed_from_run_id: Some("run-killed-mid-turn"),
+    })
+    .unwrap();
+    write_fresh_claude_probe(&worktree);
+
+    let fake_daemon = spawn_rejected_resume_fake_daemon(
+        config.daemon_dir.clone(),
+        rejected_resume_screen(),
+        true,
+    )
+    .await;
+    crate::http_api::handle_task_terminal_state(
+        &crate::http_api::AppState::new(config.clone()),
+        "recovery-task",
+        1,
+    )
+    .await
+    .unwrap();
+    let commands = fake_daemon.await.unwrap();
+
+    let command_line = commands
+        .iter()
+        .find_map(|command| match command {
+            kanna_daemon::protocol::Command::Spawn { args, .. } => args.last(),
+            _ => None,
+        })
+        .expect("replacement spawn command");
+    assert!(
+        !command_line.contains("--resume"),
+        "the rejected session must not be asked for again: {command_line}"
+    );
+    assert!(
+        command_line.contains("ALREADY completed and recorded its verdict"),
+        "a rejected resume of a succeeded stage must still forbid the redo: {command_line}"
+    );
+    assert!(
+        command_line.contains("shipped the release and recorded it"),
+        "the ancestor's recorded result must be restated: {command_line}"
+    );
+    assert!(
+        !command_line.contains("Implement the requested task in this worktree"),
+        "ordinary stage execution instructions must not be issued as success recovery: {command_line}"
+    );
+
+    let finished = db.stage_run("run-killed-mid-turn").unwrap().unwrap();
+    assert_eq!(
+        finished.status, "succeeded",
+        "the ancestor's verdict is not the rejected attempt's to rewrite"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// A succeeded run whose PTY is still alive has nothing to recover. The route
+/// must refuse it without spawning anything and without disturbing the
+/// recorded success. The daemon wait is bounded: on this path there is no
+/// spawn to wait for, so an unbounded await would hang instead of failing.
+#[tokio::test]
+async fn a_live_succeeded_session_is_refused_without_spawning() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-succeeded-live");
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"still talking on a live session"}"#),
+        None,
+    )
+    .unwrap();
+
+    let daemon = spawn_listing_fake_daemon(config.daemon_dir.clone()).await;
+    let app = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+        config.clone(),
+    )));
+    let response = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::post("/v1/tasks/recovery-task/actions/resume")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&body).contains("task session is still alive"),
+        "the live-session exclusion must survive admitting succeeded runs"
+    );
+
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(10), daemon)
+        .await
+        .expect("the refusal must settle the daemon wait, not hang on a spawn that never comes")
+        .unwrap();
+    assert!(
+        matches!(observed, kanna_daemon::protocol::Command::List),
+        "only the presence probe may reach the daemon: {observed:?}"
+    );
+
+    let finished = db.stage_run("run-killed-mid-turn").unwrap().unwrap();
+    assert_eq!(finished.status, "succeeded");
+    assert!(finished
+        .result
+        .as_deref()
+        .unwrap()
+        .contains("still talking on a live session"));
+    assert_eq!(
+        db.latest_stage_run("recovery-task").unwrap().unwrap().id,
+        "run-killed-mid-turn",
+        "a refusal must not create a replacement run"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
 async fn restart_recovery_discovers_and_resumes_codex_by_worktree_cwd() {

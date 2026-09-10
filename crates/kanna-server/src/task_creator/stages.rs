@@ -7,7 +7,8 @@ use super::definitions::{
 };
 use super::prepare_stage_run_spawn;
 use super::prompt::{
-    build_revision_resume_message, build_revision_task_prompt, build_target_stage_prompt,
+    build_completed_stage_recovery_prompt, build_revision_resume_message,
+    build_revision_task_prompt, build_target_stage_prompt,
     build_target_stage_prompt_with_instructions, RevisionRound,
 };
 use super::resume::{prepare_resume_workspace, same_cwd};
@@ -1075,6 +1076,34 @@ fn prepare_stage_restart(
         | StageRestartIntent::NextProviderAfterQuotaRejection { .. } => run.feedback.clone(),
         StageRestartIntent::ResumeProviderSession => None,
     };
+    // Does this restart follow a stage that already recorded success? `run` is
+    // the run being replaced: for a direct resume that is the succeeded run
+    // itself, and for a rejected-resume or quota relaunch it is the recovery
+    // run, whose ancestor holds the verdict. Every prompt below branches on
+    // this, because *none* of these paths may hand ordinary stage instructions
+    // to an agent that already finished the stage.
+    let (stage_already_succeeded, completed_stage_result) = match &intent {
+        StageRestartIntent::ResumeProviderSession => {
+            if run.status == "succeeded" {
+                (true, run.result.clone())
+            } else {
+                (false, None)
+            }
+        }
+        StageRestartIntent::FreshAfterRejectedResume { .. }
+        | StageRestartIntent::NextProviderAfterQuotaRejection { .. } => {
+            match run.resumed_from_run_id.as_deref() {
+                Some(ancestor_id) => match db
+                    .stage_run(ancestor_id)
+                    .map_err(|error| format!("db error: {error}"))?
+                {
+                    Some(ancestor) if ancestor.status == "succeeded" => (true, ancestor.result),
+                    _ => (false, None),
+                },
+                None => (false, None),
+            }
+        }
+    };
     let superseded = db
         .stage_run_workflow_superseded(task_id, &run.id)
         .map_err(|error| format!("db error: {error}"))?;
@@ -1118,7 +1147,7 @@ fn prepare_stage_restart(
             // A run that recorded success and then lost its PTY has no
             // interrupted work to finish, and telling it otherwise is how a
             // recovered manual stage redoes a stage it already completed.
-            if run.status == "succeeded" {
+            if stage_already_succeeded {
                 format!(
                     "Kanna recovered this task after its previous terminal session ended. \
                      The last run already recorded its stage verdict, so there is no \
@@ -1141,6 +1170,22 @@ fn prepare_stage_restart(
             },
             None,
         ),
+        Err(reason) if stage_already_succeeded => {
+            // Both fallbacks land here: a transcript that failed preflight, and
+            // a resume the provider rejected at runtime. Neither may replay a
+            // stage whose verdict is already recorded.
+            log::info!(
+                "task resume unavailable for {task_id}: {reason}; \
+                 spawning fresh after a recorded success"
+            );
+            let prompt = build_completed_stage_recovery_prompt(
+                &target_stage.name,
+                &reason,
+                completed_stage_result.as_deref(),
+                source_task.prompt.as_deref().unwrap_or(""),
+            );
+            (RunWorkspaceSpec::Current, prompt, Some(reason))
+        }
         Err(reason) => {
             log::info!("task resume unavailable for {task_id}: {reason}; spawning fresh");
             let prev_result = previous_stage_result(db, task_id, source_task)?;
