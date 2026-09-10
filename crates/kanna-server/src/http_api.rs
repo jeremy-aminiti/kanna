@@ -13,6 +13,7 @@ pub(crate) mod event_subscriptions;
 mod harness_wake;
 pub(crate) mod invoke_desktop;
 mod ksp;
+mod lan_bootstrap;
 mod lan_trust;
 mod machine_stats;
 mod mobile_notifications;

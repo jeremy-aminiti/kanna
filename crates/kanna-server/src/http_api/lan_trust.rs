@@ -72,6 +72,48 @@ pub(super) struct DesktopLocalAccess;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AccountWideTaskEventAccess(bool);
 
+/// Authority for the relay-only same-account LAN bootstrap endpoint. The
+/// caller must have arrived through relay's own connection-bound,
+/// desktop-secret-verified identity (`desktopRouting` capability v2 or
+/// later) - never a local dispatch, a legacy device-token-authenticated
+/// tunnel, or anything a caller could self-report. Both fields are exactly
+/// as trustworthy as `AuthenticatedHttpInvoke` documents them to be, which
+/// is why this extractor refuses unless *both* are present rather than
+/// trusting `TunneledHttpInvoke`/`AuthenticatedHttpInvoke` presence alone -
+/// a v1 relay, a local dispatch, or a non-desktop-secret-authenticated
+/// tunnel each leave one or both `None`.
+pub(super) struct RelayAttestedSource {
+    pub(super) source_desktop_id: String,
+    pub(super) account_uid: String,
+}
+
+impl FromRequestParts<Arc<AppState>> for RelayAttestedSource {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let unauthorized = || {
+            (
+                StatusCode::UNAUTHORIZED,
+                "same-account LAN bootstrap requires a relay attesting both the account and the source desktop identity".to_string(),
+            )
+        };
+        let invoke = parts
+            .extensions
+            .get::<AuthenticatedHttpInvoke>()
+            .ok_or_else(unauthorized)?;
+        match (&invoke.account_uid, &invoke.source_desktop_id) {
+            (Some(account_uid), Some(source_desktop_id)) => Ok(Self {
+                source_desktop_id: source_desktop_id.clone(),
+                account_uid: account_uid.clone(),
+            }),
+            _ => Err(unauthorized()),
+        }
+    }
+}
+
 impl FromRequestParts<Arc<AppState>> for PrivilegedTaskAccess {
     type Rejection = (StatusCode, String);
 

@@ -11,6 +11,7 @@ use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine
 #[cfg(debug_assertions)]
 use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
 use super::ksp::{ksp_stream, legacy_ksp_stream};
+use super::lan_bootstrap::bootstrap_lan_trust;
 use super::lan_trust::{
     attach_trusted_lan_device, require_http_access, require_local_client_authority,
 };
@@ -99,6 +100,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/cloud/desktops/{desktop_id}/invoke",
             post(invoke_cloud_desktop),
         )
+        .route("/v1/lan-routing/bootstrap", post(bootstrap_lan_trust))
         .route(
             "/v1/settings/cloud-transfer-identity",
             axum::routing::put(put_cloud_transfer_identity),

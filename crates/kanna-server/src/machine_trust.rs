@@ -23,7 +23,20 @@
 use crate::pairing;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Guards every load-modify-save cycle against this store's own file, so two
+/// concurrent bootstrap requests (or a bootstrap racing an account-change
+/// reconciliation) cannot interleave and drop one writer's update. A
+/// process-wide static rather than a new `AppState` field: `AppState` has no
+/// builder, and a new required field would touch every literal `AppState`
+/// construction site across this crate's tests for something that is purely
+/// an implementation detail of this module's own persistence.
+pub(crate) fn persistence_mutex() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Maximum lifetime of an automatic trust record. Renewed only by another
 /// authenticated relay bootstrap; there is deliberately no background
