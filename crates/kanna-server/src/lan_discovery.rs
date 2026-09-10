@@ -172,6 +172,31 @@ fn candidate_from_resolution(
     Some((desktop_id?.to_string(), SocketAddr::new(address?, port)))
 }
 
+/// Diagnostic only - explains why [`candidate_from_resolution`] rejected a
+/// resolution, without changing its decision in any way (this function has
+/// no effect on filtering; it exists to make a silent rejection observable
+/// while diagnosing whether discovery is failing before or after a real
+/// `ServiceResolved` event).
+fn candidate_rejection_reason(
+    desktop_id: Option<&str>,
+    address: Option<IpAddr>,
+    advertised_environment: Option<&str>,
+    advertised_protocol_version: Option<&str>,
+    current_environment: &str,
+) -> &'static str {
+    if advertised_environment != Some(current_environment) {
+        "environment mismatch"
+    } else if advertised_protocol_version != Some(&LAN_ROUTING_PROTOCOL_VERSION.to_string()) {
+        "protocol version mismatch"
+    } else if desktop_id.is_none() {
+        "missing desktopId TXT property"
+    } else if address.is_none() {
+        "no resolved address"
+    } else {
+        "unknown"
+    }
+}
+
 /// Which candidate a removal clears, given the removed instance's fullname.
 fn candidate_removed_by_fullname(fullname: &str) -> Option<String> {
     instance_name(fullname).map(str::to_string)
@@ -201,6 +226,19 @@ pub fn start_discovery(state: Arc<AppState>) -> Result<JoinHandle<()>, String> {
             let _daemon = daemon;
             while let Ok(event) = receiver.recv() {
                 match event {
+                    // Diagnostic only: distinguishes "the PTR record for
+                    // this service type was never observed at all" from
+                    // "it was observed but never resolved" from "it
+                    // resolved but candidate_from_resolution's own,
+                    // unchanged filtering rejected it" - see this
+                    // function's own doc comment and
+                    // `candidate_rejection_reason`.
+                    ServiceEvent::SearchStarted(service_type) => {
+                        log::debug!("LAN routing discovery search started: {service_type}");
+                    }
+                    ServiceEvent::ServiceFound(service_type, fullname) => {
+                        log::debug!("LAN routing service found (pre-resolution): {fullname} ({service_type})");
+                    }
                     ServiceEvent::ServiceResolved(resolved) => {
                         let desktop_id = resolved.txt_properties.get_property_val_str("desktopId");
                         let address = resolved.addresses.iter().next().map(|ip| ip.to_ip_addr());
@@ -209,6 +247,15 @@ pub fn start_discovery(state: Arc<AppState>) -> Result<JoinHandle<()>, String> {
                         let advertised_protocol_version = resolved
                             .txt_properties
                             .get_property_val_str("protocolVersion");
+                        log::debug!(
+                            "LAN routing service resolved (pre-filter): fullname={} host={} port={} addresses={:?} environment={:?} protocolVersion={:?}",
+                            resolved.fullname,
+                            resolved.host,
+                            resolved.port,
+                            resolved.addresses,
+                            advertised_environment,
+                            advertised_protocol_version
+                        );
                         if let Some((desktop_id, address)) = candidate_from_resolution(
                             desktop_id,
                             address,
@@ -219,6 +266,18 @@ pub fn start_discovery(state: Arc<AppState>) -> Result<JoinHandle<()>, String> {
                         ) {
                             log::info!("LAN routing candidate observed: {desktop_id} at {address}");
                             state.set_lan_candidate(desktop_id, address);
+                        } else {
+                            log::debug!(
+                                "LAN routing resolution rejected: {} ({})",
+                                resolved.fullname,
+                                candidate_rejection_reason(
+                                    desktop_id,
+                                    address,
+                                    advertised_environment,
+                                    advertised_protocol_version,
+                                    &current_environment
+                                )
+                            );
                         }
                     }
                     ServiceEvent::ServiceRemoved(_service_type, fullname) => {
@@ -227,6 +286,12 @@ pub fn start_discovery(state: Arc<AppState>) -> Result<JoinHandle<()>, String> {
                             state.remove_lan_candidate(&desktop_id);
                         }
                     }
+                    ServiceEvent::SearchStopped(service_type) => {
+                        log::debug!("LAN routing discovery search stopped: {service_type}");
+                    }
+                    // `ServiceEvent` is `#[non_exhaustive]`; every variant
+                    // known at this mdns-sd version is matched above, so
+                    // this only guards a future variant.
                     _ => {}
                 }
             }
