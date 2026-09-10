@@ -2,7 +2,7 @@
 
 load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 load("@bazel_tools//tools/cpp:cc_toolchain_config_lib.bzl", "feature", "flag_group", "flag_set", "tool_path")
-load("@rules_cc//cc:cc_toolchain.bzl", "cc_toolchain")
+load("@rules_cc//cc:defs.bzl", "cc_toolchain")
 
 _COMPILE_ACTIONS = [
     ACTION_NAMES.c_compile,
