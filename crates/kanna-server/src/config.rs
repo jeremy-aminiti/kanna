@@ -199,6 +199,25 @@ impl Config {
         )
     }
 
+    /// Where `machine_trust::MachineTrustStore` persists automatic
+    /// same-account LAN trust. Derived alongside the pairing store rather
+    /// than given its own config field: it lives in the same directory,
+    /// under the same directory-creation and desktop-identity assumptions,
+    /// and a new required config key would break every literal `Config`
+    /// fixture in this crate's tests for a value that has no independent
+    /// reason to be configured separately.
+    pub(crate) fn machine_trust_store_path(&self) -> Option<PathBuf> {
+        if self.pairing_store_path.is_empty() {
+            return None;
+        }
+        Some(
+            Path::new(&self.pairing_store_path)
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("machine-trust.json"),
+        )
+    }
+
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         let data_root = app_data_dir();
         let config_path = match std::env::var("KANNA_SERVER_CONFIG") {

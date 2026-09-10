@@ -359,7 +359,7 @@ pub fn hash_device_secret(device_secret: &str) -> String {
     digest.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
@@ -758,7 +758,7 @@ fn encode_public_key(identity: &SigningKey) -> String {
     URL_SAFE_NO_PAD.encode(identity.verifying_key().to_bytes())
 }
 
-fn generate_device_secret() -> Result<String, String> {
+pub(crate) fn generate_device_secret() -> Result<String, String> {
     let mut bytes = [0u8; 32];
     std::fs::File::open("/dev/urandom")
         .map_err(|e| format!("failed to open /dev/urandom: {}", e))?

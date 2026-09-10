@@ -13,6 +13,7 @@ mod internal_ports;
 mod ksp;
 mod logging;
 pub(crate) use kanna_runtime_defaults::login_shell;
+mod machine_trust;
 mod mobile_api;
 mod pairing;
 mod register;
