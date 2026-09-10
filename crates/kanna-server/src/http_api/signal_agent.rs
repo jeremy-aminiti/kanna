@@ -1365,13 +1365,21 @@ async fn resolve_singleton_owner(
             .filter(|owner| owner.machine_id != state.config.desktop_id)
             .collect(),
     );
-    let machine_ids = state.list_active_relay_desktops().await.map_err(|error| {
-        let reason = format!(
-            "cannot resolve the {agent} singleton for repo {repo_id} across the signed-in account: {error}; no singleton was created"
-        );
-        log::error!("{reason}");
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, reason)
-    })?;
+    // A relay listing fault must not silently drop a trusted, currently
+    // reachable same-account LAN peer from singleton reconciliation -
+    // `relay_and_lan_desktop_ids` still folds one in below. Only genuine
+    // total unreachability (no relay listing and no eligible LAN peer)
+    // remains fail-closed, preserving the no-duplicate-singleton guarantee.
+    let (machine_ids, relay_error) = super::invoke_desktop::relay_and_lan_desktop_ids(state).await;
+    if let Some(error) = relay_error {
+        if machine_ids.is_empty() {
+            let reason = format!(
+                "cannot resolve the {agent} singleton for repo {repo_id} across the signed-in account: {error}; no singleton was created"
+            );
+            log::error!("{reason}");
+            return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, reason));
+        }
+    }
     let path = format!(
         "/v1/repo-singletons/{}/{}",
         encode_path_segment(&remote_url_hash),

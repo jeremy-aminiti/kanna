@@ -157,6 +157,27 @@ pub(crate) fn eligible_lan_desktop_ids(state: &Arc<AppState>) -> Vec<String> {
         .collect()
 }
 
+/// The shared merge every list/wait/stats/signal fan-out consumer needs:
+/// relay's own active-desktop listing, extended unconditionally with
+/// [`eligible_lan_desktop_ids`] so a trusted discovered LAN peer is never
+/// dropped merely because relay happens to be unavailable - sorted and
+/// deduplicated. The relay listing's own error, if any, is returned
+/// alongside rather than folded away: some consumers must still surface it as
+/// their own outage dimension (`cloud_desktops`'s `relay_available`/`error`,
+/// `machine_stats`'s `machine_errors`), and one (`signal_agent`'s singleton
+/// resolution) must fail closed on it when the merged id list is also empty,
+/// so no caller can be made silently to swallow a real relay fault.
+pub(crate) async fn relay_and_lan_desktop_ids(state: &Arc<AppState>) -> (Vec<String>, Option<String>) {
+    let (mut ids, error) = match state.list_active_relay_desktops().await {
+        Ok(ids) => (ids, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    ids.extend(eligible_lan_desktop_ids(state));
+    ids.sort();
+    ids.dedup();
+    (ids, error)
+}
+
 /// The real LAN attempt: requires an unexpired outbound grant under the
 /// *current* account (with an already-attested TLS trust anchor) and a
 /// discovered candidate address, dials it with a client pinned to exactly
@@ -908,6 +929,76 @@ mod tests {
         );
 
         assert!(eligible_lan_desktop_ids(&state).is_empty());
+    }
+
+    /// Every list/wait/stats/signal fan-out consumer (`task_events`,
+    /// `tasks`, `signal_agent`, `machine_stats`, `cloud_desktops`) is meant
+    /// to reach eligible LAN peers through this one merge point. A relay
+    /// listing failure (a fresh `AppState` has no relay connection at all,
+    /// exactly like a real outage) must still surface its own error, but it
+    /// must not silently drop a trusted, currently discovered LAN peer from
+    /// the merged id list.
+    #[tokio::test]
+    async fn relay_and_lan_desktop_ids_merges_a_trusted_lan_peer_through_a_relay_outage() {
+        let config = lan_e2e_test_config("desktop-merge-source");
+        let state = Arc::new(AppState::new(config.clone()));
+        state.set_authenticated_account_uid(Some("uid-1".to_string()));
+        let now_ms = crate::machine_trust::unix_time_ms().unwrap();
+        let store_path = config.machine_trust_store_path().unwrap();
+        state.set_lan_candidate(
+            "desktop-lan-peer".to_string(),
+            "127.0.0.1:1".parse().unwrap(),
+        );
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            store
+                .pending_or_create(
+                    "desktop-lan-peer",
+                    "uid-1",
+                    "development",
+                    &config.desktop_id,
+                    || Ok("secret".to_string()),
+                    now_ms,
+                )
+                .unwrap();
+            store
+                .confirm_outbound(
+                    "desktop-lan-peer",
+                    "secret",
+                    &config.desktop_id,
+                    Some("fake-ca".to_string()),
+                    now_ms + 1000,
+                )
+                .unwrap();
+            store.save(&store_path).unwrap();
+        }
+
+        let (ids, error) = relay_and_lan_desktop_ids(&state).await;
+
+        assert!(
+            error.is_some(),
+            "relay's own outage must still be reported"
+        );
+        assert_eq!(
+            ids,
+            vec!["desktop-lan-peer".to_string()],
+            "a trusted discovered LAN peer must still be merged in despite the relay outage"
+        );
+    }
+
+    /// The negative case a fail-closed consumer (`signal_agent`) relies on:
+    /// with no relay listing and no eligible LAN peer either, the merge must
+    /// come back empty so a caller can tell genuine total unreachability
+    /// apart from "relay is down but a LAN peer still covers this."
+    #[tokio::test]
+    async fn relay_and_lan_desktop_ids_is_empty_on_relay_outage_with_no_lan_peer() {
+        let config = lan_e2e_test_config("desktop-merge-source-none");
+        let state = Arc::new(AppState::new(config));
+
+        let (ids, error) = relay_and_lan_desktop_ids(&state).await;
+
+        assert!(error.is_some());
+        assert!(ids.is_empty());
     }
 
     #[test]

@@ -278,32 +278,34 @@ pub(super) async fn get_task(
         .get_task(&task_id)
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let Some(mut task) = task else {
-        if !query.local_only && state.desktop_routing_available() {
-            if let Ok(machine_ids) = state.list_active_relay_desktops().await {
-                for machine_id in machine_ids {
-                    if machine_id == state.config.desktop_id {
-                        continue;
-                    }
-                    let encoded_task_id = encode_path_segment(&task_id);
-                    let path = format!("/v1/tasks/{encoded_task_id}?localOnly=true");
-                    if let Ok(response) = super::invoke_desktop::invoke_desktop(
-                        state.clone(),
-                        machine_id.clone(),
-                        "GET".to_string(),
-                        path,
-                        serde_json::Value::Null,
-                    )
-                    .await
-                    .map(|routed| routed.response)
-                    {
-                        if response.status == axum::http::StatusCode::OK.as_u16() {
-                            return Err((
-                                axum::http::StatusCode::NOT_FOUND,
-                                format!(
-                                    "task {task_id} was found on machine {machine_id}; pass machine_id: \"{machine_id}\" to kanna_get_task"
-                                ),
-                            ));
-                        }
+        if !query.local_only {
+            // A trusted discovered LAN peer must still be probed even when
+            // relay routing itself is unavailable or its listing fails.
+            let (machine_ids, _relay_error) =
+                super::invoke_desktop::relay_and_lan_desktop_ids(&state).await;
+            for machine_id in machine_ids {
+                if machine_id == state.config.desktop_id {
+                    continue;
+                }
+                let encoded_task_id = encode_path_segment(&task_id);
+                let path = format!("/v1/tasks/{encoded_task_id}?localOnly=true");
+                if let Ok(response) = super::invoke_desktop::invoke_desktop(
+                    state.clone(),
+                    machine_id.clone(),
+                    "GET".to_string(),
+                    path,
+                    serde_json::Value::Null,
+                )
+                .await
+                .map(|routed| routed.response)
+                {
+                    if response.status == axum::http::StatusCode::OK.as_u16() {
+                        return Err((
+                            axum::http::StatusCode::NOT_FOUND,
+                            format!(
+                                "task {task_id} was found on machine {machine_id}; pass machine_id: \"{machine_id}\" to kanna_get_task"
+                            ),
+                        ));
                     }
                 }
             }
@@ -671,60 +673,62 @@ async fn aggregate_get_tasks(
     order: TaskSortOrder,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     response.scope.kind = "account".to_string();
-    match state.list_active_relay_desktops().await {
-        Ok(machine_ids) => {
-            for machine_id in machine_ids {
-                if machine_id == state.config.desktop_id {
-                    continue;
-                }
-                response.scope.machine_ids.push(machine_id.clone());
-                match super::invoke_desktop::invoke_desktop(
-                    state.clone(),
-                    machine_id.clone(),
-                    "GET".to_string(),
-                    remote_path.clone(),
-                    serde_json::Value::Null,
-                )
-                .await
-                .map(|routed| routed.response)
-                {
-                    Ok(remote) if remote.status == 200 => match remote.body {
-                        Some(body) => match serde_json::from_value::<GetTasksResponse>(body) {
-                            Ok(mut peer) => {
-                                response.truncated |= peer.truncated;
-                                for task in &mut peer.tasks {
-                                    task.machine_id = Some(machine_id.clone());
-                                    if task.waiting_prompt_snippet.is_none() {
-                                        task.waiting_prompt_snippet = task.snippet.take();
-                                    }
-                                }
-                                response.tasks.append(&mut peer.tasks);
-                            }
-                            Err(error) => response.machine_errors.push(serde_json::json!({
-                                "machineId": machine_id,
-                                "error": format!("invalid filtered task-list response: {error}"),
-                            })),
-                        },
-                        None => response.machine_errors.push(serde_json::json!({
-                            "machineId": machine_id,
-                            "error": "filtered task-list response had no body",
-                        })),
-                    },
-                    Ok(remote) => response.machine_errors.push(serde_json::json!({
-                        "machineId": machine_id,
-                        "error": remote.error.unwrap_or_else(|| format!("HTTP {} (peer may not support kanna_get_tasks)", remote.status)),
-                    })),
-                    Err(error) => response.machine_errors.push(serde_json::json!({
-                        "machineId": machine_id,
-                        "error": error,
-                    })),
-                }
-            }
-        }
-        Err(error) => response.machine_errors.push(serde_json::json!({
+    // A relay outage is its own reported error, exactly as before - but it
+    // must not also hide a trusted discovered LAN peer, which
+    // `relay_and_lan_desktop_ids` folds in unconditionally.
+    let (machine_ids, relay_error) = super::invoke_desktop::relay_and_lan_desktop_ids(state).await;
+    if let Some(error) = relay_error {
+        response.machine_errors.push(serde_json::json!({
             "machineId": serde_json::Value::Null,
             "error": error,
-        })),
+        }));
+    }
+    for machine_id in machine_ids {
+        if machine_id == state.config.desktop_id {
+            continue;
+        }
+        response.scope.machine_ids.push(machine_id.clone());
+        match super::invoke_desktop::invoke_desktop(
+            state.clone(),
+            machine_id.clone(),
+            "GET".to_string(),
+            remote_path.clone(),
+            serde_json::Value::Null,
+        )
+        .await
+        .map(|routed| routed.response)
+        {
+            Ok(remote) if remote.status == 200 => match remote.body {
+                Some(body) => match serde_json::from_value::<GetTasksResponse>(body) {
+                    Ok(mut peer) => {
+                        response.truncated |= peer.truncated;
+                        for task in &mut peer.tasks {
+                            task.machine_id = Some(machine_id.clone());
+                            if task.waiting_prompt_snippet.is_none() {
+                                task.waiting_prompt_snippet = task.snippet.take();
+                            }
+                        }
+                        response.tasks.append(&mut peer.tasks);
+                    }
+                    Err(error) => response.machine_errors.push(serde_json::json!({
+                        "machineId": machine_id,
+                        "error": format!("invalid filtered task-list response: {error}"),
+                    })),
+                },
+                None => response.machine_errors.push(serde_json::json!({
+                    "machineId": machine_id,
+                    "error": "filtered task-list response had no body",
+                })),
+            },
+            Ok(remote) => response.machine_errors.push(serde_json::json!({
+                "machineId": machine_id,
+                "error": remote.error.unwrap_or_else(|| format!("HTTP {} (peer may not support kanna_get_tasks)", remote.status)),
+            })),
+            Err(error) => response.machine_errors.push(serde_json::json!({
+                "machineId": machine_id,
+                "error": error,
+            })),
+        }
     }
 
     response.tasks.sort_by(|left, right| {
@@ -764,61 +768,63 @@ async fn aggregate_task_summaries(
     remote_path: String,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     let mut machine_errors = Vec::new();
-    match state.list_active_relay_desktops().await {
-        Ok(machine_ids) => {
-            for machine_id in machine_ids {
-                if machine_id == state.config.desktop_id {
-                    continue;
-                }
-                match super::invoke_desktop::invoke_desktop(
-                    state.clone(),
-                    machine_id.clone(),
-                    "GET".to_string(),
-                    remote_path.clone(),
-                    serde_json::Value::Null,
-                )
-                .await
-                .map(|routed| routed.response)
-                {
-                    Ok(response) if response.status == 200 => match response.body {
-                        Some(body) => match serde_json::from_value::<
-                            Vec<crate::mobile_api::TaskSummary>,
-                        >(body)
-                        {
-                            Ok(mut remote_tasks) => {
-                                for task in &mut remote_tasks {
-                                    task.machine_id = Some(machine_id.clone());
-                                    if task.waiting_prompt_snippet.is_none() {
-                                        task.waiting_prompt_snippet = task.snippet.take();
-                                    }
-                                }
-                                tasks.append(&mut remote_tasks);
-                            }
-                            Err(error) => machine_errors.push(serde_json::json!({
-                                "machineId": machine_id,
-                                "error": format!("invalid task-list response: {error}"),
-                            })),
-                        },
-                        None => machine_errors.push(serde_json::json!({
-                            "machineId": machine_id,
-                            "error": "task-list response had no body",
-                        })),
-                    },
-                    Ok(response) => machine_errors.push(serde_json::json!({
-                        "machineId": machine_id,
-                        "error": response.error.unwrap_or_else(|| format!("HTTP {}", response.status)),
-                    })),
-                    Err(error) => machine_errors.push(serde_json::json!({
-                        "machineId": machine_id,
-                        "error": error,
-                    })),
-                }
-            }
-        }
-        Err(error) => machine_errors.push(serde_json::json!({
+    // A relay outage is its own reported error, exactly as before - but it
+    // must not also hide a trusted discovered LAN peer, which
+    // `relay_and_lan_desktop_ids` folds in unconditionally.
+    let (machine_ids, relay_error) = super::invoke_desktop::relay_and_lan_desktop_ids(state).await;
+    if let Some(error) = relay_error {
+        machine_errors.push(serde_json::json!({
             "machineId": serde_json::Value::Null,
             "error": error,
-        })),
+        }));
+    }
+    for machine_id in machine_ids {
+        if machine_id == state.config.desktop_id {
+            continue;
+        }
+        match super::invoke_desktop::invoke_desktop(
+            state.clone(),
+            machine_id.clone(),
+            "GET".to_string(),
+            remote_path.clone(),
+            serde_json::Value::Null,
+        )
+        .await
+        .map(|routed| routed.response)
+        {
+            Ok(response) if response.status == 200 => match response.body {
+                Some(body) => match serde_json::from_value::<
+                    Vec<crate::mobile_api::TaskSummary>,
+                >(body)
+                {
+                    Ok(mut remote_tasks) => {
+                        for task in &mut remote_tasks {
+                            task.machine_id = Some(machine_id.clone());
+                            if task.waiting_prompt_snippet.is_none() {
+                                task.waiting_prompt_snippet = task.snippet.take();
+                            }
+                        }
+                        tasks.append(&mut remote_tasks);
+                    }
+                    Err(error) => machine_errors.push(serde_json::json!({
+                        "machineId": machine_id,
+                        "error": format!("invalid task-list response: {error}"),
+                    })),
+                },
+                None => machine_errors.push(serde_json::json!({
+                    "machineId": machine_id,
+                    "error": "task-list response had no body",
+                })),
+            },
+            Ok(response) => machine_errors.push(serde_json::json!({
+                "machineId": machine_id,
+                "error": response.error.unwrap_or_else(|| format!("HTTP {}", response.status)),
+            })),
+            Err(error) => machine_errors.push(serde_json::json!({
+                "machineId": machine_id,
+                "error": error,
+            })),
+        }
     }
     tasks.sort_by(|left, right| right.created_at.cmp(&left.created_at));
     Ok(Json(serde_json::json!({
