@@ -27,7 +27,7 @@ py_test(
         "//:MODULE.bazel",
         "//tools/bazel:BUILD.bazel",
         "//tools/bazel:linux_cc_toolchain_config.bzl",
-        "@ubuntu_sysroot_amd64//:sysroot_overlay_report",
+        "@ubuntu_noble_sysroot_amd64//:sysroot_overlay_report",
     ],
     main = "tests/test_resolve_sysroot.py",
     python_version = "PY3",
