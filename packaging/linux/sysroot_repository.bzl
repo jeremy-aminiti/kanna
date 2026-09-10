@@ -122,7 +122,7 @@ filegroup(
         "sysroot/usr/include/**",
         "sysroot/usr/lib/**",
         "sysroot/usr/share/pkgconfig/**",
-    ]) + ["sysroot/.kanna-sysroot"],
+    ], allow_empty = True) + ["sysroot/.kanna-sysroot"],
 )
 """)
 
