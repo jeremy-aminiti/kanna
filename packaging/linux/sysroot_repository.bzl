@@ -30,6 +30,13 @@ def _host_zig(repository_ctx):
         return repository_ctx.path(repository_ctx.attr._zig_linux_arm64)
     fail("Ubuntu sysroot extraction has no pinned Zig 0.15.2 tool for {} {}".format(name, arch))
 
+def _host_zig_cc(repository_ctx):
+    name = repository_ctx.os.name.lower()
+    arch = repository_ctx.os.arch.lower()
+    if name.startswith("mac os") and arch in ("aarch64", "arm64"):
+        return repository_ctx.path(repository_ctx.attr._zig_cc_macos_arm64)
+    return _host_zig(repository_ctx)
+
 def _validate_lock(repository_ctx, lock):
     if lock.get("formatVersion") != 1:
         fail("{}: unsupported sysroot lock format".format(repository_ctx.attr.lock))
@@ -71,12 +78,13 @@ def _sysroot_repository_impl(repository_ctx):
     lock = json.decode(repository_ctx.read(repository_ctx.attr.lock))
     packages = _validate_lock(repository_ctx, lock)
     zig = _host_zig(repository_ctx)
+    zig_cc = _host_zig_cc(repository_ctx)
     overlay = repository_ctx.path(".tools/sysroot_overlay")
     repository_ctx.file(".tools/.keep", "")
     zig_cache = str(repository_ctx.path(".tools/zig-cache"))
     compile_result = repository_ctx.execute(
         [
-            zig,
+            zig_cc,
             "cc",
             "-std=c11",
             "-O2",
@@ -87,7 +95,7 @@ def _sysroot_repository_impl(repository_ctx):
         environment = {
             "ZIG_GLOBAL_CACHE_DIR": zig_cache + "/global",
             "ZIG_LOCAL_CACHE_DIR": zig_cache + "/local",
-            "ZIG_LIB_DIR": str(zig.dirname.get_child("lib")),
+            "ZIG_LIB_DIR": str(zig_cc.dirname.get_child("lib")),
         },
         quiet = True,
     )
@@ -191,6 +199,10 @@ ubuntu_sysroot_repository = repository_rule(
         # not the target architecture of the sysroot being unpacked.
         "_zig_macos_arm64": attr.label(
             default = "@zig_0.15.2_aarch64-macos//:zig",
+            allow_single_file = True,
+        ),
+        "_zig_cc_macos_arm64": attr.label(
+            default = "@zig_0.15.2_aarch64-macos//:zig-macos-sdk-wrapper",
             allow_single_file = True,
         ),
         "_zig_linux_amd64": attr.label(
