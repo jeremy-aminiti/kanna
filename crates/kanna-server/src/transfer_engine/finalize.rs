@@ -1526,3 +1526,596 @@ mod tests {
         );
     }
 }
+
+/// Cross-process regression coverage for [`finalize_source_session`] against a
+/// real `kanna-daemon` executable and a real PTY child, not the scripted
+/// in-process [`tests::FakeDaemon`] above.
+///
+/// The fake daemon proves finalization's *ordering* logic. It cannot prove the
+/// two things this file exists for: that the CR/paste-framed bytes the
+/// production write path constructs actually reach a real terminal's child
+/// process the way an agent CLI would read them, and that a real PID fence,
+/// a real forced exit, and a real permission-prompt frame drive the same
+/// verdicts end to end. `kanna-daemon`'s own `authorize_spawn` accepts a
+/// connection from this test binary without any negotiation dance because
+/// this test binary is that daemon's live direct parent — the same trust
+/// the desktop app gets, and the same reason `crates/daemon/tests/reconnect.rs`
+/// and `detection_rules.rs` can send `Spawn` directly.
+///
+/// The child is a `/bin/sh -c` script using only POSIX builtins (`printf`,
+/// `read`, `sleep`, `exit`) so it never depends on `PATH` or anything the
+/// daemon's environment override might drop. It is deliberately built on the
+/// `codex` provider: `codex/idle/composer` classifies off one textual rule
+/// (`lastNonEmptyLine` starts with `›`) and, unlike Claude,
+/// `allows_output_triggered_idle` lets a Codex session publish `Idle` the
+/// moment that frame is observed rather than waiting out a quiet-refresh
+/// timer (`crates/daemon/src/session.rs`) — which is what keeps these tests
+/// bounded in real time instead of racing a multi-second heuristic.
+///
+/// No production code changes with this module: it drives
+/// `finalize_source_session`, `run_sequence` and `inject` exactly as
+/// `tests::FakeDaemon` does, over the real `crate::daemon_client::DaemonClient`
+/// production code already uses.
+#[cfg(test)]
+mod real_daemon_tests {
+    use super::*;
+    use kanna_daemon::protocol::SessionInfo;
+    use std::collections::HashMap;
+    use std::os::unix::net::UnixStream;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command as StdCommand};
+    use std::time::Instant;
+
+    const SESSION: &str = "task-finalize-real";
+
+    /// Finds the compiled `kanna-daemon` executable this test can spawn.
+    ///
+    /// `kanna-daemon` is an ordinary `path` dependency of this crate
+    /// (`crates/kanna-server/Cargo.toml`), not a `[[bin]]` artifact
+    /// dependency, so Cargo never populates `CARGO_BIN_EXE_kanna-daemon` for
+    /// this crate's own test binaries the way it does inside
+    /// `crates/daemon/tests/*.rs`, which belong to the daemon's own package.
+    /// `KANNA_DAEMON_TEST_BIN` is the explicit override for a caller that
+    /// built the daemon somewhere non-standard; otherwise this locates the
+    /// binary the same way Cargo already laid it out: workspace artifacts
+    /// share one `target-dir` (`.cargo/config.toml` -> `.build/`), so the
+    /// `kanna-daemon` binary is a sibling of this test binary's own profile
+    /// directory (`<target-dir>/<profile>/deps/<this test>` ->
+    /// `<target-dir>/<profile>/kanna-daemon`).
+    fn resolve_daemon_binary() -> PathBuf {
+        if let Ok(path) = std::env::var("KANNA_DAEMON_TEST_BIN") {
+            let path = PathBuf::from(path);
+            assert!(
+                path.is_file(),
+                "KANNA_DAEMON_TEST_BIN does not name a file: {path:?}"
+            );
+            return path;
+        }
+        let exe = std::env::current_exe().expect("this test binary's own path");
+        let profile_dir = exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("test binary has a profile directory two levels up from itself");
+        let candidate = profile_dir.join("kanna-daemon");
+        assert!(
+            candidate.is_file(),
+            "kanna-daemon binary not found at {candidate:?}; build it first with \
+             `cargo build -p kanna-daemon` (it shares this workspace's target-dir with \
+             kanna-server), or set KANNA_DAEMON_TEST_BIN to an already-built binary's path"
+        );
+        candidate
+    }
+
+    /// A real `kanna-daemon` child process, listening on its own socket
+    /// directory. Never scripted: every reply in these tests came from the
+    /// daemon actually running the command.
+    struct RealDaemon {
+        child: Child,
+        dir: PathBuf,
+    }
+
+    impl Drop for RealDaemon {
+        fn drop(&mut self) {
+            // Best-effort: a test that already asserted on the daemon's own
+            // exit, or one whose child process outlived an assertion failure,
+            // must not panic again on the way out.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_file(kanna_runtime_defaults::socket_path(&self.dir));
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl RealDaemon {
+        /// `label` only has to be unique within one test; `crate::test_paths`
+        /// already makes the directory unique across every concurrent test
+        /// and every concurrent worktree's gate on this machine.
+        fn start(label: &str) -> Self {
+            let dir = crate::test_paths::unique_test_dir(&format!("kanna-finalize-real-{label}"));
+            let socket_path = kanna_runtime_defaults::socket_path(&dir);
+            let _ = std::fs::remove_file(&socket_path);
+            let pid_path = dir.join("daemon.pid");
+            let _ = std::fs::remove_file(&pid_path);
+
+            let mut command = StdCommand::new(resolve_daemon_binary());
+            command.env("KANNA_DAEMON_DIR", dir.to_str().expect("utf-8 daemon dir"));
+            let child = command.spawn().expect("failed to start a real kanna-daemon");
+
+            for _ in 0..100 {
+                let pid_matches = std::fs::read_to_string(&pid_path)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+                    == Some(child.id());
+                if pid_matches && UnixStream::connect(&socket_path).is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(
+                std::fs::read_to_string(&pid_path)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+                    == Some(child.id())
+                    && UnixStream::connect(&socket_path).is_ok(),
+                "real daemon was not ready at {socket_path:?}"
+            );
+
+            Self { child, dir }
+        }
+
+        fn dir_str(&self) -> String {
+            self.dir.to_string_lossy().to_string()
+        }
+
+        async fn connect(&self) -> crate::daemon_client::DaemonClient {
+            crate::daemon_client::DaemonClient::connect(&self.dir_str())
+                .await
+                .expect("connect to the real daemon")
+        }
+    }
+
+    async fn list_sessions(client: &mut crate::daemon_client::DaemonClient) -> Vec<SessionInfo> {
+        match client
+            .send_command(&DaemonCommand::List)
+            .await
+            .expect("List round trip against the real daemon")
+        {
+            DaemonEvent::SessionList { sessions } => sessions,
+            other => panic!("unexpected reply to List: {other:?}"),
+        }
+    }
+
+    async fn wait_for_status(
+        client: &mut crate::daemon_client::DaemonClient,
+        session_id: &str,
+        expected: SessionStatus,
+        timeout: Duration,
+    ) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let sessions = list_sessions(client).await;
+            if let Some(session) = sessions.iter().find(|session| session.session_id == session_id)
+            {
+                if session.status == expected {
+                    return;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "session {session_id} never reached {expected:?} on the real daemon"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Spawns the controlled PTY child for `session_id` and returns the real
+    /// PID the daemon reports for it, straight off `List` — never invented,
+    /// which is what makes the PID-fence tests below a real proof rather than
+    /// a restatement of a constant.
+    async fn spawn_pty_session(
+        daemon: &RealDaemon,
+        session_id: &str,
+        script: &str,
+        log_path: &Path,
+    ) -> u32 {
+        let mut client = daemon.connect().await;
+        let mut env = HashMap::new();
+        env.insert(
+            "KANNA_TEST_LOG".to_string(),
+            log_path.to_string_lossy().to_string(),
+        );
+        let command = DaemonCommand::Spawn {
+            session_id: session_id.to_string(),
+            executable: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+            cwd: "/tmp".to_string(),
+            env,
+            cols: 120,
+            rows: 40,
+            agent_provider: Some(AgentProvider::Codex),
+            agent_executable: None,
+            terminal_prelude: None,
+            operator_input_only: false,
+        };
+        match client
+            .send_command(&command)
+            .await
+            .expect("Spawn round trip against the real daemon")
+        {
+            DaemonEvent::SessionCreated {
+                session_id: created,
+            } => assert_eq!(created, session_id),
+            other => panic!("unexpected reply to Spawn: {other:?}"),
+        }
+        list_sessions(&mut client)
+            .await
+            .into_iter()
+            .find(|session| session.session_id == session_id)
+            .expect("the just-spawned session is listed")
+            .pid
+    }
+
+    /// What the real child actually consumed, one logical message per line, in
+    /// the order it read them off its own stdin -- proof of delivery that
+    /// crossed a real PTY, not a scripted acknowledgement.
+    async fn wait_for_log_lines(path: &Path, count: usize, timeout: Duration) -> Vec<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let lines: Vec<String> = std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            if lines.len() >= count {
+                return lines;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the real child never logged {count} consumed line(s); saw {lines:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    fn work_item() -> TransferWorkItem {
+        TransferWorkItem {
+            id: "finalize:transfer-real-1".to_string(),
+            kind: super::super::queue::KIND_FINALIZE.to_string(),
+            transfer_id: Some("transfer-real-1".to_string()),
+            payload_json: "{}".to_string(),
+            attempts: 1,
+        }
+    }
+
+    fn state_for(daemon: &RealDaemon, label: &str) -> Arc<AppState> {
+        let daemon_dir = daemon.dir_str();
+        crate::http_api::test_state_with_daemon_dir(label, label, &daemon_dir, |db| {
+            db.insert_test_repo("repo-finalize-real", "Finalize Real Repo")
+                .expect("repo");
+            db.insert_test_pipeline_item(
+                SESSION,
+                "repo-finalize-real",
+                "finalize me for real",
+                None,
+                "in progress",
+                "2026-09-09 00:00:00",
+            )
+            .expect("task");
+            db.enqueue_transfer_work(&work_item().id, "finalize", None, "{}")
+                .expect("queue the finalize work item");
+        })
+    }
+
+    fn phases(state: &Arc<AppState>) -> Vec<String> {
+        let db = open_db(state).expect("db");
+        let head = db.latest_task_event_seq().expect("head");
+        db.list_task_events(
+            &crate::db::TaskEventScope::Tasks(vec![SESSION.into()]),
+            0,
+            head,
+            64,
+        )
+        .expect("events")
+        .into_iter()
+        .filter(|event| event.event_type == "task.transfer_finalizing")
+        .map(|event| {
+            event.payload["phase"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+    }
+
+    async fn kill_session_best_effort(daemon: &RealDaemon, session_id: &str) {
+        let mut client = daemon.connect().await;
+        let _ = client
+            .send_command(&DaemonCommand::Kill {
+                session_id: session_id.to_string(),
+            })
+            .await;
+    }
+
+    /// The whole point of this file: a fast, legitimate preparation turn that
+    /// never shows an "esc to interrupt" busy frame at all -- the session's
+    /// only observed status is the `Idle` composer it reaches right after
+    /// reading the wrap-up -- still reaches a real, separate quit and a real,
+    /// voluntary process exit. `finalize_source_session` never required Busy;
+    /// this is the real-daemon proof of that, not a restatement of the fake
+    /// test with the same name.
+    ///
+    /// It is also the one test in this file that proves the CR/paste framing
+    /// itself: `WRAP_UP_MESSAGE` is 277 bytes with no embedded newline, over
+    /// `PASTE_FRAMING_MIN_LEN` (256), so once the child's real
+    /// `\x1b[?2004h` has been parsed by the daemon's real terminal emulator,
+    /// the production write path must wrap it in `\x1b[200~` / `\x1b[201~`
+    /// before the trailing CR -- and the child logs exactly the bytes it
+    /// read, not a summary of them.
+    #[tokio::test]
+    async fn fast_preparation_without_busy_is_paste_framed_and_reaches_a_clean_quit() {
+        let daemon = RealDaemon::start("fast-idle");
+        let log_path = daemon.dir.join("child-consumed.log");
+        let script = "\
+printf '\\033[?2004h'
+IFS= read -r prep
+printf '%s\\n' \"$prep\" >> \"$KANNA_TEST_LOG\"
+printf '\\r\\nUnderstood, wrapping up now.\\r\\n'
+printf '\\r\\n\\342\\200\\272 \\r\\n'
+IFS= read -r quit
+printf '%s\\n' \"$quit\" >> \"$KANNA_TEST_LOG\"
+exit 0
+";
+        spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+        // Real VT state, not something this test can force synchronously: give
+        // the daemon's terminal emulator time to have actually parsed the
+        // bracketed-paste DECSET the child just wrote before the wrap-up below
+        // is constructed.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let state = state_for(&daemon, "desktop-finalize-real-fast");
+        let outcome =
+            finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("codex"))
+                .await;
+
+        assert!(
+            outcome.cleanly_finalized(),
+            "a real fast turn with no observed Busy chrome reported degraded: {:?}",
+            outcome.degraded_reason,
+        );
+
+        let lines = wait_for_log_lines(&log_path, 2, Duration::from_secs(10)).await;
+        assert!(
+            lines[0].starts_with("\u{1b}[200~") && lines[0].ends_with("\u{1b}[201~"),
+            "the wrap-up did not reach the real child paste-framed: {:?}",
+            lines[0],
+        );
+        assert!(
+            lines[0].contains("transferred to another machine"),
+            "the framed wrap-up lost its text crossing the real PTY: {:?}",
+            lines[0],
+        );
+        assert_eq!(
+            lines[1], "/quit",
+            "the quit command the real child actually consumed was not exactly /quit \
+             (also proving the short command was NOT paste-framed): {:?}",
+            lines[1],
+        );
+        assert_eq!(
+            phases(&state),
+            vec!["wrap-up-sent", "idle", "quit-sent", "exited"],
+        );
+    }
+
+    /// A session already parked on a real permission-prompt frame -- matched
+    /// by the daemon's own bundled `common/waiting/permission-prompt` rule,
+    /// not a fabricated status -- must never be typed into. This is the
+    /// strongest form of that proof available: the log file the real child
+    /// would have appended to if anything reached it stays untouched.
+    #[tokio::test]
+    async fn a_real_permission_prompt_is_never_typed_into() {
+        let daemon = RealDaemon::start("real-waiting");
+        let log_path = daemon.dir.join("child-consumed.log");
+        let script = "\
+printf '\\033[?2004h'
+printf '\\r\\ndo you want to allow this command to run?\\r\\n'
+sleep 60
+";
+        spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+
+        {
+            let mut client = daemon.connect().await;
+            wait_for_status(
+                &mut client,
+                SESSION,
+                SessionStatus::Waiting,
+                Duration::from_secs(10),
+            )
+            .await;
+        }
+
+        let state = state_for(&daemon, "desktop-finalize-real-waiting");
+        let outcome =
+            finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("codex"))
+                .await;
+
+        assert!(!outcome.cleanly_finalized());
+        let reason = outcome
+            .degraded_reason
+            .expect("a session parked on a real permission prompt reported clean finalization");
+        assert!(reason.contains("permission prompt"), "{reason}");
+        assert!(
+            std::fs::read_to_string(&log_path).unwrap_or_default().is_empty(),
+            "the transfer typed at a real permission prompt",
+        );
+        assert_eq!(phases(&state), vec!["degraded"]);
+
+        kill_session_best_effort(&daemon, SESSION).await;
+    }
+
+    /// `inject` fences every lifecycle write to the PID `SessionObserver`
+    /// observed. Calling it directly with a PID that is not this real
+    /// session's -- the shape a same-id replacement leaves behind -- proves
+    /// the real daemon actually enforces `SessionIncarnationMismatch` on
+    /// `SubmitInputIfSession`, not merely that `inject`'s match arms compile.
+    #[tokio::test]
+    async fn a_stale_pid_is_fenced_by_the_real_daemon() {
+        let daemon = RealDaemon::start("real-pid-fence");
+        let log_path = daemon.dir.join("child-consumed.log");
+        let script = "\
+printf '\\033[?2004h'
+IFS= read -r prep
+printf '%s\\n' \"$prep\" >> \"$KANNA_TEST_LOG\"
+sleep 60
+";
+        let real_pid = spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+
+        let state = state_for(&daemon, "desktop-finalize-real-pid-fence");
+        let stale_pid = real_pid.wrapping_add(1);
+        let result = inject(&state, &work_item(), SESSION, stale_pid, QUIT_PHASE, "/exit").await;
+
+        assert!(
+            matches!(result, Injected::SessionGone),
+            "a stale pid was not fenced against the real session"
+        );
+        assert!(
+            std::fs::read_to_string(&log_path).unwrap_or_default().is_empty(),
+            "input reached the real PTY despite the pid fence",
+        );
+
+        kill_session_best_effort(&daemon, SESSION).await;
+    }
+
+    /// No session at all -- the real daemon's own `List` legitimately reports
+    /// it absent, not a fake `listed: None`. Nothing to wrap up: the
+    /// conversation on disk is already whole.
+    #[tokio::test]
+    async fn an_absent_real_session_finalizes_clean_without_typing_into_anything() {
+        let daemon = RealDaemon::start("real-absent");
+        let state = state_for(&daemon, "desktop-finalize-real-absent");
+
+        let outcome =
+            finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("codex"))
+                .await;
+
+        assert!(outcome.cleanly_finalized(), "{:?}", outcome.degraded_reason);
+        assert_eq!(phases(&state), vec!["already-exited"]);
+    }
+
+    /// `face01227` fixed a swallowed-error defect in exactly this branch: a DB
+    /// failure while checking ambiguous phase history after a session
+    /// disappeared used to be discarded by `.ok()`, so `ambiguous_phase` read
+    /// as `None` and finalization reported clean even though the read never
+    /// actually proved anything -- silently permitting an unsafe retry after
+    /// a crash the DB itself could no longer attest to. This corrupts the
+    /// real sqlite file backing a live `AppState` so the failure the fix
+    /// handles is a real one, not an injected mock error.
+    #[tokio::test]
+    async fn a_real_db_read_error_after_disappearance_degrades_rather_than_reading_clean() {
+        let daemon = RealDaemon::start("real-db-error");
+        let state = state_for(&daemon, "desktop-finalize-real-db-error");
+
+        // The session is absent (never spawned) -- the shape the swallowed
+        // error used to hide. Pull the schema out from under the connection
+        // `open_db` is about to make, so the ambiguous-phase read this branch
+        // performs fails for real.
+        let db_path = state.config().db_path.clone();
+        std::fs::write(&db_path, b"not a sqlite database").expect("corrupt the real db file");
+
+        let outcome =
+            finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("codex"))
+                .await;
+
+        assert!(
+            !outcome.cleanly_finalized(),
+            "a real DB read failure after disappearance was swallowed into a clean finalization",
+        );
+        let reason = outcome
+            .degraded_reason
+            .expect("a real DB read failure reported clean finalization");
+        assert!(
+            reason.contains("after session disappearance"),
+            "the degraded reason does not name the read failure: {reason}",
+        );
+    }
+
+    /// A crash can leave `WRAP_UP_PHASE` claimed with no durable delivery
+    /// outcome. Against a real, live, present session this proves the claim
+    /// is checked before the daemon connection for submission is ever opened:
+    /// nothing reaches the real PTY, because `inject` never gets that far.
+    #[tokio::test]
+    async fn a_preclaimed_wrap_up_against_a_real_session_never_touches_the_real_pty() {
+        let daemon = RealDaemon::start("real-preclaimed");
+        let log_path = daemon.dir.join("child-consumed.log");
+        // Never expected to receive anything: the claim below must short
+        // circuit before any daemon connection for submission is opened.
+        let script = "sleep 60\n";
+        spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+
+        let state = state_for(&daemon, "desktop-finalize-real-preclaimed");
+        open_db(&state)
+            .expect("db")
+            .claim_transfer_work_phase(&work_item().id, WRAP_UP_PHASE)
+            .expect("claim preparation phase");
+
+        let outcome = run_sequence(&state, &work_item(), SESSION, Some("codex")).await;
+
+        assert!(
+            std::fs::read_to_string(&log_path).unwrap_or_default().is_empty(),
+            "a claimed phase was resent to the real PTY",
+        );
+        let reason = outcome
+            .degraded_reason
+            .expect("an unproved phase claim reported clean finalization");
+        assert!(reason.contains("no quit command was sent"), "{reason}");
+
+        kill_session_best_effort(&daemon, SESSION).await;
+    }
+
+    /// The agent acknowledges the quit command but does not actually exit --
+    /// finalization's own `wait_for_exit` budget is 60s, so this test instead
+    /// forces the real daemon to `Kill` the real child the moment it observes
+    /// the quit line landed, and asserts on the `killed: true` `Exit` that
+    /// real kill produces. No process outside this test's own fixture is
+    /// touched.
+    #[tokio::test]
+    async fn a_real_forced_kill_after_quit_is_recorded_as_a_degraded_finalization() {
+        let daemon = RealDaemon::start("real-forced-exit");
+        let log_path = daemon.dir.join("child-consumed.log");
+        let script = "\
+printf '\\033[?2004h'
+IFS= read -r prep
+printf '%s\\n' \"$prep\" >> \"$KANNA_TEST_LOG\"
+printf '\\r\\nUnderstood, wrapping up now.\\r\\n'
+printf '\\r\\n\\342\\200\\272 \\r\\n'
+IFS= read -r quit
+printf '%s\\n' \"$quit\" >> \"$KANNA_TEST_LOG\"
+sleep 60
+";
+        spawn_pty_session(&daemon, SESSION, script, &log_path).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let state = state_for(&daemon, "desktop-finalize-real-forced-exit");
+        let sequence = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                finalize_source_session(&state, &work_item(), SESSION, Some("pty"), Some("codex"))
+                    .await
+            }
+        });
+
+        // The real signal to intervene is the child having actually consumed
+        // the quit command, not a fixed sleep guessing when that happened.
+        wait_for_log_lines(&log_path, 2, Duration::from_secs(15)).await;
+        kill_session_best_effort(&daemon, SESSION).await;
+
+        let outcome = sequence.await.expect("finalization sequence task");
+        assert!(!outcome.cleanly_finalized());
+        let reason = outcome
+            .degraded_reason
+            .expect("a forced kill after quit reported clean finalization");
+        assert!(
+            reason.contains("forcibly killed") && reason.contains("after the quit command"),
+            "{reason}",
+        );
+    }
+}
