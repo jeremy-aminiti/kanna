@@ -210,7 +210,7 @@ pub(crate) async fn try_submit_task_input(
 /// Submit input to the PTY process ID observed during live-session
 /// discovery. A same-id replacement is rejected rather than receiving input
 /// intended for the old run.
-async fn try_submit_task_input_if_session(
+pub(crate) async fn try_submit_task_input_if_session(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,
     expected_pid: u32,
@@ -226,8 +226,9 @@ async fn try_submit_task_input_to_session(
     input: &str,
 ) -> Result<(), TaskInputError> {
     // Every logical caller — kanna-cli, kanna-mcp, mobile, and server-side
-    // notifications — enters the daemon as one semantic message. It either
-    // submits atomically now or waits behind a raw human draft there.
+    // notifications — enters the daemon as one semantic message. A live
+    // session submits it immediately, including its boundary; any collision
+    // with an unsent human draft is the accepted always-submit behavior.
     let message = task_input_message(input);
     send_logical_session_input(
         daemon,
