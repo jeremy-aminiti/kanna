@@ -155,6 +155,9 @@ async fn create_transferred_task(
     body["transferImport"]["workflowDefinition"] =
         serde_json::Value::String(workflow_definition.clone());
     body["transferImport"]["baseOid"] = serde_json::Value::String(base_oid.to_owned());
+    body["baseRef"] = serde_json::Value::String(format!(
+        "refs/kanna/transfers/{transfer_id}/{head_oid}/base"
+    ));
     // The transfer's pinned definition is authoritative; do not let the
     // ordinary workflow-name field overwrite pipeline_def with a name.
     body["workflowName"] = serde_json::Value::Null;
