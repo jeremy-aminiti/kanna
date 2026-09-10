@@ -5076,7 +5076,8 @@ async fn subscription_watch_failure_is_a_readable_attention_batch_and_does_not_s
         &app,
         "POST",
         &format!("/v1/event-subscriptions/{id}/read"),
-        json!({"acknowledgeBatchId":pending.batch_id}),
+        // Diagnostic mode: this fixture asserts on the durable internal cursor.
+        json!({"acknowledgeBatchId":pending.batch_id, "diagnostic":true}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -5089,7 +5090,7 @@ async fn subscription_watch_failure_is_a_readable_attention_batch_and_does_not_s
         &app,
         "POST",
         "/v1/event-subscriptions",
-        json!({"taskId":"child-c", "localOnly":true, "delivery":"poll"}),
+        json!({"taskId":"child-c", "localOnly":true, "delivery":"poll", "diagnostic":true}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);

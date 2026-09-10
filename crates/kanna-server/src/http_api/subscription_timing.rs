@@ -4,9 +4,11 @@ use serde_json::Value;
 use std::time::Duration;
 use tokio::time::Instant;
 
-pub(super) const QUIET: Duration = Duration::from_millis(1_000);
-pub(super) const MAX_HOLD: Duration = Duration::from_millis(5_000);
-pub(super) const ADMISSION_INTERVAL: Duration = Duration::from_millis(5_000);
+// Equal by design: a lone event should collect for the full window below, not
+// seal early on a short trailing-quiet gap. See docs/kanna-server-boundary.md.
+pub(super) const QUIET: Duration = Duration::from_millis(300_000);
+pub(super) const MAX_HOLD: Duration = Duration::from_millis(300_000);
+pub(super) const ADMISSION_INTERVAL: Duration = Duration::from_millis(60_000);
 
 #[derive(Default)]
 pub(super) struct Collection {

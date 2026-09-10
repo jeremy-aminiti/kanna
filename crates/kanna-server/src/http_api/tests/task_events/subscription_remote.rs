@@ -146,7 +146,9 @@ impl Drop for WatchFixture {
 
 impl WatchFixture {
     fn request() -> Value {
-        json!({"taskId":"manager", "repoId":"repo-pending-source", "delivery":"poll"})
+        // Diagnostic mode: these fixtures assert on the durable internal
+        // cursor directly, which the default compact response omits.
+        json!({"taskId":"manager", "repoId":"repo-pending-source", "delivery":"poll", "diagnostic":true})
     }
 
     async fn new(exhaust_budget: bool) -> (Self, Option<tokio::sync::OwnedSemaphorePermit>) {
@@ -225,7 +227,7 @@ impl WatchFixture {
             &self.app,
             "POST",
             &format!("/v1/event-subscriptions/{}/read", self.id),
-            json!({"acknowledgeBatchId":row.batch_id}),
+            json!({"acknowledgeBatchId":row.batch_id, "diagnostic":true}),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
