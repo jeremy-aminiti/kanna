@@ -276,7 +276,7 @@ fn set_publication_seam(seam: Option<PublicationSeam>) {
     *PUBLICATION_SEAM
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
-        .expect("publication seam mutex poisoned") = barrier;
+        .expect("publication seam mutex poisoned") = seam;
 }
 
 #[cfg(test)]
