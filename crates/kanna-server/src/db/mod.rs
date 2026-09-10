@@ -158,11 +158,11 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "070_provider_quota_rejection_log",
     "071_event_subscriptions",
     "072_human_review_decision",
-    "074_transferred_task_input_provenance",
-    "075_transferred_task_context",
-    "076_transferred_task_manifest",
-    "077_transferred_task_history",
-    "078_transferred_task_manifest_content_commitment",
+    "072_transferred_task_input_provenance",
+    "073_transferred_task_context",
+    "074_transferred_task_manifest",
+    "075_transferred_task_history",
+    "076_transferred_task_manifest_content_commitment",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2194,7 +2194,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         create_human_review_schema,
     )?;
 
-    run_migration(conn, "074_transferred_task_input_provenance", |conn| {
+    run_migration(conn, "072_transferred_task_input_provenance", |conn| {
         add_column(conn, "task_input", "origin_peer_id", "TEXT")?;
         add_column(conn, "task_input", "origin_task_id", "TEXT")?;
         add_column(conn, "task_input", "origin_input_id", "INTEGER")?;
@@ -2205,7 +2205,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )
     })?;
 
-    run_migration(conn, "075_transferred_task_context", |conn| {
+    run_migration(conn, "073_transferred_task_context", |conn| {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS transferred_task_context (
                 task_id TEXT PRIMARY KEY REFERENCES pipeline_item(id) ON DELETE CASCADE,
@@ -2219,7 +2219,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )
     })?;
 
-    run_migration(conn, "076_transferred_task_manifest", |conn| {
+    run_migration(conn, "074_transferred_task_manifest", |conn| {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS transferred_task_manifest (
                 transfer_id TEXT PRIMARY KEY,
@@ -2234,13 +2234,13 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )
     })?;
 
-    // `transferred_task_context` (075) keeps only the *latest* snapshot of
+    // `transferred_task_context` (073) keeps only the *latest* snapshot of
     // each kind, which a second hop before this task's own first finished run
     // would otherwise re-export as if nothing had happened before it. This
     // sibling table holds the full ordered history instead, one row per
     // foreign run, keyed by the run's own origin identity so a retried import
     // converges rather than duplicating.
-    run_migration(conn, "077_transferred_task_history", |conn| {
+    run_migration(conn, "075_transferred_task_history", |conn| {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS transferred_task_history (
                 task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
@@ -2270,7 +2270,7 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // item 3.
     run_migration(
         conn,
-        "078_transferred_task_manifest_content_commitment",
+        "076_transferred_task_manifest_content_commitment",
         |conn| {
             add_column(
                 conn,
