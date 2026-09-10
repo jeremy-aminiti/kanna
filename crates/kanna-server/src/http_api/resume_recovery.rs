@@ -176,13 +176,16 @@ pub(super) async fn recover_rejected_claude_resume(
         "claude rejected the recorded provider session at launch (exit code {exit_code}): \
          {rejection}; relaunched this stage with a fresh conversation"
     );
-    if let Err(error) = db.finish_stage_run(
+    if let Err(error) = db.finish_stage_run_without_work(
         &candidate.run_id,
         "failed",
         Some(&rejected_result),
         // Keep whatever the attempt was carrying — a resumed revision's
         // requested changes are part of its record.
         candidate.feedback.as_deref(),
+        // The launch was rejected; no agent turn ran, so a later recovery must
+        // see through this row to whatever verdict precedes it.
+        crate::db::no_work_termination::REJECTED_RESUME_LAUNCH,
     ) {
         return RejectedResumeRecovery::RelaunchFailed(format!(
             "could not close the rejected resume run: db error: {error}"

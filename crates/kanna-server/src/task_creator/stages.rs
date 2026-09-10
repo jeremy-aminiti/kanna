@@ -1009,6 +1009,7 @@ fn resolve_completed_stage(
     let mut status = run.status.clone();
     let mut result = run.result.clone();
     let mut feedback = run.feedback.clone();
+    let mut no_work_termination = run.no_work_termination.clone();
     let mut previous = run
         .replaces_run_id
         .clone()
@@ -1020,7 +1021,12 @@ fn resolve_completed_stage(
         if status == "succeeded" {
             return Ok((true, result));
         }
+        // Producer-declared, never inferred. The legacy feedback marker is
+        // still honoured so rows written before the column existed keep
+        // working; new rows are classified at the write by all six
+        // bookkeeping producers.
         let recorded_no_verdict = matches!(status.as_str(), "running" | "pending")
+            || no_work_termination.is_some()
             || feedback.as_deref() == Some(crate::http_api::SESSION_INTERRUPTION_FEEDBACK);
         if !recorded_no_verdict {
             return Ok((false, None));
@@ -1044,6 +1050,7 @@ fn resolve_completed_stage(
         status = row.status;
         result = row.result;
         feedback = row.feedback;
+        no_work_termination = row.no_work_termination;
         previous = row.replaces_run_id.or(row.resumed_from_run_id);
     }
     log::warn!(

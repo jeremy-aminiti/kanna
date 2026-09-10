@@ -208,6 +208,7 @@ impl Db {
                 cwd TEXT,
                 resumed_from_run_id TEXT,
                 replaces_run_id TEXT,
+                no_work_termination TEXT,
                 resume_fallback_reason TEXT,
                 completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
                 trigger TEXT CHECK (trigger IN ('auto', 'operator', 'manager', 'unspecified')),

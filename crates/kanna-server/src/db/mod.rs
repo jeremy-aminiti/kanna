@@ -472,6 +472,28 @@ pub struct NewPipelineItem<'a> {
     pub pipeline_def: Option<&'a str>,
 }
 
+/// Closed vocabulary for `stage_run.no_work_termination`.
+///
+/// One entry per producer that closes a run having recorded no agent or task
+/// verdict. Adding a producer means adding a constant here and writing it at
+/// the site — the walk then needs no change, which is the point: the previous
+/// design inferred this from one producer's feedback marker and silently
+/// missed the other five.
+pub mod no_work_termination {
+    /// The session died and a recovery is being prepared (`task_input`).
+    pub const SESSION_INTERRUPTED: &str = "session_interrupted";
+    /// The provider rejected the resumed conversation at launch.
+    pub const REJECTED_RESUME_LAUNCH: &str = "rejected_resume_launch";
+    /// The provider refused the turn for spent quota and a candidate replaced it.
+    pub const QUOTA_REPLACEMENT: &str = "quota_replacement";
+    /// A prepared stage run could not be spawned.
+    pub const STAGE_SPAWN_FAILED: &str = "stage_spawn_failed";
+    /// A durable lifecycle operation could not be completed after restart.
+    pub const LIFECYCLE_OPERATION_FAILED: &str = "lifecycle_operation_failed";
+    /// A task-spawn rebind failed before the agent ran.
+    pub const TASK_SPAWN_FAILED: &str = "task_spawn_failed";
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct StageRun {
@@ -493,6 +515,16 @@ pub struct StageRun {
     /// Worktree the run executed in; a resumed revision reopens the provider
     /// session here (CLI transcripts are keyed by working directory).
     pub cwd: Option<String>,
+    /// Why this run terminated without recording any agent verdict, or `None`
+    /// when its terminal state is a real verdict.
+    ///
+    /// Declared by the producer at the write, never inferred afterwards. The
+    /// completed-stage walk traverses these rows and stops at genuine
+    /// verdicts, so a bookkeeping close between a success and a later recovery
+    /// must not read as "the stage failed" — that is how finished work got
+    /// replayed. `feedback` cannot carry this: two of the producers
+    /// deliberately retain a resumed revision's requested changes there.
+    pub no_work_termination: Option<String>,
     /// The run this one replaced, whatever workspace it spawned into.
     ///
     /// Distinct from `resumed_from_run_id`, which means specifically "this
@@ -881,6 +913,7 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           cwd TEXT,
           resumed_from_run_id TEXT,
           replaces_run_id TEXT,
+          no_work_termination TEXT,
           resume_fallback_reason TEXT,
           completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
           trigger TEXT CHECK (trigger IN ('auto', 'operator', 'manager', 'unspecified')),
@@ -2126,8 +2159,13 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         )
     })?;
 
-    run_migration(conn, "071_stage_run_replaces_run_id", |conn| {
+    run_migration(conn, "072_stage_run_replaces_run_id", |conn| {
         add_column(conn, "stage_run", "replaces_run_id", "TEXT")?;
+        Ok(())
+    })?;
+
+    run_migration(conn, "073_stage_run_no_work_termination", |conn| {
+        add_column(conn, "stage_run", "no_work_termination", "TEXT")?;
         Ok(())
     })?;
 

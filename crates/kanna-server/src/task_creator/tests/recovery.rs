@@ -1082,9 +1082,256 @@ async fn a_second_recovery_after_a_fresh_fallback_keeps_the_success_verdict() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
-/// The walk must stop at a genuine verdict. A real agent failure after a
-/// success means the stage is being worked again on purpose, and a recovery
-/// of *that* is ordinary recovery — not a completed stage.
+/// The reviewer's exact sequence, through the real rejected-resume observer
+/// and then the real resume route. A succeeded, B resumes it and Claude
+/// rejects the conversation at launch, the observer closes B and spawns fresh
+/// C, C's session then dies too. B recorded no agent turn, so D must still
+/// reach A — the previous head stopped at B's `failed`/NULL-feedback row and
+/// replayed the stage.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn a_rejected_resume_is_transparent_to_a_later_recovery() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-rejected-chain");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"A recorded the only real verdict"}"#),
+        None,
+    )
+    .unwrap();
+    // B: the resumed recovery launch the provider is about to reject.
+    db.insert_stage_run(NewStageRun {
+        id: "run-resume-attempt",
+        task_id: "recovery-task",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: Some(RECOVERY_MODEL),
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("recovery-task"),
+        provider_session_id: Some(RECOVERY_SESSION_ID),
+        cwd: Some(worktree.to_string_lossy().as_ref()),
+        resumed_from_run_id: Some("run-killed-mid-turn"),
+    })
+    .unwrap();
+    db.set_test_stage_run_replaces_run_id("run-resume-attempt", "run-killed-mid-turn")
+        .unwrap();
+    write_fresh_claude_probe(&worktree);
+
+    // Real observer: closes B and spawns fresh C.
+    let fake_daemon = spawn_rejected_resume_fake_daemon(
+        config.daemon_dir.clone(),
+        rejected_resume_screen(),
+        true,
+    )
+    .await;
+    crate::http_api::handle_task_terminal_state(
+        &crate::http_api::AppState::new(config.clone()),
+        "recovery-task",
+        1,
+    )
+    .await
+    .unwrap();
+    let _ = fake_daemon.await.unwrap();
+
+    let rejected = db.stage_run("run-resume-attempt").unwrap().unwrap();
+    assert_eq!(rejected.status, "failed");
+    assert_eq!(
+        rejected.feedback, None,
+        "the producer retains whatever the attempt carried; here that is nothing, \
+         which is exactly why feedback cannot classify this row"
+    );
+    assert_eq!(
+        rejected.no_work_termination.as_deref(),
+        Some(crate::db::no_work_termination::REJECTED_RESUME_LAUNCH),
+        "the rejected launch must declare that it recorded no work"
+    );
+    let run_c = wait_for_new_latest_run(&db, "run-resume-attempt").await;
+    assert_eq!(
+        run_c.resumed_from_run_id, None,
+        "C is a fresh conversation; the one-shot retry gate depends on this staying null"
+    );
+    assert_eq!(
+        run_c.replaces_run_id.as_deref(),
+        Some("run-resume-attempt"),
+        "but C still replaced B"
+    );
+
+    // C's session now dies too.
+    let config_dir = repo_root.join("empty-claude-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    let (status, commands) = resume_round(&config).await;
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let command_line = spawned_command_line(&commands);
+    assert!(
+        command_line.contains("ALREADY completed and recorded its verdict"),
+        "D must see through B and C to A's verdict: {command_line}"
+    );
+    assert!(
+        command_line.contains("A recorded the only real verdict"),
+        "A's exact recorded result must reach D: {command_line}"
+    );
+    assert!(
+        !command_line.contains("Implement the requested task in this worktree"),
+        "no ordinary stage instructions after a recorded success: {command_line}"
+    );
+    let original = db.stage_run("run-killed-mid-turn").unwrap().unwrap();
+    assert_eq!(original.status, "succeeded");
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// The quota replacement producer has the same failed/retained-feedback shape
+/// as the rejected launch, and must be transparent for the same reason: the
+/// provider refused the turn, so no work was recorded on that row.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn a_quota_replacement_is_transparent_to_a_later_recovery() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-quota-chain");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"the stage finished before the outage"}"#),
+        None,
+    )
+    .unwrap();
+    // The shape the quota producer leaves: refused attempt closed with a
+    // retained revision feedback and no agent verdict, replacing the success.
+    db.insert_stage_run(NewStageRun {
+        id: "run-quota-refused",
+        task_id: "recovery-task",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: Some(RECOVERY_MODEL),
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: Some(REVIEW_FEEDBACK),
+        session_id: Some("recovery-task"),
+        provider_session_id: Some(RECOVERY_SESSION_ID),
+        cwd: Some(worktree.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.set_test_stage_run_replaces_run_id("run-quota-refused", "run-killed-mid-turn")
+        .unwrap();
+    db.finish_stage_run_without_work(
+        "run-quota-refused",
+        "failed",
+        Some("claude refused this stage for spent quota and recorded no work"),
+        Some(REVIEW_FEEDBACK),
+        crate::db::no_work_termination::QUOTA_REPLACEMENT,
+    )
+    .unwrap();
+    let refused = db.stage_run("run-quota-refused").unwrap().unwrap();
+    assert_eq!(
+        refused.feedback.as_deref(),
+        Some(REVIEW_FEEDBACK),
+        "the revision's requested changes survive the replacement untouched"
+    );
+
+    let config_dir = repo_root.join("empty-claude-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    write_fresh_claude_probe(&worktree);
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    let (status, commands) = resume_round(&config).await;
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let command_line = spawned_command_line(&commands);
+    assert!(
+        command_line.contains("ALREADY completed and recorded its verdict"),
+        "a quota refusal is not a task verdict: {command_line}"
+    );
+    assert!(
+        command_line.contains("the stage finished before the outage"),
+        "A's recorded result must survive the quota hop: {command_line}"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// The spawn-failure class member. `record_stage_transition_run` inserts the
+/// replacement while it is still running, so a spawn that then fails leaves a
+/// linked row between the success and the next recovery.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn a_failed_replacement_spawn_is_transparent_to_a_later_recovery() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-spawn-failed");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"recorded before the spawn ever failed"}"#),
+        None,
+    )
+    .unwrap();
+    db.insert_stage_run(NewStageRun {
+        id: "run-spawn-failed",
+        task_id: "recovery-task",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: Some(RECOVERY_MODEL),
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("recovery-task"),
+        provider_session_id: Some(RECOVERY_SESSION_ID),
+        cwd: Some(worktree.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.set_test_stage_run_replaces_run_id("run-spawn-failed", "run-killed-mid-turn")
+        .unwrap();
+    db.finish_stage_run_without_work(
+        "run-spawn-failed",
+        "failed",
+        Some("failed to start stage in progress: daemon error"),
+        Some("stage spawn failed"),
+        crate::db::no_work_termination::STAGE_SPAWN_FAILED,
+    )
+    .unwrap();
+
+    let config_dir = repo_root.join("empty-claude-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    write_fresh_claude_probe(&worktree);
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    let (status, commands) = resume_round(&config).await;
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let command_line = spawned_command_line(&commands);
+    assert!(
+        command_line.contains("ALREADY completed and recorded its verdict"),
+        "a stage that never started recorded no verdict: {command_line}"
+    );
+    assert!(
+        command_line.contains("recorded before the spawn ever failed"),
+        "A's recorded result must survive a failed replacement spawn: {command_line}"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// The walk must stop at a genuine verdict *that it actually reaches*. A real
+/// agent failure after a success means the stage is being worked again on
+/// purpose, and a recovery of that is ordinary recovery — not a completed
+/// stage. The failed run is linked to the success by both pointers, so
+/// stopping here can only be the verdict check doing it.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
 async fn a_genuine_failure_in_the_lineage_stops_the_completed_stage_walk() {
@@ -1114,9 +1361,13 @@ async fn a_genuine_failure_in_the_lineage_stops_the_completed_stage_walk() {
         session_id: Some("recovery-task"),
         provider_session_id: Some(RECOVERY_SESSION_ID),
         cwd: Some(worktree.to_string_lossy().as_ref()),
-        resumed_from_run_id: None,
+        // Linked to A on purpose. Without the link this test proved only that
+        // the walk stops when there is nowhere to go, which is not the claim.
+        resumed_from_run_id: Some("run-killed-mid-turn"),
     })
     .unwrap();
+    db.set_test_stage_run_replaces_run_id("run-real-failure", "run-killed-mid-turn")
+        .unwrap();
     db.finish_stage_run(
         "run-real-failure",
         "failed",
@@ -1137,6 +1388,16 @@ async fn a_genuine_failure_in_the_lineage_stops_the_completed_stage_walk() {
     assert!(
         !command_line.contains("ALREADY completed and recorded its verdict"),
         "a genuine failure is not a completed stage: {command_line}"
+    );
+    let linked = db.stage_run("run-real-failure").unwrap().unwrap();
+    assert_eq!(
+        linked.replaces_run_id.as_deref(),
+        Some("run-killed-mid-turn"),
+        "the walk really did have an edge back to the success to tunnel through"
+    );
+    assert_eq!(
+        linked.no_work_termination, None,
+        "an agent-recorded failure is a verdict, so it carries no bookkeeping kind"
     );
 
     let _ = std::fs::remove_dir_all(&repo_root);
