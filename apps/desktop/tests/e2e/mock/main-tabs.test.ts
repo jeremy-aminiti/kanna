@@ -212,6 +212,77 @@ describe("main content area tabs", () => {
     await client.deleteSession();
   });
 
+  it("opens contextual help for the active mounted tab and preserves dialog precedence", async () => {
+    await selectTask(taskId);
+    await closeViewTabs(client);
+    const ctx = "window.__KANNA_E2E__.setupState";
+    async function expectHelp(title: string, command: string) {
+      await pressShortcut(client, { key: "/", meta: true });
+      await client.waitForText(".shortcuts-modal h3", title);
+      const actions = await client.executeSync<string[]>(
+        `return Array.from(document.querySelectorAll('.shortcuts-modal .shortcut-action'))
+          .map(element => element.textContent.trim());`,
+      );
+      expect(actions).toContain(command);
+      await pressShortcut(client, { key: "Escape" });
+      await client.waitForNoElement(".shortcuts-modal");
+    }
+    async function activate(id: string) {
+      await client.executeSync(
+        `document.querySelector('[data-testid="main-tab-${id}"]').click();`,
+      );
+      await waitForActiveTab(client, id);
+    }
+    try {
+      await pressShortcut(client, { key: "E", meta: true, shift: true });
+      await waitForActiveTab(client, "tree");
+      await expectHelp("Tree Explorer Shortcuts", "Enter dir / Open file");
+      await callVueMethod(client, "openFilePreview", "README.md");
+      await waitForActiveTab(client, "file:README.md");
+      await expectHelp("File Viewer Shortcuts", "Search (alt)");
+      await pressShortcut(client, { key: "d", meta: true });
+      await waitForActiveTab(client, "diff");
+      await expectHelp("Diff Viewer Shortcuts", "Search (alt)");
+
+      // These components stay mounted: their mount order must not select help.
+      await activate("tree");
+      await expectHelp("Tree Explorer Shortcuts", "Enter dir / Open file");
+      await activate("file:README.md");
+      await expectHelp("File Viewer Shortcuts", "Search (alt)");
+      await activate("agent");
+      await expectHelp("Keyboard Shortcuts", "New Task");
+      expect(await getVueState(client, "shortcutsContext")).toBe("main");
+
+      await activate("tree");
+      await pressShortcut(client, { key: "N", meta: true, shift: true });
+      await expect.poll(() => getVueState(client, "showNewTaskModal")).toBe(true);
+      await pressShortcut(client, { key: "/", meta: true, shift: true });
+      await client.waitForText(".shortcuts-modal h3", "Keyboard Shortcuts");
+      // Help itself reports Main for routing; the captured dialog still wins.
+      await pressShortcut(client, { key: "/", meta: true });
+      await client.waitForText(".shortcuts-modal h3", "New Task Shortcuts");
+      await pressShortcut(client, { key: "Escape" });
+      await client.waitForNoElement(".shortcuts-modal");
+      await pressShortcut(client, { key: "Escape" });
+      await expectHelp("Tree Explorer Shortcuts", "Enter dir / Open file");
+
+      await activate("file:README.md");
+      await pressCloseTab(client);
+      await waitForActiveTab(client, "diff");
+      await expectHelp("Diff Viewer Shortcuts", "Search (alt)");
+      await pressCloseTab(client);
+      await waitForActiveTab(client, "tree");
+      await expectHelp("Tree Explorer Shortcuts", "Enter dir / Open file");
+      await pressCloseTab(client);
+      await waitForActiveTab(client, "agent");
+      await expectHelp("Keyboard Shortcuts", "New Task");
+      expect(await getVueState(client, "shortcutsContext")).toBe("main");
+    } finally {
+      await client.executeSync(`${ctx}.showShortcutsModal = false; ${ctx}.showNewTaskModal = false;`);
+      await closeViewTabs(client);
+    }
+  });
+
   it("opens the diff and the task shell as tabs beside the agent session", async () => {
     await client.waitForElement('[data-testid="main-tab-bar"]', 5_000);
     expect(await openTabIds(client)).toEqual(["agent"]);

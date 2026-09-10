@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PipelineItem } from "../types/kanna";
 import type { WorkspaceTask } from "../workspace/types";
 import { useAppKeyboardActions } from "./useAppKeyboardActions";
+import type { ShortcutContext } from "./useShortcutContext";
 import { useMainTabs } from "./useMainTabs";
 
 vi.mock("./useKeyboardShortcuts", () => ({
@@ -75,6 +76,10 @@ function createHarness(options: {
   };
   const mainTabs = useMainTabs({ scopeKey: computed(() => "item:task-durable") });
   if (options.activeTabKind === "diff") mainTabs.openTab({ kind: "diff" });
+  const overlayContext = ref<ShortcutContext>("main");
+  const showShortcutsModal = ref(false);
+  const shortcutsContext = ref<ShortcutContext>("main");
+  const shortcutsStartFull = ref(false);
   const requestCloseCurrentWindow = vi.fn(async () => {});
   const { keyboardActions } = useAppKeyboardActions({
     store,
@@ -87,13 +92,20 @@ function createHarness(options: {
     mainTabs,
     mainPanelRef: ref(null),
     requestCloseCurrentWindow,
-    currentShortcutContext: computed(() => "main"),
-    showShortcutsModal: ref(false),
+    currentShortcutContext: computed(() => showShortcutsModal.value ? "main" : overlayContext.value),
+    showShortcutsModal,
+    shortcutsContext,
+    shortcutsStartFull,
+    showCommandPalette: ref(false),
     navigateBack,
     navigateForward,
   } as unknown as Parameters<typeof useAppKeyboardActions>[0]);
   return {
     keyboardActions,
+    overlayContext,
+    showShortcutsModal,
+    shortcutsContext,
+    shortcutsStartFull,
     mainTabs,
     requestCloseCurrentWindow,
     openWindow,
@@ -240,4 +252,54 @@ describe("useAppKeyboardActions durable selection", () => {
     expect(navigateBack).toHaveBeenCalledOnce();
     expect(navigateForward).toHaveBeenCalledOnce();
   });
+});
+
+describe("app shortcut menu context", () => {
+  it("captures the active tool on each opening, including existing tabs and close fallback", () => {
+    const h = createHarness();
+    h.mainTabs.openTab({ kind: "tree" });
+    h.mainTabs.openTab({ kind: "file", filePath: "README.md" });
+    h.mainTabs.openTab({ kind: "diff" });
+    const open = (context: ShortcutContext) => {
+      h.keyboardActions.showShortcuts();
+      expect(h.showShortcutsModal.value).toBe(true);
+      expect(h.shortcutsContext.value).toBe(context);
+      expect(h.shortcutsStartFull.value).toBe(context === "main");
+      h.showShortcutsModal.value = false;
+    };
+    open("diff");
+    h.mainTabs.activateTab("tree");
+    open("tree");
+    h.mainTabs.activateTab("file:README.md");
+    open("file");
+    h.mainTabs.closeActiveTab();
+    open("diff");
+    h.mainTabs.closeActiveTab();
+    open("tree");
+    h.mainTabs.closeActiveTab();
+    open("main");
+  });
+
+  it.each<ShortcutContext>(["file", "newTask", "transfer"])(
+    "preserves %s overlay precedence and its captured context through full-mode toggles",
+    (context) => {
+      const h = createHarness();
+      h.mainTabs.openTab({ kind: "tree" });
+      h.overlayContext.value = context;
+      h.keyboardActions.showAllShortcuts();
+      expect(h.shortcutsContext.value).toBe(context);
+      expect(h.shortcutsStartFull.value).toBe(true);
+      h.keyboardActions.showShortcuts();
+      expect(h.showShortcutsModal.value).toBe(true);
+      expect(h.shortcutsStartFull.value).toBe(false);
+      expect(h.shortcutsContext.value).toBe(context);
+      h.keyboardActions.showAllShortcuts();
+      expect(h.shortcutsStartFull.value).toBe(true);
+      h.keyboardActions.showAllShortcuts();
+      expect(h.showShortcutsModal.value).toBe(false);
+      h.overlayContext.value = "main";
+      h.keyboardActions.showShortcuts();
+      expect(h.shortcutsContext.value).toBe("tree");
+    },
+  );
 });

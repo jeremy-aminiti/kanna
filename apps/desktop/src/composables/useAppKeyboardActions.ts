@@ -296,7 +296,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     },
     showShortcuts: () => {
       if (showShortcutsModal.value) {
-        if (shortcutsStartFull.value && activeSurfaceContext() !== "main") {
+        if (shortcutsStartFull.value && shortcutsContext.value !== "main") {
           // Showing all in a modal context → switch to contextual
           shortcutsStartFull.value = false;
         } else {
@@ -305,9 +305,9 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
         return;
       }
       showCommandPalette.value = false;
-      shortcutsContext.value = currentShortcutContext.value;
-      // Main = always full set; modals start in context mode
-      shortcutsStartFull.value = currentShortcutContext.value === "main";
+      shortcutsContext.value = activeSurfaceContext();
+      // Main = always full set; tools and dialogs start in context mode
+      shortcutsStartFull.value = shortcutsContext.value === "main";
       showShortcutsModal.value = true;
     },
     showAllShortcuts: () => {
@@ -321,7 +321,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
         return;
       }
       showCommandPalette.value = false;
-      shortcutsContext.value = currentShortcutContext.value;
+      shortcutsContext.value = activeSurfaceContext();
       shortcutsStartFull.value = true;
       showShortcutsModal.value = true;
     },
