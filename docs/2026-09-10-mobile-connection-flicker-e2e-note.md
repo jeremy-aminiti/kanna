@@ -600,14 +600,44 @@ harness can currently drive interactively at all.
    repo has no prior live-TUI Claude test to carry a proven pattern from, and
    no live CLI turn was run to check it in this pass. Both files say so in
    their own comments.
-3. **Not done, deliberately:** no live CLI turn was started for either new
-   `tests/live/*.test.ts` file — that is the one real consumption lane this
-   note is now ready to have sequenced. `pnpm test:agent-cli-compat`
-   (`KANNA_RUN_LIVE_AGENT_CLI_CONTRACTS=1`) would run the *whole* live suite,
-   including the existing OpenCode/Copilot/flags files, which is broader than
-   "one real consumption lane" — running just the two new files needs
-   `vitest run --config vitest.live.config.ts tests/live/claude-logical-submission.test.ts
-   tests/live/codex-logical-submission.test.ts` with that same env var set.
+3. **One real consumption lane was then run: `tests/live/codex-logical-submission.test.ts`
+   only, twice, real CLI turns, real exit codes.** Pinned an explicit
+   `-m gpt-5.6-sol -c model_reasoning_effort="low"` rather than an
+   unspecified default. Run 1 (`.tmp/codex-logical-submission-run.log`, not
+   committed) failed both cases in ~700ms: the busy-phase proof used literal
+   marker strings embedded in the instruction text, and codex's own TUI
+   echoes a submitted message onto the transcript before running anything —
+   both "start" and "end" markers appeared together as an echo, not
+   execution, so `isStillInBusyPhase` failed immediately. **Causal fix, not
+   a loosened assertion:** replaced the text markers with the file-touch
+   pattern `opencode-injected-input.test.ts`'s own mid-turn case already
+   uses (`existsSync(startedFile)`/`existsSync(finishedFile)`) — a touched
+   file cannot be satisfied by an echo. Re-ran once (the one authorized
+   fix/rerun): Run 2 (`.tmp/codex-logical-submission-run-2.log`, not
+   committed) still failed both cases, in ~30s each this time, with real,
+   attributable evidence — `-m gpt-5.6-sol -c model_reasoning_effort="low"`
+   was accepted (`model: gpt-5.6-sol low`, OpenAI Codex v0.153.4, confirmed
+   from the transcript, not assumed) — and the actual cause is visible in
+   the preserved output: codex was still `Booting MCP server: codex_apps (0s
+   • esc to interrupt)` for the whole 30s wait, so the injected instruction
+   sat queued (`tab to queue message`) and was never executed; the busy-phase
+   start file never appeared. The borrowed `COMPOSER` pattern
+   (`/\/modeltochange|Use\/skills/i`, from the already-passing
+   `codex-tui-quit.test.ts`) matched `/model to change` — text in the static
+   model-info header panel, visible even mid-MCP-boot — so `reachComposer`
+   reported ready before codex actually was. **Neither run is evidence about
+   CR-swallowing, a CLI parser defect, or the model declining the
+   instruction; both are a harness precondition gap**, and that conclusion
+   comes from reading the actual transcript, not from guessing a cause for a
+   bare timeout. Narrowed `COMPOSER` to `/Use\/skills/i` (dropping only the
+   half proven to match early) as a further source correction after run 2,
+   **not re-run a third time this pass** — the one-fix-then-report bound.
+   `codex-tui-quit.test.ts` itself is untouched (out of scope; its own
+   environment/usage may not hit this MCP-boot race, and this pass did not
+   re-verify it). No auth secrets appear in either preserved log; only this
+   test's own PTY children were killed; no other repeated live-suite runs or
+   loops. Claude's file was not run this pass (no automatic second provider
+   run) and remains authored/unverified.
 
 **Raw on-screen direct-typing is not ruled out either, and not for the reason
 this note previously gave.** `sendTaskTerminalInput` → raw KSP bytes forwards
@@ -635,14 +665,22 @@ the reported conditions, which is real but partial: it says nothing about
 whether a live CLI's parser actually treats that CR as submit, and the one
 existing live-CLI submission test pins a stale, no-longer-shipped contract.
 No fix was authored for this symptom because no currently-reproducing defect
-was located by any means available here — source and test authoring for a
-bounded live-CLI reproduction is done (above), a real consumption lane is
-not. Closing this fully needs, in order of what it would actually settle:
-(a) the owner's affected session/provider/timestamp — still pending, not
-invented here — so the real daemon write timeline for that delivery can be
-read directly; (b) running the corrected `cargo test` subset above; (c) one
-real run of the two authored live-CLI cases (Claude, Codex), narrowed to
-whichever provider the owner's answer implicates once it arrives.
+was located by any means available here. One real Codex consumption lane
+has now run (twice — above) and, on the actual evidence, answered a
+*different* question than the one it was built for: both runs failed on a
+harness precondition (an MCP-server-boot race in composer-readiness
+detection), not on anything resembling a swallowed submission boundary or a
+CLI parser defect. The CLI-side parser question this whole reproduction
+exists to answer is therefore still genuinely open — not "probably fine
+because the daemon-byte tests pass," and not "reproduced" either. Closing
+this fully needs, in order of what it would actually settle: (a) the
+owner's affected session/provider/timestamp — still pending, not invented
+here — so the real daemon write timeline for that delivery can be read
+directly; (b) running the corrected `cargo test` subset above; (c) a Codex
+run that actually reaches its composer before injecting (the `COMPOSER`
+narrowing above, not yet reverified live) and/or a first real run of the
+authored-but-unverified Claude case, narrowed to whichever provider the
+owner's answer implicates once it arrives.
 
 ## Overlap — corrected
 
