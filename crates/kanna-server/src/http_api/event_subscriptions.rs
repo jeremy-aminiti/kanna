@@ -1,7 +1,10 @@
 //! Subscription/mailbox semantics are independent of how a harness wakes.
 //! One pending page provides backpressure; only a matching acknowledgement
 //! advances the durable observation cursor. Wakes never carry directives.
-use super::{harness_wake, lan_trust::DesktopLocalAccess, task_events, task_input, AppState};
+use super::{
+    harness_wake, lan_trust::DesktopLocalAccess, subscription_timing, task_events, task_input,
+    AppState,
+};
 use crate::db::{Db, EventSubscription};
 use axum::{
     extract::{Path, Query, State},
@@ -45,6 +48,23 @@ pub(super) struct SubscribeRequest {
     delivery: harness_wake::Delivery,
     #[serde(default)]
     diagnostic: bool,
+    /// Additive allow-list, exactly like the public wait's `event_types`: a
+    /// query filter reused verbatim, never part of the durable cursor.
+    #[serde(default)]
+    event_types: Vec<String>,
+    /// Additive to the fixed baseline exclusion list below, not a
+    /// replacement for it.
+    #[serde(default)]
+    exclude_event_types: Vec<String>,
+    /// Per-subscription override of the collector's trailing-quiet duration.
+    /// Omitted keeps the manager-adopted default; see `subscription_timing`.
+    quiet_ms: Option<u64>,
+    /// Per-subscription override of the collector's max collection hold.
+    /// Validated at registration to be at least `quiet_ms`.
+    max_hold_ms: Option<u64>,
+    /// Per-subscription override of the minimum spacing between adapter-call
+    /// admissions (the wake-rate gate, not the collection window).
+    min_admission_interval_ms: Option<u64>,
 }
 
 fn load(state: &AppState, id: &str) -> Result<EventSubscription, ApiError> {
@@ -206,10 +226,48 @@ pub(super) async fn subscribe(
     if scopes > 1 {
         return Err((StatusCode::BAD_REQUEST, "choose one event scope".into()));
     }
+    // Validate on the resolved (default-filled) values, since those are what
+    // actually govern the collector, but persist only the caller's explicit
+    // overrides below — an untouched request keeps the exact query shape a
+    // pre-existing row has, so registration-retry equality is unaffected.
+    let quiet_ms = request
+        .quiet_ms
+        .unwrap_or(subscription_timing::QUIET.as_millis() as u64);
+    let max_hold_ms = request
+        .max_hold_ms
+        .unwrap_or(subscription_timing::MAX_HOLD.as_millis() as u64);
+    let min_admission_interval_ms = request
+        .min_admission_interval_ms
+        .unwrap_or(subscription_timing::ADMISSION_INTERVAL.as_millis() as u64);
+    let floor_ms = subscription_timing::MIN_OVERRIDE.as_millis() as u64;
+    if quiet_ms < floor_ms || max_hold_ms < floor_ms || min_admission_interval_ms < floor_ms {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("quiet_ms, max_hold_ms and min_admission_interval_ms must each be at least {floor_ms}ms"),
+        ));
+    }
+    if max_hold_ms < quiet_ms {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "max_hold_ms must be at least quiet_ms".into(),
+        ));
+    }
+    // Additive to the fixed baseline, so an untouched request produces the
+    // exact same string as before.
+    let mut exclude_event_types = vec![
+        "task.activity_changed".to_string(),
+        "task.runtime_settled".to_string(),
+        "task.input_delivered".to_string(),
+    ];
+    if !request.exclude_event_types.is_empty() {
+        exclude_event_types.extend(request.exclude_event_types.iter().cloned());
+        exclude_event_types.sort();
+        exclude_event_types.dedup();
+    }
     let mut query = json!({
         "from": "now", "includeCurrentActivity": true, "shortCursor": false,
         "localOnly": request.local_only, "excludeTaskIds": request.exclude_task_ids.join(","),
-        "excludeEventTypes": "task.activity_changed,task.runtime_settled,task.input_delivered",
+        "excludeEventTypes": exclude_event_types.join(","),
         "limit": 100,
     });
     if !request.task_ids.is_empty() {
@@ -218,6 +276,21 @@ pub(super) async fn subscribe(
         query["parentTaskId"] = json!(parent);
     } else {
         query["repoId"] = json!(request.repo_id.unwrap_or(task.repo_id));
+    }
+    if !request.event_types.is_empty() {
+        let mut event_types = request.event_types.clone();
+        event_types.sort();
+        event_types.dedup();
+        query["eventTypes"] = json!(event_types.join(","));
+    }
+    if request.quiet_ms.is_some() {
+        query["quietMs"] = json!(quiet_ms);
+    }
+    if request.max_hold_ms.is_some() {
+        query["maxHoldMs"] = json!(max_hold_ms);
+    }
+    if request.min_admission_interval_ms.is_some() {
+        query["minAdmissionIntervalMs"] = json!(min_admission_interval_ms);
     }
     // A registration retry reuses the mailbox and never resets its cursor.
     if let Some(existing) = db
@@ -563,7 +636,12 @@ pub(crate) async fn run(state: Arc<AppState>) {
                     let worker_id = row.id.clone();
                     let worker_state = state.clone();
                     let mut admission = admission_clocks.remove(&row.id).unwrap_or_else(|| {
-                        super::subscription_timing::Admission::new(recovering || row.wake_admitted)
+                        let interval =
+                            super::subscription_timing::Admission::interval_from_query(&row.query);
+                        super::subscription_timing::Admission::new(
+                            recovering || row.wake_admitted,
+                            interval,
+                        )
                     });
                     let handle = workers.spawn(async move {
                         let result = work(worker_state, row.id.clone(), &mut admission).await;

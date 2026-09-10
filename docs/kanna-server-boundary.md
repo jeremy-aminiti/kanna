@@ -2742,6 +2742,31 @@ internal row — adds `stage`, `branch`, `runId`, `revision`, `delivery`,
 itself, its cursor, and restart/reconnect semantics are unchanged; this is a
 response-shape default only.
 
+`kanna_subscribe_events` also accepts optional, validated, per-subscription
+knobs that reuse existing ownership rather than adding a policy engine:
+`event_types` and `exclude_event_types` are passed straight through as the
+same `TaskEventsQuery` filter `kanna_wait_events` already exposes — a query
+filter, never part of the cursor, additive to the subscription's fixed
+baseline exclusion (`task.activity_changed`, `task.runtime_settled`,
+`task.input_delivered`). `quiet_ms`, `max_hold_ms` and
+`min_admission_interval_ms` override that one subscription's collection
+window and admission floor (defaults 300000/300000/60000ms); each is
+rejected below a 1000ms floor, and `max_hold_ms` is rejected below
+`quiet_ms`. Urgent-event handling is unaffected: an urgent batch still seals
+its collection immediately regardless of these overrides, gated only by the
+(possibly overridden) minimum admission interval — no new urgency taxonomy,
+no runtime retry loop.
+
+These fields are additive and optional at the wire and in storage: a
+subscription that never sets them persists the exact `query` shape it always
+has, so pre-existing rows and the registration-retry `existing.query != query`
+equality check are unaffected. A subscription's own value is read back from
+its persisted `query` on every collection (`quietMs`/`maxHoldMs`) and at
+worker (re)start (`minAdmissionIntervalMs`, bound once into that
+subscription's `Admission`); a row from before this feature shipped simply
+has no such keys and falls back to the global defaults, identical to its
+prior behavior.
+
 The first returned page is already observed by the registering caller. A later
 page receives one coalesced wake. Wakes contain only the subscription and batch
 identity; the mailbox contains the actual events. Delivery is a separate adapter:
