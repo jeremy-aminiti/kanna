@@ -163,15 +163,21 @@ unaffected by either):
 
 This task's source changes were written against `main` at
 `90fd52ee401dfcc900174d9564e2d9c388bec275`, before the subscription-tuning
-task's timing/API changes (task `5edc81f8`, finished and advancing to review
-at `02b65d2af`) merge. Its diff was read in full for this verification pass;
-concretely:
+task's timing/API changes (task `5edc81f8`) merge. **`02b65d2af` is not that
+task's finished/accepted head** — as of this writing `5edc81f8` is actively
+fixing its own review defects (legacy default query compatibility, the 240s
+collection cap, and compact/diagnostic contract tests) on top of it. Its diff
+was read in full for *awareness and planning* only; nothing from it has been
+merged or copied into this branch, and its exact shape will change before it
+actually lands. Reconciliation must re-read `5edc81f8`'s final, accepted
+commit — not reuse this snapshot — before touching any shared file. As read
+at `02b65d2af`, the reconciliation surface was:
 
-- `accept_page`'s outage logic is untouched by `02b65d2af` — confirms it was
+- `accept_page`'s outage logic is untouched there — confirms it was
   deliberately deferred to this task, as its own limitation doc says.
-- `compact()`/`response(row, diagnostic)` (new there) need my
-  `local_machine_id` parameter on `accept_page` merged in; both are
-  independent edits to the same functions/call sites, not a design conflict.
+- `compact()`/`response(row, diagnostic)` (new there) will need my
+  `local_machine_id` parameter on `accept_page` merged in; independent edits
+  to the same functions/call sites, not a design conflict.
 - `Collection::from_query(query.quiet_ms, query.max_hold_ms)` (new there)
   sits on lines adjacent to my `local_machine_faulted` closure and scoped
   break/OR conditions in `wait_aggregate_task_events`/`wait_local_task_events`
@@ -184,21 +190,46 @@ concretely:
   re-run once merged rather than assumed to still pass.
 - `catalog.json`'s `kanna_read_event_subscription` description was rewritten
   there (compact-response documentation) — my `staleMachines`/outage-behavior
-  sentence needs re-inserting into their new text, not restored verbatim.
-- Open, not decided here: `compact()`'s default response omits
-  `staleMachines`; only `pending.machineErrors` on an actually-delivered
-  batch carries partial-coverage info to a compact-mode caller. Whether
-  `compact()` should also expose `staleMachines` is a joint call for
-  reconciliation.
+  sentence will need re-inserting into whatever their final text becomes, not
+  restored verbatim.
 
-Once `02b65d2af` merges, the sibling's
+### Resolved: compact response must carry stale-machine coverage
+
+The previously-flagged open decision ("should `compact()` expose
+`staleMachines`?") is resolved — decided, not left to this task to invent:
+
+- The compact response must report **current** stale-machine coverage even
+  when `pending` is `null` — an operator reading a quiet subscription must
+  be able to see a degraded peer without needing a delivered batch to carry
+  it, and without `diagnostic: true`.
+- A delivered batch (`pending` non-null) continues to carry `machineErrors`
+  as it already does.
+- Neither must reintroduce a giant/cursor-shaped blob into the compact
+  response — the point of `compact()` (stripping the durable cursor) stands;
+  whatever field carries this is a small, summarized shape (e.g. machine id
+  plus reason), not `stale_machines` embedded verbatim if that ever grows
+  cursor-like, and never the durable `cursor` itself.
+
+**This task owns implementing that integration**, after `5edc81f8`'s actual
+final commit merges: add the compact-mode field sourced from
+`row.stale_machines`, and cover it with tests exercising ack, restart, and
+peer recovery through the compact response specifically (not just the
+existing diagnostic-mode assertions). Until then, `stale_machines` remains
+correctly persisted and deduped server-side (see the two
+`event_subscriptions::outage_isolation_tests` unit tests) but is only
+visible via `diagnostic: true` or a delivered batch's `machineErrors` — a
+known, tracked, non-final gap, not a defect in the outage-isolation logic
+itself.
+
+Once `5edc81f8`'s final commit merges, the sibling's
 `docs/2026-09-10-repo-subscription-remote-fault-pauses-all-legs-limitation.md`
 is resolved by this change and should be removed or marked resolved, and this
 task's new tests' timing assumptions (1s quiet / 5s max hold, from the
 pre-tuning `subscription_timing.rs` constants used at verification time) need
-re-validation against the merged timing constants (300s/300s/60s defaults,
-mitigated for these specific fixtures by the per-subscription overrides
-`WatchFixture` will carry post-merge).
+re-validation against the merged timing constants (300s/300s/60s defaults at
+time of reading, though `5edc81f8` is still revising the 240s collection cap
+too — re-check rather than assume), mitigated for these specific fixtures by
+the per-subscription overrides `WatchFixture` will carry post-merge.
 
 Current `main` was revalidated at `3f9520ae2` (Android emulator pairing
 terminal work): touches no file this task shares (`apps/mobile/**`,
