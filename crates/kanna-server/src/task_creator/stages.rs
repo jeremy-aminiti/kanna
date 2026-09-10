@@ -998,10 +998,12 @@ const COMPLETED_STAGE_WALK_LIMIT: usize = 32;
 /// the answer; a real failure or cancellation means this stage is being redone
 /// deliberately, and no-redo must not apply to it.
 ///
-/// `replaces_run_id` is the lineage every restart writes. `resumed_from_run_id`
-/// is followed only as a fallback for rows written before that column existed,
-/// and keeps its own narrower meaning — "this spawn carried `--resume`" —
-/// which the rejected-resume observer still gates its one-shot retry on.
+/// Only `replaces_run_id` carries completion lineage. `resumed_from_run_id`
+/// records conversation reuse: a new revision can resume a successful run's
+/// conversation while owing a new verdict. Following that pointer would
+/// suppress the reviewer's new work. A row without explicit replacement
+/// provenance therefore starts its own completion obligation, including a
+/// legacy row whose conversation-only link cannot establish recovery intent.
 fn resolve_completed_stage(
     db: &Db,
     run: &crate::db::StageRun,
@@ -1010,10 +1012,7 @@ fn resolve_completed_stage(
     let mut result = run.result.clone();
     let mut feedback = run.feedback.clone();
     let mut no_work_termination = run.no_work_termination.clone();
-    let mut previous = run
-        .replaces_run_id
-        .clone()
-        .or_else(|| run.resumed_from_run_id.clone());
+    let mut previous = run.replaces_run_id.clone();
     let mut seen = std::collections::HashSet::new();
     seen.insert(run.id.clone());
 
@@ -1051,7 +1050,7 @@ fn resolve_completed_stage(
         result = row.result;
         feedback = row.feedback;
         no_work_termination = row.no_work_termination;
-        previous = row.replaces_run_id.or(row.resumed_from_run_id);
+        previous = row.replaces_run_id;
     }
     log::warn!(
         "completed-stage lineage for run {} exceeded {COMPLETED_STAGE_WALK_LIMIT} hops",

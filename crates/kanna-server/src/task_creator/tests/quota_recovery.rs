@@ -17,6 +17,8 @@
 
 use super::*;
 
+mod revision_recovery;
+
 const TASK_ID: &str = "quota-task";
 const REVIEW_WORKTREE_BRANCH: &str = "task-quota-review";
 
