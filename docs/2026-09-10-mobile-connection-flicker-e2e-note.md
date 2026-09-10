@@ -55,16 +55,15 @@ is intact, and the one PR #1419 line that touched a file this fix also
 touches (`mobileEnvironment.ts` gaining an unrelated `androidPackageId`
 field) leaves the `scheme` field this fix reads untouched. The Codex
 reproduction (`tests/live/codex-logical-submission.test.ts`) has now run
-four times total across two lane authorizations — **all four failed on a
+five times total across three lane authorizations — **runs 1–4 failed on a
 harness readiness precondition (a `codex_apps` MCP-server-boot race, now
-narrowed from "wrong composer pattern" to "the boot itself outlasts the
-wait window"), never on anything resembling the submission question itself;
-the missing-Enter symptom is not fixed, not reproduced, and not ruled out
-by any of them.** Composer-readiness detection is now solid (each of runs 2
-and 3 independently falsified a different single-regex approach); the
-remaining gap's fix — `--disable apps`, confirmed via `codex features list`
-(non-agentic, zero-cost) and now applied to the test's spawn args, not yet
-run live — is documented in the test file itself. The simulator
+narrowed and fixed via `--disable apps`, confirmed via `codex features
+list` and verified absent from run 5's own transcript); run 5 still failed,
+but its cause is marked unattributed rather than pinned on the same
+harness gap — the missing-Enter symptom is not fixed, not reproduced, and
+not ruled out by any of the five.** Composer-readiness detection is solid
+(runs 2 and 3 each independently falsified a different single-regex
+approach); the MCP-boot race is closed. The simulator
 first-attach lane has since run for real (attempt 2, below): the
 `6fee7e01c` scheme fix is now live-confirmed against an actual OS-level
 open, and the real disposable-pairing sequence (`POST /v1/pairing/sessions`
@@ -865,6 +864,41 @@ harness can currently drive interactively at all.
    still untested; every failure so far has been a harness precondition, not
    a result either way.
 
+   **Run 5** (`CODEX INPUT RETRY LANE CLEAR`, `.tmp/codex-logical-submission-run-5.log`,
+   not committed): ran the corrected file exactly once, `--disable apps`
+   in place, same explicit spawn/options/identity as every prior run
+   (`--yolo -m gpt-5.6-sol -c model_reasoning_effort="low" --disable apps`).
+   **`--disable apps` is confirmed working — the MCP-boot race is closed:**
+   `Booting MCP server: codex_apps` does not appear anywhere in this
+   transcript, the first run where it's been absent. Both cases still
+   failed, still at the busy-phase-start check (30s), but the actual
+   preserved tail shows something new and genuinely ambiguous rather than
+   the same boot-race signature: the header/tip render, then the submitted
+   instruction text on the composer line (`› Run this exact shell command
+   now, and do not reply until it finishes: sh -c '...'`), then nothing —
+   no visible turn-start indicator, no tool-call chrome, no response text,
+   within the captured window. Read honestly, this does not distinguish
+   between two real possibilities: (a) codex's own session/turn startup
+   latency, independent of MCP boot, still exceeds the 30s wait on its own,
+   or (b) the message shown on the composer line was never actually
+   submitted at all — which would be the exact question this file exists to
+   answer. **Cause is marked unattributed, per instruction, not guessed
+   either way** — the preserved tail (`session.output.slice(-1500)` at
+   failure) does not contain enough to tell them apart, and no further live
+   run was made to find out (no automatic repeated variants this pass).
+   **Caveat, stated explicitly per instruction:** `--disable apps` is
+   fixture isolation to remove one confound from this test, not a claim
+   about the owner's original environment — Codex ships with `apps` on by
+   default, so a future pass here (with or without the flag) says nothing
+   about whether the owner's own session had it enabled, and does not by
+   itself clear or implicate `apps` in the original report. Cleanup:
+   confirmed no leftover processes or temp dirs tied to this fixture
+   specifically (`kanna-codex-submission-*`/`kanna-codex-home-*` — an
+   initial broad `ps aux | grep codex` incorrectly matched an unrelated,
+   concurrent Kanna task's own real Codex session on this shared machine;
+   corrected to the fixture's own temp-dir names before concluding anything
+   was clean, and left that other task's process untouched).
+
 **Raw on-screen direct-typing is not ruled out either, and not for the reason
 this note previously gave.** `sendTaskTerminalInput` → raw KSP bytes forwards
 literal keystrokes with no synthesized `\r`, which is true, but that does not
@@ -892,16 +926,25 @@ whether a live CLI's parser actually treats that CR as submit, and the one
 existing live-CLI submission test pins a stale, no-longer-shipped contract.
 No fix was authored for this symptom because no currently-reproducing defect
 was located by any means available here. The real Codex consumption lane has
-now run four times across two lane authorizations and, on the actual
-evidence, answered a *different* question than the one it was built for
-every time: all four runs failed on a harness precondition (a `codex_apps`
-MCP-server-boot race, narrowed run over run from "wrong composer pattern"
-matched too early, to that pattern never matching at all, to composer
-detection now working but the boot itself outlasting the wait window), never
-on anything resembling a swallowed submission boundary or a CLI parser
-defect. The CLI-side parser question this whole reproduction exists to
+now run five times across three lane authorizations. Runs 1–4 all failed on
+the same class of harness precondition (a `codex_apps` MCP-server-boot race,
+narrowed run over run from "wrong composer pattern" matched too early, to
+that pattern never matching at all, to composer detection working but the
+boot itself outlasting the wait window) — never on anything resembling a
+swallowed submission boundary or a CLI parser defect. **Run 5, with the
+MCP-boot race fix (`--disable apps`) confirmed working and the boot text
+genuinely absent from its transcript, still failed — but this time the
+preserved evidence does not clearly point back to a harness precondition
+either; it is marked unattributed** between ordinary session-startup
+latency and the actual submission question, because the captured tail does
+not contain enough to tell the two apart, and no further live run was made
+to find out. The CLI-side parser question this whole reproduction exists to
 answer is therefore still genuinely open — not "probably fine because the
-daemon-byte tests pass," and not "reproduced" either. Closing
+daemon-byte tests pass," not "reproduced," and — as of run 5 — no longer
+confidently "just a harness bug" either. `--disable apps` is fixture
+isolation, not a claim about the owner's own environment (which ships with
+`apps` on by default); it does not by itself implicate or clear that
+feature in the original report. Closing
 this fully needs, in order of what it would actually settle: (a) the
 owner's affected session/provider/timestamp — still pending, not invented
 here — so the real daemon write timeline for that delivery can be read
