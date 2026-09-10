@@ -81,21 +81,47 @@ pub async fn preflight(
     })
 }
 
-pub async fn commit(
-    state: &Arc<AppState>,
-    transfer_id: &str,
-    payload: &Value,
-) -> Result<(), String> {
-    let response = control(
+/// The destination's answer to a submitted transfer payload, classified into
+/// exactly three outcomes rather than a success/failure boolean — see
+/// docs/kanna-server-boundary.md item 3.
+///
+/// `Unresolved` is the outcome for literally everything other than an
+/// explicit, positively-decided `Refused`: a genuine timeout, a lost
+/// response, an old peer that cannot carry the refusal field, a same-machine
+/// sidecar that is mid-upgrade. A lost response can follow a real admission
+/// just as easily as it can follow nothing at all, so none of those cases
+/// may be read as a decided refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitOutcome {
+    Admitted,
+    Refused(String),
+    Unresolved(String),
+}
+
+pub async fn commit(state: &Arc<AppState>, transfer_id: &str, payload: &Value) -> CommitOutcome {
+    let response = match control(
         state,
         "prepare-outgoing-transfer",
         json!({ "payload": { "phase": "commit", "transferId": transfer_id, "payload": payload } }),
     )
-    .await?;
-    if response.get("admitted").and_then(Value::as_bool) != Some(true) {
-        return Err("destination sidecar did not prove transfer admission".into());
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => return CommitOutcome::Unresolved(error),
+    };
+    match response.get("admitted").and_then(Value::as_bool) {
+        Some(true) => CommitOutcome::Admitted,
+        _ => match response
+            .get("refusalReason")
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty())
+        {
+            Some(reason) => CommitOutcome::Refused(reason.to_string()),
+            None => CommitOutcome::Unresolved(
+                "destination has not yet confirmed transfer admission".into(),
+            ),
+        },
     }
-    Ok(())
 }
 
 pub async fn abandon(state: &Arc<AppState>, transfer_id: &str) -> Result<(), String> {
@@ -208,6 +234,8 @@ pub async fn acknowledge_import_committed(
     transfer_id: &str,
     source_task_id: &str,
     destination_local_task_id: &str,
+    content_commitment: &str,
+    destination_repo_id: &str,
 ) -> Result<(), String> {
     control(
         state,
@@ -216,6 +244,8 @@ pub async fn acknowledge_import_committed(
             "transferId": transfer_id,
             "sourceTaskId": source_task_id,
             "destinationLocalTaskId": destination_local_task_id,
+            "contentCommitment": content_commitment,
+            "destinationRepoId": destination_repo_id,
         }),
     )
     .await
@@ -230,6 +260,27 @@ pub async fn mark_incoming_event_recorded(
         state,
         "mark-incoming-event-recorded",
         json!({ "transferId": transfer_id }),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Records a definitive, contract-specific refusal for an incoming
+/// transfer — distinct from [`mark_incoming_event_recorded`]'s generic
+/// delivery marker. A destination-sidecar failure here (an old sidecar with
+/// no such control op, a dropped connection) is deliberately not propagated
+/// as an error: the caller's own durable DB refusal already stands, and the
+/// worst case if this best-effort signal never lands is the source seeing
+/// the existing timeout-based unresolved outcome instead of an immediate one.
+pub async fn mark_incoming_transfer_refused(
+    state: &Arc<AppState>,
+    transfer_id: &str,
+    reason: &str,
+) -> Result<(), String> {
+    control(
+        state,
+        "mark-incoming-transfer-refused",
+        json!({ "transferId": transfer_id, "reason": reason }),
     )
     .await
     .map(|_| ())

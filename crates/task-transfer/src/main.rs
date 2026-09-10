@@ -735,6 +735,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         transfer_id: event.transfer_id,
                         source_task_id: event.source_task_id,
                         destination_local_task_id: event.destination_local_task_id,
+                        content_commitment: event.content_commitment,
+                        destination_repo_id: event.destination_repo_id,
                     }
                 }
                 RuntimeEvent::OutgoingTransferFinalizationRequested(event) => {
@@ -1279,10 +1281,11 @@ async fn handle_request(
             transfer_id,
             payload,
         } => match runtime.prepare_transfer_commit(&transfer_id, payload).await {
-            Ok(()) => ControlResponse::PrepareTransferCommit {
+            Ok(outcome) => ControlResponse::PrepareTransferCommit {
                 request_id,
                 transfer_id,
-                admitted: true,
+                admitted: outcome.admitted,
+                refusal_reason: outcome.refusal_reason,
             },
             Err(error) => control_error(request_id, error),
         },
@@ -1345,8 +1348,16 @@ async fn handle_request(
             transfer_id,
             source_task_id,
             destination_local_task_id,
+            content_commitment,
+            destination_repo_id,
         } => match runtime
-            .acknowledge_import_committed(&transfer_id, &source_task_id, &destination_local_task_id)
+            .acknowledge_import_committed(
+                &transfer_id,
+                &source_task_id,
+                &destination_local_task_id,
+                content_commitment.as_deref(),
+                destination_repo_id.as_deref(),
+            )
             .await
         {
             Ok(()) => ControlResponse::AcknowledgeImportCommitted {
@@ -1360,6 +1371,20 @@ async fn handle_request(
             transfer_id,
         } => match runtime.mark_incoming_event_recorded(&transfer_id).await {
             Ok(()) => ControlResponse::MarkIncomingEventRecorded {
+                request_id,
+                transfer_id,
+            },
+            Err(error) => control_error(request_id, error),
+        },
+        ControlRequest::MarkIncomingTransferRefused {
+            request_id,
+            transfer_id,
+            reason,
+        } => match runtime
+            .mark_incoming_transfer_refused(&transfer_id, &reason)
+            .await
+        {
+            Ok(()) => ControlResponse::MarkIncomingTransferRefused {
                 request_id,
                 transfer_id,
             },

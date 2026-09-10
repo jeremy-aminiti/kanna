@@ -22,7 +22,7 @@ pub use events::{
     FinalizedOutgoingTransfer, IncomingTransferEvent, OutgoingTransferCommittedEvent,
     OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent, PairingRequestedEvent,
     PairingResult, PairingStartedEvent, PreflightResult, RuntimeError, RuntimeEvent,
-    TaskPullRequestedEvent,
+    TaskPullRequestedEvent, TransferCommitOutcome,
 };
 pub use external_peers::{ExternalPeer, PeerRoutes, TransferTransport};
 pub use state::{StagedTransferArtifact, TransferRuntime};

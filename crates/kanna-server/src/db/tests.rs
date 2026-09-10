@@ -229,7 +229,10 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "077_transferred_task_history");
+    assert_eq!(
+        latest_migration,
+        "078_transferred_task_manifest_content_commitment"
+    );
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],

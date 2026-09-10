@@ -228,6 +228,15 @@ pub struct TransferTaskPayload {
     /// Exact source commit used as the transferred task's diff base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_oid: Option<String>,
+    /// The source's own commitment over the content it is shipping (head,
+    /// base, stage, workflow, input-ledger checksum, history) — see
+    /// [`transfer_content_commitment`]. Additive: an older peer that never
+    /// sends this is unaffected, since the destination recomputes its own
+    /// copy independently rather than trusting this one; the source instead
+    /// reads its own copy back from what it persisted here, later, to check
+    /// the destination's acknowledgment against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_commitment: Option<String>,
     /// Immutable source workflow/context carried into the first destination
     /// preparation. These are snapshots, never local stage-run rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,6 +433,44 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// The facts a transfer content commitment binds together: head, base,
+/// stage, pinned workflow, the shipped input ledger's checksum, and the
+/// ordered foreign history. Grouped into one type rather than passed as
+/// loose arguments so the source (authoring what it shipped) and the
+/// destination (reporting what it read back) construct the identical shape
+/// from two very differently sourced sets of values.
+#[derive(Serialize)]
+pub struct TransferContentCommitmentInput<'a> {
+    pub transfer_id: &'a str,
+    pub cloud_task_id: &'a str,
+    pub head_oid: &'a str,
+    pub base_oid: &'a str,
+    pub stage: &'a str,
+    pub workflow_definition: Option<&'a str>,
+    pub input_ledger_sha256: Option<&'a str>,
+    pub history: &'a [TransferHistoryRecordPayload],
+}
+
+/// A digest binding exactly the facts a destination must independently prove
+/// after import — head, base, stage, pinned workflow, the shipped input
+/// ledger's checksum, and the ordered foreign history — to this transfer and
+/// task's identity.
+///
+/// The source calls this once, at build time, over what it is authoring, and
+/// persists the result so it can later check an acknowledgment against its
+/// own copy. The destination calls this once, after `verify_persisted_task_bundle`
+/// has read every one of these values back out of its own Git/SQLite state —
+/// never out of the payload it received — so that an unimported destination
+/// has nothing it could echo to produce a matching digest. See
+/// docs/kanna-server-boundary.md item 3.
+pub fn transfer_content_commitment(
+    input: &TransferContentCommitmentInput<'_>,
+) -> Result<String, String> {
+    let bytes = serde_json::to_vec(input)
+        .map_err(|error| format!("failed to encode transfer content commitment: {error}"))?;
+    Ok(sha256_hex(&bytes))
 }
 
 /// Serializes the complete durable directive history. A row that has already
@@ -1199,6 +1246,13 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
     if mode == RepoAcquisitionMode::TaskBundle && base_oid.is_none() {
         return Err("task-bundle payload is missing the exact review base".into());
     }
+    // No mode requires this: it is a read-back proof anchor the destination
+    // computes for itself, not something the sender must supply.
+    let content_commitment = nullable_string(
+        task,
+        &["content_commitment", "contentCommitment"],
+        "task content_commitment must be a string or null",
+    )?;
     let workflow_definition = nullable_string(
         task,
         &["workflow_definition", "workflowDefinition"],
@@ -1232,6 +1286,7 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
             branch: nullable_string(task, &["branch"], "task branch must be a string or null")?,
             head_oid,
             base_oid,
+            content_commitment,
             workflow_definition,
             previous_stage_result: nullable_string(
                 task,

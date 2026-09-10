@@ -10,7 +10,9 @@
 //! stay only as the record of which import owns the row.
 
 use super::control;
-use super::payload::{self, OutgoingTransferPayload, RepoAcquisitionMode};
+use super::payload::{
+    self, OutgoingTransferPayload, RepoAcquisitionMode, TransferHistoryRecordPayload,
+};
 use super::session;
 use crate::db::TransferWorkItem;
 use crate::http_api::AppState;
@@ -72,6 +74,20 @@ pub async fn record_incoming(state: &Arc<AppState>, event: &Value) -> Result<(),
         let reason = "incoming transfer uses an unsupported legacy payload; task-bundle admission is required";
         db.fail_incoming_task_transfer(&transfer_id, reason)
             .map_err(|error| format!("db error: {error}"))?;
+        // Best-effort: this is a fast, zero-I/O decision the sidecar can
+        // relay to the source immediately instead of making it wait out the
+        // admission timeout for an outcome that is already known. An old or
+        // unreachable sidecar just means the source falls back to today's
+        // timeout-based unresolved outcome — the durable refusal above
+        // already stands regardless.
+        if let Err(error) =
+            control::mark_incoming_transfer_refused(state, &transfer_id, reason).await
+        {
+            log::warn!(
+                "could not relay definitive refusal for transfer {transfer_id} to the sidecar; \
+                 the source will see the existing timeout-based unresolved outcome instead: {error}"
+            );
+        }
         return Err(reason.to_string());
     }
     control::mark_incoming_event_recorded(state, &transfer_id).await?;
@@ -417,7 +433,8 @@ async fn run_import(
     // exact committed head/base, pinned workflow, and complete input history
     // before any acknowledgment can close the source.
     verify_persisted_task_bundle(state, &payload, &local_task_id, transfer_id).await?;
-    if let Some((_, _, _, bound_task, state_name)) = db
+    let destination_repo_id;
+    if let Some((repo_id, _, _, bound_task, state_name)) = db
         .transferred_task_manifest(transfer_id)
         .map_err(|error| format!("db error: {error}"))?
     {
@@ -428,9 +445,22 @@ async fn run_import(
             db.mark_transferred_task_manifest_prepared(transfer_id)
                 .map_err(|error| format!("db error: {error}"))?;
         }
+        destination_repo_id = repo_id;
     } else {
         return Err(format!("transfer manifest missing: {transfer_id}").into());
     }
+    // Half A of the acknowledgment's proof (see docs/kanna-server-boundary.md
+    // item 3): the content commitment `verify_persisted_task_bundle` computed
+    // and persisted just above, from its own read-back state. `None` here
+    // would mean the manifest was never actually proven, which the call
+    // above already made terminal — so this is an invariant check, not a
+    // fallback path.
+    let content_commitment = db
+        .transferred_task_manifest_content_commitment(transfer_id)
+        .map_err(|error| format!("db error: {error}"))?
+        .ok_or_else(|| {
+            format!("transfer manifest for {transfer_id} has no proven content commitment")
+        })?;
 
     db.set_cloud_task_identity(&local_task_id, &payload.task.cloud_task_id)
         .map_err(|error| format!("db error: {error}"))?;
@@ -464,6 +494,8 @@ async fn run_import(
         transfer_id,
         &payload.task.source_task_id,
         &local_task_id,
+        &content_commitment,
+        &destination_repo_id,
     )
     .await
     .map_err(ImportFailure::from)?;
@@ -570,6 +602,77 @@ async fn verify_persisted_task_bundle(
             "transferred task {local_task_id} durable input history does not match the source ledger"
         )));
     }
+
+    // The ordered foreign stage/main/post/revision history a second hop would
+    // need to re-export honestly — proved here for the same reason the input
+    // ledger is: without it, the sole-authorization acknowledgment below
+    // would silently drop this guarantee out of the proved contract.
+    let db_history = verify_db
+        .transferred_task_history(local_task_id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let expected_history = &payload.task.history;
+    if db_history.len() != expected_history.len()
+        || db_history
+            .iter()
+            .zip(expected_history.iter())
+            .any(|(row, expected)| {
+                row.origin_peer_id != expected.origin_peer_id
+                    || row.origin_task_id != expected.origin_task_id
+                    || row.origin_run_id != expected.origin_run_id
+                    || row.stage != expected.stage
+                    || row.kind != expected.kind
+                    || row.result != expected.result
+                    || row.feedback != expected.feedback
+                    || row.finished_at != expected.finished_at
+            })
+    {
+        return Err(ImportFailure::Terminal(format!(
+            "transferred task {local_task_id} durable foreign history does not match the source snapshot"
+        )));
+    }
+
+    // The proof `outgoing_committed` requires before it will ever close the
+    // source task, computed ONLY from what was just read back above — never
+    // from `payload`'s own copy of these values — so a destination that
+    // imported nothing has nothing here it could echo. See
+    // docs/kanna-server-boundary.md item 3.
+    let read_back_history: Vec<TransferHistoryRecordPayload> = db_history
+        .iter()
+        .map(|record| TransferHistoryRecordPayload {
+            sequence: u64::try_from(record.sequence).unwrap_or_default(),
+            origin_peer_id: record.origin_peer_id.clone(),
+            origin_task_id: record.origin_task_id.clone(),
+            origin_run_id: record.origin_run_id.clone(),
+            stage: record.stage.clone(),
+            kind: record.kind.clone(),
+            agent: record.agent.clone(),
+            result: record.result.clone(),
+            feedback: record.feedback.clone(),
+            finished_at: record.finished_at.clone(),
+        })
+        .collect();
+    let content_commitment =
+        payload::transfer_content_commitment(&payload::TransferContentCommitmentInput {
+            transfer_id,
+            cloud_task_id: &payload.task.cloud_task_id,
+            head_oid: &actual_head,
+            base_oid: &actual_base,
+            stage: item.stage.as_deref().unwrap_or_default(),
+            workflow_definition: item.pipeline_def.as_deref(),
+            // The artifact checksum already verified byte-for-byte against the
+            // fetched ledger above (`decode_task_input_ledger`'s own sha256
+            // check) — reusing it here needs no retained ledger bytes on the
+            // source and is not an echo of anything unverified.
+            input_ledger_sha256: payload
+                .input_ledger
+                .as_ref()
+                .map(|ledger| ledger.sha256.as_str()),
+            history: &read_back_history,
+        })
+        .map_err(ImportFailure::Terminal)?;
+    verify_db
+        .set_transferred_task_manifest_content_commitment(transfer_id, &content_commitment)
+        .map_err(|error| format!("db error: {error}"))?;
     Ok(())
 }
 

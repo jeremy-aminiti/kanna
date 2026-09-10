@@ -29,6 +29,16 @@ pub(super) struct IncomingTransferReservation {
     pub(super) committed: bool,
     pub(super) event: Option<IncomingTransferEvent>,
     pub(super) event_recorded: bool,
+    /// A definitive, contract-specific refusal the destination server made
+    /// about this payload (e.g. an unsupported legacy repo acquisition mode)
+    /// — decidable synchronously, with no I/O, from the payload alone.
+    /// Distinct from `event_recorded`, which only proves *some* server
+    /// processed *some* event, old or new, for a payload it recognized —
+    /// never that it durably admitted *this* transfer's integrity contract.
+    /// `Some(reason)` short-circuits the source's admission poll with a
+    /// definitive answer instead of the ambiguous "still waiting" that a
+    /// bare timeout stands in for.
+    pub(super) refused_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +57,13 @@ pub(super) struct ImportCommitReceipt {
     pub(super) transport: Option<super::external_peers::TransferTransport>,
     pub(super) source_task_id: String,
     pub(super) destination_local_task_id: String,
+    /// Half A/B of the source-close proof (see docs/kanna-server-boundary.md
+    /// item 3), carried opaquely — this sidecar never interprets either
+    /// field, only stores and forwards what the destination server sent.
+    /// `None` on a receipt from an old destination server, which the source
+    /// server then refuses to close on rather than trusting.
+    pub(super) content_commitment: Option<String>,
+    pub(super) destination_repo_id: Option<String>,
     pub(super) created_at_unix_ms: u64,
     pub(super) applied: bool,
     pub(super) event_queued: bool,
@@ -66,6 +83,8 @@ impl ImportCommitReceipt {
             transfer_id: transfer_id.to_owned(),
             source_task_id: self.source_task_id.clone(),
             destination_local_task_id: self.destination_local_task_id.clone(),
+            content_commitment: self.content_commitment.clone(),
+            destination_repo_id: self.destination_repo_id.clone(),
         };
         match sender.try_send(event) {
             Ok(()) => {

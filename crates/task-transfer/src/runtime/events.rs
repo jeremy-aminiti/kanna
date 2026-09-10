@@ -20,6 +20,18 @@ pub struct FinalizedOutgoingTransfer {
     pub finalized_cleanly: bool,
 }
 
+/// The destination's answer to a submitted transfer payload — never
+/// collapsed to a bare success/failure boolean, because "no" and "not yet"
+/// are different outcomes with different consequences for the caller (see
+/// docs/kanna-server-boundary.md item 3). `admitted: false` with
+/// `refusal_reason: None` is deliberately not an error: it means the
+/// destination has not (yet) proven a decision either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferCommitOutcome {
+    pub admitted: bool,
+    pub refusal_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncomingTransferEvent {
     pub transfer_id: String,
@@ -34,6 +46,8 @@ pub struct OutgoingTransferCommittedEvent {
     pub transfer_id: String,
     pub source_task_id: String,
     pub destination_local_task_id: String,
+    pub content_commitment: Option<String>,
+    pub destination_repo_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

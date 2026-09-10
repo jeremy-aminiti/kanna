@@ -39,6 +39,14 @@ struct StoredImportCommitReceipt {
     transport: Option<super::external_peers::TransferTransport>,
     source_task_id: String,
     destination_local_task_id: String,
+    // A receipt persisted by a pre-upgrade build has neither: `None` is the
+    // correct, honest reading (no proof was ever computed), not an error —
+    // the source server refuses to close on that absence rather than
+    // treating a missing field as implicit trust.
+    #[serde(default)]
+    content_commitment: Option<String>,
+    #[serde(default)]
+    destination_repo_id: Option<String>,
     created_at_unix_ms: u64,
     applied: bool,
 }
@@ -54,6 +62,12 @@ struct StoredIncomingTransferReservation {
     event: Option<IncomingTransferEvent>,
     #[serde(default)]
     event_recorded: bool,
+    // A record persisted by a pre-upgrade build has no opinion on this, and
+    // `None` correctly means "not refused" rather than "refused for an
+    // unknown reason" — so an old-format row on disk still degrades to the
+    // existing timeout/uncertain behavior instead of misreading as a refusal.
+    #[serde(default)]
+    refused_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +163,7 @@ impl TransferReplayStore {
                     committed: stored.committed,
                     event: stored.event,
                     event_recorded: stored.event_recorded,
+                    refused_reason: stored.refused_reason,
                 },
             );
         }
@@ -287,6 +302,7 @@ impl TransferReplayStore {
                 committed: reservation.committed,
                 event: reservation.event.clone(),
                 event_recorded: reservation.event_recorded,
+                refused_reason: reservation.refused_reason.clone(),
             },
         )
     }
@@ -343,6 +359,8 @@ impl TransferReplayStore {
             transport: receipt.transport,
             source_task_id: receipt.source_task_id.clone(),
             destination_local_task_id: receipt.destination_local_task_id.clone(),
+            content_commitment: receipt.content_commitment.clone(),
+            destination_repo_id: receipt.destination_repo_id.clone(),
             created_at_unix_ms: receipt.created_at_unix_ms,
             applied: receipt.applied,
         };
@@ -486,6 +504,8 @@ impl From<StoredImportCommitReceipt> for ImportCommitReceipt {
             transport: stored.transport,
             source_task_id: stored.source_task_id,
             destination_local_task_id: stored.destination_local_task_id,
+            content_commitment: stored.content_commitment,
+            destination_repo_id: stored.destination_repo_id,
             created_at_unix_ms: stored.created_at_unix_ms,
             applied: stored.applied,
             event_queued: false,
@@ -519,6 +539,8 @@ mod restart_tests {
             transport: None,
             source_task_id: "task-source".into(),
             destination_local_task_id: "task-local".into(),
+            content_commitment: None,
+            destination_repo_id: None,
             created_at_unix_ms: 1,
             applied: false,
         });

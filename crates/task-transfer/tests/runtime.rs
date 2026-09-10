@@ -2012,6 +2012,7 @@ async fn outgoing_reservation_pins_cloud_route_across_external_peer_updates() {
                 request_id,
                 transfer_id,
                 admitted: true,
+                refusal_reason: None,
             },
         )
         .await;
@@ -7213,7 +7214,13 @@ async fn destination_can_acknowledge_import_commit_back_to_source() {
     let _incoming = next_incoming_transfer_request(&secondary).await;
 
     secondary
-        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .acknowledge_import_committed(
+            &preflight.transfer_id,
+            "task-source",
+            "task-dest",
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(
@@ -7351,7 +7358,13 @@ async fn destination_reloads_awaiting_ack_reservation_after_sidecar_restart() {
         .await
         .unwrap();
     secondary
-        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .acknowledge_import_committed(
+            &preflight.transfer_id,
+            "task-source",
+            "task-dest",
+            None,
+            None,
+        )
         .await
         .unwrap();
     let ack = next_outgoing_transfer_committed(&primary).await;
@@ -7364,7 +7377,13 @@ async fn destination_reloads_awaiting_ack_reservation_after_sidecar_restart() {
     drop(secondary);
     let secondary = TransferRuntime::spawn(secondary_config).await.unwrap();
     let error = secondary
-        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .acknowledge_import_committed(
+            &preflight.transfer_id,
+            "task-source",
+            "task-dest",
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(error.to_string().contains("missing source peer"));
@@ -7400,7 +7419,13 @@ async fn destination_restart_allocates_a_new_id_after_source_retains_first_tombs
         .unwrap();
     let _ = next_incoming_transfer_request(&secondary).await;
     secondary
-        .acknowledge_import_committed(&first.transfer_id, "task-source-1", "task-dest-1")
+        .acknowledge_import_committed(
+            &first.transfer_id,
+            "task-source-1",
+            "task-dest-1",
+            None,
+            None,
+        )
         .await
         .unwrap();
     let _ = next_outgoing_transfer_committed(&primary).await;
@@ -7433,7 +7458,13 @@ async fn destination_restart_allocates_a_new_id_after_source_retains_first_tombs
         .unwrap();
     let _ = next_incoming_transfer_request(&secondary).await;
     secondary
-        .acknowledge_import_committed(&second.transfer_id, "task-source-2", "task-dest-2")
+        .acknowledge_import_committed(
+            &second.transfer_id,
+            "task-source-2",
+            "task-dest-2",
+            None,
+            None,
+        )
         .await
         .unwrap();
     let second_ack = next_outgoing_transfer_committed(&primary).await;
@@ -7550,11 +7581,156 @@ async fn destination_replays_exact_incoming_event_after_submit_success_and_resta
     // Recording the event is independent of the destination's final import
     // acknowledgment; the reservation must remain usable until that completes.
     secondary
-        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .acknowledge_import_committed(
+            &preflight.transfer_id,
+            "task-source",
+            "task-dest",
+            None,
+            None,
+        )
         .await
         .unwrap();
     let committed = next_outgoing_transfer_committed(&primary).await;
     assert_eq!(committed.transfer_id, preflight.transfer_id);
+}
+
+/// A definitive, contract-specific refusal — the destination server deciding
+/// synchronously, with no I/O, that a payload can never be admitted — must
+/// short-circuit the submit response instead of waiting out the admission
+/// timeout. This is item 3's fast path: `mark_incoming_transfer_refused` is
+/// what `import::record_incoming`'s legacy-payload branch calls in
+/// production, before the sidecar's own poll loop would otherwise have to
+/// time out to reach the same answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_definitive_refusal_short_circuits_the_submit_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary-refused",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary-refused",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary-refused").await;
+
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary-refused", "task-source")
+        .await
+        .unwrap();
+
+    // Simulates the destination server's synchronous, zero-I/O decision
+    // (import.rs record_incoming, for an unsupported repo acquisition mode)
+    // — reached before the payload is even submitted, which the reservation
+    // preflight already created allows.
+    secondary
+        .mark_incoming_transfer_refused(&preflight.transfer_id, "unsupported legacy payload")
+        .await
+        .unwrap();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_millis(500),
+        primary.prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-secondary-refused",
+                "task": { "source_task_id": "task-source" }
+            }),
+        ),
+    )
+    .await
+    .expect("a definitive refusal must not wait out the admission timeout")
+    .unwrap();
+    assert!(!outcome.admitted);
+    assert_eq!(
+        outcome.refusal_reason.as_deref(),
+        Some("unsupported legacy payload")
+    );
+}
+
+/// The other half of item 3's taxonomy: when neither a refusal nor an
+/// admission lands inside the window, the submit response must report
+/// unresolved rather than a decided outcome — and, crucially, the
+/// reservation must survive so a delayed admission can still be observed
+/// afterward without waiting out a second full timeout. This is what makes
+/// push.rs's redrive (resubmitting the *same* transfer id rather than
+/// starting a new reservation) actually converge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unresolved_admission_survives_and_can_still_land_after_the_submit_response() {
+    let temp = tempfile::tempdir().unwrap();
+    let secondary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-secondary-unresolved",
+        "Secondary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    let primary = TransferRuntime::spawn(RuntimeConfig::for_tests(
+        "peer-primary-unresolved",
+        "Primary",
+        temp.path(),
+        0,
+    ))
+    .await
+    .unwrap();
+    pair_peers(&primary, &secondary, "peer-secondary-unresolved").await;
+
+    let preflight = primary
+        .prepare_transfer_preflight("peer-secondary-unresolved", "task-source")
+        .await
+        .unwrap();
+
+    // Nobody acknowledges within the admission window — the destination's own
+    // consumer (kanna-server, in production) simply has not reached it yet.
+    let outcome = primary
+        .prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-secondary-unresolved",
+                "task": { "source_task_id": "task-source" }
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(!outcome.admitted);
+    assert_eq!(
+        outcome.refusal_reason, None,
+        "an unresolved outcome must never be spelled as a refusal"
+    );
+
+    // The delayed admission lands afterward.
+    let _incoming = next_incoming_transfer_request(&secondary).await;
+    secondary
+        .mark_incoming_event_recorded(&preflight.transfer_id)
+        .await
+        .unwrap();
+
+    // Re-driving the same transfer id — exactly what push.rs's redrive path
+    // does for an unsettled row — observes it immediately: the reservation on
+    // both sides was never released while the outcome was unresolved.
+    let redrive = tokio::time::timeout(
+        Duration::from_millis(500),
+        primary.prepare_transfer_commit(
+            &preflight.transfer_id,
+            json!({
+                "target_peer_id": "peer-secondary-unresolved",
+                "task": { "source_task_id": "task-source" }
+            }),
+        ),
+    )
+    .await
+    .expect("a delayed admission must be observable without waiting out another full timeout")
+    .unwrap();
+    assert!(redrive.admitted);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7579,7 +7755,13 @@ async fn unapplied_import_commit_receipt_older_than_pending_ttl_replays_after_so
         .unwrap();
 
     secondary
-        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .acknowledge_import_committed(
+            &preflight.transfer_id,
+            "task-source",
+            "task-dest",
+            None,
+            None,
+        )
         .await
         .unwrap();
     drop(primary);
@@ -7621,7 +7803,13 @@ async fn unapplied_import_commit_receipt_retries_without_restart_or_duplicate() 
         .unwrap();
 
     secondary
-        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .acknowledge_import_committed(
+            &preflight.transfer_id,
+            "task-source",
+            "task-dest",
+            None,
+            None,
+        )
         .await
         .unwrap();
     let first = next_outgoing_transfer_committed(&primary).await;
@@ -7691,6 +7879,8 @@ async fn stalled_receipt_consumer_has_one_bounded_pending_event_per_receipt_then
                 &preflight.transfer_id,
                 &source_task_id,
                 &destination_task_id,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -7730,6 +7920,8 @@ async fn stalled_receipt_consumer_has_one_bounded_pending_event_per_receipt_then
             &retry_transfer.transfer_id,
             "task-source-retry",
             "task-dest-retry",
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -7785,6 +7977,8 @@ async fn receipt_limits_compact_applied_tombstones_and_reject_excess_unapplied()
                 &preflight.transfer_id,
                 &source_task_id,
                 &destination_task_id,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -7810,6 +8004,8 @@ async fn receipt_limits_compact_applied_tombstones_and_reject_excess_unapplied()
             &pending_one.transfer_id,
             "task-pending-1",
             "task-pending-dest-1",
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -7823,6 +8019,8 @@ async fn receipt_limits_compact_applied_tombstones_and_reject_excess_unapplied()
             &pending_two.transfer_id,
             "task-pending-2",
             "task-pending-dest-2",
+            None,
+            None,
         )
         .await
         .unwrap_err();
@@ -7965,7 +8163,13 @@ async fn committed_incoming_reservations_survive_pending_ttl_and_restart() {
     let secondary = TransferRuntime::spawn(secondary_config).await.unwrap();
     assert!(first_path.exists());
     secondary
-        .acknowledge_import_committed(&first.transfer_id, "task-committed-1", "task-dest-1")
+        .acknowledge_import_committed(
+            &first.transfer_id,
+            "task-committed-1",
+            "task-dest-1",
+            None,
+            None,
+        )
         .await
         .unwrap();
 }
@@ -8018,7 +8222,13 @@ async fn incoming_reservation_capacity_rejects_without_displacing_committed_work
         2
     );
     secondary
-        .acknowledge_import_committed(&committed_ids[0], "task-committed-0", "task-dest-oldest")
+        .acknowledge_import_committed(
+            &committed_ids[0],
+            "task-committed-0",
+            "task-dest-oldest",
+            None,
+            None,
+        )
         .await
         .unwrap();
     secondary
@@ -8035,6 +8245,8 @@ async fn incoming_reservation_capacity_rejects_without_displacing_committed_work
             committed_ids.last().unwrap(),
             "task-committed-1",
             "task-dest-newest",
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -8098,6 +8310,8 @@ async fn over_capacity_restart_preserves_existing_committed_work_and_closes_admi
                 transfer_id,
                 &format!("task-legacy-{index}"),
                 &format!("task-dest-{index}"),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -8253,7 +8467,13 @@ async fn applied_receipt_older_than_pending_ttl_remains_an_idempotent_tombstone(
         .await
         .unwrap();
     secondary
-        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .acknowledge_import_committed(
+            &preflight.transfer_id,
+            "task-source",
+            "task-dest",
+            None,
+            None,
+        )
         .await
         .unwrap();
     let _ = next_outgoing_transfer_committed(&primary).await;
@@ -10954,7 +11174,13 @@ async fn acknowledge_import_committed_does_not_leak_task_ids_on_the_wire() {
     });
 
     destination
-        .acknowledge_import_committed(&preflight.transfer_id, "task-source", "task-dest")
+        .acknowledge_import_committed(
+            &preflight.transfer_id,
+            "task-source",
+            "task-dest",
+            None,
+            None,
+        )
         .await
         .unwrap();
 

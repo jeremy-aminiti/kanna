@@ -162,6 +162,7 @@ pub(crate) const CURRENT_SCHEMA_MIGRATIONS: &[&str] = &[
     "075_transferred_task_context",
     "076_transferred_task_manifest",
     "077_transferred_task_history",
+    "078_transferred_task_manifest_content_commitment",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2260,6 +2261,25 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
                 ON transferred_task_history(task_id, sequence);",
         )
     })?;
+
+    // The destination-computed proof `outgoing_committed` requires before it
+    // will close a source task: a digest over exactly the facts
+    // `verify_persisted_task_bundle` reads back from Git/SQLite after import
+    // (never over bytes copied out of the received payload), written once the
+    // manifest is genuinely `prepared`. See docs/kanna-server-boundary.md
+    // item 3.
+    run_migration(
+        conn,
+        "078_transferred_task_manifest_content_commitment",
+        |conn| {
+            add_column(
+                conn,
+                "transferred_task_manifest",
+                "content_commitment",
+                "TEXT",
+            )
+        },
+    )?;
 
     Ok(())
 }
