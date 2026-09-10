@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { localProcessFetch } from "@kanna/local-process-fetch";
 import { BUFFY_UID } from "./firebaseAuth";
@@ -142,6 +143,62 @@ describe("LAN-first desktop-to-desktop routing E2E", () => {
           30_000,
           `${peer.desktopId} never recorded a real inbound bootstrap grant from ${harness.desktopId}`
         );
+      } finally {
+        await peer.stop();
+      }
+    },
+    60_000
+  );
+
+  /**
+   * The invariant `reconcile_machine_trust_for_account`'s own doc comment
+   * names: "Preserve eligible leases on ordinary outage." An outbound
+   * grant already established over relay must survive relay going away -
+   * `eligible_lan_desktop_ids`/`attempt_lan_invoke` read the trust store
+   * directly, never relay presence, for this decision. Provisioning both
+   * desktops with a real `desktop_secret` (see `startSameAccountPeer`) is
+   * what makes this provable at all: without it, `signed_out_or_rejected`
+   * in `relay.rs`'s reconnection loop is unconditionally true, wiping trust
+   * on every reconnect regardless of whether it was a real sign-out - see
+   * the checkpoint history for that trace. Not gated by the LAN-discovery
+   * defect: this only checks the trust store's own persisted state, never
+   * an actual LAN dial.
+   */
+  it(
+    "keeps an already-established outbound grant through a relay outage",
+    async () => {
+      const peer = await startSameAccountPeer(harness, "relay-outage-lease");
+      try {
+        await invokeMachine(harness, peer.desktopId, "/v1/status");
+        await waitForCondition(
+          async () => {
+            const store = await readMachineTrustStore(harness);
+            return store?.outbound.some(
+              (grant) =>
+                grant.targetDesktopId === peer.desktopId && grant.accountUid === BUFFY_UID
+            ) ?? false;
+          },
+          30_000,
+          `${harness.desktopId} never recorded a real outbound bootstrap grant for ${peer.desktopId}`
+        );
+
+        await harness.stopRelay();
+        try {
+          // Long enough for the reconnection loop to notice the drop and
+          // retry at least once (RELAY_RECONNECT_DELAY is 5s) - exactly the
+          // window where an incorrectly-forced signed-out reconciliation
+          // would wipe the grant.
+          await sleep(8_000);
+          const store = await readMachineTrustStore(harness);
+          const stillHasGrant =
+            store?.outbound.some(
+              (grant) =>
+                grant.targetDesktopId === peer.desktopId && grant.accountUid === BUFFY_UID
+            ) ?? false;
+          expect(stillHasGrant).toBe(true);
+        } finally {
+          await harness.startRelay();
+        }
       } finally {
         await peer.stop();
       }
