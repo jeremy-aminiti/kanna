@@ -944,6 +944,7 @@ async fn create_task_with_requested_id_and_inputs(
         .transfer_import
         .as_ref()
         .and_then(|import| import.head_oid.clone());
+    let transfer_import_for_gate = payload.transfer_import.clone();
     let outcome = {
         let state = Arc::clone(&state);
         let imported_inputs = Arc::clone(&imported_inputs);
@@ -1213,6 +1214,52 @@ async fn create_task_with_requested_id_and_inputs(
                     ));
                 }
             }
+            if let Some(import) = transfer_import_for_gate.as_ref() {
+                let db = Db::open(&state.config.db_path).map_err(|error| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {error}"),
+                    )
+                })?;
+                let transfer_id = import.transfer_id.as_deref().ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        "transferred task is missing transfer identity".to_string(),
+                    )
+                })?;
+                let expected_head = import.head_oid.as_deref().ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        "transferred task is missing committed head".to_string(),
+                    )
+                })?;
+                let (worktree, branch) = crate::task_creator::prepared_task_worktree(&prepared);
+                let actual =
+                    crate::transfer_engine::git::commit_oid(std::path::Path::new(worktree), branch)
+                        .map_err(|error| (axum::http::StatusCode::UNPROCESSABLE_ENTITY, error))?;
+                if actual != expected_head {
+                    return Err((
+                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        "transferred task head changed during preparation".to_string(),
+                    ));
+                }
+                let manifest = db
+                    .transferred_task_manifest(transfer_id)
+                    .map_err(|error| db_write_error("db error", error))?;
+                if manifest.as_ref().is_none_or(|(_, _, _, task, state)| {
+                    task.as_deref() != Some(crate::task_creator::prepared_task_id(&prepared))
+                        || state != "importing"
+                }) {
+                    return Err((
+                        axum::http::StatusCode::CONFLICT,
+                        "transferred task lacks an importing manifest".to_string(),
+                    ));
+                }
+                 db.mark_transferred_task_manifest_prepared(transfer_id)
+                    .map_err(|error| {
+                        db_write_error("could not persist transfer preparation", error)
+                     })?;
+             }
             if !resolved_blocker_ids.is_empty() || review_context.is_some() {
                 let db = Db::open(&state.config.db_path).map_err(|e| {
                     (
