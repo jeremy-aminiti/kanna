@@ -11,7 +11,7 @@ import { getWebDriverPort } from "./webdriverPort";
 
 const ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
 
-interface CreateSessionOptions {
+export interface CreateSessionOptions {
   dismissStartupShortcuts?: boolean;
 }
 
@@ -404,6 +404,36 @@ export class WebDriverClient {
     return res.value;
   }
 
+  async getAppBuildInfo(): Promise<unknown> {
+    return await this.invokeNative("get_app_build_info");
+  }
+
+  /** WebDriver's title route reads document.title, not the macOS window title. */
+  async getNativeWindowTitle(): Promise<string> {
+    const title = await this.executeAsync<unknown>(`
+      const done = arguments[arguments.length - 1];
+      const label = window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label;
+      if (typeof label !== "string" || label.length === 0) {
+        done({ __kannaNativeInvokeError: "current native window label unavailable" });
+        return;
+      }
+      window.__TAURI_INTERNALS__.invoke("plugin:window|title", { label })
+        .then(done)
+        .catch((error) => done({ __kannaNativeInvokeError: String(error) }));
+    `);
+    if (
+      title
+      && typeof title === "object"
+      && "__kannaNativeInvokeError" in title
+    ) {
+      throw new Error(`native window title unavailable: ${String((title as { __kannaNativeInvokeError: unknown }).__kannaNativeInvokeError)}`);
+    }
+    if (typeof title !== "string") {
+      throw new Error(`could not read native window title: ${JSON.stringify(title)}`);
+    }
+    return title;
+  }
+
   async screenshot(path?: string): Promise<string> {
     const res = await this.get(`/session/${this.sid}/screenshot`);
     const b64: string = res.value;
@@ -511,6 +541,23 @@ export class WebDriverClient {
 
   private async delete(path: string): Promise<void> {
     await fetch(`${this.baseUrl}${path}`, { method: "DELETE" });
+  }
+
+  private async invokeNative(command: string, args: Record<string, unknown> = {}): Promise<unknown> {
+    const result = await this.executeAsync<unknown>(`
+      const done = arguments[arguments.length - 1];
+      window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify(args)})
+        .then(done)
+        .catch((error) => done({ __kannaNativeInvokeError: String(error) }));
+    `);
+    if (
+      result
+      && typeof result === "object"
+      && "__kannaNativeInvokeError" in result
+    ) {
+      throw new Error(`native invoke ${command} failed: ${String((result as { __kannaNativeInvokeError: unknown }).__kannaNativeInvokeError)}`);
+    }
+    return result;
   }
 }
 

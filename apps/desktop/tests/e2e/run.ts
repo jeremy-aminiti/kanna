@@ -42,6 +42,9 @@ import {
   type AppStartupProbe,
 } from "./runStartup";
 import { APP_READY_SCRIPT } from "./helpers/appReady";
+import { WebDriverClient } from "./helpers/webdriver";
+import { resolveExpectedNativeWindowIdentity } from "./helpers/windowIdentity";
+import { preflightNativeWindowIdentity } from "./helpers/windowIdentityPreflight";
 import {
   buildFirebaseCommandEnv,
   buildFirebaseEmulatorCommand,
@@ -402,6 +405,7 @@ async function main(): Promise<void> {
   const desktopRoot = resolve(currentDir, "../..");
   const e2eRoot = join(desktopRoot, "tests", "e2e");
   const repoRoot = resolve(desktopRoot, "../..");
+  const expectedNativeWindowIdentity = await resolveExpectedNativeWindowIdentity(repoRoot);
   const resolvedTargets = suites.length > 0
     ? (await Promise.all(suites.map((suite) => resolveTestTargets(e2eRoot, suite)))).flat()
     : await resolveTestTargets(e2eRoot, undefined);
@@ -619,6 +623,11 @@ async function main(): Promise<void> {
     runningInstances = { primary, secondary: null };
     console.log(`[e2e] waiting for primary app at ${primary.baseUrl}`);
     await waitForApp(primary);
+    await preflightNativeWindowIdentity(
+      new WebDriverClient(primary.webDriverPort),
+      expectedNativeWindowIdentity,
+      "primary",
+    );
     console.log(`[e2e] primary app ready at ${primary.baseUrl}`);
     await pauseForAppReady("primary");
 
@@ -644,6 +653,11 @@ async function main(): Promise<void> {
       runningInstances = { primary, secondary: secondaryInstance };
       console.log(`[e2e] waiting for secondary app at ${secondaryInstance.baseUrl}`);
       await waitForApp(secondaryInstance);
+      await preflightNativeWindowIdentity(
+        new WebDriverClient(secondaryInstance.webDriverPort),
+        expectedNativeWindowIdentity,
+        "secondary",
+      );
       console.log(`[e2e] secondary app ready at ${secondaryInstance.baseUrl}`);
       await pauseForAppReady("secondary");
     }

@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("./startupOverlays", () => ({
   dismissStartupShortcutsModal: vi.fn(async () => {}),
 }));
-
 import { dismissStartupShortcutsModal } from "./startupOverlays";
 import { WebDriverClient } from "./webdriver";
 
@@ -50,6 +49,31 @@ describe("WebDriverClient.createSession", () => {
     await client.createSession({ dismissStartupShortcuts: false });
 
     expect(dismissStartupShortcutsModal).not.toHaveBeenCalled();
+  });
+
+  it("reads the native title for the window currently bound to the WebDriver session", async () => {
+    const requests: Array<{ url: string; body: { script?: string } }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = init?.body ? JSON.parse(String(init.body)) as { script?: string } : {};
+      requests.push({ url, body });
+      if (url.endsWith("/session") && init?.method === "POST") {
+        return { json: async () => ({ value: { sessionId: "session-window" } }) } as Response;
+      }
+      if (url.endsWith("/execute/async") && init?.method === "POST") {
+        return { json: async () => ({ value: "Kanna — task test" }) } as Response;
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }));
+    const client = new WebDriverClient();
+    vi.spyOn(client, "waitForAppReady").mockResolvedValue();
+    await client.createSession({ dismissStartupShortcuts: false });
+
+    expect(await client.getNativeWindowTitle()).toBe("Kanna — task test");
+    const script = requests.at(-1)?.body.script ?? "";
+    expect(script).toContain("metadata?.currentWindow?.label");
+    expect(script).toContain('invoke("plugin:window|title", { label })');
+    expect(script).not.toContain('{ label: "main" }');
   });
 
   it("clears the readiness flags in the same script that reloads", async () => {
