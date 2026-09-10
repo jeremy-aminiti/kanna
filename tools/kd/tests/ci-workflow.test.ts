@@ -148,4 +148,21 @@ describe("the Linux release check", () => {
   it("gates no job on an input the PR and push triggers do not supply", () => {
     expect(workflow).not.toMatch(/if:\s*inputs\./);
   });
+
+  /**
+   * libghostty-vt-sys's build script emits `-lc++`/`-lc++abi` on Linux (Zig's
+   * Ghostty build links libc++), which a bare `ubuntu-24.04` runner does not
+   * carry. Without the dev packages, both architectures fail at link with
+   * "cannot find -lc++"/"-lc++abi" after the Zig install succeeds — this is
+   * a build-time linker input, not a new runtime dependency: the resulting
+   * dynamic link is already the declared "conditional" exception in
+   * packaging/linux/runtime-policy.json.
+   */
+  it("installs libc++/libc++abi dev packages before building", () => {
+    expect(workflow).toContain("libc++-dev");
+    expect(workflow).toContain("libc++abi-dev");
+    expect(workflow.indexOf("libc++-dev")).toBeLessThan(
+      workflow.indexOf("- name: Build the candidate package")
+    );
+  });
 });
