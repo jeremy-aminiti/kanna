@@ -1,0 +1,303 @@
+name: Linux Release Check
+
+# The Linux release build, its dependency audit, and — under the 2026-09-09
+# owner directive — the x86-64 installed-acceptance host.
+#
+# The directive: the Intel Mac that was to run the native x86-64 Ubuntu 24.04
+# acceptance VM is in Japan and unavailable for at least a month, and nothing
+# may block on it. The substitute chosen is the `ubuntu-24.04` hosted runner
+# itself — genuinely the supported floor's userspace. Whether it also carries a
+# *working* systemd user manager was asserted here, not measured; the
+# `installed-check-prerequisites` job below measures it directly instead of
+# trusting the installed harness's own unreliable check. What the runner cannot
+# supply either way: a phone-reachable LAN, a human at a screen, and a clean
+# machine (a hosted runner is the opposite of one: it ships with Rust, Node and
+# compilers preinstalled), and its kernel is not 6.8. All of that is recorded
+# in the support matrix of
+# `docs/2026-09-09-linux-phase3-supported-distribution.md`.
+#
+# **This workflow builds and audits; it does not yet run the installed and
+# upgrade acceptance lane.** That lane needs two packages from two source
+# revisions to upgrade between, and wiring a second merge-base build has not
+# been done or exercised. It is follow-up item 2 in §7 of the evidence doc, and
+# the honest state is a build lane that works rather than an acceptance job
+# that cannot. Run the lane by hand meanwhile:
+# `./kd test linux-installed --old-artifact <deb> --new-artifact <deb>`.
+#
+# This workflow is deliberately independent of Pages deployment and holds no
+# signing or publishing credential. A Linux build failure must never be able to
+# block a macOS ship or a schema publish.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "packaging/linux/**"
+      - "tests/linux-installed/**"
+      - "crates/**"
+      - "apps/desktop/src-tauri/**"
+      - "tools/kd/src/runtime/linux-*.ts"
+      - "tools/kd/src/runtime/release-platform.ts"
+      - ".github/workflows/linux-release-check.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "packaging/linux/**"
+      - "tests/linux-installed/**"
+      - ".github/workflows/linux-release-check.yml"
+
+# Read-only. This lane builds and tests; it does not publish, and it must not be
+# able to.
+permissions:
+  contents: read
+
+concurrency:
+  # Its own group, so a Linux run never queues behind or cancels the Pages
+  # deployment.
+  group: linux-release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Both required architectures, each built natively. Cross-compiling the
+    # other would leave the linkage — which is what the audit is about —
+    # untested on the machine it has to run on.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+            zig_platform: x86_64-linux
+            zig_sha256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+            zig_platform: aarch64-linux
+            zig_sha256: 958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # A hosted runner advertises limited storage and a full Rust release
+      # build of this workspace is large. Reclaiming the preinstalled toolchains
+      # this lane does not use is disposable runner data, never anything the
+      # build produces.
+      - name: Reclaim runner disk
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Install build and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            build-essential pkg-config dpkg-dev \
+            libc++-dev libc++abi-dev
+          # libc++-dev/libc++abi-dev supply the link-time -lc++/-lc++abi that
+          # libghostty-vt-sys's build script emits on Linux (Zig's Ghostty
+          # build links libc++). This is a build-time linker input only: the
+          # dynamic runtime dependency it produces is already the declared,
+          # measured "conditional" exception in
+          # packaging/linux/runtime-policy.json, not a new one. Static linking
+          # against Zig's own libc++.a/libc++abi.a is the named follow-up
+          # recorded there.
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Record the build host
+        run: |
+          . /etc/os-release && echo "distribution=$PRETTY_NAME"
+          echo "kernel=$(uname -r)"
+          echo "glibc=$(getconf GNU_LIBC_VERSION)"
+          echo "arch=$(dpkg --print-architecture)"
+
+      - name: Install Zig 0.15.2
+        env:
+          ZIG_PLATFORM: ${{ matrix.zig_platform }}
+          ZIG_SHA256: ${{ matrix.zig_sha256 }}
+        run: |
+          archive="zig-${ZIG_PLATFORM}-0.15.2.tar.xz"
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/$archive" \
+            "https://ziglang.org/download/0.15.2/$archive"
+          echo "$ZIG_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict -
+          tar --extract --file "$RUNNER_TEMP/$archive" --directory "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-${ZIG_PLATFORM}-0.15.2" >> "$GITHUB_PATH"
+
+      # One package per architecture, from this revision. The installed and
+      # upgrade lane needs a second package built from another revision to
+      # upgrade between; that is deliberately not wired here yet (see the header).
+      - name: Build the candidate package
+        run: ./kd build linux-package --channel staging --architecture ${{ matrix.architecture }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kanna-linux-${{ matrix.architecture }}
+          path: .build/linux-package/out/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  # Evidence, not a mock: `tests/linux-installed` needs apt, root, and a real
+  # `systemd --user` manager. The harness's own `inspectHost()` check
+  # (`tests/linux-installed/src/installedWorker.ts`) only verifies the
+  # `systemctl --user` command *ran* (its exit code is non-null), which is true
+  # even when it printed "Failed to connect to bus" and exited 1 — so it cannot
+  # actually tell "no user manager" from "one exists". This job answers that
+  # question directly on the same hosted runners the build lane already uses,
+  # before any install is attempted. It does not run the installed lane itself
+  # yet, and it changes nothing about the `build` job's own output.
+  installed-check-prerequisites:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - name: Probe systemd, session and sudo prerequisites
+        run: |
+          set +e
+          echo "== PID 1 =="
+          ps -p 1 -o comm=
+          echo "== id =="
+          id
+          echo "== systemctl is-system-running (system manager) =="
+          systemctl is-system-running
+          echo "exit=$?"
+          echo "== loginctl list-sessions =="
+          loginctl list-sessions --no-legend
+          echo "exit=$?"
+          echo "== XDG_RUNTIME_DIR =="
+          echo "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
+          ls -ld "/run/user/$(id -u)"
+          echo "exit=$?"
+          echo "== systemctl --user is-system-running (user manager) =="
+          systemctl --user is-system-running
+          echo "exit=$?"
+          echo "== loginctl enable-linger =="
+          loginctl enable-linger "$(id -un)"
+          echo "exit=$?"
+          loginctl show-user "$(id -un)" --property=Linger
+          echo "== sudo -n true (passwordless sudo, needed for apt install) =="
+          sudo -n true
+          echo "exit=$?"
+          set -e
+
+  # Measured on 2026-09-10 (run 34471789591): PID 1 is `systemd`, the user
+  # `systemctl --user is-system-running` reports `running` (not merely "ran"),
+  # `loginctl enable-linger` succeeds and persists, and `sudo -n true` succeeds
+  # on both `ubuntu-24.04` and `ubuntu-24.04-arm`. The prerequisites hold, so
+  # this job does the fresh-host install itself: apt install the just-built
+  # .deb (no `-dev` packages, so nothing can mask a missing `Depends`),
+  # confirm every shared library the audit declared is actually owned by a
+  # package and every installed executable resolves, then run the harness's
+  # install-only lifecycle coverage. It does not attempt the upgrade lane —
+  # that needs a second package from another source revision, still not wired
+  # (§7 of the evidence doc) — and it re-checks the two critical prerequisites
+  # itself rather than trusting the probe job's result, since that job is
+  # intentionally never-failing evidence, not a gate.
+  installed-check:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+            artifact: kanna-linux-x86_64
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+            artifact: kanna-linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm the two critical prerequisites before attempting anything
+        run: |
+          sudo -n true || { echo "::error::no passwordless sudo; cannot apt install"; exit 1; }
+          state="$(systemctl --user is-system-running)" || true
+          case "$state" in
+            running|degraded) ;;
+            *) echo "::error::systemctl --user is-system-running reported '$state', not running/degraded"; exit 1 ;;
+          esac
+
+      # Same workflow run's own `build` job output for this exact head — no
+      # cross-run download or extra token scope needed.
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: .build/linux-package/out
+
+      # No `-dev` packages here: a `-dev` package would satisfy the same
+      # library at build time and hide a genuinely missing `Depends`. This is
+      # apt resolving the shipped package's own declared dependencies, on a
+      # host that never had the build's dev packages installed.
+      - name: Install the built package via apt (no dev packages)
+        run: |
+          set -x
+          # apt-get install treats a path with no leading `./` or `/` as a
+          # package *name* to resolve from the repo, not a local file -- the
+          # leading `./` is what tells it this is a .deb on disk.
+          deb="./$(ls .build/linux-package/out/*.deb)"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "$deb"
+
+      - name: Confirm every declared runtime library is package-owned, and every installed executable resolves
+        run: |
+          set -x
+          fail=0
+          tree="/usr/lib/kanna-staging"
+          for exe in kanna-desktop kanna-worker kanna-daemon kanna-cli kanna-mcp kanna-server kanna-task-transfer kanna-terminal-recovery; do
+            echo "== $exe =="
+            out="$(ldd "$tree/$exe" 2>&1)" || fail=1
+            echo "$out"
+            if grep -q "not found" <<<"$out"; then
+              echo "::error::$exe has an unresolved dynamic dependency"
+              fail=1
+            fi
+          done
+          for lib in libc++.so.1 libc++abi.so.1 libunwind.so.1; do
+            path="$(ldconfig -p | awk -v l="$lib" '$1==l{print $NF; exit}')"
+            echo "== $lib -> ${path:-<not found by ldconfig>} =="
+            if [ -z "$path" ]; then echo "::error::$lib not resolvable by the dynamic linker"; fail=1; continue; fi
+            # Noble's merged-/usr layout makes /lib a symlink to /usr/lib;
+            # ldconfig reports the /lib form, but dpkg's file-list database
+            # is keyed on the canonical /usr/lib path. Resolve before asking.
+            realpath="$(readlink -f "$path")"
+            dpkg -S "$realpath" || { echo "::error::$realpath is not owned by any installed package"; fail=1; }
+          done
+          exit $fail
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # Install-only: KANNA_INSTALLED_DEB alone drives installed.e2e.test.ts.
+      # upgrade.e2e.test.ts needs KANNA_INSTALLED_DEB_OLD/_NEW from two distinct
+      # source revisions and is not run here (same gap as above), so it is
+      # excluded rather than left to fail on a missing second artifact.
+      - name: Install-only lifecycle probe (real systemd --user unit, real worker)
+        working-directory: tests/linux-installed
+        env:
+          KANNA_INSTALLED_CHANNEL: staging
+        run: |
+          export KANNA_INSTALLED_DEB="$(ls "$GITHUB_WORKSPACE"/.build/linux-package/out/*.deb)"
+          pnpm exec vitest run --maxWorkers=1 src/installed.e2e.test.ts

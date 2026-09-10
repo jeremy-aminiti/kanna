@@ -2895,7 +2895,7 @@ describe("release status", () => {
         publishedAt: "2026-07-06T00:00:00Z",
         ageHours: 48
       });
-      expect(result.policy).toEqual({ productionSoakHours: 24 });
+      expect(result.policy.productionSoakHours).toBe(24);
       expect(result.lineage?.relationship).toBe("descendant");
       expect(result.lineage?.previous).toEqual({
         version: "0.0.0-staging.1",
@@ -3201,7 +3201,7 @@ describe("release status", () => {
 
       const result = await releaseStatus({ repoRoot: root, env: {}, runner, now: NOW });
 
-      expect(result.policy).toEqual({ productionSoakHours: 1 });
+      expect(result.policy.productionSoakHours).toBe(1);
       expect(result.promotion.soak.satisfied).toBe(true);
       expect(result.promotion.allowed).toBe(true);
     } finally {

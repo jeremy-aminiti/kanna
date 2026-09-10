@@ -158,7 +158,10 @@ describe("useAppUpdate", () => {
     await updater.checkNow();
 
     await vi.waitFor(() => expect(focusChangedHandler).not.toBeNull());
-    expect(updater.visible.value).toBe(true);
+    // The initial focus read is asynchronous, so the *first* true is waited
+    // for. The toggles below stay synchronous assertions, because reacting to
+    // a focus event immediately is the behaviour under test.
+    await vi.waitFor(() => expect(updater.visible.value).toBe(true));
 
     focusChangedHandler?.({ payload: false });
     expect(updater.visible.value).toBe(false);
@@ -364,5 +367,127 @@ describe("useAppUpdate", () => {
     await updater.restartNow();
 
     expect(relaunchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * The Linux path. Kanna does not update itself there — the deb comes from a
+ * signed apt archive and apt performs the upgrade — so the app's whole job is
+ * to tell the truth about a process it does not control.
+ */
+describe("useAppUpdate on a package-managed installation", () => {
+  function packageStatus(overrides: Record<string, unknown> = {}) {
+    return {
+      packageManaged: true,
+      packageName: "kanna",
+      installedVersion: "1.2.3-1",
+      candidateVersion: "1.2.4-1",
+      updateAvailable: true,
+      metadataUnavailable: false,
+      detail: null,
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    tauriRuntime = true;
+    checkMock.mockReset();
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "read_env_var" && args?.name === "KANNA_WORKTREE") return "";
+      throw new Error(`unexpected invoke: ${command}`);
+    });
+    vi.stubEnv("NODE_ENV", "test");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /**
+   * The self-updater must never run here. On Linux its plugin is not even
+   * registered, so a check that reached it would fail; more importantly, an
+   * install would write over files dpkg believes it owns.
+   */
+  it("never asks the self-updater", async () => {
+    const updater = useAppUpdate(async () => packageStatus());
+    await updater.checkNow();
+    expect(checkMock).not.toHaveBeenCalled();
+    expect(updater.status.value).toBe("packageManagerUpdate");
+    expect(updater.packageStatus.value?.candidateVersion).toBe("1.2.4-1");
+  });
+
+  /** `install()` is not offered in this state; calling it anyway must do
+   *  nothing rather than find a working path behind a hidden button. */
+  it("refuses to install", async () => {
+    const updater = useAppUpdate(async () => packageStatus());
+    await updater.checkNow();
+    await updater.install();
+    expect(updater.status.value).toBe("packageManagerUpdate");
+    expect(checkMock).not.toHaveBeenCalled();
+  });
+
+  it("says nothing when the machine is current", async () => {
+    const updater = useAppUpdate(async () =>
+      packageStatus({ candidateVersion: "1.2.3-1", updateAvailable: false })
+    );
+    await updater.checkNow();
+    expect(updater.status.value).toBe("idle");
+    expect(updater.visible.value).toBe(false);
+  });
+
+  /**
+   * An unreadable index means "we cannot tell", and rounding that down to "up
+   * to date" would hide a real update behind a reassuring silence.
+   */
+  it("reports an unreadable package index instead of claiming to be current", async () => {
+    const updater = useAppUpdate(async () =>
+      packageStatus({
+        candidateVersion: null,
+        updateAvailable: false,
+        metadataUnavailable: true,
+        detail: "Your package index has no entry for this package.",
+      })
+    );
+    await updater.checkNow();
+    expect(updater.status.value).toBe("packageManagerUnknown");
+    expect(updater.packageStatus.value?.detail).toContain("no entry");
+  });
+
+  /** A build that is not installed from a package has no package to report on,
+   *  and must not nag about one. */
+  it("stays quiet for a build the package manager does not own", async () => {
+    const updater = useAppUpdate(async () =>
+      packageStatus({
+        installedVersion: null,
+        candidateVersion: null,
+        updateAvailable: false,
+        metadataUnavailable: true,
+      })
+    );
+    await updater.checkNow();
+    expect(updater.status.value).toBe("idle");
+  });
+
+  it("respects a dismissal of the same candidate", async () => {
+    const updater = useAppUpdate(async () => packageStatus());
+    await updater.checkNow();
+    updater.dismiss();
+    await updater.checkNow();
+    expect(updater.status.value).toBe("idle");
+  });
+
+  /**
+   * The fallback direction is the safe one: if the host cannot answer, the
+   * self-updater path is correct on macOS, and on Linux its plugin is absent
+   * so the worst case is a check that finds nothing.
+   */
+  it("falls back to the self-updater when the host cannot answer", async () => {
+    checkMock.mockResolvedValue(null);
+    const updater = useAppUpdate(async () => {
+      throw new Error("no such command");
+    });
+    await updater.checkNow();
+    expect(checkMock).toHaveBeenCalled();
   });
 });

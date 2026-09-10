@@ -4,6 +4,7 @@ pub mod companion;
 pub mod daemon;
 pub mod fs;
 pub mod git;
+pub mod linux_package;
 pub mod mobile;
 pub mod shell;
 pub mod transfer;

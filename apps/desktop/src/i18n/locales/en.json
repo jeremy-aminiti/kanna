@@ -415,7 +415,14 @@
       "install": "Install",
       "retry": "Retry",
       "restartNow": "Restart now",
-      "later": "Later"
+      "later": "Later",
+      "packageManagerUpdate": "Update available from your package manager",
+      "packageManagerHint": "Kanna on Linux is installed by your package manager, so it updates with the rest of your system.",
+      "packageManagerCommand": "Update it with: sudo apt update && sudo apt install --only-upgrade {package}",
+      "packageManagerInstalled": "Installed: {version}",
+      "packageManagerCandidate": "Available: {version}",
+      "packageManagerUnknown": "Package information unavailable",
+      "packageManagerUnknownHint": "Your package index has no entry for Kanna, so we cannot tell whether an update exists."
     }
   },
   "taskTransfer": {

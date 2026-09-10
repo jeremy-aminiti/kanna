@@ -1,0 +1,21 @@
+{
+  "name": "@kanna/linux-installed",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --maxWorkers=1 src/installedLayout.test.ts",
+    "test:gate": "vitest run --maxWorkers=1 src/installed.e2e.test.ts src/upgrade.e2e.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@kanna/headless-worker": "workspace:*",
+    "@kanna/local-process-fetch": "workspace:*",
+    "@kanna/remote-e2e": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.4"
+  }
+}

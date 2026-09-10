@@ -16,7 +16,24 @@ vi.mock("vue-i18n", () => ({
 
 function makeController(
   overrides: {
-    status?: "idle" | "checking" | "available" | "downloading" | "readyToRestart" | "error";
+    status?:
+      | "idle"
+      | "checking"
+      | "available"
+      | "downloading"
+      | "readyToRestart"
+      | "error"
+      | "packageManagerUpdate"
+      | "packageManagerUnknown";
+    packageStatus?: {
+      packageManaged: boolean;
+      packageName: string;
+      installedVersion: string | null;
+      candidateVersion: string | null;
+      updateAvailable: boolean;
+      metadataUnavailable: boolean;
+      detail: string | null;
+    } | null;
     updateVersion?: string | null;
     releaseNotes?: string | null;
     publishedAt?: string | null;
@@ -26,12 +43,13 @@ function makeController(
     errorMessage?: string | null;
   } = {},
 ) {
-  const status = ref<"idle" | "checking" | "available" | "downloading" | "readyToRestart" | "error">(
+  const status = ref<NonNullable<Parameters<typeof makeController>[0]>["status"]>(
     overrides.status ?? "available",
   );
 
   return {
     status,
+    packageStatus: ref(overrides.packageStatus ?? null),
     updateVersion: ref(overrides.updateVersion ?? "0.0.39"),
     releaseNotes: ref(overrides.releaseNotes ?? "Notes for 0.0.39"),
     publishedAt: ref(overrides.publishedAt ?? "2026-04-15T00:00:00Z"),
@@ -163,5 +181,64 @@ describe("AppUpdatePrompt", () => {
     expect(source).toMatch(/\.update-prompt\s*{[^}]*max-height:\s*min\(640px,\s*calc\(100vh - 32px\)\)/s);
     expect(source).toMatch(/\.update-prompt\s*{[^}]*display:\s*grid/s);
     expect(source).toMatch(/\.update-prompt__body\s*{[^}]*overflow-y:\s*auto/s);
+  });
+
+  /**
+   * The Linux states. The distinguishing property is negative: whatever else
+   * this panel shows, it must never offer an action the app cannot perform.
+   * apt owns the upgrade, and a button that looked like Install would leave a
+   * person believing they had started one.
+   */
+  describe("on a package-managed installation", () => {
+    const packageStatus = {
+      packageManaged: true,
+      packageName: "kanna",
+      installedVersion: "1.2.3-1",
+      candidateVersion: "1.2.4-1",
+      updateAvailable: true,
+      metadataUnavailable: false,
+      detail: null,
+    };
+
+    function mountWith(overrides: Parameters<typeof makeController>[0]) {
+      return mount(AppUpdatePrompt, {
+        props: { controller: makeController(overrides) },
+        global: { mocks: { $t: (key: string) => key } },
+      });
+    }
+
+    it("says the package manager owns the update, and shows both versions", () => {
+      const wrapper = mountWith({ status: "packageManagerUpdate", packageStatus });
+      expect(wrapper.text()).toContain("app.update.packageManagerUpdate");
+      expect(wrapper.text()).toContain("1.2.3-1");
+      expect(wrapper.text()).toContain("1.2.4-1");
+      expect(wrapper.get('[data-testid="update-package-command"]').text()).toContain("kanna");
+    });
+
+    it("offers no install or restart action", () => {
+      const wrapper = mountWith({ status: "packageManagerUpdate", packageStatus });
+      expect(wrapper.find('[data-testid="update-install"]').exists()).toBe(false);
+      expect(wrapper.find('[data-testid="update-restart"]').exists()).toBe(false);
+      expect(wrapper.find('[data-testid="update-retry"]').exists()).toBe(false);
+      expect(wrapper.get('[data-testid="update-dismiss-button"]').exists()).toBe(true);
+    });
+
+    /** "We cannot tell" is shown as itself. Rounding it down to silence would
+     *  hide a real update behind a reassuring nothing. */
+    it("says plainly when the package index cannot answer", () => {
+      const wrapper = mountWith({
+        status: "packageManagerUnknown",
+        packageStatus: {
+          ...packageStatus,
+          candidateVersion: null,
+          updateAvailable: false,
+          metadataUnavailable: true,
+          detail: "Run `sudo apt update` to refresh it.",
+        },
+      });
+      expect(wrapper.text()).toContain("app.update.packageManagerUnknown");
+      expect(wrapper.text()).toContain("sudo apt update");
+      expect(wrapper.find('[data-testid="update-install"]').exists()).toBe(false);
+    });
   });
 });

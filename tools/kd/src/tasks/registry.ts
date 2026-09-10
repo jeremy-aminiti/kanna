@@ -5,6 +5,12 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import { readKannaRepoConfig } from "../config";
+import {
+  assembleLinuxPackage,
+  buildLinuxBinariesCommands,
+  formatLinuxPackageResult,
+  stageLinuxPackageBinaries
+} from "../runtime/linux-release-build";
 import { resolveKdContext, type KdContext } from "../context";
 import { cleanWorkspace } from "../runtime/clean";
 import { buildRelayProvisionPlan, deployFirebaseCloud } from "../runtime/cloud-deploy";
@@ -126,6 +132,8 @@ import {
 import {
   buildHeadlessWorkerBinariesCommand,
   buildHeadlessWorkerGateCommand,
+  buildLinuxInstalledGateCommand,
+  linuxInstalledLaneEnv,
 } from "../runtime/headless-worker";
 import { executeRustTests } from "../runtime/rust-test";
 import { buildDesktopSidecars } from "../runtime/sidecars";
@@ -232,6 +240,21 @@ const devRestartInputSchema = devUpInputSchema.extend({
   staging: z.boolean().default(false),
   production: z.boolean().default(false),
   withCredentials: z.boolean().default(false)
+});
+
+const linuxInstalledInputSchema = z.object({
+  oldArtifact: z.string(),
+  newArtifact: z.string(),
+  channel: z.enum(["production", "staging"]).default("production")
+});
+
+const linuxPackageInputSchema = z.object({
+  channel: z.enum(["production", "staging"]).default("staging"),
+  architecture: z.enum(["x86_64", "arm64"]).optional(),
+  version: z.string().optional(),
+  stagingIteration: z.number().int().positive().optional(),
+  skipBuild: z.boolean().default(false),
+  allowAuditFindings: z.boolean().default(false)
 });
 
 const rustTestInputSchema = z.object({
@@ -2786,6 +2809,68 @@ export const taskDefinitions = [
     }
   },
   {
+    id: "build.linux-package",
+    description:
+      "Build one architecture's Linux .deb: compile, audit the artifact closure against packaging/linux/runtime-policy.json, derive Depends from it, and package. Linux only.",
+    inputSchema: linuxPackageInputSchema,
+    execute: async (_context, input) => {
+      const parsed = linuxPackageInputSchema.parse(input);
+      if (process.platform !== "linux") {
+        return {
+          ok: false,
+          message:
+            "build linux-package runs on a Linux host: it reads the artifacts' own ELF headers and calls dpkg-deb. Run it on a Linux builder."
+        };
+      }
+      const context = await resolveDefaultContext(process.env);
+      const architecture = parsed.architecture ?? (process.arch === "arm64" ? "arm64" : "x86_64");
+      const version =
+        parsed.version ??
+        (JSON.parse(
+          await readFile(join(context.repoRoot, "apps/desktop/src-tauri/tauri.conf.json"), "utf8")
+        ) as { version: string }).version;
+      const stagingIteration =
+        parsed.channel === "staging" ? (parsed.stagingIteration ?? 1) : undefined;
+
+      if (!parsed.skipBuild) {
+        for (const [command, args] of buildLinuxBinariesCommands(architecture)) {
+          const built = await runBuiltCommand(command, args, context.repoRoot, context.env);
+          if (!built.ok) return built;
+        }
+      }
+
+      try {
+        const binariesDir = stageLinuxPackageBinaries({ repoRoot: context.repoRoot, architecture });
+        const result = await assembleLinuxPackage({
+          repoRoot: context.repoRoot,
+          channel: parsed.channel,
+          architecture,
+          version,
+          stagingIteration,
+          binariesDir,
+          outputDir: join(context.repoRoot, ".build", "linux-package", "out"),
+          env: context.env,
+          runner: nodeCommandRunner,
+          allowAuditFindings: parsed.allowAuditFindings
+        });
+        return {
+          ok: true,
+          message: formatLinuxPackageResult({ channel: parsed.channel, architecture, result }),
+          data: {
+            debPath: result.debPath,
+            sha256: result.sha256,
+            depends: result.depends,
+            findings: result.audit.findings,
+            conditionalUses: result.audit.conditionalUses,
+            auditOverridden: result.auditOverridden
+          }
+        };
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : String(error) };
+      }
+    }
+  },
+  {
     id: "build.desktop",
     description: "Build the Kanna desktop app through the workspace build graph.",
     inputSchema: emptyInputSchema,
@@ -3186,6 +3271,33 @@ export const taskDefinitions = [
       if (!built.ok) return built;
       const [command, args] = buildHeadlessWorkerGateCommand();
       return runBuiltCommand(command, args, context.repoRoot, context.env);
+    },
+  },
+  {
+    id: "test.linux-installed",
+    description:
+      "Install a built .deb, run the worker under systemd --user, then upgrade to a second package with a live agent session and prove the session survived. Needs a Linux host where the test user can become root.",
+    inputSchema: linuxInstalledInputSchema,
+    execute: async (_context, input) => {
+      const parsed = linuxInstalledInputSchema.parse(input);
+      if (process.platform !== "linux") {
+        return {
+          ok: false,
+          message:
+            "test linux-installed drives apt and a systemd user manager. Run it on the Linux acceptance host."
+        };
+      }
+      const context = await resolveDefaultContext(process.env);
+      const [command, args] = buildLinuxInstalledGateCommand();
+      return runBuiltCommand(
+        command,
+        args,
+        context.repoRoot,
+        linuxInstalledLaneEnv(
+          { oldDeb: parsed.oldArtifact, newDeb: parsed.newArtifact, channel: parsed.channel },
+          context.env
+        )
+      );
     },
   },
   {

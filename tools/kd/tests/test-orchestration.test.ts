@@ -305,6 +305,7 @@ describe("shared vitest timeouts", () => {
     "services/relay",
     "tests/cli-contract",
     "tests/headless-worker",
+    "tests/linux-installed",
     "tests/remote-e2e",
     "tools/kd",
   ];
