@@ -1265,7 +1265,10 @@ export function TaskScreen({
       <View
         pointerEvents="box-none"
         testID={MOBILE_E2E_IDS.taskComposerChrome}
-        onLayout={(event) => setComposerTop(event.nativeEvent.layout.y)}
+        onLayout={(event) => {
+          const { y } = event.nativeEvent.layout;
+          setComposerTop((current) => (current === y ? current : y));
+        }}
         style={[
           styles.bottomChrome,
           { bottom: getComposerBottomOffset(keyboardHeight) }
