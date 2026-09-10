@@ -951,9 +951,11 @@ file's two cases — `Test Files 7 failed | 16 passed (23)`,
 overall `exit code 1`, including unrelated OpenCode/model-id live tests.
 This was a harness/CLI-invocation defect in the run command, not authorized
 scope; noted here for the record, not re-attempted; the unrelated failures
-it surfaced (OpenCode flags/exec-json/MCP-flags/model-ids) are pre-existing
-live-suite state, not a product finding of this task and not investigated
-here. Both of *this file's* two cases failed identically, at the same 30s
+it surfaced (OpenCode flags/exec-json/MCP-flags/model-ids) are out-of-scope
+and unattributed by this task — no baseline run establishes they predate
+this branch's changes, so they are recorded as observed, not claimed
+pre-existing, and not investigated here. Both of *this file's* two cases
+failed identically, at the same 30s
 busy-phase-start
 check as run 5, `exit code 1`. Checkpoints for the short case:
 `codex-spawned` 19:14:10.819Z, `composer-ready` 19:14:11.829Z — under a
