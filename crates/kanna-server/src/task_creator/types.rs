@@ -286,6 +286,10 @@ pub(crate) struct PreparedStageRunSpawn {
     /// Set on a resumed revision: the stage run whose provider session this
     /// run continues.
     pub(super) resumed_from_run_id: Option<String>,
+    /// The run this spawn replaces, set for every restart regardless of the
+    /// workspace it lands in. `resumed_from_run_id` cannot carry this: a fresh
+    /// fallback replaces a run without resuming one.
+    pub(super) replaces_run_id: Option<String>,
     /// Why a requested resume became a fresh provider conversation.
     pub(super) resume_fallback_reason: Option<String>,
     pub(super) cwd: String,

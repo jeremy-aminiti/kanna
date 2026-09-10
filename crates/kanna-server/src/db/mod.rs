@@ -493,6 +493,14 @@ pub struct StageRun {
     /// Worktree the run executed in; a resumed revision reopens the provider
     /// session here (CLI transcripts are keyed by working directory).
     pub cwd: Option<String>,
+    /// The run this one replaced, whatever workspace it spawned into.
+    ///
+    /// Distinct from `resumed_from_run_id`, which means specifically "this
+    /// spawn carried `--resume`". A fresh fallback resumes nothing but still
+    /// replaces something, and without this the chain back to a recorded
+    /// verdict breaks at the first fallback — which is how a second reboot
+    /// used to lose a stage's success and replay finished work.
+    pub replaces_run_id: Option<String>,
     /// Set when this run resumed a previous run's provider session instead
     /// of starting a fresh agent; records which run's session it continued.
     pub resumed_from_run_id: Option<String>,
@@ -872,6 +880,7 @@ fn create_base_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           provider_session_id TEXT,
           cwd TEXT,
           resumed_from_run_id TEXT,
+          replaces_run_id TEXT,
           resume_fallback_reason TEXT,
           completion_transition TEXT CHECK (completion_transition IN ('manual', 'auto')),
           trigger TEXT CHECK (trigger IN ('auto', 'operator', 'manager', 'unspecified')),
@@ -2115,6 +2124,11 @@ fn run_schema_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             ON task_provider_rejection(task_id, stage);
             "#,
         )
+    })?;
+
+    run_migration(conn, "071_stage_run_replaces_run_id", |conn| {
+        add_column(conn, "stage_run", "replaces_run_id", "TEXT")?;
+        Ok(())
     })?;
 
     run_migration(

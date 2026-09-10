@@ -192,6 +192,7 @@ impl Db {
             completion_bound,
             trigger,
             None,
+            None,
         )
     }
 
@@ -205,13 +206,14 @@ impl Db {
         completion_bound: bool,
         trigger: Option<StageTrigger>,
         provider_override: Option<&StageProviderOverride>,
+        replaces_run_id: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO stage_run
              (id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
               session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition,
-              completion_bound, trigger, provider_override)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              completion_bound, trigger, provider_override, replaces_run_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 run.id,
                 run.task_id,
@@ -232,6 +234,7 @@ impl Db {
                 completion_bound,
                 trigger.map(StageTrigger::as_str),
                 provider_override.and_then(StageProviderOverride::to_column),
+                replaces_run_id,
             ],
         )?;
         // A pending run has not started anything yet; the watcher wants the
@@ -295,7 +298,7 @@ impl Db {
             "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
                     session_id, provider_session_id, cwd, resumed_from_run_id,
                     resume_fallback_reason, completion_transition,
-                    COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                    COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id
              FROM stage_run
              WHERE task_id = ?
              ORDER BY rowid ASC",
@@ -312,7 +315,7 @@ impl Db {
             "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
                     session_id, provider_session_id, cwd, resumed_from_run_id,
                     resume_fallback_reason, completion_transition,
-                    COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                    COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id
              FROM stage_run WHERE task_id = ? AND status = 'running' ORDER BY rowid ASC",
         )?;
         let rows = stmt.query_map([task_id], stage_run_from_row)?;
@@ -347,7 +350,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id
                  FROM stage_run
                  WHERE task_id = ?
                  ORDER BY rowid DESC
@@ -378,7 +381,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = ?
                  ORDER BY rowid DESC
@@ -400,7 +403,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id
                  FROM stage_run WHERE id = ?",
                 [run_id],
                 stage_run_from_row,
@@ -423,7 +426,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = 'main'
                    AND provider_session_id IS NOT NULL AND cwd IS NOT NULL
@@ -822,5 +825,6 @@ fn stage_run_from_row(row: &rusqlite::Row<'_>) -> Result<StageRun, rusqlite::Err
         provider_override: StageProviderOverride::from_column(row.get(18)?),
         started_at: row.get(19)?,
         finished_at: row.get(20)?,
+        replaces_run_id: row.get(21)?,
     })
 }

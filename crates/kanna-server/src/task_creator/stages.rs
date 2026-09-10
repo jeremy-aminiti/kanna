@@ -976,6 +976,83 @@ pub(crate) fn prepare_provider_fallback_for_api(
     )
 }
 
+/// How far back a completed-stage lookup will walk before giving up.
+///
+/// Lineage is data, and data can be wrong: a cycle or a pathological chain
+/// must end the walk rather than the process.
+const COMPLETED_STAGE_WALK_LIMIT: usize = 32;
+
+/// Does this restart follow a stage that already recorded its verdict, and if
+/// so what did it record?
+///
+/// Recovery is not one hop. A succeeded run can be followed by a recovery run
+/// that itself dies, and by a fresh fallback that dies after that; every
+/// replacement is a new row, and only walking back through them reaches the
+/// verdict. A second reboot used to stop at the first hop, find a `failed`
+/// bookkeeping row, and conclude the stage had never succeeded — then hand a
+/// finished agent the stage instructions again.
+///
+/// Runs that recorded no verdict of their own are transparent: still running,
+/// or terminated with the session-interruption bookkeeping the resume route
+/// writes. The walk stops at the first *genuine* verdict. A real success is
+/// the answer; a real failure or cancellation means this stage is being redone
+/// deliberately, and no-redo must not apply to it.
+///
+/// `replaces_run_id` is the lineage every restart writes. `resumed_from_run_id`
+/// is followed only as a fallback for rows written before that column existed,
+/// and keeps its own narrower meaning — "this spawn carried `--resume`" —
+/// which the rejected-resume observer still gates its one-shot retry on.
+fn resolve_completed_stage(
+    db: &Db,
+    run: &crate::db::StageRun,
+) -> Result<(bool, Option<String>), String> {
+    let mut status = run.status.clone();
+    let mut result = run.result.clone();
+    let mut feedback = run.feedback.clone();
+    let mut previous = run
+        .replaces_run_id
+        .clone()
+        .or_else(|| run.resumed_from_run_id.clone());
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(run.id.clone());
+
+    for _ in 0..COMPLETED_STAGE_WALK_LIMIT {
+        if status == "succeeded" {
+            return Ok((true, result));
+        }
+        let recorded_no_verdict = matches!(status.as_str(), "running" | "pending")
+            || feedback.as_deref() == Some(crate::http_api::SESSION_INTERRUPTION_FEEDBACK);
+        if !recorded_no_verdict {
+            return Ok((false, None));
+        }
+        let Some(previous_id) = previous else {
+            return Ok((false, None));
+        };
+        if !seen.insert(previous_id.clone()) {
+            log::warn!(
+                "completed-stage lineage for run {} cycles at {previous_id}",
+                run.id
+            );
+            return Ok((false, None));
+        }
+        let Some(row) = db
+            .stage_run(&previous_id)
+            .map_err(|error| format!("db error: {error}"))?
+        else {
+            return Ok((false, None));
+        };
+        status = row.status;
+        result = row.result;
+        feedback = row.feedback;
+        previous = row.replaces_run_id.or(row.resumed_from_run_id);
+    }
+    log::warn!(
+        "completed-stage lineage for run {} exceeded {COMPLETED_STAGE_WALK_LIMIT} hops",
+        run.id
+    );
+    Ok((false, None))
+}
+
 fn prepare_stage_restart(
     db: &Db,
     config: &Config,
@@ -1076,34 +1153,10 @@ fn prepare_stage_restart(
         | StageRestartIntent::NextProviderAfterQuotaRejection { .. } => run.feedback.clone(),
         StageRestartIntent::ResumeProviderSession => None,
     };
-    // Does this restart follow a stage that already recorded success? `run` is
-    // the run being replaced: for a direct resume that is the succeeded run
-    // itself, and for a rejected-resume or quota relaunch it is the recovery
-    // run, whose ancestor holds the verdict. Every prompt below branches on
-    // this, because *none* of these paths may hand ordinary stage instructions
-    // to an agent that already finished the stage.
-    let (stage_already_succeeded, completed_stage_result) = match &intent {
-        StageRestartIntent::ResumeProviderSession => {
-            if run.status == "succeeded" {
-                (true, run.result.clone())
-            } else {
-                (false, None)
-            }
-        }
-        StageRestartIntent::FreshAfterRejectedResume { .. }
-        | StageRestartIntent::NextProviderAfterQuotaRejection { .. } => {
-            match run.resumed_from_run_id.as_deref() {
-                Some(ancestor_id) => match db
-                    .stage_run(ancestor_id)
-                    .map_err(|error| format!("db error: {error}"))?
-                {
-                    Some(ancestor) if ancestor.status == "succeeded" => (true, ancestor.result),
-                    _ => (false, None),
-                },
-                None => (false, None),
-            }
-        }
-    };
+    // Does this restart follow a stage whose verdict is already recorded? One
+    // walk answers it for all three intents, because the answer is a property
+    // of the stage's history, not of which intent is asking.
+    let (stage_already_succeeded, completed_stage_result) = resolve_completed_stage(db, &run)?;
     let superseded = db
         .stage_run_workflow_superseded(task_id, &run.id)
         .map_err(|error| format!("db error: {error}"))?;
@@ -1267,6 +1320,11 @@ fn prepare_stage_restart(
         },
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;
+    // Every restart records what it replaced, whatever workspace it landed in.
+    // A fresh fallback resumes nothing, so `resumed_from_run_id` stays null on
+    // it and cannot carry this; without a separate pointer the chain back to a
+    // recorded verdict breaks at the first fallback.
+    prepared.replaces_run_id = Some(run.id.clone());
     Ok(prepared)
 }
 

@@ -612,6 +612,7 @@ fn record_stage_transition_run(
             true,
             Some(prepared.trigger),
             prepared.provider_override.as_ref(),
+            prepared.replaces_run_id.as_deref(),
         )?;
         if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
             db.set_stage_run_resume_fallback_reason(run_id, reason)?;
@@ -673,6 +674,7 @@ fn record_stage_transition_failure(
             false,
             Some(prepared.trigger),
             prepared.provider_override.as_ref(),
+            prepared.replaces_run_id.as_deref(),
         )
         .map_err(|db_error| format!("db error: {db_error}"))?;
         if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
@@ -2151,6 +2153,9 @@ fn record_rerun_stage_run(
             true,
             None,
             provider_override,
+            // A rerun is a deliberate redo, not a recovery: it must stay
+            // lineage-free so no-redo semantics are never inherited.
+            None,
         )?;
         db.delete_create_task_intent(task_id)
     })
@@ -2204,6 +2209,7 @@ fn record_rerun_stage_failure(
         false,
         None,
         provider_override,
+        None,
     )
     .map_err(|e| format!("db error: {}", e))
 }

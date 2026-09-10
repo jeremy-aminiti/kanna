@@ -887,6 +887,321 @@ async fn a_live_succeeded_session_is_refused_without_spawning() {
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+/// Drive one `actions/resume` through the real route against a fake daemon
+/// that reports no live session, and return the status plus what the daemon
+/// was asked to spawn.
+async fn resume_round(
+    config: &crate::config::Config,
+) -> (axum::http::StatusCode, Vec<kanna_daemon::protocol::Command>) {
+    let fake_daemon = spawn_recovery_fake_daemon(config.daemon_dir.clone()).await;
+    let app = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+        config.clone(),
+    )));
+    let response = tower::ServiceExt::oneshot(
+        app,
+        axum::http::Request::post("/v1/tasks/recovery-task/actions/resume")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let commands = fake_daemon.await.unwrap();
+    (response.status(), commands)
+}
+
+fn spawned_command_line(commands: &[kanna_daemon::protocol::Command]) -> String {
+    commands
+        .iter()
+        .find_map(|command| match command {
+            kanna_daemon::protocol::Command::Spawn { args, .. } => args.last().cloned(),
+            _ => None,
+        })
+        .expect("replacement spawn command")
+}
+
+async fn wait_for_new_latest_run(db: &Db, previous_run_id: &str) -> crate::db::StageRun {
+    loop {
+        let run = db.latest_stage_run("recovery-task").unwrap().unwrap();
+        if run.id != previous_run_id {
+            return run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// The owner's scenario applied twice. A succeeded run recovers once; that
+/// recovery run then dies too, and the second recovery must still know the
+/// stage's verdict is recorded. Walking one hop found only the first
+/// recovery's session-interruption bookkeeping and concluded the stage had
+/// never succeeded — a full replay of finished work.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn a_second_recovery_still_knows_the_stage_already_succeeded() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-double");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    let config_dir = repo_root.join("claude-config");
+    write_recovery_transcript(&config_dir, &worktree);
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"first pass finished and recorded"}"#),
+        None,
+    )
+    .unwrap();
+    let fake_claude = worktree.join(".kanna/test-provider-bin/claude");
+    std::fs::write(&fake_claude, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+
+    // First recovery: resumes A's conversation, told not to redo it.
+    let (status, commands) = resume_round(&config).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let first = spawned_command_line(&commands);
+    assert!(
+        first.contains(&format!("--resume '{RECOVERY_SESSION_ID}'")),
+        "{first}"
+    );
+    assert!(
+        first.contains("already recorded its stage verdict"),
+        "{first}"
+    );
+    let run_b = wait_for_new_latest_run(&db, "run-killed-mid-turn").await;
+    assert_eq!(
+        run_b.replaces_run_id.as_deref(),
+        Some("run-killed-mid-turn"),
+        "every replacement records what it replaced"
+    );
+    assert_eq!(
+        run_b.resumed_from_run_id.as_deref(),
+        Some("run-killed-mid-turn"),
+        "this one really did carry --resume, so the narrower field is set too"
+    );
+
+    // Second recovery: B's session is gone too.
+    let (status, commands) = resume_round(&config).await;
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let second = spawned_command_line(&commands);
+    assert!(
+        second.contains("already recorded its stage verdict"),
+        "the second recovery must still find A's verdict: {second}"
+    );
+    assert!(
+        !second.contains("finish the interrupted work"),
+        "a recorded success is not interrupted work: {second}"
+    );
+
+    // B closed as bookkeeping, A untouched.
+    let interrupted = db.stage_run(&run_b.id).unwrap().unwrap();
+    assert_eq!(interrupted.status, "failed");
+    assert_eq!(
+        interrupted.feedback.as_deref(),
+        Some(crate::http_api::SESSION_INTERRUPTION_FEEDBACK),
+        "the bookkeeping marker is what makes this run transparent to the walk"
+    );
+    let original = db.stage_run("run-killed-mid-turn").unwrap().unwrap();
+    assert_eq!(original.status, "succeeded");
+    assert!(original
+        .result
+        .as_deref()
+        .unwrap()
+        .contains("first pass finished and recorded"));
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// The same double recovery across a *fresh fallback*. B resumes nothing, so
+/// `resumed_from_run_id` is null on it and cannot carry the chain; only the
+/// replacement pointer reaches A. This is the case the one-hop ancestor
+/// lookup could never have covered.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn a_second_recovery_after_a_fresh_fallback_keeps_the_success_verdict() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-double-fresh");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"queue merged, verdict recorded"}"#),
+        None,
+    )
+    .unwrap();
+    // No transcript anywhere: every resume here becomes a fresh fallback.
+    let config_dir = repo_root.join("empty-claude-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    write_fresh_claude_probe(&worktree);
+
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+
+    let (status, commands) = resume_round(&config).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let first = spawned_command_line(&commands);
+    assert!(
+        !first.contains("--resume"),
+        "no transcript to reopen: {first}"
+    );
+    assert!(
+        first.contains("ALREADY completed and recorded its verdict"),
+        "{first}"
+    );
+    let run_b = wait_for_new_latest_run(&db, "run-killed-mid-turn").await;
+    assert_eq!(
+        run_b.resumed_from_run_id, None,
+        "a fresh fallback resumed nothing; labelling it resumed would misfire the \
+         rejected-resume observer and mislead API consumers"
+    );
+    assert_eq!(
+        run_b.replaces_run_id.as_deref(),
+        Some("run-killed-mid-turn"),
+        "but it still replaced A, and that is what carries the verdict forward"
+    );
+
+    let (status, commands) = resume_round(&config).await;
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let second = spawned_command_line(&commands);
+    assert!(
+        second.contains("ALREADY completed and recorded its verdict"),
+        "the chain through a fresh fallback must still reach A: {second}"
+    );
+    assert!(
+        second.contains("queue merged, verdict recorded"),
+        "A's recorded result must still be restated: {second}"
+    );
+    assert!(
+        !second.contains("Implement the requested task in this worktree"),
+        "ordinary stage instructions must never be issued as success recovery: {second}"
+    );
+
+    let original = db.stage_run("run-killed-mid-turn").unwrap().unwrap();
+    assert_eq!(original.status, "succeeded");
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// The walk must stop at a genuine verdict. A real agent failure after a
+/// success means the stage is being worked again on purpose, and a recovery
+/// of *that* is ordinary recovery — not a completed stage.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn a_genuine_failure_in_the_lineage_stops_the_completed_stage_walk() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-genuine-failure");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"an earlier pass succeeded"}"#),
+        None,
+    )
+    .unwrap();
+    // A later run at the same stage that really failed — its own verdict, not
+    // session bookkeeping.
+    db.insert_stage_run(NewStageRun {
+        id: "run-real-failure",
+        task_id: "recovery-task",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: Some(RECOVERY_MODEL),
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("recovery-task"),
+        provider_session_id: Some(RECOVERY_SESSION_ID),
+        cwd: Some(worktree.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    db.finish_stage_run(
+        "run-real-failure",
+        "failed",
+        Some(r#"{"status":"failure","summary":"the agent could not build the crate"}"#),
+        Some("build failed"),
+    )
+    .unwrap();
+    let config_dir = repo_root.join("empty-claude-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    write_fresh_claude_probe(&worktree);
+
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    let (status, commands) = resume_round(&config).await;
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let command_line = spawned_command_line(&commands);
+    assert!(
+        !command_line.contains("ALREADY completed and recorded its verdict"),
+        "a genuine failure is not a completed stage: {command_line}"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
+/// A run with no lineage — what `rerun_stage` deliberately produces — never
+/// inherits no-redo semantics, however many successes precede it. Redo intent
+/// has to survive.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn a_lineage_free_run_after_a_success_recovers_with_ordinary_semantics() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-lineage-free");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"the stage had already succeeded once"}"#),
+        None,
+    )
+    .unwrap();
+    // The shape rerun_stage leaves behind: running, no replacement lineage.
+    db.insert_stage_run(NewStageRun {
+        id: "run-explicit-rerun",
+        task_id: "recovery-task",
+        stage: "in progress",
+        kind: "main",
+        agent: None,
+        agent_provider: Some("claude"),
+        model: Some(RECOVERY_MODEL),
+        effort: None,
+        status: "running",
+        result: None,
+        feedback: None,
+        session_id: Some("recovery-task"),
+        provider_session_id: Some(RECOVERY_SESSION_ID),
+        cwd: Some(worktree.to_string_lossy().as_ref()),
+        resumed_from_run_id: None,
+    })
+    .unwrap();
+    assert_eq!(
+        db.stage_run("run-explicit-rerun")
+            .unwrap()
+            .unwrap()
+            .replaces_run_id,
+        None,
+        "a rerun is a deliberate redo and must stay lineage-free"
+    );
+    let config_dir = repo_root.join("empty-claude-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    write_fresh_claude_probe(&worktree);
+
+    let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+    std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    let (status, commands) = resume_round(&config).await;
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let command_line = spawned_command_line(&commands);
+    assert!(
+        !command_line.contains("ALREADY completed and recorded its verdict"),
+        "an explicit redo must not be told the stage is finished: {command_line}"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
 async fn restart_recovery_discovers_and_resumes_codex_by_worktree_cwd() {
