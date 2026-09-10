@@ -128,14 +128,13 @@ async fn put_task(
     (status, String::from_utf8_lossy(&body).into_owned())
 }
 
-async fn create_transferred_task(
+fn configure_transfer_refs(
     fixture: &GateFixture,
-    task_id: &str,
     transfer_id: &str,
     head_oid: &str,
     base_oid: &str,
-    mut body: serde_json::Value,
-) -> (StatusCode, String) {
+    body: &mut serde_json::Value,
+) {
     for (suffix, oid) in [("head", head_oid), ("base", base_oid)] {
         let reference = format!("refs/kanna/transfers/{transfer_id}/{head_oid}/{suffix}");
         let output = Command::new("git")
@@ -145,6 +144,25 @@ async fn create_transferred_task(
             .unwrap();
         assert!(output.status.success(), "{output:?}");
     }
+    // Match build_create_request: fork at the imported head, and persist the
+    // private review base through the creation owner's diff_base_ref field.
+    body["baseRef"] = serde_json::json!(format!(
+        "refs/kanna/transfers/{transfer_id}/{head_oid}/head"
+    ));
+    body["diffBaseRef"] = serde_json::json!(format!(
+        "refs/kanna/transfers/{transfer_id}/{head_oid}/base"
+    ));
+}
+
+async fn create_transferred_task(
+    fixture: &GateFixture,
+    task_id: &str,
+    transfer_id: &str,
+    head_oid: &str,
+    base_oid: &str,
+    mut body: serde_json::Value,
+) -> (StatusCode, String) {
+    configure_transfer_refs(fixture, transfer_id, head_oid, base_oid, &mut body);
     let workflow_definition = std::fs::read_to_string(
         fixture
             .repo_root
@@ -154,13 +172,6 @@ async fn create_transferred_task(
     .unwrap();
     body["transferImport"]["workflowDefinition"] =
         serde_json::Value::String(workflow_definition.clone());
-    body["transferImport"]["baseOid"] = serde_json::Value::String(base_oid.to_owned());
-    body["baseRef"] = serde_json::Value::String(format!(
-        "refs/kanna/transfers/{transfer_id}/{head_oid}/base"
-    ));
-    // The transfer's pinned definition is authoritative; do not let the
-    // ordinary workflow-name field overwrite pipeline_def with a name.
-    body["workflowName"] = serde_json::Value::Null;
     let request: crate::mobile_api::CreateTaskRequest = serde_json::from_value(body).unwrap();
     let source_payload =
         crate::transfer_engine::payload::parse_outgoing_transfer_payload(&serde_json::json!({
@@ -400,6 +411,13 @@ async fn interrupted_transfer_preparation_is_completed_before_one_recovery_spawn
     )
     .unwrap();
     let mut interrupted_body = transfer_import_body("transfer-recovery", &expected_head);
+    configure_transfer_refs(
+        &fixture,
+        "transfer-recovery",
+        &expected_head,
+        &expected_head,
+        &mut interrupted_body,
+    );
     interrupted_body["transferImport"]["workflowDefinition"] = serde_json::Value::String(
         std::fs::read_to_string(
             fixture
@@ -419,6 +437,13 @@ async fn interrupted_transfer_preparation_is_completed_before_one_recovery_spawn
     )
     .expect("simulate crash after task/create-intent persistence");
     assert_eq!(crate::task_creator::prepared_task_id(&prepared), "abad0004");
+    assert_eq!(
+        db.get_pipeline_item("abad0004").unwrap().unwrap().base_ref,
+        Some(format!(
+            "refs/kanna/transfers/transfer-recovery/{expected_head}/base"
+        )),
+        "creation must persist the review base before the simulated crash",
+    );
     assert!(
         db.transferred_task_context("abad0004").unwrap().is_none(),
         "the simulated crash must precede transfer context persistence"
@@ -431,11 +456,33 @@ async fn interrupted_transfer_preparation_is_completed_before_one_recovery_spawn
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
+        // Repair first retires the previous session. This crash happened
+        // before any spawn, so model the daemon's typed absent-session reply,
+        // as the existing interrupted-create fixture does.
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+        assert!(
+            matches!(command, DaemonCommand::Kill { ref session_id } if session_id == "abad0004")
+        );
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".into(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
         let command = read_test_daemon_command(&mut reader, &mut write_half).await;
         let session_id = match command {
             DaemonCommand::Spawn { session_id, .. } => session_id,
             other => panic!("expected one recovery Spawn, got {other:?}"),
         };
+        assert_eq!(session_id, "abad0004");
         let db = Db::open(&daemon_db_path).unwrap();
         assert!(
             db.transferred_task_manifest_content_commitment("transfer-recovery")
