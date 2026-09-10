@@ -99,8 +99,6 @@ def _zig_cc_toolchain_config_impl(ctx):
     wrapper = ctx.file.compiler_wrapper
     marker = _exec_path(ctx.file.sysroot_marker)
     sysroot = marker[:-len("/.kanna-sysroot")]
-    zig = _zig_binary(ctx.toolchains["@rules_zig//zig:toolchain_type"].zigtoolchaininfo)
-    zig_root = zig[:-len("/zig")]
     return cc_common.create_cc_toolchain_config_info(
         ctx = ctx,
         toolchain_identifier = ctx.attr.toolchain_identifier,
@@ -113,7 +111,7 @@ def _zig_cc_toolchain_config_impl(ctx):
         abi_libc_version = "2.39",
         builtin_sysroot = sysroot,
         cxx_builtin_include_directories = [
-            zig_root + "/lib",
+            "%package({}//)%/lib".format(ctx.attr.zig_repository),
             "%sysroot%/usr/include",
             "%sysroot%/usr/include/" + ctx.attr.multiarch,
             "%sysroot%/usr/lib/{}/glib-2.0/include".format(ctx.attr.multiarch),
@@ -158,12 +156,12 @@ zig_cc_toolchain_config = rule(
         "target": attr.string(mandatory = True),
         "target_cpu": attr.string(mandatory = True),
         "toolchain_identifier": attr.string(mandatory = True),
+        "zig_repository": attr.string(mandatory = True),
     },
     provides = [CcToolchainConfigInfo],
-    toolchains = ["@rules_zig//zig:toolchain_type"],
 )
 
-def zig_linux_cc_toolchain(name, target, target_cpu, multiarch, sysroot, sysroot_marker, exec_compatible_with, target_compatible_with):
+def zig_linux_cc_toolchain(name, target, target_cpu, multiarch, sysroot, sysroot_marker, zig_repository, exec_compatible_with, target_compatible_with):
     wrappers = {}
     for mode in ("cc", "ar", "nm", "objcopy", "strip"):
         wrapper = name + "_" + mode
@@ -196,6 +194,7 @@ def zig_linux_cc_toolchain(name, target, target_cpu, multiarch, sysroot, sysroot
         target = target,
         target_cpu = target_cpu,
         toolchain_identifier = name,
+        zig_repository = zig_repository,
     )
     cc_toolchain(
         name = name + "_impl",
@@ -221,10 +220,10 @@ def zig_linux_cc_toolchain(name, target, target_cpu, multiarch, sysroot, sysroot
 
 def zig_linux_cc_toolchains(name, target, target_cpu, multiarch, sysroot, sysroot_marker, target_compatible_with):
     """Declare one target toolchain for each supported execution host."""
-    for exec_name, exec_constraints in (
-        ("macos_arm64", ["@platforms//cpu:aarch64", "@platforms//os:osx"]),
-        ("linux_x86_64", ["@platforms//cpu:x86_64", "@platforms//os:linux"]),
-        ("linux_arm64", ["@platforms//cpu:aarch64", "@platforms//os:linux"]),
+    for exec_name, zig_repository, exec_constraints in (
+        ("macos_arm64", "@zig_0.15.2_aarch64-macos", ["@platforms//cpu:aarch64", "@platforms//os:osx"]),
+        ("linux_x86_64", "@zig_0.15.2_x86_64-linux", ["@platforms//cpu:x86_64", "@platforms//os:linux"]),
+        ("linux_arm64", "@zig_0.15.2_aarch64-linux", ["@platforms//cpu:aarch64", "@platforms//os:linux"]),
     ):
         zig_linux_cc_toolchain(
             name = "{}_on_{}".format(name, exec_name),
@@ -235,4 +234,5 @@ def zig_linux_cc_toolchains(name, target, target_cpu, multiarch, sysroot, sysroo
             target = target,
             target_compatible_with = target_compatible_with,
             target_cpu = target_cpu,
+            zig_repository = zig_repository,
         )
