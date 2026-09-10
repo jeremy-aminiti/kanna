@@ -1,10 +1,13 @@
 //! Subscription/mailbox semantics are independent of how a harness wakes.
 //! One pending page provides backpressure; only a matching acknowledgement
 //! advances the durable observation cursor. Wakes never carry directives.
-use super::{harness_wake, lan_trust::DesktopLocalAccess, task_events, task_input, AppState};
+use super::{
+    harness_wake, lan_trust::DesktopLocalAccess, subscription_timing, task_events, task_input,
+    AppState,
+};
 use crate::db::{Db, EventSubscription};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -43,6 +46,25 @@ pub(super) struct SubscribeRequest {
     local_only: bool,
     #[serde(default)]
     delivery: harness_wake::Delivery,
+    #[serde(default)]
+    diagnostic: bool,
+    /// Additive allow-list, exactly like the public wait's `event_types`: a
+    /// query filter reused verbatim, never part of the durable cursor.
+    #[serde(default)]
+    event_types: Vec<String>,
+    /// Additive to the fixed baseline exclusion list below, not a
+    /// replacement for it.
+    #[serde(default)]
+    exclude_event_types: Vec<String>,
+    /// Per-subscription override of the collector's trailing-quiet duration.
+    /// Omitted keeps the manager-adopted default; see `subscription_timing`.
+    quiet_ms: Option<u64>,
+    /// Per-subscription override of the collector's max collection hold.
+    /// Validated at registration to be at least `quiet_ms`.
+    max_hold_ms: Option<u64>,
+    /// Per-subscription override of the minimum spacing between adapter-call
+    /// admissions (the wake-rate gate, not the collection window).
+    min_admission_interval_ms: Option<u64>,
 }
 
 fn load(state: &AppState, id: &str) -> Result<EventSubscription, ApiError> {
@@ -78,13 +100,77 @@ async fn collect(
     state: Arc<AppState>,
     row: &EventSubscription,
     timeout: u64,
+    collection: Arc<std::sync::Mutex<subscription_timing::Collection>>,
 ) -> Result<Value, String> {
     let mut query = row.query.clone();
     query["timeoutSecs"] = json!(timeout);
     if let Some(cursor) = &row.cursor {
         query["cursor"] = json!(cursor);
     }
-    task_events::wait_subscription_events(state, query).await
+    task_events::wait_subscription_events(state, query, collection).await
+}
+
+/// A fresh, subscription-scoped collector seeded from the row's own
+/// (already-validated) quiet/max-hold overrides, falling back to the
+/// manager-adopted defaults when absent.
+fn fresh_collection(
+    row: &EventSubscription,
+) -> Arc<std::sync::Mutex<subscription_timing::Collection>> {
+    Arc::new(std::sync::Mutex::new(
+        subscription_timing::Collection::from_query(
+            row.query.get("quietMs").and_then(Value::as_u64),
+            row.query.get("maxHoldMs").and_then(Value::as_u64),
+        ),
+    ))
+}
+
+/// Query/body flag shared by every subscription endpoint: agent-facing callers
+/// get the compact response by default; a diagnostic caller opts into the full
+/// internal row (durable cursor, query, revision, and so on) explicitly.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DiagnosticQuery {
+    #[serde(default)]
+    diagnostic: bool,
+}
+
+/// The durable `cursor` (top-level and inside `pending`) and the full `query`
+/// are internal replay/observation plumbing an MCP or CLI caller never needs:
+/// acknowledgement advances by `batchId` alone. The compact response keeps
+/// only what an agent acts on — the batch's events, capacity/fault signals,
+/// and the subscription's lifecycle fields — plus its watched scope with any
+/// cursor-shaped key stripped for defense in depth.
+fn compact(row: &EventSubscription) -> Value {
+    let mut scope = row.query.clone();
+    if let Some(object) = scope.as_object_mut() {
+        object.remove("cursor");
+    }
+    let pending = row.pending.as_ref().map(|batch| {
+        json!({
+            "events": batch["events"],
+            "hasMore": batch["hasMore"],
+            "waitOutcome": batch["waitOutcome"],
+            "machineErrors": batch["machineErrors"],
+            "watchError": batch.get("watchError"),
+        })
+    });
+    json!({
+        "id": row.id,
+        "active": row.active,
+        "error": row.error,
+        "wakeState": row.wake_state,
+        "batchId": row.batch_id,
+        "pending": pending,
+        "query": scope,
+    })
+}
+
+fn response(row: &EventSubscription, diagnostic: bool) -> Value {
+    if diagnostic {
+        json!(row)
+    } else {
+        compact(row)
+    }
 }
 
 fn accept_page(row: &mut EventSubscription, mut batch: Value, observed: bool) {
@@ -155,10 +241,55 @@ pub(super) async fn subscribe(
     if scopes > 1 {
         return Err((StatusCode::BAD_REQUEST, "choose one event scope".into()));
     }
+    // Validate on the resolved (default-filled) values, since those are what
+    // actually govern the collector, but persist only the caller's explicit
+    // overrides below — an untouched request keeps the exact query shape a
+    // pre-existing row has, so registration-retry equality is unaffected.
+    let quiet_ms = request
+        .quiet_ms
+        .unwrap_or(subscription_timing::QUIET.as_millis() as u64);
+    let max_hold_ms = request
+        .max_hold_ms
+        .unwrap_or(subscription_timing::MAX_HOLD.as_millis() as u64);
+    let min_admission_interval_ms = request
+        .min_admission_interval_ms
+        .unwrap_or(subscription_timing::ADMISSION_INTERVAL.as_millis() as u64);
+    let floor_ms = subscription_timing::MIN_OVERRIDE.as_millis() as u64;
+    if quiet_ms < floor_ms || max_hold_ms < floor_ms || min_admission_interval_ms < floor_ms {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("quiet_ms, max_hold_ms and min_admission_interval_ms must each be at least {floor_ms}ms"),
+        ));
+    }
+    if max_hold_ms < quiet_ms {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "max_hold_ms must be at least quiet_ms".into(),
+        ));
+    }
+    // No ceiling by policy. `Duration::from_millis` accepts any `u64`, and so
+    // does the `Instant + Duration` arithmetic these values feed into
+    // (`Collection::deadline`, `Admission`): a `u64` millisecond count can
+    // never exceed `Duration`'s own (far larger) capacity, so there is no
+    // reachable overflow to guard against here — confirmed empirically
+    // (`Instant::now().checked_add(Duration::from_millis(u64::MAX))` never
+    // returns `None`), not just assumed.
+    // Additive to the fixed baseline, so an untouched request produces the
+    // exact same string as before.
+    let mut exclude_event_types = vec![
+        "task.activity_changed".to_string(),
+        "task.runtime_settled".to_string(),
+        "task.input_delivered".to_string(),
+    ];
+    if !request.exclude_event_types.is_empty() {
+        exclude_event_types.extend(request.exclude_event_types.iter().cloned());
+        exclude_event_types.sort();
+        exclude_event_types.dedup();
+    }
     let mut query = json!({
         "from": "now", "includeCurrentActivity": true, "shortCursor": false,
         "localOnly": request.local_only, "excludeTaskIds": request.exclude_task_ids.join(","),
-        "excludeEventTypes": "task.activity_changed,task.runtime_settled,task.input_delivered",
+        "excludeEventTypes": exclude_event_types.join(","),
         "limit": 100,
     });
     if !request.task_ids.is_empty() {
@@ -167,6 +298,21 @@ pub(super) async fn subscribe(
         query["parentTaskId"] = json!(parent);
     } else {
         query["repoId"] = json!(request.repo_id.unwrap_or(task.repo_id));
+    }
+    if !request.event_types.is_empty() {
+        let mut event_types = request.event_types.clone();
+        event_types.sort();
+        event_types.dedup();
+        query["eventTypes"] = json!(event_types.join(","));
+    }
+    if request.quiet_ms.is_some() {
+        query["quietMs"] = json!(quiet_ms);
+    }
+    if request.max_hold_ms.is_some() {
+        query["maxHoldMs"] = json!(max_hold_ms);
+    }
+    if request.min_admission_interval_ms.is_some() {
+        query["minAdmissionIntervalMs"] = json!(min_admission_interval_ms);
     }
     // A registration retry reuses the mailbox and never resets its cursor.
     if let Some(existing) = db
@@ -178,7 +324,7 @@ pub(super) async fn subscribe(
         if existing.query != query || existing.delivery != request.delivery.as_str() {
             return Err((StatusCode::CONFLICT, "subscriber already has a different subscription; unsubscribe it before changing scope or delivery".into()));
         }
-        return Ok(Json(json!(existing)));
+        return Ok(Json(response(&existing, request.diagnostic)));
     }
     // Retrying a paused watch preserves its observation position. Discarding
     // that position requires an explicit unsubscribe, never a registration
@@ -209,7 +355,7 @@ pub(super) async fn subscribe(
             ));
         }
         state.event_subscriptions_changed.notify_waiters();
-        return Ok(Json(json!(existing)));
+        return Ok(Json(response(&existing, request.diagnostic)));
     }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -236,20 +382,26 @@ pub(super) async fn subscribe(
         wake_admitted: false,
     };
     drop(db);
-    let batch = collect(state.clone(), &row, 0).await.map_err(failure)?;
+    // A single zero-timeout bootstrap check: whatever is already settled,
+    // never a wait, so there is nothing here for a chained collection to own.
+    let batch = collect(state.clone(), &row, 0, fresh_collection(&row))
+        .await
+        .map_err(failure)?;
     accept_page(&mut row, batch, true);
     database(&state)
         .map_err(failure)?
         .insert_event_subscription(&row)
         .map_err(failure)?;
     state.event_subscriptions_changed.notify_waiters();
-    Ok(Json(json!(row)))
+    Ok(Json(response(&row, request.diagnostic)))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ReadRequest {
     acknowledge_batch_id: Option<i64>,
+    #[serde(default)]
+    diagnostic: bool,
 }
 
 pub(super) async fn read(
@@ -282,13 +434,14 @@ pub(super) async fn read(
             state.event_subscriptions_changed.notify_waiters();
         }
     }
-    Ok(Json(json!(row)))
+    Ok(Json(response(&row, request.diagnostic)))
 }
 
 pub(super) async fn unsubscribe(
     _access: DesktopLocalAccess,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<DiagnosticQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let mut row = load(&state, &id)?;
     row.active = false;
@@ -300,7 +453,7 @@ pub(super) async fn unsubscribe(
         ));
     }
     state.event_subscriptions_changed.notify_waiters();
-    Ok(Json(json!(row)))
+    Ok(Json(response(&row, query.diagnostic)))
 }
 
 /// What one worker iteration decided about the subscription's lifetime.
@@ -436,42 +589,125 @@ async fn step(
     // peer legs, but an admitted relay request keeps running on the peer.
     // Recreating that wait for every local state edge exhausts its long-poll
     // permits even with only one subscription.
-    let batch = {
-        let collection = collect(
-            state.clone(),
-            &row,
-            kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS,
-        );
-        tokio::pin!(collection);
-        loop {
-            let mut notification = Box::pin(state.event_subscriptions_changed.notified());
-            notification.as_mut().enable();
-            let current = database(state)?
-                .event_subscription(id)
-                .map_err(|e| e.to_string())?;
-            if !current.is_some_and(|current| {
-                current.active
-                    && current.revision == row.revision
-                    && current.pending.is_none()
-                    && current.query == row.query
-                    && current.cursor == row.cursor
-            }) || !still_bound(state, &row)?
-            {
-                // Genuine retirement or a changed mailbox invalidates this
-                // collect. There is no relay cancellation protocol: at most
-                // one abandoned leg per peer per retirement finishes at its
-                // receiver's own deadline (MAX_WAIT_TIMEOUT_SECS). Repeated
-                // retirements can overlap those holds; this is not a bound on
-                // all historical requests from the subscription. Never put a
-                // cancelled aggregate back in the registry: it may already
-                // have advanced checkpoints for events not yet in the mailbox.
-                return Ok(Step::Iterate);
+    //
+    // One native call is capped at MAX_WAIT_TIMEOUT_SECS (240s) regardless of
+    // this subscription's own quiet/max-hold window, which can exceed it
+    // (defaults are 300s each). `collection` is shared across every chained
+    // call below, so the true first relevant observation — and hence the
+    // subscription's own deadline — survives across calls instead of
+    // resetting each time a call returns merely because its own native
+    // receiver expired. A native "events" outcome means the subscription's
+    // own criteria (urgent, full page, or quiet/max-hold reached) were
+    // genuinely satisfied; "timeout" means only that one call's own budget
+    // ran out, so the chain continues with the advanced cursor.
+    let collection = fresh_collection(&row);
+    let mut working_cursor = row.cursor.clone();
+    // Each native call's own `events`/page-capacity accounting starts fresh
+    // (its `collected` local is empty and its own `limit` is the full page
+    // size), so a chain of calls that each return fewer than a page would
+    // otherwise both drop every timed-out call's already-observed events (the
+    // native cursor already advanced past them) and let each call fill up to
+    // a full page of its own, overrunning the subscription's real capacity.
+    // Retain every relevant event this chain has actually observed here, and
+    // shrink each subsequent call's own limit by that count so the chain's
+    // total never exceeds one page.
+    let mut retained_events: Vec<Value> = Vec::new();
+    let batch = 'chain: loop {
+        let native_timeout = {
+            let guard = collection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match guard.intrinsic_deadline() {
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    remaining
+                        .as_secs()
+                        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+                        .clamp(1, kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS)
+                }
+                None => kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS,
             }
-            tokio::select! {
-                _ = notification => {},
-                _ = changes.recv() => {},
-                batch = &mut collection => break batch,
+        };
+        let mut call_row = row.clone();
+        call_row.cursor = working_cursor.clone();
+        if !retained_events.is_empty() {
+            if let Some(limit) = call_row.query.get("limit").and_then(Value::as_i64) {
+                call_row.query["limit"] = json!((limit - retained_events.len() as i64).max(1));
             }
+        }
+        let native_batch = {
+            let collection_call =
+                collect(state.clone(), &call_row, native_timeout, collection.clone());
+            tokio::pin!(collection_call);
+            loop {
+                let mut notification = Box::pin(state.event_subscriptions_changed.notified());
+                notification.as_mut().enable();
+                let current = database(state)?
+                    .event_subscription(id)
+                    .map_err(|e| e.to_string())?;
+                if !current.is_some_and(|current| {
+                    current.active
+                        && current.revision == row.revision
+                        && current.pending.is_none()
+                        && current.query == row.query
+                        && current.cursor == row.cursor
+                }) || !still_bound(state, &row)?
+                {
+                    // Genuine retirement or a changed mailbox invalidates this
+                    // collect. There is no relay cancellation protocol: at most
+                    // one abandoned leg per peer per retirement finishes at its
+                    // receiver's own deadline (MAX_WAIT_TIMEOUT_SECS). Repeated
+                    // retirements can overlap those holds; this is not a bound on
+                    // all historical requests from the subscription. Never put a
+                    // cancelled aggregate back in the registry: it may already
+                    // have advanced checkpoints for events not yet in the mailbox.
+                    return Ok(Step::Iterate);
+                }
+                tokio::select! {
+                    _ = notification => {},
+                    _ = changes.recv() => {},
+                    batch = &mut collection_call => break batch,
+                }
+            }
+        };
+        match native_batch {
+            Ok(mut batch) => {
+                working_cursor = batch["cursor"].as_str().map(str::to_owned);
+                if let Some(events) = batch["events"].as_array() {
+                    retained_events.extend(events.iter().cloned());
+                }
+                let machine_errors_present = batch["machineErrors"]
+                    .as_array()
+                    .is_some_and(|errors| !errors.is_empty());
+                if batch["waitOutcome"] == "timeout" && !machine_errors_present {
+                    // Whether this leg's own timeout also means the
+                    // subscription is genuinely done cannot be decided from
+                    // how this call's timeout was originally sized: a later
+                    // relevant event observed mid-call can push the live
+                    // Collection's intrinsic deadline further out (quiet is
+                    // anchored to the latest observation), so a call sized to
+                    // the deadline as it stood at dispatch can still return
+                    // "timeout" well before the subscription's now-later
+                    // deadline. Re-read the live collection here, after the
+                    // call, rather than trusting a pre-call snapshot.
+                    let live_deadline_reached = {
+                        let guard = collection
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        guard
+                            .intrinsic_deadline()
+                            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                    };
+                    if !live_deadline_reached {
+                        #[cfg(test)]
+                        subscription_timing::leg_timed_out(state);
+                        continue 'chain;
+                    }
+                }
+                batch["events"] = json!(std::mem::take(&mut retained_events));
+                break 'chain Ok(batch);
+            }
+            Err(error) => break 'chain Err(error),
         }
     };
     match batch {
@@ -509,7 +745,12 @@ pub(crate) async fn run(state: Arc<AppState>) {
                     let worker_id = row.id.clone();
                     let worker_state = state.clone();
                     let mut admission = admission_clocks.remove(&row.id).unwrap_or_else(|| {
-                        super::subscription_timing::Admission::new(recovering || row.wake_admitted)
+                        let interval =
+                            super::subscription_timing::Admission::interval_from_query(&row.query);
+                        super::subscription_timing::Admission::new(
+                            recovering || row.wake_admitted,
+                            interval,
+                        )
                     });
                     let handle = workers.spawn(async move {
                         let result = work(worker_state, row.id.clone(), &mut admission).await;

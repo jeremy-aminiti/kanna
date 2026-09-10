@@ -2499,6 +2499,9 @@ mod notification_failure_tests {
             state.clone(),
             serde_json::json!({"taskIds":"task", "localOnly":true,
                 "includeCurrentActivity":false, "timeoutSecs":5}),
+            std::sync::Arc::new(std::sync::Mutex::new(
+                super::super::subscription_timing::Collection::default(),
+            )),
         )
         .await
         .unwrap();

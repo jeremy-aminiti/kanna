@@ -14,7 +14,13 @@ fn run_with_policy(db: &Db, id: &str, task: &str, stage: &str, policy: &str) {
 }
 
 async fn selected(state: Arc<AppState>, query: Value) -> Value {
-    super::super::super::task_events::wait_subscription_events(state, query)
+    let collection = Arc::new(std::sync::Mutex::new(
+        super::super::super::subscription_timing::Collection::from_query(
+            query.get("quietMs").and_then(Value::as_u64),
+            query.get("maxHoldMs").and_then(Value::as_u64),
+        ),
+    ));
+    super::super::super::task_events::wait_subscription_events(state, query, collection)
         .await
         .unwrap()
 }
@@ -145,8 +151,15 @@ async fn excluded_events_neither_fill_batch_nor_start_its_debounce() {
     noise(&db, 8);
     let mut q = query(3);
     q["timeoutSecs"] = json!(30);
+    // `selected()` goes through `wait_subscription_events`, which always
+    // selects subscription-timing mode — the generic `minEvents`/`debounceMs`
+    // below are inert there. `quietMs` is that mode's own equivalent of the
+    // debounce this test exercises; `maxHoldMs` stays generous so quiet is
+    // what actually governs sealing here.
     q["minEvents"] = json!(2);
     q["debounceMs"] = json!(1000);
+    q["quietMs"] = json!(1_000);
+    q["maxHoldMs"] = json!(30_000);
     let wait = tokio::spawn(selected(state, q));
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(2)).await;
@@ -203,7 +216,8 @@ async fn both_delivery_adapters_share_manual_bootstrap_and_acknowledgement_selec
             &app,
             "POST",
             &path,
-            json!({"acknowledgeBatchId":initial["batchId"]}),
+            // Diagnostic mode: the response cursor feeds the raw-wait resume below.
+            json!({"acknowledgeBatchId":initial["batchId"], "diagnostic":true}),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -376,7 +390,8 @@ async fn subscription_worker_publishes_only_attention_and_ack_resumes_after_filt
         &app,
         "POST",
         &format!("/v1/event-subscriptions/{id}/read"),
-        json!({}),
+        // Diagnostic mode: comparing against the DB row's raw (unreshaped) pending.
+        json!({"diagnostic":true}),
     )
     .await;
     assert_eq!(
@@ -461,7 +476,12 @@ async fn final_auto_completion_reaches_both_mailboxes_and_fresh_registration() {
                 &app,
                 "POST",
                 "/v1/event-subscriptions",
-                json!({"taskId":"child-c", "localOnly":true, "delivery":delivery}),
+                // Per-subscription quiet/max-hold overrides, not the
+                // 300000ms globals: the non-bootstrap branch's successful
+                // (non-urgent) run.finished event needs to seal within this
+                // test's real-time `await_subscription` budget.
+                json!({"taskId":"child-c", "localOnly":true, "delivery":delivery,
+                    "quietMs": 2_000, "maxHoldMs": 10_000}),
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{initial}");
@@ -494,7 +514,8 @@ async fn final_auto_completion_reaches_both_mailboxes_and_fresh_registration() {
                 &app,
                 "POST",
                 &format!("/v1/event-subscriptions/{id}/read"),
-                json!({"acknowledgeBatchId":page["batchId"]}),
+                // Diagnostic mode: the response cursor feeds the raw-wait resume below.
+                json!({"acknowledgeBatchId":page["batchId"], "diagnostic":true}),
             )
             .await;
             assert!(ack["pending"].is_null());
@@ -556,7 +577,8 @@ async fn exited_without_verdict_bootstraps_once_for_both_adapters_without_markin
             &app,
             "POST",
             &path,
-            json!({"acknowledgeBatchId":initial["batchId"]}),
+            // Diagnostic mode: the response cursor feeds the raw-wait resume below.
+            json!({"acknowledgeBatchId":initial["batchId"], "diagnostic":true}),
         )
         .await;
         assert!(ack["pending"].is_null());

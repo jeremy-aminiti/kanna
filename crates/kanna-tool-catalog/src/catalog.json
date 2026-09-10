@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "kanna_subscribe_events",
-      "description": "Subscribe once to task events. Returns promptly with a durable subscription and any already-settled actionable tasks. The default relevance policy runs BEFORE local and cross-machine batching for both input and codex_app_server delivery: failures, confirmed questions, manual gates (including idle without a verdict), unresolved/exhausted revisions, parked providers, dependency/close/PR/merge coordination, and observation faults wake. Routine busy/read edges, automatic successful main/post/stage progress, serviced completion echoes, and automatic-stage idle do not. Raw kanna_wait_events history is unchanged. Internal subscription timing uses manager-adopted defaults: 1000ms trailing quiet, 5000ms max hold from first relevant observation, and minimum 5000ms between adapter-call admissions. Full pages and urgent failures/questions/parking/watch faults seal early but never bypass admission pacing or acknowledgement. Bounds describe scheduler-added delay after observation with healthy execution and available acknowledgement, not universal event-creation latency or harness consumption time. Peer legs do not duplicate debounce; public wait timing is unchanged. Kanna owns the watcher; the agent need not run or background a process. Read pending events with kanna_read_event_subscription and acknowledge the batch id after reconciling it. Wake delivery is a separate harness adapter. Only one active subscription per subscriber run; repeated calls return it. Subscriptions stop on run replacement or close. Local-process access only.",
+      "description": "Subscribe once to task events. Returns promptly with a durable subscription and any already-settled actionable tasks. The default relevance policy runs BEFORE local and cross-machine batching for both input and codex_app_server delivery: failures, confirmed questions, manual gates (including idle without a verdict), unresolved/exhausted revisions, parked providers, dependency/close/PR/merge coordination, and observation faults wake. Routine busy/read edges, automatic successful main/post/stage progress, serviced completion echoes, and automatic-stage idle do not. Raw kanna_wait_events history is unchanged. Internal subscription timing uses manager-adopted defaults: ordinary (non-urgent) batches collect for up to 300000ms (5 minutes) from the first relevant observation, with no earlier quiet-triggered seal, and minimum 60000ms between adapter-call admissions. The collector chains as many native calls as needed (each capped at the existing 240000ms receiver window) so this 300000ms figure is the true bound honored from first observation, not truncated at 240000ms. quiet_ms, max_hold_ms and min_admission_interval_ms let one subscription override these three defaults — but only when omitted entirely; an explicit value, even one matching the default, is persisted as an override and changes registration-retry/resume comparisons accordingly (validated: floor 1000ms, max_hold_ms >= quiet_ms; no ceiling); event_types and exclude_event_types add or narrow the event-type filter reused verbatim from kanna_wait_events. Every override is optional and additive — an unspecified subscription keeps the exact prior defaults and query shape. Full pages and urgent failures/questions/parking/watch faults seal early but never bypass admission pacing or acknowledgement. Bounds describe scheduler-added delay after observation with healthy execution and available acknowledgement, not universal event-creation latency or harness consumption time. Peer legs do not duplicate debounce; public wait timing is unchanged. Kanna owns the watcher; the agent need not run or background a process. The response is compact by default: id, active, error, wakeState, batchId, pending (events, hasMore, waitOutcome, machineErrors, watchError) and the watched query, omitting the durable internal cursor an agent never acts on directly. Pass diagnostic true for the full internal row (adds stage, branch, runId, revision, delivery, wakeAdmitted and the raw cursor) for troubleshooting. Read pending events with kanna_read_event_subscription and acknowledge the batch id after reconciling it. Wake delivery is a separate harness adapter. Only one active subscription per subscriber run; repeated calls return it. Subscriptions stop on run replacement or close. Local-process access only.",
       "method": "POST",
       "path": "/v1/event-subscriptions",
       "response": "json",
@@ -67,12 +67,60 @@
             "poll"
           ],
           "default": "input"
+        },
+        {
+          "name": "diagnostic",
+          "description": "Return the full internal subscription row (adds stage, branch, runId, revision, delivery, wakeAdmitted and the raw durable/pending cursor) instead of the default compact response.",
+          "type": "boolean",
+          "required": false,
+          "location": "body",
+          "default": false
+        },
+        {
+          "name": "event_types",
+          "description": "Watch only these event types, to the exclusion of every other type — reuses the same allow-list filter kanna_wait_events exposes. A query filter, never part of the durable cursor. Omit to keep the default relevance policy's selection.",
+          "type": "string_array",
+          "required": false,
+          "location": "body",
+          "key": "eventTypes"
+        },
+        {
+          "name": "exclude_event_types",
+          "description": "Additional event types to drop, on top of the fixed baseline exclusion (task.activity_changed, task.runtime_settled, task.input_delivered) already applied to every subscription. A query filter, never part of the durable cursor.",
+          "type": "string_array",
+          "required": false,
+          "location": "body",
+          "key": "excludeEventTypes"
+        },
+        {
+          "name": "quiet_ms",
+          "description": "Override this subscription's trailing-quiet duration (default 300000ms/5 minutes, applied only when this is omitted entirely — an explicit value, even 300000, is persisted as an override). Validated to be at least 1000ms and no greater than max_hold_ms; no ceiling otherwise. The collector chains native calls (each capped at 240s) as needed so this window is honored from the first relevant observation regardless of that per-call cap. Urgent events still seal immediately regardless of this value.",
+          "type": "integer",
+          "required": false,
+          "location": "body",
+          "key": "quietMs"
+        },
+        {
+          "name": "max_hold_ms",
+          "description": "Override this subscription's maximum ordinary-collection hold from the first relevant observation (default 300000ms/5 minutes, applied only when this is omitted entirely — an explicit value, even 300000, is persisted as an override). Validated to be at least quiet_ms and at least 1000ms; no ceiling otherwise. The collector chains native calls (each capped at 240s) as needed so this window is honored regardless of that per-call cap.",
+          "type": "integer",
+          "required": false,
+          "location": "body",
+          "key": "maxHoldMs"
+        },
+        {
+          "name": "min_admission_interval_ms",
+          "description": "Override the minimum spacing between adapter-call wake admissions for this subscription (default 60000ms/60s, applied only when this is omitted entirely — an explicit value, even 60000, is persisted as an override) — the wake-rate gate, not the collection window. Validated to be at least 1000ms; no ceiling otherwise — an extreme value simply delays this subscription's own future admissions. Urgent events remain gated by this floor.",
+          "type": "integer",
+          "required": false,
+          "location": "body",
+          "key": "minAdmissionIntervalMs"
         }
       ]
     },
     {
       "name": "kanna_read_event_subscription",
-      "description": "Read the durable mailbox without acknowledging it. Pass acknowledge_batch_id only after servicing that exact batch to advance the observation cursor and release the next page. Reading and acknowledging never affect human read/unread state or task completion. The error and wakeState fields expose failed or uncertain native/input delivery; do not blindly retry uncertain input. Kanna continues observing independently of the harness.",
+      "description": "Read the durable mailbox without acknowledging it. Pass acknowledge_batch_id only after servicing that exact batch to advance the observation cursor and release the next page. Reading and acknowledging never affect human read/unread state or task completion. The error and wakeState fields expose failed or uncertain native/input delivery; do not blindly retry uncertain input. Kanna continues observing independently of the harness. The response is compact by default: id, active, error, wakeState, batchId, pending (events, hasMore, waitOutcome, machineErrors, watchError) and the watched query, omitting the durable internal cursor. Pass diagnostic true for the full internal row.",
       "method": "POST",
       "path": "/v1/event-subscriptions/{subscription_id}/read",
       "response": "json",
@@ -91,12 +139,20 @@
           "required": false,
           "location": "body",
           "key": "acknowledgeBatchId"
+        },
+        {
+          "name": "diagnostic",
+          "description": "Return the full internal subscription row (adds stage, branch, runId, revision, delivery, wakeAdmitted and the raw durable/pending cursor) instead of the default compact response.",
+          "type": "boolean",
+          "required": false,
+          "location": "body",
+          "default": false
         }
       ]
     },
     {
       "name": "kanna_unsubscribe_events",
-      "description": "Stop an event subscription and its background observer. Pending events remain readable for audit; stopping does not close or advance the manager task.",
+      "description": "Stop an event subscription and its background observer. Pending events remain readable for audit; stopping does not close or advance the manager task. The response is compact by default; pass diagnostic true for the full internal row.",
       "method": "POST",
       "path": "/v1/event-subscriptions/{subscription_id}/unsubscribe",
       "response": "json",
@@ -107,6 +163,14 @@
           "type": "string",
           "required": true,
           "location": "path"
+        },
+        {
+          "name": "diagnostic",
+          "description": "Return the full internal subscription row instead of the default compact response.",
+          "type": "boolean",
+          "required": false,
+          "location": "query",
+          "default": false
         }
       ]
     },

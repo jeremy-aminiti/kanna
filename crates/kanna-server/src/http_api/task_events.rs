@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Upper bound on one response. A caller that asks for a whole repo's history
@@ -157,6 +157,20 @@ pub(super) struct TaskEventsQuery {
     /// Set only by the owning subscription call, never from peer wire input.
     #[serde(skip)]
     subscription_timing: bool,
+    /// Per-subscription override of the collector's trailing-quiet duration,
+    /// validated and persisted by `event_subscriptions::subscribe`. Inert
+    /// unless `subscription_timing` is set.
+    quiet_ms: Option<u64>,
+    /// Per-subscription override of the collector's max collection hold.
+    /// Inert unless `subscription_timing` is set.
+    max_hold_ms: Option<u64>,
+    /// Shared across every chained native call within one subscription batch
+    /// cycle, so quiet/max-hold timing tracks the true first relevant
+    /// observation rather than resetting at each individual call's own (up
+    /// to 240s) native receiver window. Set only by `wait_subscription_events`
+    /// via `event_subscriptions::step`; always `None` for the public wait.
+    #[serde(skip)]
+    subscription_collection: Option<Arc<Mutex<super::subscription_timing::Collection>>>,
 }
 
 fn include_current_state_by_default() -> bool {
@@ -1371,6 +1385,30 @@ fn append_current_activity_snapshots(
     Ok(())
 }
 
+/// Runs `f` against the query's shared collection when present — subscription
+/// mode, where the same `Collection` is reused across every chained native
+/// call in one batch cycle so quiet/max-hold tracks the true first relevant
+/// observation rather than resetting at each call's own native receiver
+/// window — or a throwaway local one otherwise (the public wait never sets
+/// `subscription_timing`, so that fallback is never actually consulted).
+fn with_collection<R>(
+    query: &TaskEventsQuery,
+    f: impl FnOnce(&mut super::subscription_timing::Collection) -> R,
+) -> R {
+    match &query.subscription_collection {
+        Some(shared) => {
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            f(&mut guard)
+        }
+        None => f(&mut super::subscription_timing::Collection::from_query(
+            query.quiet_ms,
+            query.max_hold_ms,
+        )),
+    }
+}
+
 async fn wait_local_task_events(
     state: Arc<AppState>,
     query: TaskEventsQuery,
@@ -1446,7 +1484,6 @@ async fn wait_local_task_events(
     } else {
         deadline
     };
-    let mut timing = super::subscription_timing::Collection::default();
     let min_events = kanna_tool_catalog::clamp_task_event_min_events(query.min_events, limit);
     let debounce = hold_duration(query.debounce_ms);
     // Collected across re-reads, not per read: a batched wait returns one
@@ -1509,7 +1546,9 @@ async fn wait_local_task_events(
         }
         let read_events = !batch.events.is_empty();
         if query.subscription_timing {
-            timing.observe(&batch.events, tokio::time::Instant::now());
+            with_collection(&query, |c| {
+                c.observe(&batch.events, tokio::time::Instant::now())
+            });
             #[cfg(test)]
             super::subscription_timing::observed(&state, batch.events.len());
         }
@@ -1520,7 +1559,7 @@ async fn wait_local_task_events(
         let now = tokio::time::Instant::now();
         let hold_until = hold_deadline(debounce_deadline, interval_deadline);
         let batch_complete = if query.subscription_timing {
-            timing.ready(collected.len(), limit, deadline, now)
+            with_collection(&query, |c| c.ready(collected.len(), limit, now))
         } else {
             kanna_tool_catalog::task_event_batch_is_complete(
                 collected.len(),
@@ -1586,7 +1625,7 @@ async fn wait_local_task_events(
         // A batch already at `min_events` is only waiting out its hold window;
         // anything short of it waits for the full timeout.
         let wake_deadline = if query.subscription_timing {
-            timing.deadline(deadline)
+            with_collection(&query, |c| c.deadline(deadline))
         } else {
             match hold_until {
                 Some(hold_until) if collected.len() >= min_events => hold_until,
@@ -2368,7 +2407,6 @@ async fn wait_aggregate_task_events(
     // every leg together — the same place the timeout is enforced. A leg that
     // has already answered is simply re-armed while the batch is still filling,
     // which is how a burst split across machines still returns as one response.
-    let mut timing = super::subscription_timing::Collection::default();
     let min_events = kanna_tool_catalog::clamp_task_event_min_events(query.min_events, limit);
     let debounce = hold_duration(query.debounce_ms);
     let mut debounce_deadline: Option<tokio::time::Instant> = None;
@@ -2408,7 +2446,7 @@ async fn wait_aggregate_task_events(
         // A batch already holding `min_events` is only waiting out its hold
         // window; anything short of it waits for the whole timeout.
         let join_deadline = if query.subscription_timing {
-            timing.deadline(deadline)
+            with_collection(&query, |c| c.deadline(deadline))
         } else {
             match hold_deadline(debounce_deadline, interval_deadline) {
                 Some(hold_until) if events.len() >= min_events => hold_until,
@@ -2446,7 +2484,9 @@ async fn wait_aggregate_task_events(
             limit,
         )?;
         if query.subscription_timing {
-            timing.observe(&events[before_count..], tokio::time::Instant::now());
+            with_collection(&query, |c| {
+                c.observe(&events[before_count..], tokio::time::Instant::now())
+            });
             #[cfg(test)]
             super::subscription_timing::observed(&state, events.len() - before_count);
         }
@@ -2455,7 +2495,8 @@ async fn wait_aggregate_task_events(
         }
         let now = tokio::time::Instant::now();
         let batch_complete = if query.subscription_timing {
-            timing.ready(events.len(), limit, deadline, now) || !machine_errors.is_empty()
+            with_collection(&query, |c| c.ready(events.len(), limit, now))
+                || !machine_errors.is_empty()
         } else {
             kanna_tool_catalog::task_event_batch_is_complete(
                 events.len(),
@@ -2510,7 +2551,9 @@ async fn wait_aggregate_task_events(
     // that closed short of `min_events` reports `timeout` with whatever
     // accumulated, exactly like the single-machine wait.
     let batch_complete = if query.subscription_timing {
-        timing.ready(events.len(), limit, deadline, tokio::time::Instant::now())
+        with_collection(&query, |c| {
+            c.ready(events.len(), limit, tokio::time::Instant::now())
+        })
     } else {
         kanna_tool_catalog::task_event_batch_is_complete(
             events.len(),
@@ -2563,11 +2606,13 @@ pub(super) async fn wait_task_events(
 pub(super) async fn wait_subscription_events(
     state: Arc<AppState>,
     query: Value,
+    collection: Arc<Mutex<super::subscription_timing::Collection>>,
 ) -> Result<Value, String> {
     let mut query: TaskEventsQuery =
         serde_json::from_value(query).map_err(|error| format!("invalid event scope: {error}"))?;
     query.orchestration_notifications = true;
     query.subscription_timing = true;
+    query.subscription_collection = Some(collection);
     wait_events_in_process(state, query, true, false)
         .await
         .map(|Json(value)| value)

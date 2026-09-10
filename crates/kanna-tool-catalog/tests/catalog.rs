@@ -2513,3 +2513,105 @@ fn raw_input_description_separates_keys_from_delivered_messages() {
     // Terminal-mode limits are stated rather than a universal claim implied.
     assert!(description.contains("DECCKM"));
 }
+
+/// `value_for_param` fills in a declared `default` for any omitted parameter
+/// and sends it on the wire (proven by `override_catalog_cannot_reintroduce_
+/// an_unsurvivable_wait_window`'s `defaulted`/`explicit` cases resolving to
+/// the same clamped value above). For `kanna_subscribe_events`'s timing
+/// overrides that would be a defect: the server distinguishes "omitted, keep
+/// whatever this subscription already has" from "explicit, persist as an
+/// override" purely by whether the key is present at all, so a resolver that
+/// injects the documented default turns every omission into an explicit
+/// (if numerically identical) override — breaking retry/resume for every
+/// subscription that predates this feature or was registered without one.
+#[test]
+fn subscribe_events_timing_overrides_are_omitted_from_the_wire_when_not_given() {
+    let catalog = bundled_catalog();
+    let minimal = resolve_request(
+        &catalog,
+        "kanna_subscribe_events",
+        &json!({ "task_id": "manager-1", "local_only": true, "delivery": "input" }),
+    )
+    .expect("minimal subscribe request resolves");
+
+    for key in ["quietMs", "maxHoldMs", "minAdmissionIntervalMs"] {
+        assert!(
+            minimal.body.get(key).is_none(),
+            "{key} must be entirely absent from an omitted-knob request body, not merely null: {}",
+            minimal.body
+        );
+    }
+
+    // An explicit value — even one matching the documented default — must
+    // still reach the wire, so the server can tell it apart from omission.
+    let explicit = resolve_request(
+        &catalog,
+        "kanna_subscribe_events",
+        &json!({
+            "task_id": "manager-1",
+            "local_only": true,
+            "delivery": "input",
+            "quiet_ms": 300_000,
+            "max_hold_ms": 300_000,
+            "min_admission_interval_ms": 60_000,
+        }),
+    )
+    .expect("explicit subscribe request resolves");
+    assert_eq!(explicit.body["quietMs"], 300_000);
+    assert_eq!(explicit.body["maxHoldMs"], 300_000);
+    assert_eq!(explicit.body["minAdmissionIntervalMs"], 60_000);
+}
+
+/// `diagnostic` reaches the wire the same way on all three subscription
+/// tools' own terms: a body field for subscribe/read, but a query parameter
+/// for unsubscribe, which has no body at all.
+#[test]
+fn diagnostic_maps_to_a_body_field_on_subscribe_and_read_but_a_query_param_on_unsubscribe() {
+    let catalog = bundled_catalog();
+
+    let subscribe_diagnostic = catalog
+        .find_param("kanna_subscribe_events", "diagnostic")
+        .expect("subscribe declares diagnostic");
+    assert_eq!(subscribe_diagnostic.location, ParamLoc::Body);
+    let read_diagnostic = catalog
+        .find_param("kanna_read_event_subscription", "diagnostic")
+        .expect("read declares diagnostic");
+    assert_eq!(read_diagnostic.location, ParamLoc::Body);
+    let unsubscribe_diagnostic = catalog
+        .find_param("kanna_unsubscribe_events", "diagnostic")
+        .expect("unsubscribe declares diagnostic");
+    assert_eq!(unsubscribe_diagnostic.location, ParamLoc::Query);
+
+    let subscribe = resolve_request(
+        &catalog,
+        "kanna_subscribe_events",
+        &json!({ "task_id": "manager-1", "local_only": true, "delivery": "input", "diagnostic": true }),
+    )
+    .expect("subscribe resolves");
+    assert_eq!(subscribe.body["diagnostic"], true);
+
+    let read = resolve_request(
+        &catalog,
+        "kanna_read_event_subscription",
+        &json!({ "subscription_id": "watch-1", "diagnostic": true }),
+    )
+    .expect("read resolves");
+    assert_eq!(read.body["diagnostic"], true);
+
+    let unsubscribe = resolve_request(
+        &catalog,
+        "kanna_unsubscribe_events",
+        &json!({ "subscription_id": "watch-1", "diagnostic": true }),
+    )
+    .expect("unsubscribe resolves");
+    assert!(
+        unsubscribe.body.get("diagnostic").is_none(),
+        "diagnostic must not also land in unsubscribe's body: {}",
+        unsubscribe.body
+    );
+    assert!(
+        unsubscribe.path.contains("diagnostic=true"),
+        "diagnostic must reach unsubscribe as a query parameter: {}",
+        unsubscribe.path
+    );
+}

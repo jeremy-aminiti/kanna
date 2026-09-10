@@ -828,6 +828,24 @@ pub(crate) enum TaskCommands {
         local_only: bool,
         #[arg(long, default_value = "input", value_parser = ["input", "codex_app_server", "poll"])]
         delivery: String,
+        /// Return the full internal subscription row instead of the compact default
+        #[arg(long)]
+        diagnostic: bool,
+        /// Watch only these event types; repeat or comma-separate
+        #[arg(long, value_delimiter = ',')]
+        event_types: Vec<String>,
+        /// Additional event types to drop, on top of the fixed baseline exclusion
+        #[arg(long, value_delimiter = ',')]
+        exclude_event_types: Vec<String>,
+        /// Override this subscription's trailing-quiet duration (default 300000ms)
+        #[arg(long)]
+        quiet_ms: Option<i64>,
+        /// Override this subscription's maximum ordinary-collection hold (default 300000ms)
+        #[arg(long)]
+        max_hold_ms: Option<i64>,
+        /// Override the minimum spacing between adapter-call wake admissions (default 60000ms)
+        #[arg(long)]
+        min_admission_interval_ms: Option<i64>,
         #[arg(long)]
         server_url: Option<String>,
     },
@@ -837,6 +855,9 @@ pub(crate) enum TaskCommands {
         subscription_id: String,
         #[arg(long)]
         acknowledge_batch_id: Option<i64>,
+        /// Return the full internal subscription row instead of the compact default
+        #[arg(long)]
+        diagnostic: bool,
         #[arg(long)]
         server_url: Option<String>,
     },
@@ -844,6 +865,9 @@ pub(crate) enum TaskCommands {
     UnsubscribeEvents {
         #[arg(long)]
         subscription_id: String,
+        /// Return the full internal subscription row instead of the compact default
+        #[arg(long)]
+        diagnostic: bool,
         #[arg(long)]
         server_url: Option<String>,
     },

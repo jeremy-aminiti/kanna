@@ -934,7 +934,10 @@ async fn subscription_wakes_manager_through_fenced_input_once_per_pending_batch(
         &app,
         "POST",
         "/v1/event-subscriptions",
-        json!({"taskId":"manager", "localOnly":true}),
+        // Per-subscription quiet/max-hold overrides, not the 300000ms
+        // globals: the ordinary (non-urgent) idle-settle event below needs
+        // to seal within this test's real-time delivery-channel budget.
+        json!({"taskId":"manager", "localOnly":true, "quietMs": 2_000, "maxHoldMs": 10_000, "minAdmissionIntervalMs": 1_000}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{subscription}");
@@ -1018,7 +1021,10 @@ async fn subscription_wake_that_never_reached_the_daemon_is_retried_once_when_it
         &app,
         "POST",
         "/v1/event-subscriptions",
-        json!({"taskId":"manager", "localOnly":true}),
+        // Per-subscription quiet/max-hold overrides, not the 300000ms
+        // globals: the ordinary (non-urgent) idle-settle event below needs
+        // to seal within this test's real-time delivery-channel budget.
+        json!({"taskId":"manager", "localOnly":true, "quietMs": 2_000, "maxHoldMs": 10_000, "minAdmissionIntervalMs": 1_000}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{subscription}");
@@ -1149,7 +1155,10 @@ async fn subscription_storage_fault_defers_the_worker_instead_of_deactivating_it
         &app,
         "POST",
         "/v1/event-subscriptions",
-        json!({"taskId":"manager", "localOnly":true}),
+        // Per-subscription quiet/max-hold overrides, not the 300000ms
+        // globals: the ordinary (non-urgent) idle-settle event below needs
+        // to seal within this test's real-time delivery-channel budget.
+        json!({"taskId":"manager", "localOnly":true, "quietMs": 2_000, "maxHoldMs": 10_000, "minAdmissionIntervalMs": 1_000}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{subscription}");
