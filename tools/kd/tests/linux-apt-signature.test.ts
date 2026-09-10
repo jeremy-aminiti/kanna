@@ -65,6 +65,15 @@ describe("supplied-key OpenPGP apt signatures", () => {
     await expect(signer.sign(encode(release().replace("Suite: staging", "Suite: staging ")))).rejects.toThrow(/canonical/);
   });
 
+  it("does not silently strip a UTF-8 BOM before signing", async () => {
+    const signer = await createAptPublicationSigner(keys());
+    await expect(signer.sign(encode(`\uFEFF${release()}`))).rejects.toThrow();
+  });
+
+  it("does not strip a UTF-8 BOM from the intended plaintext during verification", async () => {
+    await expect(verify(await rawSign(release()), `\uFEFF${release()}`)).rejects.toThrow(/intended content/);
+  });
+
   it("rejects a bad signature", async () => {
     const signed = await rawSign(release());
     const tampered = signed.replace("Suite: staging", "Suite: stable");

@@ -41,6 +41,8 @@ if (worker) {
   const signedRelease = await signer.sign(encode(release));
   const verify = (overrides = {}) => verifyAptRelease({ ...keys, now, signedRelease, expectedRelease: encode(release), ...overrides });
   assert.deepEqual(await verify(), encode(release));
+  await assert.rejects(signer.sign(encode(`\uFEFF${release}`)), /Invalid apt Release field/);
+  await assert.rejects(verify({ expectedRelease: encode(`\uFEFF${release}`) }), /intended content/);
   await assert.rejects(verify({ fingerprint: "0".repeat(40) }), /fingerprint mismatch/);
   await assert.rejects(verify({ signedRelease: encode(Buffer.from(signedRelease).toString().replace("Suite: staging", "Suite: stable")) }), /OpenPGP/);
   await assert.rejects(verify({ now: new Date("2026-09-11T00:00:00Z") }), /expired/);

@@ -44,7 +44,9 @@ function safeError(error: unknown): Error {
 
 function text(bytes: Uint8Array): string {
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_BYTES) fail("Invalid apt signature input size.");
-  return new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/\r\n/g, "\n");
+  // Preserve a leading BOM as content so validation/comparison rejects it;
+  // TextDecoder otherwise silently strips bytes beyond our LF/CRLF policy.
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes).replace(/\r\n/g, "\n");
 }
 
 function clock(value: Date): Date {
