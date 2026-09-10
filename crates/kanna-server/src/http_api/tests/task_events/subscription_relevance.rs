@@ -203,7 +203,8 @@ async fn both_delivery_adapters_share_manual_bootstrap_and_acknowledgement_selec
             &app,
             "POST",
             &path,
-            json!({"acknowledgeBatchId":initial["batchId"]}),
+            // Diagnostic mode: the response cursor feeds the raw-wait resume below.
+            json!({"acknowledgeBatchId":initial["batchId"], "diagnostic":true}),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -494,7 +495,8 @@ async fn final_auto_completion_reaches_both_mailboxes_and_fresh_registration() {
                 &app,
                 "POST",
                 &format!("/v1/event-subscriptions/{id}/read"),
-                json!({"acknowledgeBatchId":page["batchId"]}),
+                // Diagnostic mode: the response cursor feeds the raw-wait resume below.
+                json!({"acknowledgeBatchId":page["batchId"], "diagnostic":true}),
             )
             .await;
             assert!(ack["pending"].is_null());
@@ -556,7 +558,8 @@ async fn exited_without_verdict_bootstraps_once_for_both_adapters_without_markin
             &app,
             "POST",
             &path,
-            json!({"acknowledgeBatchId":initial["batchId"]}),
+            // Diagnostic mode: the response cursor feeds the raw-wait resume below.
+            json!({"acknowledgeBatchId":initial["batchId"], "diagnostic":true}),
         )
         .await;
         assert!(ack["pending"].is_null());

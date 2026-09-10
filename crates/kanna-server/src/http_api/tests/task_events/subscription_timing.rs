@@ -258,12 +258,12 @@ async fn both_adapters_trail_bursts_and_rate_gate_urgent_attention() {
         tokio::time::advance(Duration::from_millis(800)).await;
         watch.emit(TaskEventKind::TaskClosed);
         let last = watch.observed().await;
-        tokio::time::advance(Duration::from_millis(999)).await;
+        tokio::time::advance(Duration::from_millis(299_999)).await;
         watch.no_admission();
         tokio::time::advance(Duration::from_millis(1)).await;
         let (batch, admitted) = watch.admitted().await;
-        assert_eq!(admitted, last + Duration::from_secs(1));
-        assert!(admitted > first + Duration::from_secs(1));
+        assert_eq!(admitted, last + Duration::from_secs(300));
+        assert!(admitted > first + Duration::from_secs(300));
         watch.delivered().await;
         assert_eq!(
             watch.row().pending.unwrap()["events"]
@@ -278,9 +278,9 @@ async fn both_adapters_trail_bursts_and_rate_gate_urgent_attention() {
         until(|| watch.row().pending.is_some()).await;
         // Urgent sealed immediately, but cannot bypass the previous admission.
         watch.no_admission();
-        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::time::advance(Duration::from_secs(60)).await;
         let (_, next) = watch.admitted().await;
-        assert_eq!(next - admitted, Duration::from_secs(5));
+        assert_eq!(next - admitted, Duration::from_secs(60));
         watch.delivered().await;
     }
 }
@@ -297,7 +297,7 @@ async fn sustained_full_pages_ack_and_later_failure_cannot_bypass_either_adapter
         watch.delivered().await;
         let immutable = watch.row().pending.unwrap();
         assert_eq!(immutable["events"].as_array().unwrap().len(), 100);
-        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::time::advance(Duration::from_secs(70)).await;
         watch.no_admission();
         assert_eq!(
             watch.row().pending.unwrap(),
@@ -306,7 +306,7 @@ async fn sustained_full_pages_ack_and_later_failure_cannot_bypass_either_adapter
         );
         watch.ack(batch).await;
         let (batch, second) = watch.admitted().await;
-        assert!(second - first >= Duration::from_secs(5));
+        assert!(second - first >= Duration::from_secs(60));
         watch.delivered().await;
         watch.ack(batch).await;
         watch.observed().await;
@@ -319,9 +319,9 @@ async fn sustained_full_pages_ack_and_later_failure_cannot_bypass_either_adapter
             ]
         );
         watch.no_admission();
-        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::time::advance(Duration::from_secs(60)).await;
         let (_, third) = watch.admitted().await;
-        assert!(third - second >= Duration::from_secs(5));
+        assert!(third - second >= Duration::from_secs(60));
         watch.delivered().await;
     }
 }
@@ -342,10 +342,10 @@ async fn ack_during_cooldown_invalidates_scheduled_wake_without_erasing_gate() {
         watch.ack(unsent.batch_id).await;
         watch.emit(TaskEventKind::AwaitingInput);
         watch.observed().await;
-        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::time::advance(Duration::from_secs(60)).await;
         let (batch, at) = watch.admitted().await;
         assert_eq!(batch, unsent.batch_id + 1);
-        assert_eq!(at - first_at, Duration::from_secs(5));
+        assert_eq!(at - first_at, Duration::from_secs(60));
         watch.delivered().await;
         let (status, _) = subscription_request(
             &watch.app,
@@ -365,34 +365,34 @@ async fn lone_noise_sustained_and_urgent_bursts_have_the_same_bounds_for_both_ad
         watch.emit(TaskEventKind::PrCreated);
         let first = watch.observed().await;
         for _ in 0..4 {
-            tokio::time::advance(Duration::from_millis(200)).await;
+            tokio::time::advance(Duration::from_millis(60_000)).await;
             watch.emit(TaskEventKind::RunStarted); // irrelevant, never resets quiet
             tokio::task::yield_now().await;
         }
         watch.no_admission();
-        tokio::time::advance(Duration::from_millis(200)).await;
+        tokio::time::advance(Duration::from_millis(60_000)).await;
         let (batch, at) = watch.admitted().await;
-        assert_eq!(at - first, Duration::from_secs(1));
+        assert_eq!(at - first, Duration::from_secs(300));
         watch.delivered().await;
         watch.ack(batch).await;
         watch.emit(TaskEventKind::PrCreated);
         let first = watch.observed().await;
         for _ in 0..6 {
-            tokio::time::advance(Duration::from_millis(800)).await;
+            tokio::time::advance(Duration::from_millis(48_000)).await;
             watch.emit(TaskEventKind::PrCreated);
             watch.observed().await;
             watch.no_admission();
         }
-        tokio::time::advance(Duration::from_millis(200)).await;
+        tokio::time::advance(Duration::from_millis(12_000)).await;
         let (batch, at) = watch.admitted().await;
         assert_eq!(
             at - first,
-            Duration::from_secs(5),
+            Duration::from_secs(300),
             "continuous relevance cannot extend the cap"
         );
         watch.delivered().await;
         watch.ack(batch).await;
-        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::time::advance(Duration::from_secs(60)).await;
         watch.emit(TaskEventKind::PrCreated);
         watch.observed().await;
         tokio::time::advance(Duration::from_millis(200)).await;
@@ -433,7 +433,7 @@ async fn retirement_during_collection_and_cooldown_cannot_dispatch_for_either_ad
                     .state
                     .publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
                 until(|| !watch.row().active).await;
-                tokio::time::advance(Duration::from_secs(6)).await;
+                tokio::time::advance(Duration::from_secs(70)).await;
                 watch.no_admission();
                 assert_eq!(watch.row().cursor, checkpoint);
             }
@@ -462,13 +462,13 @@ async fn restart_before_scheduled_send_rearms_once_and_preserves_the_pending_pag
             watch.state.clone(),
         ));
         tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_millis(4_999)).await;
+        tokio::time::advance(Duration::from_millis(59_999)).await;
         watch.no_admission();
         assert_eq!(watch.row().pending, page);
         tokio::time::advance(Duration::from_millis(1)).await;
         let (next, admitted) = watch.admitted().await;
         assert_eq!(next, batch + 1);
-        assert_eq!(admitted - restarted, Duration::from_secs(5));
+        assert_eq!(admitted - restarted, Duration::from_secs(60));
         watch.delivered().await;
         assert_eq!(watch.row().pending, page);
     }
@@ -508,11 +508,11 @@ async fn restart_after_ack_rearms_one_cooldown_and_old_records_remain_readable()
         let observed = watch.observed().await;
         until(|| watch.row().pending.is_some()).await;
         assert_eq!(watch.row().cursor, checkpoint);
-        tokio::time::advance(Duration::from_millis(4_999)).await;
+        tokio::time::advance(Duration::from_millis(59_999)).await;
         watch.no_admission();
         tokio::time::advance(Duration::from_millis(1)).await;
         let (_, admitted) = watch.admitted().await;
-        assert_eq!(admitted - observed, Duration::from_secs(5));
+        assert_eq!(admitted - observed, Duration::from_secs(60));
         watch.delivered().await;
     }
 }
@@ -533,10 +533,10 @@ async fn ack_racing_real_delivery_result_keeps_cooldown_and_cannot_resurrect_pag
         assert_eq!(json!(watch.row().cursor), checkpoint);
         until(|| watch.row().pending.is_some()).await;
         watch.no_admission();
-        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::time::advance(Duration::from_secs(60)).await;
         let (next_batch, next) = watch.admitted().await;
         assert_eq!(next_batch, batch + 1);
-        assert_eq!(next - first, Duration::from_secs(5));
+        assert_eq!(next - first, Duration::from_secs(60));
         watch.delivery_returned().await;
         watch.delivery_gate.as_ref().unwrap().add_permits(1);
         watch.delivered().await;
@@ -560,7 +560,7 @@ async fn restart_during_actual_delivery_parks_uncertainty_without_repeated_wake(
         ));
         until(|| watch.row().wake_state == "uncertain").await;
         for _ in 0..3 {
-            tokio::time::advance(Duration::from_secs(5)).await;
+            tokio::time::advance(Duration::from_secs(60)).await;
             watch.state.event_subscriptions_changed.notify_waiters();
             tokio::task::yield_now().await;
             watch.no_admission();
@@ -597,7 +597,7 @@ async fn definitely_undelivered_retry_needs_a_notification_and_an_admission_slot
     watch.emit(TaskEventKind::AwaitingInput);
     let (batch, _) = watch.admitted().await;
     until(|| watch.row().wake_state == "pending" && watch.row().error.is_some()).await;
-    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::time::advance(Duration::from_secs(70)).await;
     watch.no_admission(); // no timer-driven transport retry
     watch.state.event_subscriptions_changed.notify_waiters();
     let (same, second) = watch.admitted().await;
@@ -606,9 +606,9 @@ async fn definitely_undelivered_retry_needs_a_notification_and_an_admission_slot
     watch.state.event_subscriptions_changed.notify_waiters();
     tokio::task::yield_now().await;
     watch.no_admission();
-    tokio::time::advance(Duration::from_secs(5)).await;
+    tokio::time::advance(Duration::from_secs(60)).await;
     let (_, third) = watch.admitted().await;
-    assert_eq!(third - second, Duration::from_secs(5));
+    assert_eq!(third - second, Duration::from_secs(60));
     assert_eq!(watch.db.count_task_inputs("child-c").unwrap(), 0);
 }
 
@@ -631,7 +631,7 @@ async fn lost_input_reply_and_native_identity_fault_never_retry_or_switch_adapte
         until(|| watch.row().wake_state == "error").await;
         let page = watch.row().pending;
         for _ in 0..3 {
-            tokio::time::advance(Duration::from_secs(5)).await;
+            tokio::time::advance(Duration::from_secs(60)).await;
             watch.state.event_subscriptions_changed.notify_waiters();
             tokio::task::yield_now().await;
             watch.no_admission();

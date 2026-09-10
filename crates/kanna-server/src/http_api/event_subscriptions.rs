@@ -4,7 +4,7 @@
 use super::{harness_wake, lan_trust::DesktopLocalAccess, task_events, task_input, AppState};
 use crate::db::{Db, EventSubscription};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -43,6 +43,8 @@ pub(super) struct SubscribeRequest {
     local_only: bool,
     #[serde(default)]
     delivery: harness_wake::Delivery,
+    #[serde(default)]
+    diagnostic: bool,
 }
 
 fn load(state: &AppState, id: &str) -> Result<EventSubscription, ApiError> {
@@ -85,6 +87,55 @@ async fn collect(
         query["cursor"] = json!(cursor);
     }
     task_events::wait_subscription_events(state, query).await
+}
+
+/// Query/body flag shared by every subscription endpoint: agent-facing callers
+/// get the compact response by default; a diagnostic caller opts into the full
+/// internal row (durable cursor, query, revision, and so on) explicitly.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DiagnosticQuery {
+    #[serde(default)]
+    diagnostic: bool,
+}
+
+/// The durable `cursor` (top-level and inside `pending`) and the full `query`
+/// are internal replay/observation plumbing an MCP or CLI caller never needs:
+/// acknowledgement advances by `batchId` alone. The compact response keeps
+/// only what an agent acts on — the batch's events, capacity/fault signals,
+/// and the subscription's lifecycle fields — plus its watched scope with any
+/// cursor-shaped key stripped for defense in depth.
+fn compact(row: &EventSubscription) -> Value {
+    let mut scope = row.query.clone();
+    if let Some(object) = scope.as_object_mut() {
+        object.remove("cursor");
+    }
+    let pending = row.pending.as_ref().map(|batch| {
+        json!({
+            "events": batch["events"],
+            "hasMore": batch["hasMore"],
+            "waitOutcome": batch["waitOutcome"],
+            "machineErrors": batch["machineErrors"],
+            "watchError": batch.get("watchError"),
+        })
+    });
+    json!({
+        "id": row.id,
+        "active": row.active,
+        "error": row.error,
+        "wakeState": row.wake_state,
+        "batchId": row.batch_id,
+        "pending": pending,
+        "query": scope,
+    })
+}
+
+fn response(row: &EventSubscription, diagnostic: bool) -> Value {
+    if diagnostic {
+        json!(row)
+    } else {
+        compact(row)
+    }
 }
 
 fn accept_page(row: &mut EventSubscription, mut batch: Value, observed: bool) {
@@ -178,7 +229,7 @@ pub(super) async fn subscribe(
         if existing.query != query || existing.delivery != request.delivery.as_str() {
             return Err((StatusCode::CONFLICT, "subscriber already has a different subscription; unsubscribe it before changing scope or delivery".into()));
         }
-        return Ok(Json(json!(existing)));
+        return Ok(Json(response(&existing, request.diagnostic)));
     }
     // Retrying a paused watch preserves its observation position. Discarding
     // that position requires an explicit unsubscribe, never a registration
@@ -209,7 +260,7 @@ pub(super) async fn subscribe(
             ));
         }
         state.event_subscriptions_changed.notify_waiters();
-        return Ok(Json(json!(existing)));
+        return Ok(Json(response(&existing, request.diagnostic)));
     }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -243,13 +294,15 @@ pub(super) async fn subscribe(
         .insert_event_subscription(&row)
         .map_err(failure)?;
     state.event_subscriptions_changed.notify_waiters();
-    Ok(Json(json!(row)))
+    Ok(Json(response(&row, request.diagnostic)))
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ReadRequest {
     acknowledge_batch_id: Option<i64>,
+    #[serde(default)]
+    diagnostic: bool,
 }
 
 pub(super) async fn read(
@@ -282,13 +335,14 @@ pub(super) async fn read(
             state.event_subscriptions_changed.notify_waiters();
         }
     }
-    Ok(Json(json!(row)))
+    Ok(Json(response(&row, request.diagnostic)))
 }
 
 pub(super) async fn unsubscribe(
     _access: DesktopLocalAccess,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<DiagnosticQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let mut row = load(&state, &id)?;
     row.active = false;
@@ -300,7 +354,7 @@ pub(super) async fn unsubscribe(
         ));
     }
     state.event_subscriptions_changed.notify_waiters();
-    Ok(Json(json!(row)))
+    Ok(Json(response(&row, query.diagnostic)))
 }
 
 /// What one worker iteration decided about the subscription's lifetime.
