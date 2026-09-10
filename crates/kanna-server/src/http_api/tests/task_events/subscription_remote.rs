@@ -207,6 +207,72 @@ impl WatchFixture {
         (fixture, held)
     }
 
+    /// Like `new`, but the peer's own embedded native cursor is corrupted
+    /// *before* the worker ever spawns, so its very first long-poll already
+    /// carries the poisoned value — not after a valid one was already
+    /// admitted. A live peer leg is never cancelled, so mutating the row out
+    /// from under one that already holds the fixture's one relay permit
+    /// only starves a later attempt with a busy rejection instead of
+    /// reaching the peer's cursor validation at all (see
+    /// `subscription_retirement_abandons_one_leg_until_peer_deadline`: an
+    /// abandoned leg keeps its permit until its own deadline).
+    async fn new_with_poisoned_peer_cursor() -> Self {
+        let (source, peer) = aggregate_pending_leg_states();
+        for (state, repo) in [
+            (&source, "repo-pending-source"),
+            (&peer, "repo-pending-peer"),
+        ] {
+            Db::open(&state.config().db_path)
+                .unwrap()
+                .patch_repo(
+                    repo,
+                    crate::db::RepoPatch {
+                        remote_url_hash: Some(Some("sha256:subscription-fixture")),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let db = Db::open(&source.config().db_path).unwrap();
+        db.insert_test_pipeline_item(
+            "manager",
+            "repo-pending-source",
+            "manage",
+            Some("Manager"),
+            "in progress",
+            "2026-09-09 00:00:00",
+        )
+        .unwrap();
+        start_run(&db, "manager-run", "manager", "in progress");
+        let relay = connect(&source, peer.clone());
+        let app = router(source.clone());
+        let (status, initial) =
+            subscription_request(&app, "POST", "/v1/event-subscriptions", Self::request()).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        let id = initial["id"].as_str().unwrap().to_string();
+        let mut poisoned = decode_cursor(initial["cursor"].as_str().unwrap());
+        // Same poisoned literal already proven (in task_events.rs) to decode
+        // locally as a pass-through legacy cursor and be rejected by the
+        // peer itself, never by this machine's own decode.
+        poisoned["cursorsByMachine"]["desktop-pending-peer"] = json!("ksh1.deadbeef");
+        let mut row = db.event_subscription(&id).unwrap().unwrap();
+        row.cursor = Some(encode_cursor(&poisoned));
+        assert!(db.save_event_subscription(&mut row).unwrap());
+        let service = tokio::spawn(super::super::super::event_subscriptions::run(
+            source.clone(),
+        ));
+        let fixture = Self {
+            source,
+            peer,
+            relay,
+            app,
+            id,
+            service,
+        };
+        until(|| fixture.relay.counts.attempts.load(Ordering::SeqCst) == 1).await;
+        fixture
+    }
+
     fn row(&self) -> crate::db::EventSubscription {
         Db::open(&self.source.config().db_path)
             .unwrap()
@@ -417,7 +483,8 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
     );
     let acked = watch.ack(&first).await;
     assert_eq!(
-        acked["active"], true,
+        acked["active"],
+        json!(true),
         "a peer outage must not pause the whole subscription"
     );
     assert!(acked["error"].is_null());
@@ -434,7 +501,7 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
         "idle",
         "an unchanged, already-reported peer fault must not re-wake the subscriber"
     );
-    assert_eq!(watch.row().active, true);
+    assert!(watch.row().active);
     assert_eq!(
         decode_cursor(watch.row().cursor.as_ref().unwrap())["cursorsByMachine"]
             ["desktop-pending-peer"],
@@ -467,7 +534,7 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
         peer_checkpoint
     );
     let second_acked = watch.ack(&second).await;
-    assert_eq!(second_acked["active"], true);
+    assert_eq!(second_acked["active"], json!(true));
     // Let the next call's own peer dispatch begin (and fail, held is still
     // exhausted) before jumping the clock, so its local-only deadline is
     // anchored to the current time rather than to whatever the worker has
@@ -490,7 +557,10 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
             "https://example.test/pull/201",
         )
         .unwrap();
-    tokio::time::advance(Duration::from_secs(kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS)).await;
+    tokio::time::advance(Duration::from_secs(
+        kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS,
+    ))
+    .await;
     let recovered = watch.page().await;
     let recovered_batch = recovered.pending.as_ref().unwrap();
     assert!(recovered_batch.get("watchError").is_none());
@@ -504,7 +574,7 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
         vec![("pending-peer-child".into(), "task.pr_created".into())]
     );
     let recovered_acked = watch.ack(&recovered).await;
-    assert_eq!(recovered_acked["active"], true);
+    assert_eq!(recovered_acked["active"], json!(true));
     assert!(recovered_acked["error"].is_null());
 }
 
@@ -518,24 +588,8 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
 /// reconciliation, never silently reset or retried.
 #[tokio::test(start_paused = true)]
 async fn subscription_remote_cursor_rejection_remains_a_hard_pause_distinct_from_outage() {
-    let (watch, _held) = WatchFixture::new(false).await;
-    let checkpoint = watch.row().cursor.unwrap();
-    let mut poisoned = decode_cursor(&checkpoint);
-    // Same poisoned literal already proven (in task_events.rs) to decode
-    // locally as a pass-through legacy cursor and be rejected by the peer
-    // itself, never by this machine's own decode.
-    poisoned["cursorsByMachine"]["desktop-pending-peer"] = json!("ksh1.deadbeef");
-    let poisoned_cursor = encode_cursor(&poisoned);
-    {
-        let db = Db::open(&watch.source.config().db_path).unwrap();
-        let mut row = db.event_subscription(&watch.id).unwrap().unwrap();
-        row.cursor = Some(poisoned_cursor.clone());
-        assert!(db.save_event_subscription(&mut row).unwrap());
-    }
-    // The worker's already-admitted collect used the old, valid cursor; a
-    // notification is what makes it notice the row changed underneath it
-    // and restart with the poisoned one (see step()'s revalidation).
-    notifications(&watch.source).await;
+    let watch = WatchFixture::new_with_poisoned_peer_cursor().await;
+    let poisoned_cursor = watch.row().cursor.unwrap();
 
     let failed = watch.page().await;
     let batch = failed.pending.as_ref().unwrap();
@@ -562,7 +616,8 @@ async fn subscription_remote_cursor_rejection_remains_a_hard_pause_distinct_from
 
     let paused = watch.ack(&failed).await;
     assert_eq!(
-        paused["active"], false,
+        paused["active"],
+        json!(false),
         "a remote cursor rejection must remain a durable, actionable pause, unlike remote unavailability"
     );
     assert_eq!(paused["cursor"], json!(poisoned_cursor));
@@ -571,7 +626,10 @@ async fn subscription_remote_cursor_rejection_remains_a_hard_pause_distinct_from
     // amount of notifications or elapsed time produces another peer attempt.
     let attempts_at_pause = watch.relay.counts.attempts.load(Ordering::SeqCst);
     notifications(&watch.source).await;
-    tokio::time::advance(Duration::from_secs(kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS)).await;
+    tokio::time::advance(Duration::from_secs(
+        kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS,
+    ))
+    .await;
     notifications(&watch.source).await;
     assert_eq!(
         watch.relay.counts.attempts.load(Ordering::SeqCst),
@@ -583,7 +641,7 @@ async fn subscription_remote_cursor_rejection_remains_a_hard_pause_distinct_from
     // position for reconciliation rather than silently resetting it to now.
     let resumed = watch.register().await;
     assert_eq!(resumed["cursor"], json!(poisoned_cursor));
-    assert_eq!(resumed["active"], true);
+    assert_eq!(resumed["active"], json!(true));
 }
 
 #[tokio::test(start_paused = true)]

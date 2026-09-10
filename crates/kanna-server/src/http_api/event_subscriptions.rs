@@ -99,7 +99,10 @@ fn accept_page(
     observed: bool,
     local_machine_id: &str,
 ) {
-    let machine_errors = batch["machineErrors"].as_array().cloned().unwrap_or_default();
+    let machine_errors = batch["machineErrors"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let local_faulted = machine_errors
         .iter()
         .any(|error| error["machineId"].as_str() == Some(local_machine_id));
@@ -132,8 +135,7 @@ fn accept_page(
             ))
         })
         .collect();
-    let coverage_changed =
-        !local_faulted && !remote_errors.keys().eq(row.stale_machines.keys());
+    let coverage_changed = !local_faulted && !remote_errors.keys().eq(row.stale_machines.keys());
     if batch.get("watchError").is_some()
         || batch["events"]
             .as_array()
@@ -649,7 +651,10 @@ mod outage_isolation_tests {
             false,
             "desktop-local",
         );
-        assert!(row.pending.is_some(), "a newly observed fault must wake once");
+        assert!(
+            row.pending.is_some(),
+            "a newly observed fault must wake once"
+        );
         assert_eq!(row.batch_id, 1);
         assert_eq!(
             row.stale_machines.get("desktop-peer").map(String::as_str),
@@ -702,13 +707,28 @@ mod outage_isolation_tests {
         let state = crate::http_api::test_support::test_state_with_seed(
             "desktop-restart-local",
             "Restart Local",
-            |_db| {},
+            |db| {
+                db.insert_test_repo("repo-restart", "Restart Repo")
+                    .expect("insert test repo");
+                db.insert_test_pipeline_item(
+                    "manager",
+                    "repo-restart",
+                    "manage",
+                    Some("Manager"),
+                    "in progress",
+                    "2026-09-10 00:00:00",
+                )
+                .expect("insert test pipeline item");
+            },
         );
         let db = database(&state).unwrap();
         let mut row = base_row("watch-restart");
         accept_page(
             &mut row,
-            remote_fault_batch("desktop-restart-peer", "machine unreachable since unix:1000"),
+            remote_fault_batch(
+                "desktop-restart-peer",
+                "machine unreachable since unix:1000",
+            ),
             false,
             "desktop-restart-local",
         );
@@ -721,13 +741,19 @@ mod outage_isolation_tests {
         let reloaded_db = database(&state).unwrap();
         let mut reloaded = reloaded_db.event_subscription(&row.id).unwrap().unwrap();
         assert_eq!(
-            reloaded.stale_machines.get("desktop-restart-peer").map(String::as_str),
+            reloaded
+                .stale_machines
+                .get("desktop-restart-peer")
+                .map(String::as_str),
             Some("machine unreachable since unix:1000")
         );
 
         accept_page(
             &mut reloaded,
-            remote_fault_batch("desktop-restart-peer", "machine unreachable since unix:9999"),
+            remote_fault_batch(
+                "desktop-restart-peer",
+                "machine unreachable since unix:9999",
+            ),
             false,
             "desktop-restart-local",
         );
