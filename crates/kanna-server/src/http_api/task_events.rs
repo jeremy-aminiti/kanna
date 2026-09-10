@@ -2049,6 +2049,16 @@ fn apply_aggregate_completion(
             ));
         }
         Err(AggregateMachineWaitError::Unavailable(error)) => {
+            // A later fault revokes an earlier success for this same
+            // machine within this native call: the re-arm path below can
+            // dispatch a machine a second time after it already completed
+            // successfully once, and that second completion's outcome is
+            // authoritative. Without this removal, a machine that succeeds
+            // then fails in one call would be reported in both
+            // `confirmedMachines` and `machineErrors`, and callers that
+            // reconcile confirmations first (see `accept_page`) would read
+            // the stale success and hide the fault.
+            confirmed_machines.remove(&completion.machine_id);
             failed_machines.insert(completion.machine_id.clone());
             machine_errors.push(json!({
                 "machineId": completion.machine_id,

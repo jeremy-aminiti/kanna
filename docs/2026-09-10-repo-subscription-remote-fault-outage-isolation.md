@@ -517,3 +517,66 @@ hold builds/tests until released, same as prior rounds. Verified by careful
 manual reading only, including full re-derivation of `step`'s native-call
 chain timing to confirm the new integration test's synchronization points
 are reachable without hanging (documented inline in the test itself).
+
+## Round 3: same-native-call ordering, and a test fixture that never ran
+
+Round 2's `confirmedMachines` fix handled the ACROSS-chained-native-calls
+case (`step`'s `'chain: loop`, most recent call wins) but missed the
+identical race one layer down, WITHIN one native call. `wait_aggregate_task_events`
+re-arms a machine's just-completed leg whenever the batch it is filling
+isn't done yet (task_events.rs's re-arm block, pre-existing from the tuning
+task) — so a peer can complete twice in the same call: once successfully,
+then again with a failure once its re-armed leg also resolves.
+`apply_aggregate_completion`'s success branch only ever *inserted* into
+`confirmed_machines`; its `Unavailable` branch never removed the earlier
+insertion. So that peer came back in both `confirmedMachines` and
+`machineErrors` on the very same response, and `accept_page`'s
+add-fault-then-clear-confirmed processing order let the stale confirmation
+silently erase the real fault — reporting a peer that had just failed as
+healthy. Fix: the `Unavailable` branch now also does
+`confirmed_machines.remove(&completion.machine_id)` before recording the
+fault, so the most recent completion is authoritative within a native call
+exactly as `step`'s chain already made it across calls. Once source-level
+`confirmedMachines`/`machineErrors` are mutually exclusive per machine, per
+call, `accept_page`'s existing add-then-remove order needs no change — traced
+through, not assumed, since a machine can no longer appear in both lists at
+once for it to matter.
+
+New integration coverage:
+`subscription_remote_same_call_success_then_failure_keeps_the_peer_stale`
+(`subscription_remote.rs`) forces exactly that ordering deterministically —
+`minEvents: 2` so a re-armed peer's first, single-event success cannot
+complete the batch on its own, guaranteeing the re-arm rather than racing
+for it — then resolves the re-armed leg with a failure in the same call.
+Proves: the peer reads stale through both the diagnostic row and a plain
+compact read, and after ACK; the earlier successful event and its checkpoint
+are retained, not lost to the later fault; and a subsequent unchanged
+failure for the same peer does not mint another coverage-only wake.
+
+Also repaired: `GatedInvoke.response.send(...)`, used throughout the Round 2
+gated-peer test, was a *partial move* of only the `response` field —
+`_permit` survived it and stayed alive until the enclosing `let` binding's
+scope ended (the whole test function), not when the response actually
+resolved. Under `connect_gated_peer`'s one-permit budget that starves every
+dispatch after the first resolved one with a synthetic 503, so the test as
+written would never actually reach its second gated leg. Fixed by giving
+`GatedInvoke` a `resolve(self, ...)` method that destructures itself,
+explicitly drops the permit, and only then sends the response — releasing
+admission at the real completion boundary instead of at scope-end — and
+updating every call site (including the new Round 3 test) to use it. Also
+bounded every `gate.recv()` wait with a new `recv_gated` helper (mirrors
+`until`'s virtual-clock budget) so a fixture regression fails the test
+instead of hanging the suite, and corrected the existing gated test's final
+admission-count assertion: the third leg's own non-terminal success (no
+events accumulated; `minEvents` defaults to 1) legitimately triggers one
+more re-armed dispatch before that native call concludes, which the
+assertion now explicitly bound-waits for and accounts for (4 attempts, not
+3) rather than forbidding — without touching production re-arming to satisfy
+the fixture.
+
+Not run: `cargo build`/`test`/`clippy`/`fmt` — still held this round per
+instructions. Verified by manual tracing of `apply_aggregate_completion`,
+the re-arm block, `wait_aggregate_task_events`'s collection loop exit
+conditions, and `GatedInvoke`'s exact partial-move semantics, including
+re-deriving why the new test's re-armed second leg is guaranteed (not
+racy) given `minEvents: 2` and a single-event first success.

@@ -2788,12 +2788,18 @@ the registry, in which case that peer appears in neither `machineErrors` nor
 `confirmedMachines` — that silence is left untouched, never read as
 recovery. Only `confirmedMachines` (a positive, successful completion of
 that machine's own leg this call — including an empty response whose
-checkpoint does not move) may clear an entry, and `step`'s own native-call
-chain accumulates it the same way it already accumulates events across
-chained calls, so a peer's recovery observed mid-chain is never silently
-dropped by the chain continuing past it; a peer already recorded stale
-being confirmed is also what ends that chain early, the same way a fresh
-failure already does, rather than sitting unreported until the chain
+checkpoint does not move) may clear an entry. A machine never appears in
+both lists on one response: `wait_aggregate_task_events` can re-arm and
+re-dispatch a machine's leg more than once within a single native call
+while its batch is still filling, so a machine can complete twice in one
+call — and the most recent completion is authoritative there exactly as it
+is across calls, a later same-call failure revoking an earlier same-call
+confirmation rather than the two coexisting. `step`'s own native-call chain
+accumulates `confirmedMachines` the same way it already accumulates events
+across chained calls, so a peer's recovery observed mid-chain is never
+silently dropped by the chain continuing past it; a peer already recorded
+stale being confirmed is also what ends that chain early, the same way a
+fresh failure already does, rather than sitting unreported until the chain
 otherwise runs out of things to say. The unreachable peer's own native
 checkpoint is left exactly as `apply_aggregate_completion` last recorded it
 — never advanced, never dropped from the aggregate's machine roster — so
