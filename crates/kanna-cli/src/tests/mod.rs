@@ -150,7 +150,11 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             "kanna_get_task",
             TypedToolSurface {
                 command_path: &["task", "get"],
-                param_args: &[("task_id", "task_id"), ("agent_view", "agent_view")],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("agent_view", "agent_view"),
+                    ("brief", "brief"),
+                ],
             },
         ),
         (

@@ -5,6 +5,7 @@ use super::task_blockers::{
 use crate::db::Db;
 use crate::mobile_api::MobileApi;
 use axum::extract::State;
+use axum::response::IntoResponse;
 use axum::Json;
 use kanna_agent_protocol::StateChangeScope;
 use kanna_tool_catalog::encode_path_segment;
@@ -86,7 +87,7 @@ pub(super) async fn get_task(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<GetTaskQuery>,
-) -> Result<Json<crate::mobile_api::TaskDetail>, (axum::http::StatusCode, String)> {
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
     let db = Db::open(&state.config.db_path).map_err(|e| {
         (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -145,12 +146,57 @@ pub(super) async fn get_task(
     {
         task.composer = None;
     }
-    Ok(Json(task))
+    if !query.brief {
+        return Ok(Json(task).into_response());
+    }
+    let mut value = serde_json::to_value(task)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    brief_task_detail(&mut value, &state.config.desktop_id);
+    Ok(Json(value).into_response())
+}
+
+/// Keep diagnostics intact; only known bulky/static fields are omitted. Using
+/// the ordinary detail as the source preserves unknown/null runtime and git facts.
+fn brief_task_detail(value: &mut serde_json::Value, machine_id: &str) {
+    let Some(detail) = value.as_object_mut() else {
+        return;
+    };
+    for key in ["prompt", "workflowDefinition", "ports", "pipelineName"] {
+        detail.remove(key);
+    }
+    detail.insert("view".into(), serde_json::json!("brief"));
+    detail.insert("briefVersion".into(), serde_json::json!(1));
+    detail.insert("machineId".into(), serde_json::json!(machine_id));
+    bound_brief_text(detail, "title", "titleTruncated", 200);
+    if let Some(run) = detail
+        .get_mut("latestRun")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        bound_brief_text(run, "summary", "summaryTruncated", 1000);
+    }
+}
+
+fn bound_brief_text(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    flag: &str,
+    limit: usize,
+) {
+    let mut truncated = false;
+    if let Some(serde_json::Value::String(text)) = object.get_mut(key) {
+        if let Some((end, _)) = text.char_indices().nth(limit) {
+            text.truncate(end);
+            truncated = true;
+        }
+    }
+    object.insert(flag.into(), serde_json::json!(truncated));
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct GetTaskQuery {
+    #[serde(default)]
+    brief: bool,
     #[serde(default)]
     local_only: bool,
     /// Agent tools must not receive provider-authored composer suggestions as

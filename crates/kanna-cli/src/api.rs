@@ -543,6 +543,20 @@ pub(crate) async fn get_task_with_agent_view_via_api(
     .await
 }
 
+pub(crate) async fn get_brief_task_via_api(
+    base_url: &str,
+    task_id: &str,
+    agent_view: bool,
+) -> Result<Value, String> {
+    let path = format!(
+        "{}&brief=true",
+        task_get_path_with_agent_view(task_id, agent_view)
+    );
+    let value = get_json(base_url, &path).await?;
+    kanna_tool_catalog::validate_task_detail_view(&path, &value)?;
+    Ok(value)
+}
+
 pub(crate) async fn list_task_children_via_api(
     base_url: &str,
     task_id: &str,

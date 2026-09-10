@@ -1539,7 +1539,11 @@ async fn execute_resolved_request(
             .ok_or_else(|| "guide request missing local response".to_string()),
         (Method::Get, ResponseKind::Json) => {
             let value = get_routed_json(base_url, &request.path, machine_id).await?;
-            confirm_stopped_activity(base_url, &request.path, value, machine_id).await
+            kanna_tool_catalog::validate_task_detail_view(&request.path, &value)?;
+            let value =
+                confirm_stopped_activity(base_url, &request.path, value, machine_id).await?;
+            kanna_tool_catalog::validate_task_detail_view(&request.path, &value)?;
+            Ok(value)
         }
         (Method::Get, ResponseKind::Text) => match machine_id {
             Some(machine_id) => {

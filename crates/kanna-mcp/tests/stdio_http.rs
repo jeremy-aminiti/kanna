@@ -2545,3 +2545,6 @@ fn subscription_tools_register_acknowledge_and_stop_the_server_owned_mailbox() {
     assert!(tool_text(&responses[1])["pending"].is_null());
     assert_eq!(tool_text(&responses[2])["active"], false);
 }
+
+#[path = "stdio_http/brief_task.rs"]
+mod brief_task;
