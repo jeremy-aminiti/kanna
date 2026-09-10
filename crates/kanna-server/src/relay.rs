@@ -114,6 +114,7 @@ fn apply_relay_authentication(
         capabilities,
     } = authentication;
     log::info!("Relay authenticated as user {user_id}");
+    reconcile_machine_trust_for_account(http_state, Some(&user_id));
     *authenticated_user_id = Some(user_id);
     if capabilities
         .desktop_routing
@@ -136,6 +137,44 @@ fn apply_relay_authentication(
             .mobile_notifications
             .map_or(0, |capability| capability.version),
     );
+}
+
+/// The server-owned account-transition cleanup for
+/// `machine_trust::MachineTrustStore`, called at every point this desktop's
+/// own account identity is established or confirmed lost: a fresh
+/// `auth_ok` (covering a UID change *and* the first reconciliation after a
+/// restart, since nothing here depends on remembering a previous value),
+/// and falling back to anonymous-push-only mode (covering both an
+/// authoritative account-auth rejection and an explicit local sign-out,
+/// which collapse to the same "not signed into any account" state here).
+/// `current_account_uid: None` clears every record; `Some(uid)` keeps only
+/// what already matches it. A missing machine trust store path (no
+/// configured pairing store - true for `kanna-worker`, which has no
+/// account relay identity to begin with) is a silent no-op, not an error:
+/// there is nothing to reconcile.
+fn reconcile_machine_trust_for_account(
+    http_state: &http_api::AppState,
+    current_account_uid: Option<&str>,
+) {
+    let Some(store_path) = http_state.config().machine_trust_store_path() else {
+        return;
+    };
+    let _guard = crate::machine_trust::persistence_mutex()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut store = match crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path) {
+        Ok(store) => store,
+        Err(error) => {
+            log::warn!("Failed to load machine trust store for account reconciliation: {error}");
+            return;
+        }
+    };
+    if !store.retain_account(current_account_uid) {
+        return;
+    }
+    if let Err(error) = store.save(&store_path) {
+        log::warn!("Failed to persist machine trust store after account reconciliation: {error}");
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +272,12 @@ async fn run_relay_loop_with_timing(
             && (config.desktop_secret.is_none()
                 || account_auth == relay_client::AccountAuthProbe::Rejected);
         if use_anonymous_push {
+            // No configured credential, or relay authoritatively rejected the
+            // one this desktop has - either way, this desktop is not signed
+            // into any account right now. Automatic same-account LAN trust
+            // must not survive that: clear it rather than leave it to expire
+            // on its own lease.
+            reconcile_machine_trust_for_account(&http_state, None);
             run_anonymous_push_loop(
                 &config,
                 Arc::clone(&http_state),
@@ -1766,6 +1811,70 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
         }
+    }
+
+    /// `relay_connection_test_config` places its pairing store directly
+    /// under the shared system temp dir with only its own filename made
+    /// unique, so machine_trust_store_path's fixed-filename sibling
+    /// derivation would collide with every other concurrent test using that
+    /// same helper. Machine-trust-specific tests need their own genuinely
+    /// isolated directory instead - see `crate::test_paths`'s own warning
+    /// about exactly this class of collision.
+    fn account_reconcile_test_config(name: &str) -> Config {
+        let dir = crate::test_paths::unique_test_dir(&format!("relay-account-reconcile-{name}"));
+        let mut config = relay_connection_test_config(name, "127.0.0.1:1".parse().unwrap());
+        config.pairing_store_path = dir.join("pairings.json").to_string_lossy().into_owned();
+        config
+    }
+
+    /// `reconcile_machine_trust_for_account` is the server-owned
+    /// account-transition cleanup: this exercises it directly against a real
+    /// machine_trust store on disk, independent of an actual relay
+    /// connection (the address here is never dialed).
+    #[test]
+    fn reconcile_machine_trust_for_account_keeps_only_the_current_account() {
+        let config = account_reconcile_test_config("keep-current");
+        let state = http_api::AppState::new(config.clone());
+        let store_path = config
+            .machine_trust_store_path()
+            .expect("machine trust store path");
+
+        let now_ms = crate::machine_trust::unix_time_ms().expect("clock");
+        let mut store = crate::machine_trust::MachineTrustStore::default();
+        store.accept_inbound("desktop-a", "hash-a", "uid-1", "development", now_ms);
+        store.accept_inbound("desktop-b", "hash-b", "uid-2", "development", now_ms);
+        store.save(&store_path).expect("seed machine trust store");
+
+        reconcile_machine_trust_for_account(&state, Some("uid-1"));
+
+        let reloaded = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+            .expect("reload after reconcile");
+        assert_eq!(reloaded.inbound.len(), 1);
+        assert_eq!(reloaded.inbound[0].account_uid, "uid-1");
+    }
+
+    /// Falling back to anonymous-push-only mode - an authoritative rejection
+    /// or an explicit local sign-out both collapse to this - must clear
+    /// every automatic LAN trust record, not just the ones for whichever
+    /// account was previously observed.
+    #[test]
+    fn reconcile_machine_trust_for_account_none_clears_everything() {
+        let config = account_reconcile_test_config("sign-out");
+        let state = http_api::AppState::new(config.clone());
+        let store_path = config
+            .machine_trust_store_path()
+            .expect("machine trust store path");
+
+        let now_ms = crate::machine_trust::unix_time_ms().expect("clock");
+        let mut store = crate::machine_trust::MachineTrustStore::default();
+        store.accept_inbound("desktop-a", "hash-a", "uid-1", "development", now_ms);
+        store.save(&store_path).expect("seed machine trust store");
+
+        reconcile_machine_trust_for_account(&state, None);
+
+        let reloaded = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+            .expect("reload after reconcile");
+        assert!(reloaded.inbound.is_empty());
     }
 
     async fn stalled_relay_listener() -> (
