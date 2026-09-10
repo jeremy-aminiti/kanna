@@ -3060,7 +3060,47 @@ mod tests {
             payload_json: r#"{"interruptAfterAcquisition":true,"interruptAfterSpawn":true}"#.into(),
             attempts: 1,
         };
-        let first = run_import(&state, &work, &reservation.transfer_id).await;
+        // Serve the same durable finalization request that the source server
+        // receives. Its transfer ID correlates the pending sidecar waiter with
+        // the bundle and ledger staged above; no pre-bound destination ID is
+        // needed to skip finalization.
+        let finalize = async {
+            let request = wait_for_durable_work(
+                &reservation.source_work,
+                super::super::queue::KIND_FINALIZE,
+                std::time::Duration::from_secs(15),
+            )
+            .await;
+            assert_eq!(
+                request.transfer_id.as_deref(),
+                Some(reservation.transfer_id.as_str())
+            );
+            let event: Value = serde_json::from_str(&request.payload_json).unwrap();
+            assert_eq!(event["transfer_id"], reservation.transfer_id);
+            reservation
+                .source
+                .control(
+                    "complete-outgoing-transfer-finalization",
+                    serde_json::json!({
+                        "transferId": reservation.transfer_id,
+                        "payload": payload_json,
+                        "finalizedCleanly": true,
+                        "error": null,
+                    }),
+                )
+                .await
+                .expect("answer the correlated source finalization request");
+            reservation
+                .source_work
+                .open_db()
+                .unwrap()
+                .complete_transfer_work(&request.id)
+                .unwrap();
+        };
+        let (first, ()) = tokio::join!(
+            run_import(&state, &work, &reservation.transfer_id),
+            finalize,
+        );
         assert!(
             matches!(first, Err(ImportFailure::Retry(ref reason)) if reason.contains("test interruption")),
             "unexpected first attempt: {first:?}"
