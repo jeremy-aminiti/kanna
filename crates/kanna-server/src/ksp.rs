@@ -3891,7 +3891,6 @@ static TASK_SUMMARY_REVISION: AtomicU64 = AtomicU64::new(1);
 
 async fn stream_task_summaries(state: Arc<AppState>, frame_tx: mpsc::Sender<ServerFrame>) {
     let mut changes = state.subscribe_state_changes();
-    let mut runtime_states = HashMap::<String, String>::new();
     loop {
         let db_path = state.config().db_path.clone();
         let snapshot =
@@ -3901,16 +3900,19 @@ async fn stream_task_summaries(state: Arc<AppState>, frame_tx: mpsc::Sender<Serv
             for entry in snapshot.entries {
                 for item in entry.items {
                     let revision = TASK_SUMMARY_REVISION.fetch_add(1, Ordering::Relaxed);
-                    let runtime_state =
-                        runtime_states.get(&item.id).cloned().unwrap_or_else(|| {
-                            if item.closed_at.is_some() {
-                                "exited".into()
-                            } else if item.activity == "working" {
-                                "busy".into()
-                            } else {
-                                "idle".into()
-                            }
-                        });
+                    // The snapshot carries the daemon's persisted runtime
+                    // verdict separately from the blended display activity.
+                    // Falling back to activity is only for tasks whose runtime
+                    // has never been observed; an unread task may still be busy.
+                    let runtime_state = item.runtime_state.unwrap_or_else(|| {
+                        if item.closed_at.is_some() {
+                            "exited".into()
+                        } else if item.activity == "working" {
+                            "busy".into()
+                        } else {
+                            "idle".into()
+                        }
+                    });
                     if frame_tx
                         .send(ServerFrame::TaskSummary {
                             task_id: item.id,
@@ -3928,13 +3930,10 @@ async fn stream_task_summaries(state: Arc<AppState>, frame_tx: mpsc::Sender<Serv
             }
         }
 
-        let first = match changes.recv().await {
-            Ok(frame) => frame,
+        match changes.recv().await {
+            Ok(_) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-        };
-        if let ServerFrame::StatusChanged { task_id, status } = first {
-            runtime_states.insert(task_id, status);
         }
         let deadline = tokio::time::sleep(TASK_SUMMARY_DEBOUNCE);
         tokio::pin!(deadline);
@@ -3942,9 +3941,6 @@ async fn stream_task_summaries(state: Arc<AppState>, frame_tx: mpsc::Sender<Serv
             tokio::select! {
                 _ = &mut deadline => break,
                 change = changes.recv() => match change {
-                    Ok(ServerFrame::StatusChanged { task_id, status }) => {
-                        runtime_states.insert(task_id, status);
-                    }
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 }
@@ -13520,7 +13516,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loopback_ksp_task_summary_attachment_streams_live_snippet() {
+    async fn loopback_ksp_task_summary_attachment_streams_persisted_runtime() {
         let unique = crate::test_paths::unique_test_name("ksp-task-summary");
         let config = test_config(&unique, "KSP Task Summary");
         let db = Db::open_for_tests(&config.db_path).unwrap();
@@ -13536,6 +13532,10 @@ mod tests {
         )
         .unwrap();
         db.update_test_pipeline_item_preview("summary-ksp-task", Some("live agent output"))
+            .unwrap();
+        db.update_pipeline_item_activity("summary-ksp-task", "unread")
+            .unwrap();
+        db.update_pipeline_item_runtime_status("summary-ksp-task", "busy", None)
             .unwrap();
         drop(db);
 
@@ -13568,8 +13568,8 @@ mod tests {
                 revision,
             } if task_id == "summary-ksp-task"
                 && snippet == "live agent output"
-                && activity == "idle"
-                && runtime_state == "idle"
+                && activity == "unread"
+                && runtime_state == "busy"
                 && revision > 0
         ));
         let _ = std::fs::remove_file(config.db_path);
