@@ -2542,12 +2542,19 @@ fn raw_key_input_is_listed_as_a_mutating_tool() {
 
 #[test]
 fn subscription_tools_register_acknowledge_and_stop_the_server_owned_mailbox() {
+    // `diagnostic` carries a declared default (false), so an omitted call
+    // still resolves it onto the wire — as a body field for subscribe/read,
+    // as a query parameter for unsubscribe (its endpoint has no body). Unlike
+    // quiet_ms/max_hold_ms/min_admission_interval_ms, this is intentional:
+    // `diagnostic` only selects the response shape and is never persisted
+    // into the subscription's stored query, so there is no
+    // omission-vs-override distinction for the server to lose.
     let (base_url, server) = start_http_fixture(vec![
         ExpectedRequest {
             method: "POST",
             path: "/v1/event-subscriptions",
             body: Some(
-                json!({"taskId":"manager", "taskIds":["child"], "localOnly":true, "delivery":"input"}),
+                json!({"taskId":"manager", "taskIds":["child"], "localOnly":true, "delivery":"input", "diagnostic":false}),
             ),
             response_status: "200 OK",
             response_body: json!({"id":"watch-1", "batchId":7, "pending":{"events":[{"taskId":"child"}]}}),
@@ -2555,13 +2562,13 @@ fn subscription_tools_register_acknowledge_and_stop_the_server_owned_mailbox() {
         ExpectedRequest {
             method: "POST",
             path: "/v1/event-subscriptions/watch-1/read",
-            body: Some(json!({"acknowledgeBatchId":7})),
+            body: Some(json!({"acknowledgeBatchId":7, "diagnostic":false})),
             response_status: "200 OK",
             response_body: json!({"id":"watch-1", "pending":null, "active":true}),
         },
         ExpectedRequest {
             method: "POST",
-            path: "/v1/event-subscriptions/watch-1/unsubscribe",
+            path: "/v1/event-subscriptions/watch-1/unsubscribe?diagnostic=false",
             body: Some(json!({})),
             response_status: "200 OK",
             response_body: json!({"id":"watch-1", "active":false}),
@@ -2587,6 +2594,58 @@ fn subscription_tools_register_acknowledge_and_stop_the_server_owned_mailbox() {
         "child"
     );
     assert!(tool_text(&responses[1])["pending"].is_null());
+    assert_eq!(tool_text(&responses[2])["active"], false);
+}
+
+#[test]
+fn subscription_tools_pass_diagnostic_true_through_stdio_to_http_on_all_three_endpoints() {
+    // Companion to the default-compact test above: proves `diagnostic: true`
+    // actually reaches the wire through the real stdio-to-HTTP transport, not
+    // just the catalog's own request-contract unit tests — a body field for
+    // subscribe/read, a query parameter for unsubscribe.
+    let (base_url, server) = start_http_fixture(vec![
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/event-subscriptions",
+            body: Some(
+                json!({"taskId":"manager", "taskIds":["child"], "localOnly":true, "delivery":"input", "diagnostic":true}),
+            ),
+            response_status: "200 OK",
+            response_body: json!({"id":"watch-1", "stage":"in progress", "branch":"task-manager", "runId":"run-1", "revision":0}),
+        },
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/event-subscriptions/watch-1/read",
+            body: Some(json!({"diagnostic":true})),
+            response_status: "200 OK",
+            response_body: json!({"id":"watch-1", "stage":"in progress", "branch":"task-manager", "runId":"run-1", "revision":0}),
+        },
+        ExpectedRequest {
+            method: "POST",
+            path: "/v1/event-subscriptions/watch-1/unsubscribe?diagnostic=true",
+            body: Some(json!({})),
+            response_status: "200 OK",
+            response_body: json!({"id":"watch-1", "stage":"in progress", "branch":"task-manager", "runId":"run-1", "revision":0, "active":false}),
+        },
+    ]);
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[
+            json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params": {
+                "name":"kanna_subscribe_events", "arguments":{"task_id":"manager", "task_ids":["child"], "local_only":true, "diagnostic":true}
+            }}),
+            json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params": {
+                "name":"kanna_read_event_subscription", "arguments":{"subscription_id":"watch-1", "diagnostic":true}
+            }}),
+            json!({"jsonrpc":"2.0", "id":3, "method":"tools/call", "params": {
+                "name":"kanna_unsubscribe_events", "arguments":{"subscription_id":"watch-1", "diagnostic":true}
+            }}),
+        ],
+    );
+    assert_eq!(server.join().unwrap().len(), 3);
+    for response in &responses {
+        assert_eq!(tool_text(response)["runId"], "run-1");
+    }
     assert_eq!(tool_text(&responses[2])["active"], false);
 }
 
