@@ -129,7 +129,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       "#!/bin/sh\nprintf 'WORKFLOW_QUOTA_EXHAUSTED\\n'\nexit 1\n", { mode: 0o755 });
     const pinned = {
       name: "quota-recovery",
-      stages: [{ name: initial.stage, agent_provider: ["claude-fable", "codex-astra"],
+      stages: [{ name: initial.stage, agent_provider: ["claude-fable", "codex-gpt-6-astra"],
         prompt: "$TASK_PROMPT", policy: { transition: "manual" } }]
     };
     const pin = asRecord(await runKannaCliJson(harness, ["task", "replace-workflow",
@@ -144,7 +144,7 @@ describe("remote task listing, creation, and actions E2E", () => {
     const failedRun = asRecord(failed.latestRun);
     expect(failed.model).toBe("fable");
     const patched = structuredClone(pinned);
-    patched.stages[0]!.agent_provider = ["codex-astra"];
+    patched.stages[0]!.agent_provider = ["codex-gpt-6-astra"];
     const replacement = asRecord(await runKannaCliJson(harness, ["task", "replace-workflow",
       "--task-id", task.taskId, "--expected-definition", JSON.stringify(pin.workflowDefinition),
       "--workflow-definition", JSON.stringify(patched), "--source", "operator"]));
@@ -158,7 +158,7 @@ describe("remote task listing, creation, and actions E2E", () => {
       expect(recovered.id).toBe(task.taskId);
       expect(recovered.branch).toBe(initial.branch);
       expect(recovered.worktreePath).toBe(initial.worktreePath);
-      expect(recovered).toMatchObject({ agentProvider: "codex", model: "astra" });
+      expect(recovered).toMatchObject({ agentProvider: "codex", model: "gpt-6-astra" });
       expect(asRecord(recovered.latestRun).id).not.toBe(failedRun.id);
       const siblingAfter = await detail(untouched.taskId);
       expect(siblingAfter.workflowDefinition).toEqual(siblingBefore.workflowDefinition);

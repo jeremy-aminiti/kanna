@@ -235,9 +235,9 @@ repo (and dogfooded by this repo on itself):
 - `workflows/{name}.json` — workflow definitions. Stage and post
   `agent_provider` entries are compact provider selectors,
   `provider[-model[-effort]]`: a plain provider id (`codex`), an optional
-  model passed to the CLI verbatim (`claude-fable`, `codex-gpt-5-codex`), and
+  model passed to the CLI verbatim (`claude-fable`, `codex-gpt-5.6-sol`), and
   an optional trailing effort token (`lo`/`low`, `med`/`medium`, `hi`/`high`,
-  `xhi`/`xhigh`, `max`) — e.g. `claude-fable-hi`, `codex-astra-lo`. Each
+  `xhi`/`xhigh`, `max`) — e.g. `claude-fable-hi`, `codex-gpt-6-astra-lo`. Each
   selector names exactly one provider, so an ordered fallback list gives every
   candidate its own coherent model/effort pair; anything under-specified
   inherits the provider CLI's own defaults. Selectors are workflow-JSON

@@ -3184,7 +3184,7 @@ fn workflow_provider_selectors_supply_per_candidate_model_and_effort() {
             "stages": [{
                 "name": "in progress",
                 "transition": "manual",
-                "agent_provider": ["claude-fable-hi", "codex-astra-lo"],
+                "agent_provider": ["claude-fable-hi", "codex-gpt-6-astra-lo"],
                 "post": {
                     "name": "commit",
                     "agent_provider": "claude-haiku",
@@ -3201,7 +3201,12 @@ fn workflow_provider_selectors_supply_per_candidate_model_and_effort() {
     // Selectors keep their written form — snapshots round-trip verbatim.
     assert_eq!(
         stage.agent_provider.as_deref(),
-        Some(&["claude-fable-hi".to_string(), "codex-astra-lo".to_string()][..]),
+        Some(
+            &[
+                "claude-fable-hi".to_string(),
+                "codex-gpt-6-astra-lo".to_string(),
+            ][..]
+        ),
     );
     assert_eq!(
         stage
@@ -3239,7 +3244,7 @@ fn workflow_provider_selectors_supply_per_candidate_model_and_effort() {
     );
     assert_eq!(
         tuning.model_for(AgentProvider::Codex).as_deref(),
-        Some("astra")
+        Some("gpt-6-astra")
     );
     assert_eq!(
         tuning.effort_for(AgentProvider::Codex).as_deref(),
@@ -3336,7 +3341,7 @@ fn builtin_plan_build_review_workflow_and_plan_agent_resolve_from_compiled_resou
     // own coherent model.
     assert_eq!(
         plan_stage.agent_provider.as_deref(),
-        Some(&["claude-fable".to_string(), "codex-astra".to_string()][..]),
+        Some(&["claude-fable".to_string(), "codex-gpt-6-astra".to_string(),][..]),
     );
 
     let build_stage = &workflow.stages[1];
@@ -3350,6 +3355,22 @@ fn builtin_plan_build_review_workflow_and_plan_agent_resolve_from_compiled_resou
         "the build stage receives the plan stage's recorded result",
     );
     assert!(build_stage.post.is_some(), "build commits as a post");
+    assert_eq!(
+        build_stage.agent_provider.as_deref(),
+        Some(
+            &[
+                "claude-opus-med".to_string(),
+                "codex-gpt-6-astra-lo".to_string(),
+            ][..]
+        ),
+    );
+    assert_eq!(
+        build_stage
+            .post
+            .as_ref()
+            .and_then(|post| post.agent_provider.as_deref()),
+        Some(&["claude-haiku".to_string(), "codex-gpt-5.6-luna".to_string(),][..]),
+    );
 
     let review_stage = &workflow.stages[2];
     assert_eq!(review_stage.agent.as_deref(), Some("review"));
@@ -3360,6 +3381,19 @@ fn builtin_plan_build_review_workflow_and_plan_agent_resolve_from_compiled_resou
             .unwrap_or_default()
             .contains("\"plan\""),
         "the review stage names the plan stage as a revision target",
+    );
+    assert_eq!(
+        review_stage.agent_provider.as_deref(),
+        Some(&["claude-fable".to_string(), "codex-gpt-6-astra".to_string(),][..]),
+    );
+
+    let pr_stage = &workflow.stages[3];
+    assert_eq!(
+        pr_stage
+            .post
+            .as_ref()
+            .and_then(|post| post.agent_provider.as_deref()),
+        Some(&["claude-haiku".to_string(), "codex-gpt-5.6-luna".to_string(),][..]),
     );
 
     let agent = definitions.agent("plan").unwrap();
@@ -7484,7 +7518,10 @@ fn default_agent_provider_setting_falls_back_to_claude_when_invalid() {
 /// moves the spawn to a different provider than the stage would have chosen.
 #[test]
 fn an_advance_provider_override_outranks_the_target_stage_selectors() {
-    let stage_providers = vec!["claude-fable-hi".to_string(), "codex-astra-lo".to_string()];
+    let stage_providers = vec![
+        "claude-fable-hi".to_string(),
+        "codex-gpt-6-astra-lo".to_string(),
+    ];
 
     // Without an override the stage's own selectors decide.
     let stage_only =
@@ -7529,7 +7566,7 @@ fn an_advance_provider_override_outranks_the_target_stage_selectors() {
     assert_eq!(
         tuning.model_for(AgentProvider::Codex).as_deref(),
         Some("gpt-6-astra"),
-        "the override's own model must win over the stage selector's `astra`",
+        "the override's own model must win over the stage selector's `gpt-6-astra`",
     );
     assert_eq!(
         tuning.effort_for(AgentProvider::Codex).as_deref(),
@@ -7547,7 +7584,10 @@ fn an_advance_provider_override_outranks_the_target_stage_selectors() {
 /// composition: the value was authored beside the provider it lands on.
 #[test]
 fn a_provider_only_advance_override_keeps_that_providers_own_lower_layers() {
-    let stage_providers = vec!["claude-fable-hi".to_string(), "codex-astra-lo".to_string()];
+    let stage_providers = vec![
+        "claude-fable-hi".to_string(),
+        "codex-gpt-6-astra-lo".to_string(),
+    ];
     let advance_override = crate::db::StageProviderOverride {
         source: "operator".to_string(),
         provider: "codex".to_string(),
@@ -7565,7 +7605,7 @@ fn a_provider_only_advance_override_keeps_that_providers_own_lower_layers() {
     );
     assert_eq!(
         tuning.model_for(AgentProvider::Codex).as_deref(),
-        Some("astra")
+        Some("gpt-6-astra")
     );
     assert_eq!(
         tuning.effort_for(AgentProvider::Codex).as_deref(),

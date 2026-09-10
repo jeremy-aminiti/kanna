@@ -39,7 +39,7 @@ continues with `build`, selects either a single `review` agent or the existing
 `qa-dispatcher`, and ends at `pr`. It may omit review for genuinely mechanical
 work or introduce additional build stages when the work has independently
 committable phases. It may use the compact provider selectors introduced by
-task `7cbd033e`, for example `claude`, `codex-sol`, or `codex-astra-lo`, on a
+task `7cbd033e`, for example `claude`, `codex-gpt-5.6-sol`, or `codex-gpt-6-astra-lo`, on a
 stage or post.
 
 The pin is a replacement, not a patch. A complete document has one validation
@@ -66,7 +66,7 @@ authoritative):
     {
       "name": "build",
       "agent": "implement",
-      "agent_provider": "codex-astra-lo",
+      "agent_provider": "codex-gpt-6-astra-lo",
       "prompt": "Implement the accepted plan. $PREV_RESULT",
       "policy": { "transition": "manual", "revision_transition": "auto" },
       "post": {

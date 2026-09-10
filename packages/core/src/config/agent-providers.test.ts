@@ -17,17 +17,17 @@ describe("parseAgentProviderSelector", () => {
       model: "fable",
       effort: "high",
     });
-    expect(parseAgentProviderSelector("codex-astra-lo")).toEqual({
+    expect(parseAgentProviderSelector("codex-gpt-6-astra-lo")).toEqual({
       provider: "codex",
-      model: "astra",
+      model: "gpt-6-astra",
       effort: "low",
     });
   });
 
   it("keeps a trailing segment that is not an effort token in the model", () => {
-    expect(parseAgentProviderSelector("codex-gpt-5-codex")).toEqual({
+    expect(parseAgentProviderSelector("codex-gpt-5.6-sol")).toEqual({
       provider: "codex",
-      model: "gpt-5-codex",
+      model: "gpt-5.6-sol",
     });
   });
 

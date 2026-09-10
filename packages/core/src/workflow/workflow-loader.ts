@@ -37,7 +37,7 @@ function parseAgentProviderSelection(
   }
 
   // Entries are compact provider selectors (`provider[-model[-effort]]`,
-  // e.g. `claude`, `codex-sol`, `claude-fable-hi`); they keep their written
+  // e.g. `claude`, `codex-gpt-5.6-sol`, `claude-fable-hi`); they keep their written
   // form — the server derives each candidate's model/effort at spawn time.
   const invalid = values.filter(
     (provider) => parseAgentProviderSelector(provider) === null,

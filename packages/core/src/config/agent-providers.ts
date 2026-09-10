@@ -39,7 +39,7 @@ export function splitAgentProviderValue(value: unknown): string[] {
  *
  * Workflow stage/post `agent_provider` entries name provider candidates with
  * an optional model and reasoning effort folded into one token — `claude`,
- * `codex-sol`, `claude-fable-hi`, `codex-astra-lo` — so each candidate in an
+ * `codex-gpt-5.6-sol`, `claude-fable-hi`, `codex-gpt-6-astra-lo` — so each candidate in an
  * ordered fallback list carries its own coherent pair. Anything not specified
  * inherits the provider CLI's own defaults.
  */
@@ -73,7 +73,7 @@ const EFFORT_ALIASES: Record<string, string> = {
  * one. The first `-`-separated segment must be a known provider id; a
  * recognized trailing effort token is the effort (normalized), and everything
  * in between is the model, kept verbatim (multi-segment ids like
- * `gpt-5-codex` survive). Provider-specific validity of the model and effort
+ * `gpt-5.6-sol` survive). Provider-specific validity of the model and effort
  * (e.g. a provider with no model flag) is enforced server-side; this parser
  * covers syntax and provider identity.
  */

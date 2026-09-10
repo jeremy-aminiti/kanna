@@ -4052,7 +4052,7 @@ fn edited_workflow_spawn_case(seed_run: bool) {
     db.update_test_pipeline_item_pipeline_def("task-1", &before.to_string())
         .unwrap();
     let mut after = before.clone();
-    after["stages"][0]["agent_provider"] = serde_json::json!(["codex-astra-lo"]);
+    after["stages"][0]["agent_provider"] = serde_json::json!(["codex-gpt-6-astra-lo"]);
     let repo = db.get_repo("repo-1").unwrap().unwrap();
     let runs = db.list_stage_runs_for_task("task-1").unwrap();
     let validated = super::super::validate_task_workflow_replacement(
@@ -4081,7 +4081,7 @@ fn edited_workflow_spawn_case(seed_run: bool) {
     .unwrap();
     let rerun = prepare_rerun_stage_for_api(&db, &config, "task-1").unwrap();
     assert_eq!(rerun.agent_provider, "codex");
-    assert_eq!(rerun.model.as_deref(), Some("astra"));
+    assert_eq!(rerun.model.as_deref(), Some("gpt-6-astra"));
     assert_eq!(rerun.effort.as_deref(), Some("low"));
     assert!(rerun.provider_override.is_none());
     if !seed_run {
@@ -4090,7 +4090,7 @@ fn edited_workflow_spawn_case(seed_run: bool) {
     }
     let recovery = prepare_resume_task_for_api(&db, &config, "task-1").unwrap();
     assert_eq!(recovery.agent_provider, "codex");
-    assert_eq!(recovery.model.as_deref(), Some("astra"));
+    assert_eq!(recovery.model.as_deref(), Some("gpt-6-astra"));
     assert_eq!(
         recovery.resume_fallback_reason.as_deref(),
         Some("pinned workflow execution binding changed")
@@ -4106,7 +4106,7 @@ fn edited_workflow_spawn_case(seed_run: bool) {
     )
     .unwrap();
     assert_eq!(revision.agent_provider, "codex");
-    assert_eq!(revision.model.as_deref(), Some("astra"));
+    assert_eq!(revision.model.as_deref(), Some("gpt-6-astra"));
     let old = db.latest_stage_run("task-1").unwrap().unwrap();
     assert_eq!(old.agent_provider.as_deref(), Some("opencode"));
     assert_eq!(old.model.as_deref(), Some("recorded-model"));
@@ -4117,7 +4117,7 @@ fn edited_workflow_spawn_case(seed_run: bool) {
         kind: "main",
         agent: Some("implement"),
         agent_provider: Some("codex"),
-        model: Some("astra"),
+        model: Some("gpt-6-astra"),
         effort: Some("low"),
         status: "failed",
         result: None,
@@ -4141,6 +4141,6 @@ fn edited_workflow_spawn_case(seed_run: bool) {
         later_revision.agent_provider, "codex",
         "a later fresh revision must retain the new run's provider"
     );
-    assert_eq!(later_revision.model.as_deref(), Some("astra"));
+    assert_eq!(later_revision.model.as_deref(), Some("gpt-6-astra"));
     let _ = std::fs::remove_dir_all(&repo_root);
 }

@@ -1,6 +1,6 @@
 //! The 6b4a48af regression, end to end through the real server wiring.
 //!
-//! `plan-build-review` declares `["claude-fable", "codex-astra"]` on its
+//! `plan-build-review` declares `["claude-fable", "codex-gpt-6-astra"]` on its
 //! `review` stage, documented as an outage-fallback chain. On 2026-09-08 the
 //! account's Fable allowance ran out, a task advanced to `review`, the stage
 //! spawned on the leading candidate, and the session parked on
@@ -94,7 +94,7 @@ fn init_quota_fixture_with_candidates(
         .replace(
             "PROVIDERS",
             if candidates {
-                ",\n      \"agent_provider\": [\"claude-fable-hi\", \"codex-astra-lo\"]"
+                ",\n      \"agent_provider\": [\"claude-fable-hi\", \"codex-gpt-6-astra-lo\"]"
             } else {
                 ""
             },
@@ -405,7 +405,7 @@ async fn a_refused_leading_candidate_falls_back_to_the_next_one_with_its_own_mod
     // The candidate's *own* pair, never the refused candidate's: a selector
     // list gives every fallback its own coherent model and effort, and
     // `codex -m fable` would be rejected by the Codex CLI outright.
-    assert_eq!(replacement.model.as_deref(), Some("astra"));
+    assert_eq!(replacement.model.as_deref(), Some("gpt-6-astra"));
     assert_eq!(replacement.effort.as_deref(), Some("low"));
     assert_eq!(replacement.status, "running");
     assert_eq!(
@@ -484,7 +484,7 @@ async fn the_last_candidate_refused_parks_the_task_once() {
         &repo_root,
         "run-review-2",
         "codex",
-        Some("astra"),
+        Some("gpt-6-astra"),
         Some("low"),
     );
     let state = crate::http_api::AppState::new(config.clone());
@@ -674,7 +674,7 @@ async fn a_rerun_after_a_refusal_does_not_respawn_the_refused_provider() {
         rerun.agent_provider, "codex",
         "the rerun re-resolves the stage's candidate list around the refusal"
     );
-    assert_eq!(rerun.model.as_deref(), Some("astra"));
+    assert_eq!(rerun.model.as_deref(), Some("gpt-6-astra"));
     assert_eq!(rerun.effort.as_deref(), Some("low"));
     assert!(
         rerun.provider_override.is_none(),
@@ -695,7 +695,7 @@ async fn a_rerun_with_no_remaining_candidate_runs_the_recorded_provider() {
         &repo_root,
         "run-review",
         "codex",
-        Some("astra"),
+        Some("gpt-6-astra"),
         Some("low"),
     );
     for provider in ["claude", "codex"] {
@@ -723,7 +723,7 @@ async fn a_rerun_with_no_remaining_candidate_runs_the_recorded_provider() {
         rerun.agent_provider, "codex",
         "with nothing un-refused to prefer, the rerun reproduces the recorded run"
     );
-    assert_eq!(rerun.model.as_deref(), Some("astra"));
+    assert_eq!(rerun.model.as_deref(), Some("gpt-6-astra"));
     assert_eq!(rerun.effort.as_deref(), Some("low"));
 }
 

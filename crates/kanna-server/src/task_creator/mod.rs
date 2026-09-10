@@ -148,7 +148,7 @@ pub(crate) struct RevisionedAgentDefinition {
 /// provider and the model and effort written beside it.
 ///
 /// A workflow stage's `agent_provider` entries are compact selectors
-/// (`claude-fable-hi`, `codex-astra-lo`), and the whole point of the list
+/// (`claude-fable-hi`, `codex-gpt-6-astra-lo`), and the whole point of the list
 /// shape is that each candidate carries its *own* coherent pair. Anything that
 /// walks the list to the next candidate has to carry that candidate's values,
 /// never the leading one's.

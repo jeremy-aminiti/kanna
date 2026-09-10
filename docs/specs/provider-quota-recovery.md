@@ -3,9 +3,9 @@
 ## The incident
 
 `.kanna/workflows/plan-build-review.json` declares
-`"agent_provider": ["claude-fable", "codex-astra"]` on its `plan` and `review`
+`"agent_provider": ["claude-fable", "codex-gpt-6-astra"]` on its `plan` and `review`
 stages. AGENTS.md documents an ordered candidate list as an outage-fallback
-chain: "an ordered list like `["claude-fable-hi", "codex-astra-lo"]` gives every
+chain: "an ordered list like `["claude-fable-hi", "codex-gpt-6-astra-lo"]` gives every
 fallback candidate its own coherent model/effort".
 
 On 2026-09-08 the account's Fable allowance was exhausted. Task `6b4a48af`

@@ -274,7 +274,7 @@ pub(super) fn resolve_agent_provider_candidates(
 /// The tuning layers a workflow stage's compact provider selectors
 /// contribute — one layer per selector that names a model or an effort, each
 /// bound to exactly that selector's provider. This is what lets an ordered
-/// fallback list like `["claude-fable-hi", "codex-astra-lo"]` give every
+/// fallback list like `["claude-fable-hi", "codex-gpt-6-astra-lo"]` give every
 /// candidate its own coherent pair: whichever provider availability lands on
 /// draws the values written beside it, and a selector with neither model nor
 /// effort contributes nothing (the CLI's own defaults apply).

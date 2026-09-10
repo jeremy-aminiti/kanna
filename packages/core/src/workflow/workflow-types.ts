@@ -22,7 +22,7 @@ export interface WorkflowPost {
   prompt?: string;
   /**
    * Compact provider selectors (`provider[-model[-effort]]`, e.g. `claude`,
-   * `codex-sol`, `claude-fable-hi`) — validated by the loader via
+   * `codex-gpt-5.6-sol`, `claude-fable-hi`) — validated by the loader via
    * `parseAgentProviderSelector`; entries keep their written form.
    */
   agent_provider?: string | string[];
@@ -35,7 +35,7 @@ export interface WorkflowStage {
   prompt?: string;
   /**
    * Compact provider selectors (`provider[-model[-effort]]`, e.g. `claude`,
-   * `codex-sol`, `claude-fable-hi`) — validated by the loader via
+   * `codex-gpt-5.6-sol`, `claude-fable-hi`) — validated by the loader via
    * `parseAgentProviderSelector`; entries keep their written form.
    */
   agent_provider?: string | string[];
