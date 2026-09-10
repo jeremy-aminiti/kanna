@@ -631,6 +631,18 @@ async fn restart_during_actual_delivery_parks_uncertainty_without_repeated_wake(
     }
 }
 
+/// Advances the paused clock in 1s increments until at least `target`. A
+/// single large `advance()` can leave a background task's own periodic (here,
+/// 5s) recheck timer unpolled through several of its intermediate ticks
+/// instead of driving each one in turn — harmless when nothing of interest
+/// happens in between, but exactly the case a moving-deadline regression must
+/// step through faithfully rather than skip over.
+async fn advance_in_one_second_steps_to(target: Instant) {
+    while tokio::time::Instant::now() < target {
+        tokio::time::advance(Duration::from_secs(1)).await;
+    }
+}
+
 /// Advances to just before `deadline`, asserts nothing has been admitted yet,
 /// then steps across it and returns the admission. Computed relative to
 /// `tokio::time::Instant::now()` rather than a fixed literal, since prior
@@ -699,6 +711,65 @@ async fn events_straddling_a_native_leg_boundary_are_all_retained_and_acked_toge
             ("child-a".into(), "task.closed".into()),
         ]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_later_event_that_extends_the_live_quiet_deadline_mid_leg_is_not_sealed_early() {
+    // quiet (300s) < max_hold (600s), so quiet — anchored to the LATEST
+    // observation — actually controls the deadline, unlike the default
+    // quiet == max_hold configuration where max_hold (anchored to the first
+    // observation) always wins or ties regardless of later events.
+    let mut watch =
+        Watch::with_overrides("input", json!({"quietMs": 300_000, "maxHoldMs": 600_000})).await;
+    tokio::task::yield_now().await;
+    watch.emit(TaskEventKind::PrCreated);
+    let first_observed = watch.observed().await;
+    // Leg 1 dispatches with nothing observed yet (240s ceiling) and times out
+    // at its own receiver, well short of the then-current 300s intrinsic
+    // deadline.
+    watch.leg_timed_out().await;
+    // Leg 2 dispatches sized to that 300s deadline (60s remaining, clamped
+    // under the 240s ceiling). A second relevant event lands inside it,
+    // pushing the live intrinsic deadline out (last_observed + 300s quiet,
+    // still short of first_observed + 600s max_hold) — but leg 2's own
+    // receiver was already fixed at the stale 300s point when it was
+    // dispatched.
+    watch.emit(TaskEventKind::TaskClosed);
+    let second_observed = watch.observed().await;
+    let obsolete_deadline = first_observed + Duration::from_secs(300);
+    let live_deadline = second_observed + Duration::from_secs(300);
+    assert!(
+        live_deadline > obsolete_deadline,
+        "the second event must genuinely extend the deadline for this test to be meaningful"
+    );
+    // Crossing leg 2's own (now-stale) receiver deadline must not seal or
+    // admit anything: the chain must re-evaluate the live collection instead
+    // of trusting how leg 2's timeout was originally sized. Stepped in 1s
+    // increments (rather than one large `advance()`) so the paused-clock
+    // runtime reliably drives the worker's own periodic recheck through each
+    // intermediate tick instead of skipping past them.
+    advance_in_one_second_steps_to(obsolete_deadline + Duration::from_secs(1)).await;
+    watch.no_admission();
+    // The chain keeps re-issuing (through however many further 240s-capped
+    // legs it takes) until the live deadline is actually reached.
+    advance_in_one_second_steps_to(live_deadline + Duration::from_secs(1)).await;
+    let (_, admitted) = watch.admitted().await;
+    assert_eq!(admitted, live_deadline);
+    watch.delivered().await;
+    assert_eq!(
+        event_pairs(watch.row().pending.as_ref().unwrap()),
+        vec![
+            ("child-a".into(), "task.pr_created".into()),
+            ("child-a".into(), "task.closed".into()),
+        ]
+    );
+    let (batch_id, pending_cursor) = {
+        let row = watch.row();
+        let pending = row.pending.clone().unwrap();
+        (row.batch_id, pending["cursor"].clone())
+    };
+    watch.ack(batch_id).await;
+    assert_eq!(json!(watch.row().cursor), pending_cursor);
 }
 
 #[tokio::test(start_paused = true)]
