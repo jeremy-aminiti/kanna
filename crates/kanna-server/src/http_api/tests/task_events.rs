@@ -5009,6 +5009,221 @@ async fn subscription_mailbox_bootstraps_once_persists_unacked_work_and_follows_
     let _ = service.await;
 }
 
+/// The primary usability requirement from the compact-response change: every
+/// internal cursor location is genuinely absent by default, not merely
+/// null-shaped, while everything an agent acts on survives — proven against
+/// a full (100-event) page, not a token pending batch.
+#[tokio::test]
+async fn compact_default_response_omits_every_internal_cursor_location_but_keeps_the_rest() {
+    let state = test_state_with_seed("subscription-compact-shape", "Mailbox", seed_orchestration);
+    let db = Db::open(&state.config().db_path).unwrap();
+    start_run(&db, "manager-run", "child-c", "in progress");
+    let app = router(state.clone());
+    let (status, initial) = subscription_request(
+        &app,
+        "POST",
+        "/v1/event-subscriptions",
+        json!({"taskId":"child-c", "localOnly":true, "delivery":"poll"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    let id = initial["id"].as_str().unwrap().to_string();
+    let service = tokio::spawn(super::super::event_subscriptions::run(state.clone()));
+    // A full page (the 100-event capacity) seals immediately regardless of
+    // the 300000ms ordinary quiet/max-hold defaults, which this real-time
+    // test cannot afford to wait out — these events are ordinary, not urgent.
+    for _ in 0..150 {
+        db.append_task_event("child-a", crate::db::TaskEventKind::PrCreated, json!({}))
+            .unwrap();
+    }
+    let full = await_subscription(&state, &id, |row| row.pending.is_some()).await;
+    let (_, compact) = subscription_request(
+        &app,
+        "POST",
+        &format!("/v1/event-subscriptions/{id}/read"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        compact["pending"]["events"].as_array().unwrap().len(),
+        100,
+        "a full page, not a token one: {compact}"
+    );
+
+    // Every internal cursor location is entirely absent, not present-as-null.
+    assert!(
+        !compact.as_object().unwrap().contains_key("cursor"),
+        "top-level cursor must be absent: {compact}"
+    );
+    assert!(
+        !compact["query"].as_object().unwrap().contains_key("cursor"),
+        "query.cursor must be absent: {compact}"
+    );
+    assert!(
+        !compact["pending"]
+            .as_object()
+            .unwrap()
+            .contains_key("cursor"),
+        "pending.cursor must be absent: {compact}"
+    );
+    // Everything an agent acts on (or needs to diagnose a fault) survives.
+    for key in [
+        "id",
+        "active",
+        "error",
+        "wakeState",
+        "batchId",
+        "pending",
+        "query",
+    ] {
+        assert!(
+            compact.as_object().unwrap().contains_key(key),
+            "{key} missing from compact response: {compact}"
+        );
+    }
+    for key in ["events", "hasMore", "waitOutcome", "machineErrors"] {
+        assert!(
+            compact["pending"].as_object().unwrap().contains_key(key),
+            "pending.{key} missing: {compact}"
+        );
+    }
+    assert_eq!(compact["id"], full.id);
+    assert_eq!(compact["batchId"], full.batch_id);
+    service.abort();
+    let _ = service.await;
+}
+
+/// Diagnostic mode is the one escape hatch to the full internal row, on all
+/// three endpoints — including unsubscribe, whose flag is a query parameter
+/// rather than a body field because unsubscribe has no body.
+#[tokio::test]
+async fn diagnostic_mode_returns_the_full_internal_row_on_all_three_endpoints() {
+    let state = test_state_with_seed(
+        "subscription-diagnostic-shape",
+        "Mailbox",
+        seed_orchestration,
+    );
+    let db = Db::open(&state.config().db_path).unwrap();
+    start_run(&db, "manager-run", "child-c", "in progress");
+    let app = router(state.clone());
+    let (status, diagnostic_subscribe) = subscription_request(
+        &app,
+        "POST",
+        "/v1/event-subscriptions",
+        json!({"taskId":"child-c", "localOnly":true, "delivery":"poll", "diagnostic":true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{diagnostic_subscribe}");
+    let id = diagnostic_subscribe["id"].as_str().unwrap().to_string();
+    for key in [
+        "stage",
+        "branch",
+        "runId",
+        "revision",
+        "delivery",
+        "wakeAdmitted",
+        "cursor",
+    ] {
+        assert!(
+            diagnostic_subscribe.as_object().unwrap().contains_key(key),
+            "subscribe diagnostic missing {key}: {diagnostic_subscribe}"
+        );
+    }
+    let (_, diagnostic_read) = subscription_request(
+        &app,
+        "POST",
+        &format!("/v1/event-subscriptions/{id}/read"),
+        json!({"diagnostic":true}),
+    )
+    .await;
+    for key in ["stage", "branch", "runId", "revision"] {
+        assert!(
+            diagnostic_read.as_object().unwrap().contains_key(key),
+            "read diagnostic missing {key}: {diagnostic_read}"
+        );
+    }
+    let (_, diagnostic_unsubscribe) = subscription_request(
+        &app,
+        "POST",
+        &format!("/v1/event-subscriptions/{id}/unsubscribe?diagnostic=true"),
+        json!({}),
+    )
+    .await;
+    for key in ["stage", "branch", "runId", "revision", "query"] {
+        assert!(
+            diagnostic_unsubscribe
+                .as_object()
+                .unwrap()
+                .contains_key(key),
+            "unsubscribe diagnostic missing {key}: {diagnostic_unsubscribe}"
+        );
+    }
+}
+
+/// A compact read without `acknowledgeBatchId` must not touch anything, and
+/// a compact ack must advance the durable cursor to the exact full value the
+/// pending page carried — surviving a service restart, exactly like the raw
+/// (diagnostic) contract already proven elsewhere for this durability path.
+#[tokio::test]
+async fn compact_read_is_non_destructive_and_compact_ack_advances_the_full_cursor() {
+    let state = test_state_with_seed("subscription-compact-ack", "Mailbox", seed_orchestration);
+    let db = Db::open(&state.config().db_path).unwrap();
+    start_run(&db, "manager-run", "child-c", "in progress");
+    let app = router(state.clone());
+    let (status, initial) = subscription_request(
+        &app,
+        "POST",
+        "/v1/event-subscriptions",
+        json!({"taskId":"child-c", "localOnly":true, "delivery":"poll"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    let id = initial["id"].as_str().unwrap().to_string();
+    let service = tokio::spawn(super::super::event_subscriptions::run(state.clone()));
+    db.append_task_event(
+        "child-a",
+        crate::db::TaskEventKind::LifecycleFailed,
+        json!({}),
+    )
+    .unwrap();
+    await_subscription(&state, &id, |row| row.pending.is_some()).await;
+    let before = db.event_subscription(&id).unwrap().unwrap();
+    let read_path = format!("/v1/event-subscriptions/{id}/read");
+
+    // Non-destructive: reading without acknowledging changes nothing durable.
+    let (_, read_only) = subscription_request(&app, "POST", &read_path, json!({})).await;
+    assert!(!read_only["pending"].is_null(), "{read_only}");
+    let unchanged = db.event_subscription(&id).unwrap().unwrap();
+    assert_eq!(unchanged.batch_id, before.batch_id);
+    assert_eq!(unchanged.pending, before.pending);
+    assert_eq!(unchanged.wake_state, before.wake_state);
+
+    // The compact ack must advance the durable cursor to the exact value the
+    // (internal-only) pending.cursor carried.
+    let full_pending_cursor = before.pending.as_ref().unwrap()["cursor"].clone();
+    let (status, acked) = subscription_request(
+        &app,
+        "POST",
+        &read_path,
+        json!({"acknowledgeBatchId": before.batch_id}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{acked}");
+    assert!(acked["pending"].is_null());
+    let after_ack = db.event_subscription(&id).unwrap().unwrap();
+    assert_eq!(json!(after_ack.cursor), full_pending_cursor);
+
+    // Survives a restart: the durable cursor is not a harness-local value.
+    service.abort();
+    let _ = service.await;
+    let reopened = Db::open(&state.config().db_path)
+        .unwrap()
+        .event_subscription(&id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(json!(reopened.cursor), full_pending_cursor);
+}
+
 #[tokio::test]
 async fn subscription_restart_preserves_uncertain_delivery_and_ack_wins_a_late_result() {
     let state = test_state_with_seed("subscription-uncertain", "Mailbox", seed_orchestration);
