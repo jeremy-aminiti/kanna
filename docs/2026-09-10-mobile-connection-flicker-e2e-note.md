@@ -937,12 +937,39 @@ and `tests/cli-contract/helpers/pty.ts`:
   the whole `CODEX_HOME`) to `.tmp/codex-run-artifacts/<run>/` — gitignored,
   not committed — on every exit, pass or fail.
 
-None of this changed the two cases' pass/fail assertions, and none of it
-produced or claims to have produced any evidence yet: it was verified only
-via `vitest list` (safe, non-executing) and the offline suite, not against a
-real Codex session. It exists so the next authorized run — not yet made — has
-a full timestamped record and Codex's own ground truth to read, instead of
-another 1500-char tail guess.
+None of this changed the two cases' pass/fail assertions.
+
+**Run 6** (`CODEX INSTRUMENTED OBSERVATION LANE CLEAR`, authorized for the
+short-message case only; artifacts under `.tmp/codex-run-artifacts/`, not
+committed): the intended `vitest ... -t "<name>"` invocation did not restrict
+to that one case — both cases ran (a harness/CLI-invocation defect in the
+run command, not authorized scope; noted here for the record, not
+re-attempted). Both failed identically, at the same 30s busy-phase-start
+check as run 5, `exit code 1`. Checkpoints for the short case:
+`codex-spawned` 19:14:10.819Z, `composer-ready` 19:14:11.829Z — under a
+second later, because `--yolo` skips the directory-trust prompt entirely
+(confirmed: no trust-prompt bytes appear anywhere in this run's raw
+output) — then `busy-start-observed:false` at 19:14:41.866Z (the 30s
+timeout). At the moment the busy-phase instruction was submitted, the
+composer's own model field still read `model: loading`, not yet
+`gpt-5.6-sol low` — raw output shows both frames, `loading` first. Whether
+input accepted at the composer while the model is still resolving is
+silently dropped is a real, evidence-grounded hypothesis this run raises,
+not a conclusion. `rollout-files-found.json` was empty for both cases: no
+rollout JSONL was ever written under either isolated `CODEX_HOME`
+(cross-checked read-only against the real `~/.codex/sessions` too — nothing
+new there either). That is consistent with — but does not prove — no turn
+ever starting, since the process was SIGKILLed rather than exited cleanly,
+so a started-but-unflushed turn cannot be ruled out from this alone.
+Process-tree cleanup verified for both cases: each session's real `codex`
+child (found by exact pid via `pgrep -P <bridgePid>`, not a name match) was
+already dead after the bridge kill, before any force-kill was needed
+(`forceKilled: []`, `stillAlive: []`); machine-wide read-only checks after
+teardown found no leftover fixture processes or temp dirs, including from
+the unintended second case. Cause remains unattributed — this narrows the
+search (a UI-ready-but-runtime-not-ready window is now a concrete,
+evidence-backed candidate alongside plain startup latency) without
+resolving it, and per instruction no further live run was made this pass.
 
 **Raw on-screen direct-typing is not ruled out either, and not for the reason
 this note previously gave.** `sendTaskTerminalInput` → raw KSP bytes forwards
@@ -971,7 +998,9 @@ whether a live CLI's parser actually treats that CR as submit, and the one
 existing live-CLI submission test pins a stale, no-longer-shipped contract.
 No fix was authored for this symptom because no currently-reproducing defect
 was located by any means available here. The real Codex consumption lane has
-now run five times across three lane authorizations. Runs 1–4 all failed on
+now run six times across four lane authorizations (run 6 unintentionally
+covered both cases instead of the one authorized — see above; not
+re-attempted). Runs 1–4 all failed on
 the same class of harness precondition (a `codex_apps` MCP-server-boot race,
 narrowed run over run from "wrong composer pattern" matched too early, to
 that pattern never matching at all, to composer detection working but the
