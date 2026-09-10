@@ -229,7 +229,7 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "075_transferred_task_context");
+    assert_eq!(latest_migration, "077_transferred_task_history");
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -4117,6 +4117,79 @@ fn transferred_task_inputs_keep_origin_and_are_idempotent() {
     assert_eq!(imported[0].message, "keep the compact interaction");
     assert_eq!(imported[0].delivered_at, "2026-09-08 23:59:00");
     assert_eq!(imported[0].origin.as_ref(), Some(&inputs[0].origin));
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+/// The [`super::TransferredHistoryRecord`] analog of the task-input ledger
+/// test above: ordered stage/main/post history imports idempotently, keeps
+/// each record's original origin identity, and refuses a retry that reuses
+/// the same origin with different content instead of silently keeping
+/// either version.
+#[test]
+fn transferred_task_history_keeps_order_and_origin_and_is_idempotent() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-destination",
+        "repo-1",
+        "Transferred task",
+        Some("Transferred task"),
+        "review",
+        "2026-09-09 04:00:00",
+    )
+    .expect("task");
+
+    let records = vec![
+        super::TransferredHistoryRecord {
+            sequence: 0,
+            origin_peer_id: "peer-studio".into(),
+            origin_task_id: "task-source".into(),
+            origin_run_id: "run-implement".into(),
+            stage: "in progress".into(),
+            kind: "main".into(),
+            agent: Some("implement".into()),
+            result: Some("{\"status\":\"succeeded\"}".into()),
+            feedback: None,
+            finished_at: Some("2026-09-08 23:00:00".into()),
+        },
+        super::TransferredHistoryRecord {
+            sequence: 1,
+            origin_peer_id: "peer-studio".into(),
+            origin_task_id: "task-source".into(),
+            origin_run_id: "run-commit".into(),
+            stage: "in progress".into(),
+            kind: "post".into(),
+            agent: Some("commit".into()),
+            result: Some("{\"status\":\"succeeded\"}".into()),
+            feedback: None,
+            finished_at: Some("2026-09-08 23:05:00".into()),
+        },
+    ];
+
+    db.import_transferred_task_history("task-destination", &records)
+        .expect("first import");
+    db.import_transferred_task_history("task-destination", &records)
+        .expect("retry import converges");
+
+    let mut conflicting = records.clone();
+    conflicting[0].result = Some("{\"status\":\"failed\"}".into());
+    assert!(db
+        .import_transferred_task_history("task-destination", &conflicting)
+        .is_err());
+
+    let imported = db
+        .transferred_task_history("task-destination")
+        .expect("read imported history");
+    assert_eq!(imported.len(), 2);
+    assert_eq!(imported[0], records[0]);
+    assert_eq!(imported[1], records[1]);
+    assert!(
+        imported[0].sequence < imported[1].sequence,
+        "history must read back in delivery order"
+    );
 
     drop(db);
     let _ = std::fs::remove_file(path);

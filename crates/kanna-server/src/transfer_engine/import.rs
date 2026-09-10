@@ -1088,6 +1088,25 @@ async fn build_create_request(
             previous_stage_result: payload.task.previous_stage_result.clone(),
             previous_main_result: payload.task.previous_main_result.clone(),
             revision_feedback: payload.task.revision_feedback.clone(),
+            history: payload
+                .task
+                .history
+                .iter()
+                .map(
+                    |record| crate::mobile_api::TransferredHistoryRecordSummary {
+                        sequence: record.sequence,
+                        origin_peer_id: record.origin_peer_id.clone(),
+                        origin_task_id: record.origin_task_id.clone(),
+                        origin_run_id: record.origin_run_id.clone(),
+                        stage: record.stage.clone(),
+                        kind: record.kind.clone(),
+                        agent: record.agent.clone(),
+                        result: record.result.clone(),
+                        feedback: record.feedback.clone(),
+                        finished_at: record.finished_at.clone(),
+                    },
+                )
+                .collect(),
         }),
         resume_session_id,
         recovery_snapshot: payload.recovery.clone(),

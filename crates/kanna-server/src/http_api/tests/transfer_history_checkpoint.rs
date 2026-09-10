@@ -1,0 +1,374 @@
+//! The foreign-history checkpoint: a destination task must receive its
+//! source's full ordered stage/main/post/revision history (not only the
+//! *latest* result of each kind), with every record's original run identity
+//! preserved, and its first agent-visible prompt must name its own branch —
+//! never the imported private fork ref.
+//!
+//! Same harness as `transfer_preparation_gate` (real HTTP creation path, real
+//! SQLite, a real (fake) daemon on a Unix socket), extended with a second
+//! workflow stage whose prompt substitutes `$BRANCH` and `$PREV_RESULT`, so
+//! this drives the actual production prompt-building and persistence paths
+//! rather than asserting only against hand-written helpers.
+
+use super::*;
+
+/// Isolated `Config` + git repo + SQLite DB for one test. A local copy of
+/// `transfer_preparation_gate`'s `GateFixture`/`build_gate_fixture`: the two
+/// modules are siblings under `tests`, whose private items are not visible
+/// across a sibling boundary, and that file's own doc comment already notes
+/// this same fixture shape is duplicated per test file rather than shared.
+struct GateFixture {
+    config: Config,
+    repo_root: PathBuf,
+    daemon_dir: PathBuf,
+    socket_path: PathBuf,
+}
+
+fn build_gate_fixture(label: &str) -> GateFixture {
+    let unique = unique_test_suffix();
+    let repo_root =
+        crate::test_paths::unique_test_path(&format!("kanna-http-transfer-history-{label}"));
+    init_test_git_repo(&repo_root);
+    let daemon_dir =
+        crate::test_paths::unique_test_path(&format!("kanna-http-transfer-history-daemon-{label}"));
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    let socket_path = daemon_socket_path_for_dir(&daemon_dir.to_string_lossy());
+    let _ = std::fs::remove_file(&socket_path);
+
+    let config = Config {
+        relay_url: "wss://relay.example".to_string(),
+        device_token: "device-token".to_string(),
+        firebase_project_id: "kanna-local".to_string(),
+        firebase_auth_emulator_url: None,
+        firebase_firestore_emulator_host: None,
+        daemon_dir: daemon_dir.to_string_lossy().to_string(),
+        db_path: Db::test_db_path(&format!("http-api-transfer-history-{label}-{unique}")),
+        kanna_cli_path: None,
+        desktop_id: "desktop-1".to_string(),
+        desktop_secret: Some("desktop-secret".to_string()),
+        desktop_name: "Studio Mac".to_string(),
+        version: "test-version".to_string(),
+        environment: "development".to_string(),
+        lan_host: "127.0.0.1".to_string(),
+        lan_port: 48120,
+        transfer_port: 4455,
+        activity_event_debounce_seconds: 300,
+        pairing_store_path: crate::test_paths::unique_test_file(
+            "kanna-pairings-transfer-history",
+            "json",
+        ),
+    };
+    let db = Db::open_for_tests(&config.db_path).unwrap();
+    db.insert_test_repo_with_path("repo-1", &repo_root.to_string_lossy(), "Repo One")
+        .unwrap();
+    drop(db);
+
+    GateFixture {
+        config,
+        repo_root,
+        daemon_dir,
+        socket_path,
+    }
+}
+
+impl GateFixture {
+    fn cleanup(&self) {
+        let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_dir_all(&self.daemon_dir);
+        let _ = std::fs::remove_dir_all(&self.repo_root);
+        let _ = std::fs::remove_file(&self.config.db_path);
+    }
+}
+
+fn repo_head_oid(repo_root: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+fn transfer_import_body(transfer_id: &str, head_oid: &str) -> serde_json::Value {
+    serde_json::json!({
+        "repoId": "repo-1",
+        "prompt": "resume the transferred agent",
+        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
+        "agentProvider": "claude",
+        "transferImport": {
+            "transferId": transfer_id,
+            "headOid": head_oid,
+            "sourceMachine": "peer-source",
+        },
+    })
+}
+
+async fn put_task(
+    app: &axum::Router,
+    task_id: &str,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::put(format!("/v1/tasks/{task_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Adds a workflow with a `review` stage past `in progress`, so a transfer
+/// landing directly on `review` (as a resumed task does) exercises
+/// `$BRANCH`/`$PREV_RESULT` substitution, which `TEST_PROVIDER_NEUTRAL_WORKFLOW`'s
+/// single stage never does. Committed and published to `origin/main` exactly
+/// like `init_test_git_repo` does for its own workflow.
+fn write_history_checkpoint_workflow(repo_root: &Path) {
+    std::fs::write(
+        repo_root.join(".kanna/workflows/history-checkpoint.json"),
+        serde_json::json!({
+            "name": "history-checkpoint",
+            "stages": [
+                {
+                    "name": "in progress",
+                    "prompt": "$TASK_PROMPT",
+                    "policy": { "transition": "manual" }
+                },
+                {
+                    "name": "review",
+                    "prompt": "Review branch $BRANCH against $BASE_REF. Previous: $PREV_RESULT",
+                    "policy": { "transition": "manual" }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo_root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", "add history checkpoint workflow"])
+        .current_dir(repo_root)
+        .status()
+        .unwrap()
+        .success());
+    publish_test_origin_main(repo_root);
+}
+
+/// A transfer landing on `review` (a second hop's typical stage, since the
+/// task already passed `in progress` on an earlier machine) whose
+/// `transferImport` carries both the latest-result scalars *and* the full
+/// ordered history two machines back. This is what `build_payload` produces
+/// for a task that was itself imported and has since run further — the exact
+/// shape a second hop must not collapse back down to "only the latest".
+#[tokio::test]
+async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_branch() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncWriteExt, BufReader};
+
+    let fixture = build_gate_fixture("history-checkpoint");
+    write_history_checkpoint_workflow(&fixture.repo_root);
+    let expected_head = repo_head_oid(&fixture.repo_root);
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    db.upsert_transferred_task_manifest(
+        "transfer-history",
+        "repo-1",
+        Some("abcd0001"),
+        &expected_head,
+        &expected_head,
+    )
+    .unwrap();
+    drop(db);
+
+    let body = serde_json::json!({
+        "repoId": "repo-1",
+        "prompt": "Original task prompt",
+        "workflowName": "history-checkpoint",
+        "stage": "review",
+        "agentProvider": "claude",
+        "transferImport": {
+            "transferId": "transfer-history",
+            "headOid": expected_head,
+            "sourceMachine": "peer-source",
+            // Persisting context (and, alongside it, the ordered history
+            // below) is gated on a pinned workflow definition being present
+            // — the shape a real TaskBundle transfer always carries — so a
+            // fixture that omits it would silently skip the very path this
+            // test exists to exercise.
+            "workflowDefinition": serde_json::json!({
+                "name": "history-checkpoint",
+                "stages": [
+                    {
+                        "name": "in progress",
+                        "prompt": "$TASK_PROMPT",
+                        "policy": { "transition": "manual" }
+                    },
+                    {
+                        "name": "review",
+                        "prompt": "Review branch $BRANCH against $BASE_REF. Previous: $PREV_RESULT",
+                        "policy": { "transition": "manual" }
+                    }
+                ]
+            }).to_string(),
+            "previousStageResult": "hop1 review result: looks good",
+            "history": [
+                {
+                    "sequence": 0,
+                    "originPeerId": "peer-hop0",
+                    "originTaskId": "task-hop0-original",
+                    "originRunId": "run-hop0-implement",
+                    "stage": "in progress",
+                    "kind": "main",
+                    "agent": "implement",
+                    "result": "{\"status\":\"succeeded\"}"
+                },
+                {
+                    "sequence": 1,
+                    "originPeerId": "peer-hop0",
+                    "originTaskId": "task-hop0-original",
+                    "originRunId": "run-hop0-commit",
+                    "stage": "in progress",
+                    "kind": "post",
+                    "agent": "commit",
+                    "result": "{\"status\":\"succeeded\"}"
+                }
+            ]
+        },
+    });
+
+    let listener = tokio::net::UnixListener::bind(&fixture.socket_path).unwrap();
+    let daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+        let (session_id, args) = match command {
+            DaemonCommand::Spawn {
+                session_id, args, ..
+            } => (session_id, args),
+            other => panic!("expected PTY Spawn command, got {other:?}"),
+        };
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        args
+    });
+
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let (status, resp_body) = put_task(&app, "abcd0001", body).await;
+    assert_eq!(status, StatusCode::OK, "{resp_body}");
+
+    let args = daemon.await.unwrap();
+    let command = args.last().expect("PTY command").clone();
+    assert!(
+        command.contains("Review branch task-abcd0001 against"),
+        "$BRANCH must resolve to this task's own branch, not the imported fork ref: {command}"
+    );
+    assert!(
+        command.contains("hop1 review result: looks good"),
+        "$PREV_RESULT must carry the inherited latest result: {command}"
+    );
+
+    // The full ordered history persists with each record's original
+    // provenance intact — never rewritten to credit this destination.
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    let history = db.transferred_task_history("abcd0001").unwrap();
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert_eq!(history[0].sequence, 0);
+    assert_eq!(history[0].origin_peer_id, "peer-hop0");
+    assert_eq!(history[0].origin_task_id, "task-hop0-original");
+    assert_eq!(history[0].origin_run_id, "run-hop0-implement");
+    assert_eq!(history[0].kind, "main");
+    assert_eq!(history[1].sequence, 1);
+    assert_eq!(history[1].origin_run_id, "run-hop0-commit");
+    assert_eq!(history[1].kind, "post");
+
+    let context = db
+        .transferred_task_context("abcd0001")
+        .unwrap()
+        .expect("scalar context also persisted");
+    assert_eq!(context.2.as_deref(), Some("hop1 review result: looks good"));
+
+    fixture.cleanup();
+}
+
+/// A payload with no `history` at all — an older sender, or a genuine first
+/// hop with nothing to inherit — must still create the task normally: the
+/// scalar snapshots alone are enough, exactly as before this checkpoint.
+#[tokio::test]
+async fn a_transfer_with_no_history_field_is_unaffected() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncWriteExt, BufReader};
+
+    let fixture = build_gate_fixture("history-checkpoint-compat");
+    let expected_head = repo_head_oid(&fixture.repo_root);
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    db.upsert_transferred_task_manifest(
+        "transfer-compat",
+        "repo-1",
+        Some("abcd0002"),
+        &expected_head,
+        &expected_head,
+    )
+    .unwrap();
+    drop(db);
+
+    let listener = tokio::net::UnixListener::bind(&fixture.socket_path).unwrap();
+    let daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+        let session_id = match command {
+            DaemonCommand::Spawn { session_id, .. } => session_id,
+            other => panic!("expected PTY Spawn command, got {other:?}"),
+        };
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let (status, resp_body) = put_task(
+        &app,
+        "abcd0002",
+        transfer_import_body("transfer-compat", &expected_head),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resp_body}");
+    daemon.await.unwrap();
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    assert!(db.transferred_task_history("abcd0002").unwrap().is_empty());
+    assert!(db.get_pipeline_item("abcd0002").unwrap().is_some());
+
+    fixture.cleanup();
+}

@@ -238,6 +238,17 @@ pub struct TransferTaskPayload {
     pub previous_main_result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision_feedback: Option<String>,
+    /// Ordered source stage/main/post/revision history, oldest first. Unlike
+    /// the three scalar snapshots above (each the *latest* value of its
+    /// kind), this carries every finished run so a destination that is later
+    /// transferred again (a second hop) can re-export what it inherited
+    /// instead of only its own local runs. Each record keeps the run
+    /// identity it was first produced under — never rewritten to credit an
+    /// intermediate machine — mirroring how [`TransferInputLedgerEntry`]
+    /// preserves first origin. Additive: an older peer that never sends this
+    /// is unaffected, since every consumer still has the three scalars.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<TransferHistoryRecordPayload>,
     /// The task's workflow name. Emitted under both `workflow` (canonical)
     /// and `pipeline` (legacy) so a peer running either naming can import it;
     /// parsing accepts either key.
@@ -252,6 +263,35 @@ pub struct TransferTaskPayload {
     pub base_ref: Option<String>,
     pub agent_type: Option<String>,
     pub agent_provider: String,
+}
+
+/// One historical stage/main/post/revision run, as carried in
+/// [`TransferTaskPayload::history`]. `origin_*` names where the run actually
+/// happened, which is not necessarily the immediate sender on a second hop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferHistoryRecordPayload {
+    /// Position in delivery order, 0-based and contiguous. Assigned fresh by
+    /// whichever machine exports this list, so it orders the *combined*
+    /// history (inherited plus this hop's own runs), not any one run's
+    /// original position.
+    pub sequence: u64,
+    pub origin_peer_id: String,
+    pub origin_task_id: String,
+    /// The run's own id on the machine that produced it. Kept separate from
+    /// any locally executable run id at the destination: this never becomes
+    /// a real `stage_run` row there.
+    pub origin_run_id: String,
+    pub stage: String,
+    /// `main` or `post`, matching `stage_run.kind`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -757,6 +797,93 @@ fn parse_codex_rollout_filename(
     Ok((year.to_string(), month.to_string(), day.to_string()))
 }
 
+/// Parses `task.history` (see [`TransferTaskPayload::history`]). Absent or
+/// `null` is a legacy/pre-history peer, not an error: it decodes as empty and
+/// every consumer falls back to the three scalar snapshots.
+fn parse_history_records(
+    task: &serde_json::Map<String, Value>,
+) -> Result<Vec<TransferHistoryRecordPayload>, String> {
+    let Some(value) = task.get("history").filter(|value| !value.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let entries = value
+        .as_array()
+        .ok_or_else(|| "task history must be an array".to_string())?;
+    let mut seen_origins = HashSet::new();
+    let mut records = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let record = object(entry, &format!("task history entry {index}"))?;
+        let sequence = record
+            .get("sequence")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("task history entry {index} missing sequence"))?;
+        if sequence != index as u64 {
+            return Err("transferred task history is not in delivery order".into());
+        }
+        let origin_peer_id = required_string(
+            record,
+            &["origin_peer_id", "originPeerId"],
+            &format!("task history entry {index} missing origin_peer_id"),
+        )?;
+        let origin_task_id = required_string(
+            record,
+            &["origin_task_id", "originTaskId"],
+            &format!("task history entry {index} missing origin_task_id"),
+        )?;
+        let origin_run_id = required_string(
+            record,
+            &["origin_run_id", "originRunId"],
+            &format!("task history entry {index} missing origin_run_id"),
+        )?;
+        if !seen_origins.insert((
+            origin_peer_id.clone(),
+            origin_task_id.clone(),
+            origin_run_id.clone(),
+        )) {
+            return Err("transferred task history has a duplicate origin run".into());
+        }
+        let kind = required_string(
+            record,
+            &["kind"],
+            &format!("task history entry {index} missing kind"),
+        )?;
+        if kind != "main" && kind != "post" {
+            return Err(format!(
+                "task history entry {index} has an unsupported kind"
+            ));
+        }
+        records.push(TransferHistoryRecordPayload {
+            sequence,
+            origin_peer_id,
+            origin_task_id,
+            origin_run_id,
+            stage: required_string(
+                record,
+                &["stage"],
+                &format!("task history entry {index} missing stage"),
+            )?,
+            kind,
+            agent: optional_string(record, &["agent"]),
+            result: nullable_string(
+                record,
+                &["result"],
+                &format!("task history entry {index} result must be a string or null"),
+            )?,
+            feedback: nullable_string(
+                record,
+                &["feedback"],
+                &format!("task history entry {index} feedback must be a string or null"),
+            )?,
+            finished_at: nullable_string(
+                record,
+                &["finished_at", "finishedAt"],
+                &format!("task history entry {index} finished_at must be a string or null"),
+            )?,
+        });
+    }
+    Ok(records)
+}
+
 fn parse_artifacts(
     value: Option<&Value>,
     task_provider: &str,
@@ -1121,6 +1248,7 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
                 &["revision_feedback", "revisionFeedback"],
                 "task revision_feedback must be a string or null",
             )?,
+            history: parse_history_records(task)?,
             workflow: workflow_name.clone(),
             legacy_pipeline: workflow_name,
             display_name: nullable_string(
@@ -1665,5 +1793,94 @@ mod tests {
         payload.task.base_ref = None;
         payload.repo.default_branch = Some("main".into());
         assert_eq!(resolve_incoming_base_branch(&payload), None);
+    }
+
+    fn history_entry(
+        sequence: u64,
+        origin_task_id: &str,
+        origin_run_id: &str,
+        kind: &str,
+    ) -> Value {
+        json!({
+            "sequence": sequence,
+            "origin_peer_id": "peer-original",
+            "origin_task_id": origin_task_id,
+            "origin_run_id": origin_run_id,
+            "stage": "in progress",
+            "kind": kind,
+            "agent": "implement",
+            "result": format!("{{\"status\":\"succeeded\"}}"),
+        })
+    }
+
+    /// A payload with no `history` key at all is a pre-history sender, not a
+    /// malformed one: it decodes as an empty list rather than an error, and
+    /// every scalar-snapshot consumer is unaffected.
+    #[test]
+    fn a_payload_without_history_decodes_as_empty() {
+        let parsed = parse_outgoing_transfer_payload(&payload_with(json!([])))
+            .expect("a payload with no history key should still parse");
+        assert!(parsed.task.history.is_empty());
+
+        let encoded = encode_outgoing_transfer_payload(&parsed).expect("re-encode");
+        assert!(
+            encoded["task"].get("history").is_none(),
+            "an empty history must not appear on the wire at all"
+        );
+    }
+
+    #[test]
+    fn ordered_task_history_round_trips_with_provenance_intact() {
+        let mut payload = payload_with(json!([]));
+        payload["task"]["history"] = json!([
+            history_entry(0, "task-original", "run-one", "main"),
+            history_entry(1, "task-original", "run-two", "post"),
+        ]);
+        let parsed = parse_outgoing_transfer_payload(&payload).expect("valid ordered history");
+        assert_eq!(parsed.task.history.len(), 2);
+        assert_eq!(parsed.task.history[0].sequence, 0);
+        assert_eq!(parsed.task.history[0].kind, "main");
+        assert_eq!(parsed.task.history[0].origin_run_id, "run-one");
+        assert_eq!(parsed.task.history[1].sequence, 1);
+        assert_eq!(parsed.task.history[1].kind, "post");
+        assert_eq!(parsed.task.history[1].origin_run_id, "run-two");
+
+        // Re-encoding and re-parsing (what a second hop's importer round-trips
+        // through) must reproduce exactly the same ordered, attributed list.
+        let encoded = encode_outgoing_transfer_payload(&parsed).expect("re-encode");
+        let reparsed =
+            parse_outgoing_transfer_payload(&encoded).expect("re-parse the re-encoded payload");
+        assert_eq!(reparsed.task.history, parsed.task.history);
+    }
+
+    #[test]
+    fn task_history_out_of_delivery_order_is_refused() {
+        let mut payload = payload_with(json!([]));
+        payload["task"]["history"] = json!([
+            history_entry(1, "task-original", "run-one", "main"),
+            history_entry(0, "task-original", "run-two", "post"),
+        ]);
+        let error = parse_outgoing_transfer_payload(&payload).expect_err("reordered history");
+        assert!(error.contains("not in delivery order"), "{error}");
+    }
+
+    #[test]
+    fn task_history_rejects_a_duplicate_origin_run() {
+        let mut payload = payload_with(json!([]));
+        payload["task"]["history"] = json!([
+            history_entry(0, "task-original", "run-one", "main"),
+            history_entry(1, "task-original", "run-one", "post"),
+        ]);
+        let error = parse_outgoing_transfer_payload(&payload).expect_err("duplicate origin run");
+        assert!(error.contains("duplicate origin run"), "{error}");
+    }
+
+    #[test]
+    fn task_history_rejects_an_unsupported_kind() {
+        let mut payload = payload_with(json!([]));
+        payload["task"]["history"] =
+            json!([history_entry(0, "task-original", "run-one", "revision")]);
+        let error = parse_outgoing_transfer_payload(&payload).expect_err("unsupported kind");
+        assert!(error.contains("unsupported kind"), "{error}");
     }
 }

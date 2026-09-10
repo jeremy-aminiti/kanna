@@ -1,5 +1,5 @@
 use super::Db;
-use rusqlite::OptionalExtension;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 const TASK_TRANSFER_COLUMNS: &str = "SELECT id, direction, status, source_peer_id, target_peer_id,
@@ -108,6 +108,24 @@ pub struct NewTaskTransferProvenance {
     pub source_peer_id: String,
     pub source_task_id: String,
     pub source_machine_task_label: Option<String>,
+}
+
+/// One row of `transferred_task_history`: a foreign stage/main/post/revision
+/// run this task inherited from a transfer, in the order it was exported.
+/// `origin_*` is the run's identity on the machine that actually produced it,
+/// preserved unchanged across however many hops it has crossed since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferredHistoryRecord {
+    pub sequence: i64,
+    pub origin_peer_id: String,
+    pub origin_task_id: String,
+    pub origin_run_id: String,
+    pub stage: String,
+    pub kind: String,
+    pub agent: Option<String>,
+    pub result: Option<String>,
+    pub feedback: Option<String>,
+    pub finished_at: Option<String>,
 }
 
 impl Db {
@@ -232,6 +250,109 @@ impl Db {
                 },
             )
             .optional()
+    }
+
+    /// Imports the ordered foreign history a transfer carried, oldest first.
+    /// Idempotent on `(task_id, origin_peer_id, origin_task_id,
+    /// origin_run_id)`: a retry that re-sends the same records converges
+    /// rather than duplicating, and a genuine conflict (same origin,
+    /// different content) is refused loudly rather than silently kept or
+    /// overwritten.
+    pub fn import_transferred_task_history(
+        &self,
+        task_id: &str,
+        records: &[TransferredHistoryRecord],
+    ) -> Result<(), rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            for record in records {
+                let inserted = db.conn.execute(
+                    "INSERT INTO transferred_task_history
+                     (task_id, sequence, origin_peer_id, origin_task_id, origin_run_id,
+                      stage, kind, agent, result, feedback, finished_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ON CONFLICT(task_id, origin_peer_id, origin_task_id, origin_run_id)
+                     DO NOTHING",
+                    params![
+                        task_id,
+                        record.sequence,
+                        &record.origin_peer_id,
+                        &record.origin_task_id,
+                        &record.origin_run_id,
+                        &record.stage,
+                        &record.kind,
+                        record.agent.as_deref(),
+                        record.result.as_deref(),
+                        record.feedback.as_deref(),
+                        record.finished_at.as_deref(),
+                    ],
+                )?;
+                if inserted == 0 {
+                    let existing: TransferredHistoryRecord = db.conn.query_row(
+                        "SELECT sequence, origin_peer_id, origin_task_id, origin_run_id,
+                                stage, kind, agent, result, feedback, finished_at
+                         FROM transferred_task_history
+                         WHERE task_id = ? AND origin_peer_id = ? AND origin_task_id = ? AND origin_run_id = ?",
+                        params![
+                            task_id,
+                            &record.origin_peer_id,
+                            &record.origin_task_id,
+                            &record.origin_run_id,
+                        ],
+                        |row| {
+                            Ok(TransferredHistoryRecord {
+                                sequence: row.get(0)?,
+                                origin_peer_id: row.get(1)?,
+                                origin_task_id: row.get(2)?,
+                                origin_run_id: row.get(3)?,
+                                stage: row.get(4)?,
+                                kind: row.get(5)?,
+                                agent: row.get(6)?,
+                                result: row.get(7)?,
+                                feedback: row.get(8)?,
+                                finished_at: row.get(9)?,
+                            })
+                        },
+                    )?;
+                    if existing != *record {
+                        return Err(rusqlite::Error::InvalidParameterName(
+                            "conflicting transferred task history replay".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// The full ordered foreign history imported for this task, oldest
+    /// first. Empty for a task that was never transferred, or whose sender
+    /// predated this record.
+    pub fn transferred_task_history(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<TransferredHistoryRecord>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sequence, origin_peer_id, origin_task_id, origin_run_id, stage, kind,
+                    agent, result, feedback, finished_at
+             FROM transferred_task_history
+             WHERE task_id = ?
+             ORDER BY sequence ASC",
+        )?;
+        let rows = stmt.query_map([task_id], |row| {
+            Ok(TransferredHistoryRecord {
+                sequence: row.get(0)?,
+                origin_peer_id: row.get(1)?,
+                origin_task_id: row.get(2)?,
+                origin_run_id: row.get(3)?,
+                stage: row.get(4)?,
+                kind: row.get(5)?,
+                agent: row.get(6)?,
+                result: row.get(7)?,
+                feedback: row.get(8)?,
+                finished_at: row.get(9)?,
+            })
+        })?;
+        rows.collect()
     }
 
     pub fn insert_task_transfer(&self, transfer: &NewTaskTransfer) -> Result<(), rusqlite::Error> {
