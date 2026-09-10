@@ -121,6 +121,101 @@ pub(crate) fn requested_activation_policy(value: Option<&str>) -> Option<tauri::
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct E2eForegroundActivation {
+    pub target_pid: u32,
+    pub target_active_before: bool,
+    pub target_active_after: bool,
+    pub frontmost_pid_before: Option<i32>,
+    pub frontmost_name_before: Option<String>,
+    pub frontmost_pid_after: Option<i32>,
+    pub frontmost_name_after: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn frontmost_application() -> (Option<i32>, Option<String>) {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use std::ffi::CStr;
+
+    let Some(workspace_class) = AnyClass::get(c"NSWorkspace") else {
+        return (None, None);
+    };
+    let workspace: Option<Retained<AnyObject>> = msg_send![workspace_class, sharedWorkspace];
+    let Some(workspace) = workspace else {
+        return (None, None);
+    };
+    let application: Option<Retained<AnyObject>> = msg_send![&*workspace, frontmostApplication];
+    let Some(application) = application else {
+        return (None, None);
+    };
+    let pid: i32 = msg_send![&*application, processIdentifier];
+    let name: Option<Retained<AnyObject>> = msg_send![&*application, localizedName];
+    let name = name.and_then(|name| {
+        let utf8: *const std::ffi::c_char = msg_send![&*name, UTF8String];
+        (!utf8.is_null()).then(|| CStr::from_ptr(utf8).to_string_lossy().into_owned())
+    });
+    (Some(pid), name)
+}
+
+/// Activates only this process for the foreground E2E fixture. This is not a
+/// production focus policy: the command is refused unless the isolated test
+/// target explicitly requested normal activation.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub(crate) fn e2e_activate_current_app(
+    app: tauri::AppHandle,
+) -> Result<E2eForegroundActivation, String> {
+    if std::env::var(NO_ACTIVATE_ENV).ok().as_deref() != Some("0") {
+        return Err("foreground E2E activation requires KANNA_E2E_NO_ACTIVATE=0".to_string());
+    }
+
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        use objc2::msg_send;
+        use objc2::rc::Retained;
+        use objc2::runtime::{AnyClass, AnyObject};
+
+        let result = unsafe {
+            match AnyClass::get(c"NSApplication") {
+                Some(application_class) => {
+                    let application: Option<Retained<AnyObject>> =
+                        msg_send![application_class, sharedApplication];
+                    match application {
+                        Some(application) => {
+                            let (frontmost_pid_before, frontmost_name_before) =
+                                frontmost_application();
+                            let target_active_before: bool = msg_send![&*application, isActive];
+                            let _: () = msg_send![&*application, activateIgnoringOtherApps: true];
+                            let target_active_after: bool = msg_send![&*application, isActive];
+                            let (frontmost_pid_after, frontmost_name_after) =
+                                frontmost_application();
+                            Ok(E2eForegroundActivation {
+                                target_pid: std::process::id(),
+                                target_active_before,
+                                target_active_after,
+                                frontmost_pid_before,
+                                frontmost_name_before,
+                                frontmost_pid_after,
+                                frontmost_name_after,
+                            })
+                        }
+                        None => Err("NSApplication shared instance unavailable".to_string()),
+                    }
+                }
+                None => Err("NSApplication class unavailable".to_string()),
+            }
+        };
+        let _ = send.send(result);
+    })
+    .map_err(|error| format!("could not schedule foreground E2E activation: {error}"))?;
+    receive
+        .recv()
+        .map_err(|_| "foreground E2E activation did not return from the main thread".to_string())?
+}
+
 /// Resolve the user's full PATH from their interactive login shell.
 /// macOS apps launched from Finder/Spotlight inherit a minimal PATH
 /// (/usr/bin:/bin:/usr/sbin:/sbin) that doesn't include tools like

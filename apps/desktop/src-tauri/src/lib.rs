@@ -362,6 +362,7 @@ pub fn run() {
             commands::fs::append_log,
             commands::fs::get_app_data_dir,
             commands::fs::get_app_build_info,
+            macos::e2e_activate_current_app,
             commands::fs::get_workflow_socket_path,
             commands::fs::get_pipeline_socket_path,
             commands::fs::copy_file,

@@ -28,6 +28,7 @@ interface RenderedTerminal extends Dimensions {
 }
 
 interface FocusObservation {
+  appActivation: unknown;
   documentHasFocus: boolean;
   focusEvents: boolean[];
   nativeFocusError: string | null;
@@ -164,7 +165,11 @@ async function waitForOwnerAndRenderer(
   return (latest as { daemon: Dimensions }).daemon;
 }
 
-async function focusTerminal(client: WebDriverClient, ownerTaskId: string): Promise<void> {
+async function focusTerminal(
+  client: WebDriverClient,
+  ownerTaskId: string,
+  focusLabel: string,
+): Promise<void> {
   const focusState = await client.executeAsync<FocusObservation>(`
     const done = arguments[arguments.length - 1];
     void (async () => {
@@ -202,6 +207,7 @@ async function focusTerminal(client: WebDriverClient, ownerTaskId: string): Prom
         internals.invoke("plugin:window|is_minimized", { label }),
         internals.invoke("plugin:window|is_visible", { label }),
       ]);
+      const appActivation = await internals.invoke("e2e_activate_current_app");
       let nativeFocusError = null;
       try {
         await internals.invoke("plugin:window|set_focus", { label });
@@ -222,6 +228,7 @@ async function focusTerminal(client: WebDriverClient, ownerTaskId: string): Prom
         internals.invoke("plugin:window|is_visible", { label }),
       ]);
       result = {
+        appActivation,
         documentHasFocus: document.hasFocus(),
         focusEvents,
         nativeFocusError,
@@ -245,6 +252,7 @@ async function focusTerminal(client: WebDriverClient, ownerTaskId: string): Prom
     throw new Error(`native main-window focus failed: ${JSON.stringify(focusState)}`);
   }
   if (!focusState.documentHasFocus || !focusState.terminalHasFocus) {
+    await capture(client, `foreground-focus-failure-${focusLabel}.png`);
     throw new Error(`foreground terminal focus was not established: ${JSON.stringify(focusState)}`);
   }
 }
@@ -335,7 +343,7 @@ async function createOwnerTask(): Promise<string> {
     `),
     { timeout: 30_000, interval: 150 },
   ).toBe(true);
-  await focusTerminal(primary, created.taskId);
+  await focusTerminal(primary, created.taskId, "owner-initial");
   return created.taskId;
 }
 
@@ -393,7 +401,7 @@ describe("remote active-view restoration", () => {
     const remoteItemId = await waitForRemoteTask(ownerTaskId);
     await secondary.setWindowRect({ width: 1600, height: 900, x: 80, y: 80 });
     await selectRemoteTask(remoteItemId, ownerTaskId);
-    await focusTerminal(secondary, ownerTaskId);
+    await focusTerminal(secondary, ownerTaskId, "remote");
     const remoteActive = await waitForOwnerAndRenderer(secondary, ownerTaskId);
     expect(remoteActive.cols).toBeLessThan(ownerInitial.cols);
     expect(remoteActive.rows).toBeLessThan(ownerInitial.rows);
@@ -401,7 +409,7 @@ describe("remote active-view restoration", () => {
 
     // This is the actual local desktop foreground handback. Do not send any
     // terminal bytes: focus alone must restore its measured grid.
-    await focusTerminal(primary, ownerTaskId);
+    await focusTerminal(primary, ownerTaskId, "owner-handback");
     const ownerRestored = await waitForOwnerAndRenderer(primary, ownerTaskId, ownerInitial);
     expect(ownerRestored).toEqual(ownerInitial);
     await capture(primary, "owner-restored-without-terminal-input.png");
