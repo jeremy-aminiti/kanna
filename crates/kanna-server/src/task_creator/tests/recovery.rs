@@ -540,6 +540,115 @@ printf 'retained' > resume-proof.txt
     let _ = std::fs::remove_dir_all(&repo_root);
 }
 
+/// A recorded verdict does not keep a PTY alive. A manual stage's agent
+/// finishes its turn, records success, and parks at its composer; a reboot
+/// then takes the session with a `succeeded` run behind it. That is the state
+/// every singleton and every manual stage is in after a restart, and refusing
+/// it is how restart recovery stopped working for them: the desktop's
+/// attach-failure path calls this route, so a task the route would not resume
+/// was a task whose terminal never came back.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
+async fn restart_recovery_resumes_a_session_lost_after_a_success_verdict() {
+    let (repo_root, config, db) = init_recovery_fixture("task-recovery-succeeded");
+    let worktree = repo_root.join(".kanna-worktrees/task-recovery");
+    let config_dir = repo_root.join("claude-config");
+    write_recovery_transcript(&config_dir, &worktree);
+    db.finish_stage_run(
+        "run-killed-mid-turn",
+        "succeeded",
+        Some(r#"{"status":"success","summary":"stage complete"}"#),
+        None,
+    )
+    .unwrap();
+
+    let fake_claude = worktree.join(".kanna/test-provider-bin/claude");
+    std::fs::write(
+        &fake_claude,
+        r#"#!/bin/sh
+session_id=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--resume" ]; then
+    session_id="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+slug=$(printf '%s' "$PWD" | sed 's/[^[:alnum:]]/-/g')
+transcript="$CLAUDE_CONFIG_DIR/projects/$slug/$session_id.jsonl"
+grep -q prior-context-retained "$transcript" || exit 42
+printf 'retained' > resume-proof.txt
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let fake_daemon = spawn_recovery_fake_daemon(config.daemon_dir.clone()).await;
+    let (response, commands) = {
+        let _env_guard = super::CLAUDE_CONFIG_DIR_LOCK.lock().unwrap();
+        std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+        let app = crate::http_api::router(std::sync::Arc::new(crate::http_api::AppState::new(
+            config.clone(),
+        )));
+        let response = tower::ServiceExt::oneshot(
+            app,
+            axum::http::Request::post("/v1/tasks/recovery-task/actions/resume")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let commands = fake_daemon.await.unwrap();
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        (response, commands)
+    };
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+    let command_line = commands
+        .iter()
+        .find_map(|command| match command {
+            kanna_daemon::protocol::Command::Spawn { args, .. } => args.last(),
+            _ => None,
+        })
+        .expect("replacement spawn command");
+    assert!(
+        command_line.contains(&format!("--resume '{RECOVERY_SESSION_ID}'")),
+        "a lost session must reopen its own conversation, not replay the prompt: {command_line}"
+    );
+    assert!(
+        command_line.contains("already recorded its stage verdict"),
+        "a recovered success must not be told to finish interrupted work: {command_line}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("resume-proof.txt")).unwrap(),
+        "retained"
+    );
+
+    // The succeeded run keeps its own verdict. Recovery adds a run beside it;
+    // it never rewrites a real success as an interruption.
+    let finished = db.stage_run("run-killed-mid-turn").unwrap().unwrap();
+    assert_eq!(finished.status, "succeeded");
+    let finished_result: serde_json::Value =
+        serde_json::from_str(finished.result.as_deref().unwrap()).unwrap();
+    assert_eq!(finished_result["summary"], "stage complete");
+
+    let run = loop {
+        let run = db.latest_stage_run("recovery-task").unwrap().unwrap();
+        if run.id != "run-killed-mid-turn" {
+            break run;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        run.resumed_from_run_id.as_deref(),
+        Some("run-killed-mid-turn")
+    );
+    assert_eq!(run.resume_fallback_reason, None);
+
+    let _ = std::fs::remove_dir_all(&repo_root);
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // Process-global provider store must stay fixed through prepare.
 async fn restart_recovery_discovers_and_resumes_codex_by_worktree_cwd() {

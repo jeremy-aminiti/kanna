@@ -993,9 +993,17 @@ fn prepare_stage_restart(
         .ok_or_else(|| format!("task has no stage run to resume: {task_id}"))?;
     match &intent {
         StageRestartIntent::ResumeProviderSession => {
-            if !matches!(run.status.as_str(), "cancelled" | "failed") {
+            // A `succeeded` run is resumable for the same reason a failed one
+            // is: the verdict describes the turn that ended, not the session
+            // that carried it. A manual stage parks its agent at the composer
+            // after recording success, so a daemon death there leaves a task
+            // whose conversation is still worth reopening. The caller has
+            // already proven the session absent, and the succeeded run keeps
+            // its own verdict — the resume records a new run beside it rather
+            // than rewriting history as an interruption.
+            if !matches!(run.status.as_str(), "cancelled" | "failed" | "succeeded") {
                 return Err(format!(
-                    "latest run is {}, not cancelled or failed: {}",
+                    "latest run is {}, not cancelled, failed or succeeded: {}",
                     run.status, task_id
                 ));
             }
@@ -1106,14 +1114,31 @@ fn prepare_stage_restart(
     let (workspace_spec, final_prompt, resume_fallback_reason) = match resume {
         Ok((_provider, workspace)) => (
             RunWorkspaceSpec::Resume(workspace),
-            format!(
-                "Kanna recovered this task after its previous terminal session ended before a \
-                 stage verdict was recorded. Continue the existing task from the preserved \
-                 conversation and worktree context. Review the current state, finish the \
-                 interrupted work, and follow the stage completion instructions. \
-                 Do not restart the task from scratch.\n\nTask reminder:\n{}",
-                source_task.prompt.as_deref().unwrap_or("")
-            ),
+            // What the agent is told must match what actually happened to it.
+            // A run that recorded success and then lost its PTY has no
+            // interrupted work to finish, and telling it otherwise is how a
+            // recovered manual stage redoes a stage it already completed.
+            if run.status == "succeeded" {
+                format!(
+                    "Kanna recovered this task after its previous terminal session ended. \
+                     The last run already recorded its stage verdict, so there is no \
+                     interrupted work to finish and nothing to redo. Continue the existing \
+                     task from the preserved conversation and worktree context, and pick up \
+                     from wherever that conversation left off. Do not restart the task from \
+                     scratch and do not re-record a verdict you have already \
+                     recorded.\n\nTask reminder:\n{}",
+                    source_task.prompt.as_deref().unwrap_or("")
+                )
+            } else {
+                format!(
+                    "Kanna recovered this task after its previous terminal session ended before a \
+                     stage verdict was recorded. Continue the existing task from the preserved \
+                     conversation and worktree context. Review the current state, finish the \
+                     interrupted work, and follow the stage completion instructions. \
+                     Do not restart the task from scratch.\n\nTask reminder:\n{}",
+                    source_task.prompt.as_deref().unwrap_or("")
+                )
+            },
             None,
         ),
         Err(reason) => {
