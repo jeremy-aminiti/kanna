@@ -385,7 +385,8 @@ impl Db {
                 base_oid TEXT NOT NULL,
                 state TEXT NOT NULL CHECK (state IN ('importing','prepared','failed')),
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                prepared_at TEXT
+                prepared_at TEXT,
+                content_commitment TEXT
             );
 
             CREATE TABLE transferred_task_history (

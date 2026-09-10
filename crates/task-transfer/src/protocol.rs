@@ -222,10 +222,30 @@ pub enum ControlRequest {
         transfer_id: String,
         source_task_id: String,
         destination_local_task_id: String,
+        /// Half A of the source-close proof: the destination's own
+        /// commitment, computed from what it read back after import — never
+        /// from the payload it received. Additive so an old destination
+        /// server (which never computes one) still acknowledges; the source
+        /// then refuses to close on a missing proof rather than trusting it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_commitment: Option<String>,
+        /// Half B: the destination's own repo identity, reported plaintext
+        /// beside Half A rather than folded into it — the source cannot mint
+        /// a commitment over identity it does not know in advance. See
+        /// docs/kanna-server-boundary.md item 3.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination_repo_id: Option<String>,
     },
     MarkIncomingEventRecorded {
         request_id: String,
         transfer_id: String,
+    },
+    /// A definitive, contract-specific refusal for an incoming transfer,
+    /// distinct from `MarkIncomingEventRecorded`'s generic delivery marker.
+    MarkIncomingTransferRefused {
+        request_id: String,
+        transfer_id: String,
+        reason: String,
     },
     MarkImportCommitApplied {
         request_id: String,
@@ -363,6 +383,8 @@ pub enum ControlResponse {
         transfer_id: String,
         #[serde(default)]
         admitted: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refusal_reason: Option<String>,
     },
     AbandonOutgoingTransfer {
         request_id: String,
@@ -383,6 +405,10 @@ pub enum ControlResponse {
         transfer_id: String,
     },
     MarkIncomingEventRecorded {
+        request_id: String,
+        transfer_id: String,
+    },
+    MarkIncomingTransferRefused {
         request_id: String,
         transfer_id: String,
     },
@@ -606,8 +632,19 @@ pub enum PeerResponse {
     SubmitTransferPayload {
         request_id: String,
         transfer_id: String,
+        // Kept as-is on the wire for compatibility: `admitted` still means
+        // only "durably queued", never "verified" — see
+        // docs/kanna-server-boundary.md item 3. Refusal rides beside it as
+        // additive structured data an old peer's deserializer simply drops.
         #[serde(default)]
         admitted: bool,
+        /// A definitive, contract-specific refusal reason. `Some` only when
+        /// `admitted` is `false` *and* the destination positively decided
+        /// this payload cannot be admitted (a fast, zero-I/O, structural
+        /// decision). `None` with `admitted: false` means unresolved —
+        /// still queued, still possible, distinct from a refusal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refusal_reason: Option<String>,
     },
     AbandonTransfer {
         request_id: String,
@@ -833,6 +870,10 @@ pub enum SidecarEvent {
         transfer_id: String,
         source_task_id: String,
         destination_local_task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_commitment: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination_repo_id: Option<String>,
     },
     OutgoingTransferFinalizationRequested {
         transfer_id: String,

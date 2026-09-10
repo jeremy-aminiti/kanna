@@ -191,6 +191,44 @@ impl Db {
             [task_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         ).optional()
     }
+
+    /// The destination-computed proof for this transfer, once `state` has
+    /// reached `prepared` — see [`Self::set_transferred_task_manifest_content_commitment`].
+    /// `None` either because the manifest itself does not exist, or because
+    /// it has not yet been proven.
+    pub fn transferred_task_manifest_content_commitment(
+        &self,
+        transfer_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT content_commitment FROM transferred_task_manifest WHERE transfer_id=?",
+                [transfer_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
+    /// Records the digest `verify_persisted_task_bundle` computed from its
+    /// own read-back Git/SQLite values — never from the payload the
+    /// destination merely received, which would let an unimported
+    /// destination echo the source's own commitment back as proof of
+    /// something it never did. Settable only once the manifest is genuinely
+    /// `prepared`, and only once: a later call is a no-op rather than
+    /// overwriting a proof already relied on.
+    pub fn set_transferred_task_manifest_content_commitment(
+        &self,
+        transfer_id: &str,
+        content_commitment: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        Ok(self.conn.execute(
+            "UPDATE transferred_task_manifest
+             SET content_commitment = ?
+             WHERE transfer_id = ? AND state = 'prepared' AND content_commitment IS NULL",
+            (content_commitment, transfer_id),
+        )? == 1)
+    }
     /// Stores the source-pinned workflow/context before a transferred task's
     /// first agent spawn. Replays must carry the same transfer identity.
     pub fn upsert_transferred_task_context(
