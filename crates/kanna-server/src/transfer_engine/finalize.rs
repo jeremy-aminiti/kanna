@@ -1577,11 +1577,18 @@ mod real_daemon_tests {
     /// `crates/daemon/tests/*.rs`, which belong to the daemon's own package.
     /// `KANNA_DAEMON_TEST_BIN` is the explicit override for a caller that
     /// built the daemon somewhere non-standard; otherwise this locates the
-    /// binary the same way Cargo already laid it out: workspace artifacts
-    /// share one `target-dir` (`.cargo/config.toml` -> `.build/`), so the
-    /// `kanna-daemon` binary is a sibling of this test binary's own profile
-    /// directory (`<target-dir>/<profile>/deps/<this test>` ->
-    /// `<target-dir>/<profile>/kanna-daemon`).
+    /// binary the same way Cargo already laid it out. Measured directly
+    /// against this workspace's actual `.cargo/config.toml`: `build-dir`
+    /// (`.build/cargo-build`) and `target-dir` (`.build`) are split, so this
+    /// test binary itself compiles under
+    /// `.build/cargo-build/<profile>/deps/<this test>` while a named
+    /// `[[bin]]` like `kanna-daemon` is copied to `.build/<profile>/` --
+    /// *not* to a sibling of this test binary's own directory. The profile
+    /// name (the directory that holds `deps/`) is the one thing shared by
+    /// both layouts, so it locates `kanna-daemon` under the workspace's
+    /// fixed `target-dir` rather than by walking up from wherever the test
+    /// harness happened to land. The plain sibling-of-this-binary layout is
+    /// kept as a fallback in case `build-dir` is ever unset.
     fn resolve_daemon_binary() -> PathBuf {
         if let Ok(path) = std::env::var("KANNA_DAEMON_TEST_BIN") {
             let path = PathBuf::from(path);
@@ -1596,14 +1603,26 @@ mod real_daemon_tests {
             .parent()
             .and_then(Path::parent)
             .expect("test binary has a profile directory two levels up from itself");
-        let candidate = profile_dir.join("kanna-daemon");
-        assert!(
-            candidate.is_file(),
-            "kanna-daemon binary not found at {candidate:?}; build it first with \
-             `cargo build -p kanna-daemon` (it shares this workspace's target-dir with \
-             kanna-server), or set KANNA_DAEMON_TEST_BIN to an already-built binary's path"
-        );
-        candidate
+        let mut candidates = Vec::new();
+        if let Some(profile) = profile_dir.file_name() {
+            let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .expect("crates/kanna-server has a workspace root two levels up");
+            candidates.push(repo_root.join(".build").join(profile).join("kanna-daemon"));
+        }
+        candidates.push(profile_dir.join("kanna-daemon"));
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| {
+                panic!(
+                    "kanna-daemon binary not found next to this test binary ({exe:?}); build it \
+                     first with `cargo build -p kanna-daemon` (it shares this workspace's \
+                     target-dir with kanna-server), or set KANNA_DAEMON_TEST_BIN to an \
+                     already-built binary's path"
+                )
+            })
     }
 
     /// A real `kanna-daemon` child process, listening on its own socket
