@@ -6,6 +6,11 @@ export interface KdPorts {
   KANNA_MOBILE_PORT: number;
   KANNA_APPIUM_PORT: number;
   KANNA_TRANSFER_PORT: number;
+  /// Dedicated authenticated-LAN machine-invoke listener. Explicitly
+  /// reserved here rather than derived by arithmetic from another port, so
+  /// it never collides with one an existing port already owns as some
+  /// worktree's offset happens to land on it.
+  KANNA_LAN_ROUTING_PORT: number;
   KANNA_FIREBASE_AUTH_PORT: number;
   KANNA_FIREBASE_FIRESTORE_PORT: number;
   KANNA_FIREBASE_FUNCTIONS_PORT: number;
@@ -21,6 +26,7 @@ export const defaultPorts: KdPorts = {
   KANNA_MOBILE_PORT: 8081,
   KANNA_APPIUM_PORT: 4723,
   KANNA_TRANSFER_PORT: 4455,
+  KANNA_LAN_ROUTING_PORT: 4460,
   KANNA_FIREBASE_AUTH_PORT: 9099,
   KANNA_FIREBASE_FIRESTORE_PORT: 8080,
   KANNA_FIREBASE_FUNCTIONS_PORT: 5001,
@@ -54,6 +60,7 @@ export function resolvePorts(input: ResolvePortsInput): KdPorts {
     KANNA_MOBILE_PORT: resolvePort("KANNA_MOBILE_PORT", input),
     KANNA_APPIUM_PORT: resolvePort("KANNA_APPIUM_PORT", input),
     KANNA_TRANSFER_PORT: resolvePort("KANNA_TRANSFER_PORT", input),
+    KANNA_LAN_ROUTING_PORT: resolvePort("KANNA_LAN_ROUTING_PORT", input),
     KANNA_FIREBASE_AUTH_PORT: resolvePort("KANNA_FIREBASE_AUTH_PORT", input),
     KANNA_FIREBASE_FIRESTORE_PORT: resolvePort("KANNA_FIREBASE_FIRESTORE_PORT", input),
     KANNA_FIREBASE_FUNCTIONS_PORT: resolvePort("KANNA_FIREBASE_FUNCTIONS_PORT", input),
