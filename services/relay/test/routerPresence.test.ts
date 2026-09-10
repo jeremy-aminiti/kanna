@@ -174,6 +174,54 @@ describe("connection pair lifetime", () => {
     expect((await response).body).toEqual([{ id: "task-on-target" }]);
   });
 
+  it("stamps a forwarded invoke with the sender's own verified identity, overwriting any claim in the frame", async () => {
+    const url = await startServer();
+    const userId = "desktop-provenance-user";
+    const requester = await connect(url);
+    const target = await connect(url);
+    setServerConnection(
+      userId,
+      "desktop-requester",
+      requester.server,
+      desktopProof("desktop-requester"),
+    );
+    setServerConnection(
+      userId,
+      "desktop-target",
+      target.server,
+      desktopProof("desktop-target"),
+    );
+
+    const delivered = nextMessage(target.client);
+    routeMessage(
+      userId,
+      "server",
+      JSON.stringify({
+        type: "invoke",
+        id: "desktop-invoke-provenance",
+        desktopId: "desktop-target",
+        method: "GET",
+        path: "/v1/status",
+        body: null,
+        // A sender cannot self-report who it is; this must be discarded in
+        // favor of the identity this connection actually authenticated as.
+        sourceDesktopId: "desktop-impostor",
+      }),
+      requester.server,
+      "desktop-requester",
+      {
+        kind: "desktop",
+        desktopId: "desktop-requester",
+        desktopSecret: "requester-secret",
+      },
+    );
+
+    expect(await delivered).toMatchObject({
+      id: "desktop-invoke-provenance",
+      sourceDesktopId: "desktop-requester",
+    });
+  });
+
   it("rejects sibling desktop invokes authenticated by a legacy device token", async () => {
     const url = await startServer();
     const userId = "legacy-device-user";

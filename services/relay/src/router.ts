@@ -38,6 +38,15 @@ export interface RelayMessage {
   payload?: unknown;
   path?: unknown;
   service?: unknown;
+  /**
+   * Present only on a forwarded "invoke" frame, and only ever written by
+   * this router (see `routeMessage`'s "invoke" branch) from the sending
+   * connection's own relay-verified desktop-secret identity - never read
+   * back out of a sender's own frame, which carries no such field at all.
+   * A sender cannot claim this value; a receiving desktop can trust it
+   * exactly as much as it already trusts `authenticated_user_id`.
+   */
+  sourceDesktopId?: unknown;
 }
 
 /** In-memory map of userId → client and desktop WebSocket connections. */
@@ -887,7 +896,17 @@ export function routeMessage(
         pair.pendingResponses.set(idKey, source);
         pair.pendingResponseClasses.set(idKey, byteClass);
       }
-      sendControlFrame(target, data, dataByteLength, byteClass);
+      // Unlike every other frame this function forwards verbatim, an
+      // "invoke" frame must carry provenance the target can act on: which
+      // specific same-account desktop is asking, not merely that some
+      // desktop of this account is. `sourceDesktopId` here is `desktopId`
+      // (this function's own parameter, bound to the sending connection at
+      // auth time and already checked against `serverAuthProof` above) -
+      // never anything read out of `parsed`, which the sender does not and
+      // cannot populate. A target that predates this field simply ignores
+      // it; nothing about the rest of the frame changes.
+      const forwarded = JSON.stringify({ ...parsed, sourceDesktopId });
+      sendControlFrame(target, forwarded, Buffer.byteLength(forwarded), byteClass);
       return;
     }
 
