@@ -209,23 +209,38 @@ describe("the runtime policy file", () => {
 /**
  * The real closure, measured on a Linux build rather than imagined.
  *
- * Taken from the Phase 2 aarch64 binaries on 2026-09-09 with
- * `readelf --wide -d`. Pinning it here is what stops the policy from drifting
- * into a description of what somebody assumed: a new dependency appearing in a
- * Kanna binary fails this test on any developer's machine, months before it
- * would fail a user's launch.
+ * The libc++/libc++abi/libgcc_s/libm/libc set for the five non-GTK binaries was
+ * first taken from the Phase 2 aarch64 binaries on 2026-09-09 with
+ * `readelf --wide -d`. `libunwind.so.1` and the `kanna-worker` row were added
+ * 2026-09-10 from CI run 34439249468's real `readelf`-backed audit on Ubuntu
+ * 24.04 (noble), both amd64 and arm64: installing `libc++abi-dev` there pulls
+ * in `libunwind-18` as a transitive dependency of the distro's own
+ * `libc++abi.so.1`, so the five binaries that already link libc++/libc++abi
+ * link this too. Pinning it here is what stops the policy from drifting into a
+ * description of what somebody assumed: a new dependency appearing in a Kanna
+ * binary fails this test on any developer's machine, months before it would
+ * fail a user's launch.
  */
 describe("the measured artifact closure", () => {
   const MEASURED: Record<string, string[]> = {
     "kanna-cli": ["libssl.so.3", "libcrypto.so.3", "libgcc_s.so.1", "libc.so.6"],
-    "kanna-daemon": ["libc++.so.1", "libc++abi.so.1", "libgcc_s.so.1", "libm.so.6", "libc.so.6"],
+    "kanna-daemon": [
+      "libc++.so.1", "libc++abi.so.1", "libunwind.so.1", "libgcc_s.so.1", "libm.so.6", "libc.so.6",
+    ],
     "kanna-mcp": ["libssl.so.3", "libcrypto.so.3", "libgcc_s.so.1", "libc.so.6"],
     "kanna-server": [
-      "libc++.so.1", "libc++abi.so.1", "libssl.so.3", "libcrypto.so.3",
+      "libc++.so.1", "libc++abi.so.1", "libunwind.so.1", "libssl.so.3", "libcrypto.so.3",
       "libgcc_s.so.1", "libm.so.6", "libc.so.6",
     ],
-    "kanna-task-transfer": ["libc++.so.1", "libc++abi.so.1", "libgcc_s.so.1", "libm.so.6", "libc.so.6"],
-    "kanna-terminal-recovery": ["libc++.so.1", "libc++abi.so.1", "libgcc_s.so.1", "libc.so.6"],
+    "kanna-task-transfer": [
+      "libc++.so.1", "libc++abi.so.1", "libunwind.so.1", "libgcc_s.so.1", "libm.so.6", "libc.so.6",
+    ],
+    "kanna-terminal-recovery": [
+      "libc++.so.1", "libc++abi.so.1", "libunwind.so.1", "libgcc_s.so.1", "libc.so.6",
+    ],
+    "kanna-worker": [
+      "libc++.so.1", "libc++abi.so.1", "libunwind.so.1", "libgcc_s.so.1", "libm.so.6", "libc.so.6",
+    ],
     "kanna-desktop": [
       "libgio-2.0.so.0", "libgobject-2.0.so.0", "libglib-2.0.so.0", "libz.so.1",
       "libgdk-3.so.0", "libpango-1.0.so.0", "libgdk_pixbuf-2.0.so.0",
@@ -266,9 +281,35 @@ describe("the measured artifact closure", () => {
     const audit = auditArtifacts(policy, "arm64", artifacts);
     const openssl = audit.conditionalUses.filter((use) => use.soname === "libssl.so.3").map((use) => use.path);
     const libcxx = audit.conditionalUses.filter((use) => use.soname === "libc++.so.1").map((use) => use.path);
+    const libunwind = audit.conditionalUses.filter((use) => use.soname === "libunwind.so.1").map((use) => use.path);
+    const FIVE_CXX_CONSUMERS = [
+      "kanna-daemon", "kanna-server", "kanna-task-transfer", "kanna-terminal-recovery", "kanna-worker",
+    ];
     expect(openssl.sort()).toEqual(["kanna-cli", "kanna-mcp", "kanna-server"]);
-    expect(libcxx.sort()).toEqual([
-      "kanna-daemon", "kanna-server", "kanna-task-transfer", "kanna-terminal-recovery",
-    ]);
+    expect(libcxx.sort()).toEqual(FIVE_CXX_CONSUMERS);
+    // libunwind.so.1 is a transitive consequence of the same accepted libc++abi
+    // exception, so it is conditionally used by exactly the same five artifacts.
+    expect(libunwind.sort()).toEqual(FIVE_CXX_CONSUMERS);
+  });
+
+  /**
+   * `libunwind-18` must reach `Depends` exactly once, alongside the already
+   * accepted libc++/libc++abi packages, and its build-only `-dev` sibling must
+   * never appear as a runtime dependency.
+   */
+  it("derives libunwind-18 in Depends exactly once, and never the -dev package", () => {
+    const artifacts: ElfFacts[] = Object.entries(MEASURED).map(([name, needed]) => ({
+      path: name,
+      machine: "AArch64",
+      interpreter: "/lib/ld-linux-aarch64.so.1",
+      needed,
+      versionRequirements: {},
+      runpaths: [],
+    }));
+    const audit = auditArtifacts(policy, "arm64", artifacts);
+    expect(audit.findings).toEqual([]);
+    const depends = dependsFromAudit(policy, audit);
+    expect(depends.filter((entry) => entry === "libunwind-18")).toHaveLength(1);
+    expect(depends).not.toContain("libunwind-18-dev");
   });
 });

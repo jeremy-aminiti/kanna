@@ -67,22 +67,49 @@ seven Linux binaries Phase 2 left on the ARM64 VM (Ubuntu 26.04.1 aarch64):
 That measurement corrected three things the written policy had wrong: `libz` was
 missing from the allowlist, the dynamic loader appeared as a `NEEDED` entry and
 would have been rejected as undeclared, and — the substantive one — **`libc++`
-and `libc++abi` are linked dynamically today, in four artifacts**, because
-`libghostty-vt-sys`'s build script emits `cargo:rustc-link-lib=c++`.
+and `libc++abi` are linked dynamically today**, because `libghostty-vt-sys`'s
+build script emits `cargo:rustc-link-lib=c++`.
 
-The plan preferred static linking, and it is achievable: the pinned Zig
-toolchain already produces `libc++.a` and `libc++abi.a` in its own cache
-(`~/.cache/zig/o/…`). Recording this as "cannot be vendored" would therefore be
-false. It is a **conditional exception** carrying the measurement, the evidence
-that static is reachable, and a named follow-up — the same treatment OpenSSL
-gets — and every build reports by name which artifacts still use it. Both
-exception sets are asserted in `tools/kd/tests/linux-elf-audit.test.ts` so they
-shrink deliberately rather than growing by forgetting.
+The plan preferred static linking, and it is partly demonstrated: the pinned
+Zig toolchain's own cache has been observed to produce `libc++.a` and
+`libc++abi.a` (`~/.cache/zig/o/…`). Recording this as "cannot be vendored"
+would therefore be false. It is a **conditional exception** carrying the
+measurement, the evidence that static linking is partly reachable, and a named
+follow-up — the same treatment OpenSSL gets — and every build reports by name
+which artifacts still use it. The exception sets are asserted in
+`tools/kd/tests/linux-elf-audit.test.ts` so they shrink deliberately rather
+than growing by forgetting.
 
-One thing this measurement does **not** establish: `libc++1`/`libc++abi1` are
-packaged in Ubuntu 26.04 universe, and the supported floor is 24.04. A package
-declaring them must verify the supplying package on **noble**, not on the
-development VM. That check has not been run.
+**Update, 2026-09-10:** the question this measurement left open — whether
+`libc++1`/`libc++abi1` are actually available on the supported floor, not just
+the 26.04 development VM — is now answered by real evidence: CI run
+`34439249468` ran `./kd build linux-package` on `ubuntu-24.04` and
+`ubuntu-24.04-arm` hosted runners (the actual 24.04/glibc 2.39 floor) and
+confirmed `libc++1`/`libc++abi1` resolve to `libc++1-18`/`libc++abi1-18` from
+`llvm-toolchain-18`, noble universe, on both architectures. That same run is
+also the first real-floor `readelf` audit of the closure, and it is stricter
+than the VM measurement: the VM's own libc++/libc++abi entries were measured
+against only **four** artifacts on 2026-09-09; the CI run shows **five** —
+`kanna-worker` links this too and had never been included in either the policy
+measurement or `tools/kd/tests/linux-elf-audit.test.ts`'s closure. The same run
+also surfaced a dependency the VM measurement missed entirely: Noble's
+`libc++abi1-18` package itself depends on `libunwind-18 (>= 1:18.1.3)`, so
+`libunwind.so.1` is now a third, direct `NEEDED` entry in the same five
+binaries — declared as its own conditional exception in
+`packaging/linux/runtime-policy.json`, transitive in provenance (it comes from
+the already-accepted libc++abi package, not from anything Kanna's own build
+script asks for) but audited directly since it appears in the shipped ELF
+closure regardless of provenance. `libunwind-18` is noble universe, built from
+the same `llvm-toolchain-18` source as the already-accepted libc++/libc++abi
+exception.
+
+None of this is clean-install proof yet. `kd build linux-package` audits the
+staged closure before `dpkg-deb` runs (below), and CI run `34439249468` failed
+that audit before the libunwind entry existed — no `.deb` was produced by that
+run, and none has been produced from a fresh-host `apt install` since (the
+CI runners themselves preinstall the `-dev` packages the audit is checking
+for, so a green build there is not clean-install evidence either). That
+remains open; see the fresh-host install proof requirement below.
 
 `kd build linux-package` compiles, audits the staged artifacts' own ELF headers,
 derives `Depends` from what survives, then packages. The order is the point: a
@@ -194,7 +221,7 @@ release graph (§7.1).
 
 | Dimension | Position | Evidence today |
 | --- | --- | --- |
-| Distribution floor | Ubuntu 24.04 LTS, glibc 2.39, kernel 6.8 | **Not verified.** All measurement to date is on 26.04.1 aarch64. |
+| Distribution floor | Ubuntu 24.04 LTS, glibc 2.39, kernel 6.8 | **Partially verified.** CI run `34439249468` built and audited on real `ubuntu-24.04`/`ubuntu-24.04-arm` hosted runners (§2) — package availability confirmed both architectures, but the audit found an undeclared dependency and no `.deb` was produced; no clean-install proof exists yet. |
 | x86-64 build | Required | CI lane written; **never run.** |
 | arm64 build | Required | Phase 2 built all seven binaries natively (debug). Release build not run. |
 | x86-64 installed acceptance | `ubuntu-24.04` hosted runner (substitute) | Lane written; **not wired into CI and never run** — see §7.3. |
@@ -316,7 +343,7 @@ Each item, with what it needs.
 7. **The cross-version handoff fixture is still skipped on Linux.**
    `previous_daemon.rs`'s archived-tag gate needs a real Linux-capable release
    tag, which requires (1) and (5).
-8. **`libc++` static linking**, per §2.
+8. **`libc++`/`libc++abi`/`libunwind` static linking**, per §2.
 9. **Support documentation for users** — install, key bootstrap, update and
    restart sequence, service semantics, uninstall, recovery, logs, graphics
    troubleshooting — is not written. It should not be written before there is a
