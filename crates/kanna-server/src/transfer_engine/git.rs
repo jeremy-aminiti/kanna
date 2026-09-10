@@ -193,9 +193,110 @@ pub fn import_task_bundle_ref(
     Ok(transfer_ref)
 }
 
+/// The exit status `git rev-parse --verify --quiet` documents for "no such
+/// object" (verified against the installed git: missing and malformed refs
+/// both exit 1, while a fatal repository, permission, or object-database
+/// error exits 128 or fails to run at all). Absence of a final transfer ref
+/// authorizes this transaction to *create* one, so only this exact,
+/// documented status may be read as absence — anything else has to propagate
+/// as an error instead of being treated as "not created yet".
+const GIT_VERIFY_NOT_FOUND_STATUS: i32 = 1;
+
+fn looks_like_commit_oid(candidate: &str) -> bool {
+    matches!(candidate.len(), 40 | 64)
+        && candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Strictly resolves one of a transfer's final refs to its commit id.
+///
+/// `Ok(None)` means git affirmatively reported the ref does not exist.
+/// Everything else — a corrupt object, a permission error, a missing
+/// repository, a command that failed to run — is propagated as an error
+/// rather than read as absence.
+fn read_final_transfer_ref(repo_path: &Path, reference: &str) -> Result<Option<String>, String> {
+    let output = Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ])
+        .current_dir(repo_path)
+        // Same isolation `git()` applies: a nested git run must not adopt the
+        // worktree-scoped environment of the instance that spawned this one.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .map_err(|error| format!("failed to run git rev-parse for {reference}: {error}"))?;
+    match output.status.code() {
+        Some(0) => {
+            let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if looks_like_commit_oid(&oid) {
+                Ok(Some(oid))
+            } else {
+                Err(format!("git returned an invalid object id for {reference}"))
+            }
+        }
+        Some(GIT_VERIFY_NOT_FOUND_STATUS) => Ok(None),
+        _ => Err(format!(
+            "failed to read transfer ref {reference}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+/// Test-only synchronization seam at the exact point `import_task_bundle_refs`
+/// is about to send its atomic transaction to git -- after every read this
+/// attempt will act on has already happened, immediately before publication.
+/// Production takes this identical code path with the seam compiled to
+/// nothing (`#[cfg(not(test))]` below): the hook exists so a test can force
+/// several concurrent callers to all reach publication having read the same
+/// pre-publication ref state, which starting threads together does not by
+/// itself guarantee.
+#[cfg(test)]
+static PUBLICATION_SEAM: std::sync::OnceLock<
+    std::sync::Mutex<Option<std::sync::Arc<std::sync::Barrier>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn set_publication_seam(barrier: Option<std::sync::Arc<std::sync::Barrier>>) {
+    *PUBLICATION_SEAM
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("publication seam mutex poisoned") = barrier;
+}
+
+#[cfg(test)]
+fn wait_at_publication_seam() {
+    let barrier = PUBLICATION_SEAM
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("publication seam mutex poisoned")
+        .clone();
+    if let Some(barrier) = barrier {
+        barrier.wait();
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn wait_at_publication_seam() {}
+
 /// Import and prove both immutable refs a transferred review needs. The
 /// source names are read only from the bundle; destination branches live in a
 /// transfer-private namespace and are never rewritten.
+///
+/// Objects are ingested with `git bundle unbundle`, which writes to the
+/// object store without touching any ref — so a bundle that fails
+/// verification, or a process that dies mid-unbundle, leaves ordinary
+/// unreachable objects and never a partial or rebound final ref. Both final
+/// refs are then published in one `git update-ref --stdin` transaction:
+/// absent refs are created, an already-identical ref is verified (making a
+/// retry idempotent), and any differing existing ref refuses the whole
+/// transaction before it is even started.
 pub fn import_task_bundle_refs(
     repo_path: &Path,
     bundle_path: &Path,
@@ -236,52 +337,92 @@ pub fn import_task_bundle_refs(
             ));
         }
     }
+    // Object-only ingestion: no refname is given, so this writes objects into
+    // the store and updates no ref, whatever the bundle itself contains.
     git(repo_path, &["bundle", "unbundle", bundle_path])?;
-    for (label, expected) in [("head", expected_head_oid), ("base", expected_base_oid)] {
-        let imported = git(
+    for expected in [expected_head_oid, expected_base_oid] {
+        git(
             repo_path,
             &["cat-file", "-e", &format!("{expected}^{{commit}}")],
         )?;
-        let _ = imported;
     }
-    let mut tx = format!("start\n");
+
+    let mut tx = String::from("start\n");
     for (reference, expected) in [
         (&head_ref, expected_head_oid),
         (&base_ref, expected_base_oid),
     ] {
-        let current = git(
-            repo_path,
-            &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-        );
-        match current {
-            Ok(existing) if existing != expected => {
-                return Err(format!("transfer ref rebinding refused for {reference}"))
+        match read_final_transfer_ref(repo_path, reference)? {
+            Some(existing) if existing != expected => {
+                return Err(format!("transfer ref rebinding refused for {reference}"));
             }
-            Ok(existing) => tx.push_str(&format!("verify {reference} {existing}\n")),
-            Err(_) => tx.push_str(&format!("create {reference} {expected}\n")),
+            Some(existing) => tx.push_str(&format!("verify {reference} {existing}\n")),
+            None => tx.push_str(&format!("create {reference} {expected}\n")),
         }
     }
     tx.push_str("prepare\ncommit\n");
+
+    // The publication seam: every read this attempt will act on is already
+    // done, and nothing below this point may observe or change ref state
+    // before the transaction itself does. A test can force concurrent
+    // callers to all arrive here together; production takes the same path
+    // with the wait compiled out entirely.
+    wait_at_publication_seam();
+
     let mut child = Command::new("git")
         .args(["update-ref", "--stdin"])
         .current_dir(repo_path)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| format!("failed to start git update-ref: {error}"))?;
     use std::io::Write;
-    child
+    let mut stdin = child
         .stdin
         .take()
-        .unwrap()
-        .write_all(tx.as_bytes())
-        .map_err(|e| e.to_string())?;
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+        .ok_or_else(|| "git update-ref did not open a stdin pipe".to_string())?;
+    let write_result = stdin.write_all(tx.as_bytes());
+    // Close stdin before waiting regardless of the write outcome, so
+    // update-ref sees EOF and this process's exit does not depend on a write
+    // that already failed.
+    drop(stdin);
+    if let Err(error) = write_result {
+        // The write failed, but the child was already spawned: reap it so a
+        // stdin error never leaks a child process.
+        let _ = child.wait();
+        return Err(format!("failed to write to git update-ref: {error}"));
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for git update-ref: {error}"))?;
     if !output.status.success() {
+        // A competing writer can complete an equivalent transaction between
+        // this attempt's reads above and its publish here. Reread both refs
+        // strictly before treating this as a genuine failure: converging on a
+        // pair a competing writer already published in full is success, not
+        // a failure to mutate. Any other outcome — including a real read
+        // error during this recheck — falls through to the original refusal.
+        let recovered = [
+            (&head_ref, expected_head_oid),
+            (&base_ref, expected_base_oid),
+        ]
+        .into_iter()
+        .all(|(reference, expected)| {
+            matches!(
+                read_final_transfer_ref(repo_path, reference),
+                Ok(Some(existing)) if existing == expected
+            )
+        });
+        if recovered {
+            return Ok((head_ref, base_ref));
+        }
         return Err(format!(
             "atomic transfer ref publication failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
     Ok((head_ref, base_ref))
@@ -772,6 +913,490 @@ mod tests {
             git(&destination, &["rev-parse", "refs/heads/main"]).expect("destination main"),
             expected,
             "the import must add the task history without substituting or rewriting main",
+        );
+    }
+
+    /// A source repo with one task head and two independent candidate bases,
+    /// so a test can bundle the head against either base and get a distinct
+    /// base OID without touching the head at all.
+    fn source_repo_with_head_and_two_bases(root: &Path) -> PathBuf {
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).expect("source dir");
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            git(&source, &args).expect("init source");
+        }
+        std::fs::write(source.join("base.txt"), b"base").expect("base file");
+        git(&source, &["add", "base.txt"]).expect("add base");
+        git(&source, &["commit", "-m", "base"]).expect("commit base");
+        git(&source, &["branch", "base-a"]).expect("branch base-a");
+        git(&source, &["checkout", "-b", "base-b"]).expect("branch base-b");
+        std::fs::write(source.join("alt.txt"), b"alt").expect("alt file");
+        git(&source, &["add", "alt.txt"]).expect("add alt");
+        git(&source, &["commit", "-m", "alt base"]).expect("commit alt base");
+        git(&source, &["checkout", "main"]).expect("back to main");
+        git(&source, &["checkout", "-b", "task-1"]).expect("task branch");
+        std::fs::write(source.join("task.txt"), b"task").expect("task file");
+        git(&source, &["add", "task.txt"]).expect("add task file");
+        git(&source, &["commit", "-m", "task work"]).expect("commit task");
+        source
+    }
+
+    /// The invariant `import_verified_task_bundle`/`build_create_request`
+    /// depend on: a second attempt for the *same* transfer and head that
+    /// names a *different* base must be refused, and the pair the first
+    /// attempt published — the same string a task's `pipeline_item.base_ref`
+    /// is stored as, verbatim — must resolve to exactly what it did before.
+    #[test]
+    fn a_conflicting_base_for_the_same_transfer_and_head_is_refused_and_the_original_pair_survives()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = source_repo_with_head_and_two_bases(temp.path());
+        let head_oid = commit_oid(&source, "task-1").expect("head oid");
+        let base_a_oid = commit_oid(&source, "base-a").expect("base a oid");
+        let base_b_oid = commit_oid(&source, "base-b").expect("base b oid");
+
+        let destination = temp.path().join("destination");
+        init_empty_repo(&destination).expect("init dest");
+
+        let bundle_a = temp.path().join("bundle-a.bundle");
+        git(
+            &source,
+            &[
+                "bundle",
+                "create",
+                bundle_a.to_str().expect("bundle a path"),
+                "task-1",
+                "base-a",
+            ],
+        )
+        .expect("bundle a");
+        let (head_ref, base_ref) = import_task_bundle_refs(
+            &destination,
+            &bundle_a,
+            "conflict-transfer",
+            "task-1",
+            &head_oid,
+            "base-a",
+            &base_a_oid,
+        )
+        .expect("first import establishes the pair");
+
+        let bundle_b = temp.path().join("bundle-b.bundle");
+        git(
+            &source,
+            &[
+                "bundle",
+                "create",
+                bundle_b.to_str().expect("bundle b path"),
+                "task-1",
+                "base-b",
+            ],
+        )
+        .expect("bundle b");
+        let error = import_task_bundle_refs(
+            &destination,
+            &bundle_b,
+            "conflict-transfer",
+            "task-1",
+            &head_oid,
+            "base-b",
+            &base_b_oid,
+        )
+        .expect_err("a differing base for the same transfer and head must be refused");
+        assert!(error.contains("rebinding refused"), "{error}");
+
+        assert_eq!(
+            commit_oid(&destination, &head_ref).expect("head still resolves"),
+            head_oid
+        );
+        assert_eq!(
+            commit_oid(&destination, &base_ref).expect("base still resolves"),
+            base_a_oid,
+            "the refused attempt must not have moved the original base"
+        );
+    }
+
+    /// The engine runs up to eight work items concurrently and excludes only
+    /// a matching `transfer_id`, so two unrelated transfers that happen to
+    /// name the same source head must be able to import into the same
+    /// repository without sharing mutable state or colliding on a ref name.
+    #[test]
+    fn distinct_transfers_sharing_one_head_keep_independent_bases() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = source_repo_with_head_and_two_bases(temp.path());
+        let head_oid = commit_oid(&source, "task-1").expect("head oid");
+        let base_a_oid = commit_oid(&source, "base-a").expect("base a oid");
+        let base_b_oid = commit_oid(&source, "base-b").expect("base b oid");
+
+        let destination = temp.path().join("destination");
+        init_empty_repo(&destination).expect("init dest");
+
+        let bundle_a = temp.path().join("bundle-a.bundle");
+        git(
+            &source,
+            &[
+                "bundle",
+                "create",
+                bundle_a.to_str().expect("bundle a path"),
+                "task-1",
+                "base-a",
+            ],
+        )
+        .expect("bundle a");
+        let bundle_b = temp.path().join("bundle-b.bundle");
+        git(
+            &source,
+            &[
+                "bundle",
+                "create",
+                bundle_b.to_str().expect("bundle b path"),
+                "task-1",
+                "base-b",
+            ],
+        )
+        .expect("bundle b");
+
+        let (head_ref_a, base_ref_a) = import_task_bundle_refs(
+            &destination,
+            &bundle_a,
+            "transfer-a",
+            "task-1",
+            &head_oid,
+            "base-a",
+            &base_a_oid,
+        )
+        .expect("transfer a imports");
+        let (head_ref_b, base_ref_b) = import_task_bundle_refs(
+            &destination,
+            &bundle_b,
+            "transfer-b",
+            "task-1",
+            &head_oid,
+            "base-b",
+            &base_b_oid,
+        )
+        .expect("transfer b imports independently of transfer a's staged state");
+
+        assert_ne!(
+            base_ref_a, base_ref_b,
+            "each transfer must own its own private base ref"
+        );
+        assert_eq!(
+            commit_oid(&destination, &head_ref_a).expect("head a"),
+            head_oid
+        );
+        assert_eq!(
+            commit_oid(&destination, &head_ref_b).expect("head b"),
+            head_oid
+        );
+        assert_eq!(
+            commit_oid(&destination, &base_ref_a).expect("base a"),
+            base_a_oid
+        );
+        assert_eq!(
+            commit_oid(&destination, &base_ref_b).expect("base b"),
+            base_b_oid
+        );
+    }
+
+    /// A retry that resends the exact pair an earlier attempt already
+    /// published must succeed by verifying, not by refusing a "rebind" of a
+    /// ref onto the value it already holds.
+    #[test]
+    fn an_identical_retry_converges_on_the_same_pair() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = source_repo_with_head_and_two_bases(temp.path());
+        let head_oid = commit_oid(&source, "task-1").expect("head oid");
+        let base_oid = commit_oid(&source, "base-a").expect("base oid");
+
+        let destination = temp.path().join("destination");
+        init_empty_repo(&destination).expect("init dest");
+
+        let bundle = temp.path().join("bundle.bundle");
+        git(
+            &source,
+            &[
+                "bundle",
+                "create",
+                bundle.to_str().expect("bundle path"),
+                "task-1",
+                "base-a",
+            ],
+        )
+        .expect("bundle");
+
+        let first = import_task_bundle_refs(
+            &destination,
+            &bundle,
+            "retried-transfer",
+            "task-1",
+            &head_oid,
+            "base-a",
+            &base_oid,
+        )
+        .expect("first import");
+        let second = import_task_bundle_refs(
+            &destination,
+            &bundle,
+            "retried-transfer",
+            "task-1",
+            &head_oid,
+            "base-a",
+            &base_oid,
+        )
+        .expect("an identical retry must succeed rather than refuse a same-value rebind");
+        assert_eq!(first, second);
+    }
+
+    /// A bundle that does not advertise the exact head/base names and OIDs it
+    /// claims -- whether because it was built for a different base, or is not
+    /// a bundle at all -- must be refused before any final ref is created or
+    /// moved, and must not disturb a pair a prior, unrelated import already
+    /// published.
+    #[test]
+    fn a_mismatched_or_corrupt_bundle_never_touches_a_final_ref() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = source_repo_with_head_and_two_bases(temp.path());
+        let head_oid = commit_oid(&source, "task-1").expect("head oid");
+        let base_a_oid = commit_oid(&source, "base-a").expect("base a oid");
+        let base_b_oid = commit_oid(&source, "base-b").expect("base b oid");
+
+        let destination = temp.path().join("destination");
+        init_empty_repo(&destination).expect("init dest");
+
+        let bundle_a = temp.path().join("bundle-a.bundle");
+        git(
+            &source,
+            &[
+                "bundle",
+                "create",
+                bundle_a.to_str().expect("bundle a path"),
+                "task-1",
+                "base-a",
+            ],
+        )
+        .expect("bundle a");
+        let (head_ref, base_ref) = import_task_bundle_refs(
+            &destination,
+            &bundle_a,
+            "guarded-transfer",
+            "task-1",
+            &head_oid,
+            "base-a",
+            &base_a_oid,
+        )
+        .expect("establish a prior pair");
+
+        // A bundle built for a different base does not advertise the base
+        // this call claims, at the expected OID -- refused before unbundling
+        // or any ref mutation.
+        let bundle_b = temp.path().join("bundle-b.bundle");
+        git(
+            &source,
+            &[
+                "bundle",
+                "create",
+                bundle_b.to_str().expect("bundle b path"),
+                "task-1",
+                "base-b",
+            ],
+        )
+        .expect("bundle b");
+        let mismatch_error = import_task_bundle_refs(
+            &destination,
+            &bundle_b,
+            "unrelated-transfer",
+            "task-1",
+            &head_oid,
+            "base-a",
+            &base_a_oid,
+        )
+        .expect_err("a bundle that does not advertise the claimed base must be refused");
+        assert!(
+            mismatch_error.contains("does not advertise"),
+            "{mismatch_error}"
+        );
+        let unrelated_head_ref = format!("refs/kanna/transfers/unrelated-transfer/{head_oid}/head");
+        assert!(
+            commit_oid(&destination, &unrelated_head_ref).is_err(),
+            "a refused import must not create a partial new ref"
+        );
+        let _ = base_b_oid;
+
+        // Not a bundle at all.
+        let garbage = temp.path().join("garbage.bundle");
+        std::fs::write(&garbage, b"not a git bundle").expect("write garbage");
+        import_task_bundle_refs(
+            &destination,
+            &garbage,
+            "guarded-transfer",
+            "task-1",
+            &head_oid,
+            "base-a",
+            &base_a_oid,
+        )
+        .expect_err("a corrupt bundle must be refused");
+
+        // Neither refusal may have disturbed the pair already published.
+        assert_eq!(
+            commit_oid(&destination, &head_ref).expect("head unchanged"),
+            head_oid
+        );
+        assert_eq!(
+            commit_oid(&destination, &base_ref).expect("base unchanged"),
+            base_a_oid
+        );
+    }
+
+    /// Resets the publication seam when a test that armed it finishes, even
+    /// on panic -- so a failing race test cannot leave every later test in
+    /// this binary blocked waiting on a barrier nobody will ever complete.
+    struct PublicationSeamGuard;
+    impl Drop for PublicationSeamGuard {
+        fn drop(&mut self) {
+            set_publication_seam(None);
+        }
+    }
+
+    /// This is a defensive property of the atomic-transaction implementation,
+    /// not a scenario the engine's own scheduling produces. The engine's
+    /// `transfer_id` exclusion means two work items for the *same* transfer
+    /// never run concurrently in one process; up to eight *distinct*
+    /// transfers do run side by side, and each owns its own private ref path
+    /// (proved above by
+    /// `distinct_transfers_sharing_one_head_keep_independent_bases`), so
+    /// ordinary in-process scheduling never has two callers reading or
+    /// writing the very same final ref at once. What still has to be
+    /// defended against is everything scheduling exclusion does not cover: a
+    /// crash-and-restart recovery sweep resuming a work item while an old
+    /// process's write to that same ref is still landing, or two processes on
+    /// two machines racing to publish the same transfer. This test forces
+    /// that exact interleaving with a synchronization seam at the real
+    /// publication boundary `import_task_bundle_refs` itself uses (not a
+    /// stand-in for it), so every racer's *read* -- not just its start --
+    /// lands before anyone has published. Half of the racers claim one base
+    /// for the transfer's head; the other half claim a genuinely different
+    /// one, so this is a real conflicting-contract race, not N copies of the
+    /// same call. Exactly one contract may win: every racer for it must
+    /// converge on success, and every racer for the other must be refused
+    /// without ever observing a hybrid pair.
+    #[test]
+    fn concurrent_competing_publication_converges_on_one_complete_pair_and_refuses_the_loser() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = source_repo_with_head_and_two_bases(temp.path());
+        let head_oid = commit_oid(&source, "task-1").expect("head oid");
+        let base_a_oid = commit_oid(&source, "base-a").expect("base a oid");
+        let base_b_oid = commit_oid(&source, "base-b").expect("base b oid");
+
+        let destination = temp.path().join("destination");
+        init_empty_repo(&destination).expect("init dest");
+
+        let bundle_a = temp.path().join("bundle-a.bundle");
+        git(
+            &source,
+            &[
+                "bundle",
+                "create",
+                bundle_a.to_str().expect("bundle a path"),
+                "task-1",
+                "base-a",
+            ],
+        )
+        .expect("bundle a");
+        let bundle_b = temp.path().join("bundle-b.bundle");
+        git(
+            &source,
+            &[
+                "bundle",
+                "create",
+                bundle_b.to_str().expect("bundle b path"),
+                "task-1",
+                "base-b",
+            ],
+        )
+        .expect("bundle b");
+
+        const RACERS_PER_CONTRACT: usize = 3;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(RACERS_PER_CONTRACT * 2));
+        set_publication_seam(Some(std::sync::Arc::clone(&barrier)));
+        let _reset_seam = PublicationSeamGuard;
+
+        let mut handles = Vec::new();
+        for (bundle, source_base_ref, expected_base) in [
+            (&bundle_a, "base-a", &base_a_oid),
+            (&bundle_b, "base-b", &base_b_oid),
+        ] {
+            for _ in 0..RACERS_PER_CONTRACT {
+                let destination = destination.clone();
+                let bundle = bundle.clone();
+                let head_oid = head_oid.clone();
+                let expected_base = expected_base.clone();
+                let source_base_ref = source_base_ref.to_string();
+                handles.push(std::thread::spawn(move || {
+                    let result = import_task_bundle_refs(
+                        &destination,
+                        &bundle,
+                        "racing-transfer",
+                        "task-1",
+                        &head_oid,
+                        &source_base_ref,
+                        &expected_base,
+                    );
+                    (expected_base, result)
+                }));
+            }
+        }
+
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("racer thread panicked"))
+            .collect();
+
+        // Whichever contract actually landed, read it back once from the
+        // final refs -- not from either side's own claim.
+        let head_ref = format!("refs/kanna/transfers/racing-transfer/{head_oid}/head");
+        let base_ref = format!("refs/kanna/transfers/racing-transfer/{head_oid}/base");
+        assert_eq!(
+            commit_oid(&destination, &head_ref).expect("head published"),
+            head_oid
+        );
+        let winning_base = commit_oid(&destination, &base_ref).expect("base published");
+        assert!(
+            winning_base == base_a_oid || winning_base == base_b_oid,
+            "the published base must be exactly one of the two contended values, never anything else: {winning_base}"
+        );
+
+        let mut winners = 0;
+        let mut losers = 0;
+        for (claimed_base, result) in results {
+            if claimed_base == winning_base {
+                result.unwrap_or_else(|error| {
+                    panic!("every racer for the winning contract must converge on success: {error}")
+                });
+                winners += 1;
+            } else {
+                let error = result.expect_err(
+                    "a racer for the losing contract must be refused, never silently succeed",
+                );
+                assert!(
+                    error.contains("rebinding refused")
+                        || error.contains("atomic transfer ref publication failed"),
+                    "{error}"
+                );
+                losers += 1;
+            }
+        }
+        assert_eq!(
+            winners, RACERS_PER_CONTRACT,
+            "every identical racer for the winning contract must converge"
+        );
+        assert_eq!(
+            losers, RACERS_PER_CONTRACT,
+            "every racer for the losing contract must be refused"
         );
     }
 
