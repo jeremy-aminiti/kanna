@@ -184,6 +184,16 @@ describe("useAppKeyboardActions durable selection", () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
+  it("opens the local file picker shortcuts when the repository has no selected task", () => {
+    const { keyboardActions, showFilePickerOnTop, toast } = createHarness();
+
+    keyboardActions.openFile();
+    keyboardActions.toggleFilePreview();
+
+    expect(showFilePickerOnTop).toHaveBeenCalledTimes(2);
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
   it("refuses the repo-root shell shortcut for a task owned by another machine", () => {
     const workspaceTask = remoteWorkspaceTask("cloud:repo:task-remote");
     workspaceTask.capabilities = { canOpenShell: false } as WorkspaceTask["capabilities"];
