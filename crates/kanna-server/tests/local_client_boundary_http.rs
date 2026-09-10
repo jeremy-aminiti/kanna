@@ -581,11 +581,19 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::Message;
 
-async fn open_stream(
+type TestSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn open_stream(port: u16, path: &str, origin: Option<&str>) -> TestSocket {
+    open_stream_with_device_headers(port, path, origin, None).await
+}
+
+async fn open_stream_with_device_headers(
     port: u16,
     path: &str,
     origin: Option<&str>,
-) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    device: Option<(&str, &str)>,
+) -> TestSocket {
     let mut request = format!("ws://127.0.0.1:{port}{path}")
         .into_client_request()
         .expect("build websocket request");
@@ -598,19 +606,66 @@ async fn open_stream(
             "websocket".parse().expect("fetch mode header value"),
         );
     }
+    if let Some((device_id, device_secret)) = device {
+        request.headers_mut().insert(
+            "x-kanna-device-id",
+            device_id.parse().expect("device id header value"),
+        );
+        request.headers_mut().insert(
+            "x-kanna-device-secret",
+            device_secret.parse().expect("device secret header value"),
+        );
+    }
     let (socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .expect("open KSP stream");
     socket
 }
 
+async fn pair_test_device(server: &RunningServer, device_id: &str) -> String {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build pairing client");
+    let base_url = format!("http://{}", server.origin());
+    let pairing: serde_json::Value = client
+        .post(format!("{base_url}/v1/pairing/sessions"))
+        .send()
+        .await
+        .expect("create pairing session through real server")
+        .error_for_status()
+        .expect("pairing session response")
+        .json()
+        .await
+        .expect("decode pairing session");
+    let claim: serde_json::Value = client
+        .post(format!("{base_url}/v1/pairing/sessions/claim"))
+        .json(&serde_json::json!({
+            "code": pairing["code"],
+            "deviceId": device_id,
+            "deviceName": "Boundary Test Phone",
+        }))
+        .send()
+        .await
+        .expect("claim pairing session through real server")
+        .error_for_status()
+        .expect("pairing claim response")
+        .json()
+        .await
+        .expect("decode pairing claim");
+    let expected_desktop_id = format!("desktop-{device_id}");
+    assert_eq!(
+        claim["desktopId"].as_str(),
+        Some(expected_desktop_id.as_str())
+    );
+    claim["deviceSecret"]
+        .as_str()
+        .expect("pairing claim must issue a device secret")
+        .to_string()
+}
+
 /// Send an `auth` frame and report whether the server accepted it.
-async fn authenticate(
-    socket: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    credential: Option<&str>,
-) -> bool {
+async fn authenticate(socket: &mut TestSocket, credential: Option<&str>) -> bool {
     let frame = match credential {
         Some(credential) => serde_json::json!({ "type": "auth", "credential": credential }),
         None => serde_json::json!({ "type": "auth" }),
@@ -634,6 +689,38 @@ async fn authenticate(
             // A refusal may arrive as a close instead of an error frame.
             Ok(Some(Err(_)) | None) => return false,
             Err(_) => panic!("timed out waiting for the server's auth answer"),
+        }
+    }
+}
+
+async fn assert_legacy_stream_refuses_privileged_request(socket: &mut TestSocket) {
+    socket
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "request",
+                "id": 1,
+                "method": "POST",
+                "path": "/v1/tasks/missing/actions/close",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send privileged KSP request");
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), socket.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&text).expect("decode server frame");
+                if parsed.get("type").and_then(|value| value.as_str()) == Some("error") {
+                    assert_eq!(parsed["code"], "unauthorized");
+                    return;
+                }
+            }
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(error))) => panic!("stream failed before privileged refusal: {error}"),
+            Ok(None) => panic!("stream closed before privileged refusal"),
+            Err(_) => panic!("timed out waiting for privileged refusal"),
         }
     }
 }
@@ -679,4 +766,93 @@ async fn a_local_process_websocket_upgrade_keeps_its_loopback_authority() {
             "a non-browser loopback stream must keep empty in-band auth on {path}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_paired_browser_loopback_upgrade_uses_paired_device_authority() {
+    let _fixture_guard = PROCESS_FIXTURE_LOCK.lock().await;
+    let server = launch_server("paired-browser-stream").await;
+    let device_id = "paired-browser-stream";
+    let device_secret = pair_test_device(&server, device_id).await;
+    let paired_credential = serde_json::json!({
+        "deviceId": device_id,
+        "deviceSecret": device_secret.as_str(),
+    })
+    .to_string();
+    let wrong_credential = serde_json::json!({
+        "deviceId": device_id,
+        "deviceSecret": "wrong-secret",
+    })
+    .to_string();
+
+    for path in ["/v1/stream", "/v2/stream"] {
+        let mut paired = open_stream_with_device_headers(
+            server.port,
+            path,
+            Some("http://10.0.2.2"),
+            Some((device_id, &device_secret)),
+        )
+        .await;
+        assert!(
+            authenticate(&mut paired, Some(&paired_credential)).await,
+            "a paired browser-originated loopback stream must authenticate in band on {path}"
+        );
+
+        let mut wrong_secret = open_stream_with_device_headers(
+            server.port,
+            path,
+            Some("http://10.0.2.2"),
+            Some((device_id, &device_secret)),
+        )
+        .await;
+        assert!(
+            !authenticate(&mut wrong_secret, Some(&wrong_credential)).await,
+            "a wrong in-band paired secret must be refused on {path}"
+        );
+
+        // Invalid device headers must not establish upgrade-time pairing. A
+        // browser loopback stream then falls back to local-control auth, so
+        // even the otherwise-valid paired credential is insufficient.
+        for invalid_device in [
+            (device_id, "wrong-upgrade-secret"),
+            ("unknown-device", device_secret.as_str()),
+        ] {
+            let mut invalid_upgrade = open_stream_with_device_headers(
+                server.port,
+                path,
+                Some("http://10.0.2.2"),
+                Some(invalid_device),
+            )
+            .await;
+            assert!(
+                !authenticate(&mut invalid_upgrade, Some(&paired_credential)).await,
+                "invalid device headers must not establish paired authority on {path}"
+            );
+        }
+    }
+
+    let mut v2_empty = open_stream_with_device_headers(
+        server.port,
+        "/v2/stream",
+        Some("http://10.0.2.2"),
+        Some((device_id, &device_secret)),
+    )
+    .await;
+    assert!(
+        !authenticate(&mut v2_empty, None).await,
+        "v2 must refuse empty in-band auth even after a paired browser upgrade"
+    );
+
+    let mut v1_empty = open_stream_with_device_headers(
+        server.port,
+        "/v1/stream",
+        Some("http://10.0.2.2"),
+        Some((device_id, &device_secret)),
+    )
+    .await;
+    assert!(
+        authenticate(&mut v1_empty, None).await,
+        "v1 must preserve legacy empty-auth read access after a paired browser upgrade"
+    );
+    assert_legacy_stream_refuses_privileged_request(&mut v1_empty).await;
 }

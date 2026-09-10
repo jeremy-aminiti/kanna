@@ -36,6 +36,19 @@ import {
 } from "../runtime/env-sync";
 import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFirebaseEmulators, resolveFirebaseEnvFromReference, writeFirebaseEmulatorConfig, type FirebasePortInput } from "../runtime/firebase";
 import { resolveMobileServerUrl } from "../runtime/mobile";
+import {
+  buildAndroidEmulatorLaunchCommand,
+  buildAndroidPrebuildCommand,
+  buildAndroidRunCommand,
+  launchAndroidEmulator,
+  missingRequiredAndroidTools,
+  resolveAndroidSdkTools,
+  resolveAndroidVirtualDevice,
+  waitForAndroidVirtualDevice,
+  type AndroidCommand,
+  type AndroidEmulatorWaitOptions,
+  type AndroidVirtualDevice
+} from "../runtime/mobile-android";
 import { buildDesktopMockE2eCommand, buildDesktopRealE2eCommand } from "../runtime/desktop-e2e";
 import { buildMobileDeviceSmokeCommand, buildMobileTestCommand } from "../runtime/mobile-commands";
 import { executeMobileIosArchiveWithContext } from "../runtime/mobile-archive";
@@ -57,6 +70,7 @@ import {
   isMobileDeviceAppInstalled,
   mobileDeviceDerivedDataPath,
   resolveMobileIosWorkspace,
+  resolveMobileAndroidIdentity,
   resolveMobileNativeIdentity,
   resolveMobileReleaseAppPath,
   resolvePhysicalDevice,
@@ -171,6 +185,7 @@ export interface MobileUpInput {
 export interface MobileRunInput {
   device: boolean;
   simulator?: boolean | string;
+  androidEmulator?: boolean | string;
   production?: boolean;
   staging?: boolean;
   install?: boolean;
@@ -239,6 +254,7 @@ const mobileUpInputSchema = z.object({
 const mobileRunInputSchema = z.object({
   device: z.boolean().default(false),
   simulator: z.union([z.boolean(), z.string()]).optional(),
+  androidEmulator: z.union([z.boolean(), z.string()]).optional(),
   production: z.boolean().default(false),
   staging: z.boolean().default(false),
   install: z.boolean().default(false),
@@ -477,6 +493,8 @@ export interface MobileDeviceRunExecutionOptions {
   metroReadiness?: Pick<PhysicalDeviceMetroReadinessInput, "attempts" | "delayMs">;
   readInstalledStagingDesktopStatus?: (runner: CommandRunner) => Promise<ProductionDesktopStatus | null>;
   listStagingRelayActiveDesktopIds?: (input: StagingRelayActiveDesktopIdsInput) => Promise<Set<string> | null>;
+  launchAndroidEmulator?: (command: AndroidCommand) => Promise<void>;
+  androidEmulatorWait?: AndroidEmulatorWaitOptions;
 }
 
 export interface MobileDeviceUninstallExecutionOptions {
@@ -1153,12 +1171,36 @@ function physicalDeviceChecksWithMetroReadiness(input: {
 
 type MobileRunTarget =
   | { kind: "device"; device: AvailablePhysicalDevice }
-  | { kind: "simulator"; device: AvailableSimulatorDevice };
+  | { kind: "simulator"; device: AvailableSimulatorDevice }
+  | {
+      kind: "android-emulator";
+      device: AndroidVirtualDevice;
+      tools: ReturnType<typeof resolveAndroidSdkTools>;
+    };
 
 async function resolveMobileRunTarget(
   input: MobileRunInput,
   executor: ExecutorInput
 ): Promise<MobileRunTarget> {
+  if (input.androidEmulator !== undefined) {
+    const tools = resolveAndroidSdkTools(executor.context.env);
+    const missingTools = missingRequiredAndroidTools(tools);
+    if (missingTools.length > 0) {
+      throw new Error(`Android SDK is missing required tools: ${missingTools.join(", ")}.`);
+    }
+    return {
+      kind: "android-emulator",
+      device: await resolveAndroidVirtualDevice({
+        runner: executor.runner,
+        tools,
+        requested:
+          typeof input.androidEmulator === "string"
+            ? input.androidEmulator
+            : executor.context.env.KANNA_ANDROID_AVD?.trim() || undefined
+      }),
+      tools
+    };
+  }
   if (input.device) {
     return {
       kind: "device",
@@ -1177,10 +1219,30 @@ async function resolveMobileRunTarget(
   };
 }
 
-async function bootMobileRunSimulator(
+async function bootMobileRunTarget(
   target: MobileRunTarget,
-  runner: CommandRunner
+  runner: CommandRunner,
+  repoRoot: string,
+  options: MobileDeviceRunExecutionOptions = {}
 ): Promise<void> {
+  if (target.kind === "android-emulator") {
+    if (!target.device.running) {
+      await (options.launchAndroidEmulator ?? launchAndroidEmulator)(
+        buildAndroidEmulatorLaunchCommand(
+          target.tools,
+          target.device.name,
+          repoRoot
+        )
+      );
+    }
+    target.device = await waitForAndroidVirtualDevice({
+      avd: target.device.name,
+      runner,
+      tools: target.tools,
+      options: options.androidEmulatorWait
+    });
+    return;
+  }
   if (target.kind !== "simulator") return;
   for (const command of buildMobileSimulatorBootCommandPlan(target.device)) {
     const result = await runner.run(command.command, command.args, { streamOutput: true });
@@ -1208,16 +1270,28 @@ export async function executeMobileDeviceRunWithContext(
     production: input.production
   });
   const hasSimulator = input.simulator === true || typeof input.simulator === "string";
-  if (Number(input.device) + Number(hasSimulator) !== 1) {
+  const hasAndroidEmulator =
+    input.androidEmulator === true || typeof input.androidEmulator === "string";
+  if (Number(input.device) + Number(hasSimulator) + Number(hasAndroidEmulator) !== 1) {
     throw new Error(
-      "mobile.run requires exactly one target: --simulator [<udid|name>] or --device."
+      "mobile.run requires exactly one target: --simulator [<udid|name>], --device, or --android-emulator [<avd>]."
     );
   }
-  if (hasSimulator && input.install) {
+  if ((hasSimulator || hasAndroidEmulator) && input.install) {
     throw new Error("mobile.run --install is only supported with the physical-iPhone --device target.");
   }
   if (input.production && input.staging) {
     throw new Error("mobile.run accepts only one of --production or --staging.");
+  }
+  if (
+    hasAndroidEmulator &&
+    (profile.clientBuild !== "dev" ||
+      profile.desktopOwner !== "worktree" ||
+      profile.cloud !== "emulators")
+  ) {
+    throw new Error(
+      "The first Android emulator slice supports only build=dev, owner=worktree, cloud=emulators."
+    );
   }
 
   let stagingOwnerStatus: ProductionDesktopStatus | null = null;
@@ -1238,9 +1312,17 @@ export async function executeMobileDeviceRunWithContext(
   }
 
   const target = await resolveMobileRunTarget(input, executor);
-  await bootMobileRunSimulator(target, executor.runner);
-  const device = target.device;
+  await bootMobileRunTarget(
+    target,
+    executor.runner,
+    executor.context.repoRoot,
+    options
+  );
   const buildEnv = mobileRunTargetEnv(profile, executor, target);
+  if (target.kind === "android-emulator") {
+    return executeAndroidEmulatorRun(input, profile, executor, target, buildEnv, options);
+  }
+  const device = target.device;
   if (input.install) {
     if (target.kind !== "device") {
       throw new Error("mobile.run --install requires a physical iPhone target.");
@@ -1510,12 +1592,142 @@ function mobileRunTargetEnv(
   target: MobileRunTarget
 ): NodeJS.ProcessEnv {
   const env = applyEnvironmentProfile(executor.context.env, profile);
+  if (target.kind === "android-emulator") {
+    delete env.KANNA_IOS_DEVICE_UDID;
+    delete env.KANNA_IOS_PHYSICAL_DEVICE_NAME;
+    const emulatorHost = "10.0.2.2";
+    return {
+      ...env,
+      ANDROID_HOME: target.tools.root,
+      ANDROID_SDK_ROOT: target.tools.root,
+      KANNA_ANDROID_AVD: target.device.name,
+      EXPO_PUBLIC_KANNA_SERVER_URL:
+        `http://${emulatorHost}:${env.KANNA_MOBILE_SERVER_PORT ?? "48120"}`,
+      ...(env.KANNA_RELAY_PORT
+        ? { EXPO_PUBLIC_KANNA_RELAY_URL: `ws://${emulatorHost}:${env.KANNA_RELAY_PORT}` }
+        : {}),
+      ...(env.KANNA_FIREBASE_AUTH_PORT
+        ? { EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST: emulatorHost }
+        : {}),
+      ...(env.KANNA_FIREBASE_FIRESTORE_PORT
+        ? { EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST: emulatorHost }
+        : {}),
+      ...(env.KANNA_FIREBASE_FUNCTIONS_PORT
+        ? { EXPO_PUBLIC_FIREBASE_FUNCTIONS_EMULATOR_HOST: emulatorHost }
+        : {})
+    };
+  }
   if (target.kind === "device") {
     return { ...env, KANNA_IOS_DEVICE_UDID: target.device.udid };
   }
   delete env.KANNA_IOS_DEVICE_UDID;
   delete env.KANNA_IOS_PHYSICAL_DEVICE_NAME;
   return env;
+}
+
+async function executeAndroidEmulatorRun(
+  input: MobileRunInput,
+  profile: KdEnvironmentProfile,
+  executor: ExecutorInput,
+  target: Extract<MobileRunTarget, { kind: "android-emulator" }>,
+  env: NodeJS.ProcessEnv,
+  options: MobileDeviceRunExecutionOptions
+): Promise<TaskResult> {
+  if (!target.device.serial) {
+    throw new Error(`Android AVD ${target.device.name} is booted without an adb serial.`);
+  }
+  const serverPort = executor.context.env.KANNA_MOBILE_SERVER_PORT ?? "48120";
+  const launch = prepareMobileDeviceLaunch(
+    input,
+    profile,
+    executor,
+    "10.0.2.2",
+    env,
+    `http://127.0.0.1:${serverPort}`
+  );
+  await launch.resetTmux();
+  await startTmuxSession(executor.runner, executor.context.tmux, launch.plan.windows, {
+    reconcileKey: `mobile-android:${formatEnvironmentProfile(profile)}:${target.device.name}`
+  });
+
+  const metroPort = Number.parseInt(launch.env.KANNA_MOBILE_PORT ?? "8081", 10);
+  if (Number.isNaN(metroPort)) {
+    throw new Error(`KANNA_MOBILE_PORT must be an integer, got: ${launch.env.KANNA_MOBILE_PORT}`);
+  }
+  const identity = resolveMobileAndroidIdentity(launch.env);
+  const prebuild = buildAndroidPrebuildCommand({
+    repoRoot: executor.context.repoRoot,
+    appEnv: identity.appEnv
+  });
+  const prebuildResult = await executor.runner.run(prebuild.command, prebuild.args, {
+    cwd: prebuild.cwd,
+    env: { ...launch.env, ...prebuild.env },
+    streamOutput: true
+  });
+  if (prebuildResult.exitCode !== 0) {
+    return {
+      ok: false,
+      message:
+        prebuildResult.stderr || prebuildResult.stdout ||
+        `Failed to prebuild ${identity.packageId} for Android.`,
+      data: { profile, packageId: identity.packageId, device: target.device }
+    };
+  }
+
+  const metroReadiness = await waitForPhysicalDeviceMetroReadiness(executor.runner, {
+    lanHost: "127.0.0.1",
+    metroPort,
+    ...options.metroReadiness
+  });
+  if (!metroReadiness.ok) {
+    return {
+      ok: false,
+      message: `Android AVD ${target.device.name} is booted, but ${metroReadiness.message}`,
+      data: { profile, packageId: identity.packageId, device: target.device, metroReadiness }
+    };
+  }
+
+  const run = buildAndroidRunCommand({
+    repoRoot: executor.context.repoRoot,
+    deviceName: target.device.name,
+    packageId: identity.packageId,
+    metroPort,
+    appEnv: identity.appEnv,
+    tools: target.tools
+  });
+  const runResult = await executor.runner.run(run.command, run.args, {
+    cwd: run.cwd,
+    env: { ...launch.env, ...run.env },
+    streamOutput: true
+  });
+  if (runResult.exitCode !== 0) {
+    return {
+      ok: false,
+      message:
+        runResult.stderr || runResult.stdout ||
+        `Failed to build, install, or launch ${identity.packageId} on ${target.device.name}.`,
+      data: { profile, packageId: identity.packageId, device: target.device, metroReadiness }
+    };
+  }
+
+  return {
+    ok: true,
+    message: [
+      `Launched ${identity.displayName} on Android AVD ${target.device.name} (${target.device.serial}).`,
+      `Package: ${identity.packageId}`,
+      `Metro (host): http://127.0.0.1:${metroPort}`,
+      `Metro (emulator): http://10.0.2.2:${metroPort}`,
+      `Desktop endpoint (emulator): http://10.0.2.2:${serverPort}`,
+      `Profile: ${formatEnvironmentProfile(profile)}.`
+    ].join("\n"),
+    data: {
+      profile,
+      packageId: identity.packageId,
+      device: target.device,
+      metroReadiness,
+      windows: launch.plan.windows.map((window) => window.name)
+    }
+  };
 }
 
 async function executeMobileDeviceReleaseInstall(
@@ -1661,7 +1873,8 @@ function prepareMobileDeviceLaunch(
   profile: KdEnvironmentProfile,
   executor: ExecutorInput,
   lanHost: string,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  mobileServerUrl = resolveMobileServerUrl(env)
 ): {
   env: NodeJS.ProcessEnv;
   plan: ReturnType<typeof buildDevPlan>;
@@ -1695,7 +1908,7 @@ function prepareMobileDeviceLaunch(
     mobile: true,
     emulators: true,
     firebaseConfigPath,
-    mobileServerUrl: resolveMobileServerUrl(env),
+    mobileServerUrl,
     resolveLanAddress: () => lanHost
   });
   return {
@@ -1847,8 +2060,13 @@ export async function executeMobileDeviceDoctorWithContext(
     staging: input.staging,
     production: input.production
   });
-  if (!input.device) {
-    throw new Error("mobile.doctor requires --device.");
+  const hasAndroidEmulator =
+    input.androidEmulator === true || typeof input.androidEmulator === "string";
+  if (Number(input.device) + Number(hasAndroidEmulator) !== 1) {
+    throw new Error("mobile.doctor requires exactly one of --device or --android-emulator [<avd>].");
+  }
+  if (hasAndroidEmulator) {
+    return executeAndroidEmulatorDoctor(input, profile, executor);
   }
 
   const lanHost = requireMobileDeviceLanHost(options);
@@ -1883,6 +2101,89 @@ export async function executeMobileDeviceDoctorWithContext(
       metroUrl: preflight.metroUrl,
       preflight
     }
+  };
+}
+
+async function executeAndroidEmulatorDoctor(
+  input: MobileRunInput,
+  profile: KdEnvironmentProfile,
+  executor: ExecutorInput
+): Promise<TaskResult> {
+  if (
+    profile.clientBuild !== "dev" ||
+    profile.desktopOwner !== "worktree" ||
+    profile.cloud !== "emulators"
+  ) {
+    throw new Error(
+      "The first Android emulator slice supports only build=dev, owner=worktree, cloud=emulators."
+    );
+  }
+  const tools = resolveAndroidSdkTools(executor.context.env);
+  const missing = missingRequiredAndroidTools(tools);
+  const checks: string[] = [
+    `OK sdk-root: ${tools.root}`,
+    ...missing.map((tool) => `FAIL required-tool: ${tool}`),
+    ...(tools.sdkmanager
+      ? [`OK sdkmanager: ${tools.sdkmanager}`]
+      : ["WARN sdkmanager: Android command-line tools are not installed; the existing AVD can still run."]),
+    ...(tools.avdmanager
+      ? [`OK avdmanager: ${tools.avdmanager}`]
+      : ["WARN avdmanager: Android command-line tools are not installed; kd will not create an AVD."])
+  ];
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      message: `Android emulator doctor failed.\n${checks.join("\n")}`,
+      data: { profile, tools, missing }
+    };
+  }
+
+  const [adbVersion, emulatorVersion, javaVersion] = await Promise.all([
+    executor.runner.run(tools.adb, ["version"]),
+    executor.runner.run(tools.emulator, ["-version"]),
+    executor.runner.run("java", ["-version"])
+  ]);
+  checks.push(
+    `${adbVersion.exitCode === 0 ? "OK" : "FAIL"} adb: ${
+      adbVersion.stdout.split(/\r?\n/).find(Boolean) ?? (adbVersion.stderr.trim() || tools.adb)
+    }`,
+    `${emulatorVersion.exitCode === 0 ? "OK" : "FAIL"} emulator: ${
+      emulatorVersion.stdout.split(/\r?\n/).find(Boolean) ?? (emulatorVersion.stderr.trim() || tools.emulator)
+    }`,
+    `${javaVersion.exitCode === 0 ? "OK" : "FAIL"} java: ${
+      javaVersion.stderr.split(/\r?\n/).find(Boolean) ?? (javaVersion.stdout.trim() || "not found")
+    }`
+  );
+
+  let device: AndroidVirtualDevice;
+  try {
+    device = await resolveAndroidVirtualDevice({
+      runner: executor.runner,
+      tools,
+      requested:
+        typeof input.androidEmulator === "string"
+          ? input.androidEmulator
+          : executor.context.env.KANNA_ANDROID_AVD?.trim() || undefined
+    });
+    checks.push(
+      `OK avd: ${device.name}${device.running ? ` is running as ${device.serial}` : " is installed and stopped"}.`
+    );
+  } catch (error) {
+    checks.push(`FAIL avd: ${error instanceof Error ? error.message : String(error)}`);
+    return {
+      ok: false,
+      message: `Android emulator doctor failed.\n${checks.join("\n")}`,
+      data: { profile, tools }
+    };
+  }
+
+  const identity = resolveMobileAndroidIdentity({ KANNA_APP_ENV: "dev" });
+  checks.push(`OK identity: ${identity.displayName} (${identity.packageId}).`);
+  const ok = adbVersion.exitCode === 0 && emulatorVersion.exitCode === 0 && javaVersion.exitCode === 0;
+  return {
+    ok,
+    message: `Android emulator doctor for ${device.name}.\n${checks.join("\n")}`,
+    data: { profile, tools, device, packageId: identity.packageId }
   };
 }
 
@@ -2162,7 +2463,7 @@ export const taskDefinitions = [
   },
   {
     id: "mobile.run",
-    description: "Build, install, and launch Kanna mobile on an iOS Simulator or physical iPhone.",
+    description: "Build, install, and launch Kanna mobile on an iOS Simulator, physical iPhone, or Android emulator.",
     inputSchema: mobileRunInputSchema,
     execute: async (_context, input) => executeMobileDeviceRun(mobileRunInputSchema.parse(input))
   },
@@ -2215,7 +2516,7 @@ export const taskDefinitions = [
   },
   {
     id: "mobile.doctor",
-    description: "Check physical iOS device mobile development readiness.",
+    description: "Check physical iOS device or Android emulator mobile development readiness.",
     inputSchema: mobileRunInputSchema,
     execute: async (_context, input) => executeMobileDeviceDoctor(mobileRunInputSchema.parse(input))
   },

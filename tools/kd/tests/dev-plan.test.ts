@@ -215,6 +215,37 @@ Run '\\''copilot update'\\'' to check for updates.
     expect(plan.windows[3]?.command).toContain("EXPO_PUBLIC_FIREBASE_FIRESTORE_EMULATOR_HOST='172.16.0.193'");
   });
 
+  it("routes Android emulator development endpoints through the host alias", () => {
+    const plan = buildDevPlan({
+      repoRoot: "/repo",
+      env: {
+        KANNA_ANDROID_AVD: "Medium_Phone_API_36.1",
+        KANNA_DEV_PORT: "1421",
+        KANNA_DB_PATH: "/tmp/kanna.db",
+        KANNA_MOBILE_SERVER_PORT: "48120",
+        KANNA_FIREBASE_AUTH_PORT: "9100",
+        KANNA_FIREBASE_FIRESTORE_PORT: "9101",
+        KANNA_RELAY_PORT: "9081",
+        KANNA_MOBILE_PORT: "8082"
+      },
+      mobile: true,
+      emulators: true,
+      firebaseConfigPath: "/repo/.firebase-8080.kanna.json",
+      mobileServerUrl: "http://127.0.0.1:48120"
+    });
+
+    const mobile = plan.windows.find((window) => window.name === "mobile");
+    expect(mobile?.command).toContain(
+      "EXPO_PUBLIC_KANNA_SERVER_URL='http://10.0.2.2:48120'"
+    );
+    expect(mobile?.command).toContain("REACT_NATIVE_PACKAGER_HOSTNAME='10.0.2.2'");
+    expect(mobile?.command).toContain(
+      "EXPO_PUBLIC_FIREBASE_AUTH_EMULATOR_HOST='10.0.2.2'"
+    );
+    expect(mobile?.command).toContain("EXPO_PUBLIC_KANNA_RELAY_URL='ws://10.0.2.2:9081'");
+    expect(mobile?.command).toContain("while true; do");
+  });
+
   it("does not point mobile auth at local emulators unless emulators are running", () => {
     const plan = buildDevPlan({
       repoRoot: "/repo",
