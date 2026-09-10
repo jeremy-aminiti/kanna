@@ -111,14 +111,13 @@ impl FromRequestParts<Arc<AppState>> for LanMachineInvokeAuthenticated {
         let unauthorized = || {
             (
                 StatusCode::UNAUTHORIZED,
-                "LAN machine invoke requires a device id and a verified device secret"
-                    .to_string(),
+                "LAN machine invoke requires a device id and a verified device secret".to_string(),
             )
         };
         let device_id =
             header_value_from_map(&parts.headers, DEVICE_ID_HEADER).ok_or_else(unauthorized)?;
-        let device_secret = header_value_from_map(&parts.headers, DEVICE_SECRET_HEADER)
-            .ok_or_else(unauthorized)?;
+        let device_secret =
+            header_value_from_map(&parts.headers, DEVICE_SECRET_HEADER).ok_or_else(unauthorized)?;
         let Some(store_path) = state.config().machine_trust_store_path() else {
             return Err(unauthorized());
         };
@@ -134,6 +133,8 @@ impl FromRequestParts<Arc<AppState>> for LanMachineInvokeAuthenticated {
             &device_id,
             &device_secret,
             current_account_uid.as_deref(),
+            &state.config().environment,
+            &state.config().desktop_id,
             now_ms,
         ) {
             return Err(unauthorized());

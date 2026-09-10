@@ -90,7 +90,8 @@ mod tests {
 
     fn generate_identity(desktop_id: &str) -> LanTlsIdentity {
         let path = crate::test_paths::unique_test_path("lan-tls-handshake-identity");
-        crate::lan_tls_identity::load_or_create(&path, desktop_id).expect("generate identity")
+        crate::lan_tls_identity::load_or_create(&path, desktop_id, "development")
+            .expect("generate identity")
     }
 
     /// Binds a real loopback listener presenting `server_identity`, attempts
@@ -119,9 +120,8 @@ mod tests {
             acceptor.accept(stream).await
         });
 
-        let connector = TlsConnector::from(
-            client_config_pinned_to_ca(client_ca_pem).expect("client config"),
-        );
+        let connector =
+            TlsConnector::from(client_config_pinned_to_ca(client_ca_pem).expect("client config"));
         let tcp = tokio::net::TcpStream::connect(addr)
             .await
             .map_err(|error| format!("connect tcp: {error}"))?;
@@ -200,7 +200,10 @@ mod tests {
         let connector =
             TlsConnector::from(client_config_pinned_to_ca(&identity.ca_certificate_pem).unwrap());
         let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
-        let mut tls = connector.connect(name, tcp).await.expect("client handshake");
+        let mut tls = connector
+            .connect(name, tcp)
+            .await
+            .expect("client handshake");
         tls.write_all(b"hello").await.expect("write to server");
         let mut buf = [0u8; 5];
         tls.read_exact(&mut buf).await.expect("read from server");

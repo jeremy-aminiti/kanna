@@ -55,6 +55,7 @@ pub(crate) fn test_router(desktop_id: &str, desktop_name: &str) -> Router {
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -84,6 +85,7 @@ pub(super) fn test_router_with_repo_checkout_root(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -115,6 +117,7 @@ pub(super) fn test_router_with_seed(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -145,6 +148,7 @@ pub(crate) fn test_state_with_seed(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings-invoke", "json"),
     };
@@ -188,6 +192,7 @@ pub(crate) fn test_state_with_daemon_dir_and_debounce(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings-daemon", "json"),
     };
@@ -218,6 +223,7 @@ pub(super) fn test_state_with_task_input_sender(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-invoke-input",
@@ -251,6 +257,7 @@ pub(super) fn test_state_with_seed_and_task_input_sender(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-invoke-input-seeded",
@@ -284,6 +291,7 @@ pub(super) fn test_router_with_task_creator(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -314,6 +322,7 @@ pub(super) fn test_router_with_seed_and_task_creator(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -344,6 +353,7 @@ pub(super) fn test_router_with_merge_agent_runner(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -376,6 +386,7 @@ pub(super) fn test_router_with_task_input_sender(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -408,6 +419,7 @@ pub(super) fn test_router_with_task_closer(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -437,6 +449,7 @@ pub(super) fn test_router_with_stage_advancer(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -469,6 +482,7 @@ pub(super) fn test_router_with_stage_rerunner(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings-rerun", "json"),
     };
@@ -501,6 +515,7 @@ pub(super) fn test_router_with_stage_completer(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -533,6 +548,7 @@ pub(super) fn test_router_with_revision_requester(
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };

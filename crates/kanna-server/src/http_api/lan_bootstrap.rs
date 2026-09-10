@@ -69,9 +69,12 @@ pub(super) async fn bootstrap_lan_trust(
         StatusCode::INTERNAL_SERVER_ERROR,
         "LAN TLS identity is not configured".to_string(),
     ))?;
-    let identity =
-        crate::lan_tls_identity::load_or_create(&identity_path, &state.config().desktop_id)
-            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let identity = crate::lan_tls_identity::load_or_create(
+        &identity_path,
+        &state.config().desktop_id,
+        &state.config().environment,
+    )
+    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
 
     let now_ms = crate::machine_trust::unix_time_ms()
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
@@ -87,6 +90,7 @@ pub(super) async fn bootstrap_lan_trust(
             &secret_hash,
             &source.account_uid,
             &state.config().environment,
+            &state.config().desktop_id,
             now_ms,
         );
         store
@@ -112,6 +116,7 @@ fn prepare_bootstrap_request(
     target_desktop_id: &str,
     account_uid: &str,
     environment: &str,
+    local_desktop_id: &str,
     now_ms: u64,
 ) -> Result<String, String> {
     let _guard = crate::machine_trust::persistence_mutex()
@@ -122,6 +127,7 @@ fn prepare_bootstrap_request(
         target_desktop_id,
         account_uid,
         environment,
+        local_desktop_id,
         crate::pairing::generate_device_secret,
         now_ms,
     )?;
@@ -140,6 +146,7 @@ fn confirm_bootstrap_response(
     store_path: &std::path::Path,
     target_desktop_id: &str,
     candidate_secret: &str,
+    local_desktop_id: &str,
     response: LanBootstrapResponse,
 ) -> Result<crate::machine_trust::OutboundGrant, String> {
     let _guard = crate::machine_trust::persistence_mutex()
@@ -149,6 +156,7 @@ fn confirm_bootstrap_response(
     let grant = store.confirm_outbound(
         target_desktop_id,
         candidate_secret,
+        local_desktop_id,
         Some(response.ca_certificate_pem),
         response.expires_at_unix_ms,
     )?;
@@ -177,11 +185,13 @@ pub(crate) async fn request_bootstrap(
     let environment = state.config().environment.clone();
     let now_ms = crate::machine_trust::unix_time_ms()?;
 
+    let local_desktop_id = state.config().desktop_id.clone();
     let candidate_secret = prepare_bootstrap_request(
         &store_path,
         &target_desktop_id,
         account_uid,
         &environment,
+        &local_desktop_id,
         now_ms,
     )?;
 
@@ -209,7 +219,13 @@ pub(crate) async fn request_bootstrap(
     )
     .map_err(|error| format!("invalid bootstrap acknowledgement: {error}"))?;
 
-    confirm_bootstrap_response(&store_path, &target_desktop_id, &candidate_secret, body)
+    confirm_bootstrap_response(
+        &store_path,
+        &target_desktop_id,
+        &candidate_secret,
+        &local_desktop_id,
+        body,
+    )
 }
 
 #[cfg(test)]
@@ -246,27 +262,44 @@ mod tests {
         // The target now verifies the source's secret, but only under the
         // account it was actually bootstrapped under.
         let store_path = target_state.config().machine_trust_store_path().unwrap();
-        let store =
-            crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path).unwrap();
+        let store = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path).unwrap();
         let now_ms = crate::machine_trust::unix_time_ms().unwrap();
         assert!(store.verify_inbound(
             "desktop-source",
             "the-candidate-secret",
             Some("uid-1"),
+            "development",
+            "desktop-target",
             now_ms
         ));
         assert!(!store.verify_inbound(
             "desktop-source",
             "wrong-secret",
             Some("uid-1"),
+            "development",
+            "desktop-target",
             now_ms
         ));
         assert!(
-            !store.verify_inbound("desktop-source", "the-candidate-secret", Some("uid-2"), now_ms),
+            !store.verify_inbound(
+                "desktop-source",
+                "the-candidate-secret",
+                Some("uid-2"),
+                "development",
+                "desktop-target",
+                now_ms
+            ),
             "a grant minted under one account must not verify under another"
         );
         assert!(
-            !store.verify_inbound("desktop-source", "the-candidate-secret", None, now_ms),
+            !store.verify_inbound(
+                "desktop-source",
+                "the-candidate-secret",
+                None,
+                "development",
+                "desktop-target",
+                now_ms
+            ),
             "signed out (no current account) must never verify anything"
         );
     }
@@ -281,12 +314,24 @@ mod tests {
         let store_path = crate::test_paths::unique_test_path("lan-bootstrap-source-store");
         let now_ms = 1_000;
 
-        let first_secret =
-            prepare_bootstrap_request(&store_path, "desktop-target", "uid-1", "development", now_ms)
-                .expect("first prepare");
-        let retried_secret =
-            prepare_bootstrap_request(&store_path, "desktop-target", "uid-1", "development", now_ms)
-                .expect("retried prepare reuses the pending record");
+        let first_secret = prepare_bootstrap_request(
+            &store_path,
+            "desktop-target",
+            "uid-1",
+            "development",
+            "desktop-source",
+            now_ms,
+        )
+        .expect("first prepare");
+        let retried_secret = prepare_bootstrap_request(
+            &store_path,
+            "desktop-target",
+            "uid-1",
+            "development",
+            "desktop-source",
+            now_ms,
+        )
+        .expect("retried prepare reuses the pending record");
         assert_eq!(
             first_secret, retried_secret,
             "a retry before acknowledgement must resend the same candidate"
@@ -297,6 +342,7 @@ mod tests {
             &store_path,
             "desktop-target",
             &first_secret,
+            "desktop-source",
             LanBootstrapResponse {
                 ca_certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----"
                     .to_string(),
@@ -318,7 +364,13 @@ mod tests {
         let store = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
             .expect("reload store");
         assert!(store
-            .outbound_grant_for("desktop-target", Some("uid-1"), now_ms)
+            .outbound_grant_for(
+                "desktop-target",
+                Some("uid-1"),
+                "development",
+                "desktop-source",
+                now_ms
+            )
             .is_some());
     }
 
@@ -331,13 +383,21 @@ mod tests {
         let store_path = crate::test_paths::unique_test_path("lan-bootstrap-stale-ack-store");
         let now_ms = 1_000;
 
-        prepare_bootstrap_request(&store_path, "desktop-target", "uid-1", "development", now_ms)
-            .expect("prepare");
+        prepare_bootstrap_request(
+            &store_path,
+            "desktop-target",
+            "uid-1",
+            "development",
+            "desktop-source",
+            now_ms,
+        )
+        .expect("prepare");
 
         let error = confirm_bootstrap_response(
             &store_path,
             "desktop-target",
             "an-old-secret-from-a-previous-request",
+            "desktop-source",
             LanBootstrapResponse {
                 ca_certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----"
                     .to_string(),

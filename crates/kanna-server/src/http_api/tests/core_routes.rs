@@ -5871,6 +5871,7 @@ async fn task_file_route_maps_database_failure_to_internal_server_error() {
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: temp_dir
             .path()
@@ -6914,6 +6915,7 @@ async fn create_pairing_session_route_uses_local_identity_without_desktop_secret
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-http-local",

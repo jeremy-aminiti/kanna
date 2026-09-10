@@ -38,16 +38,24 @@ use std::thread::JoinHandle;
 /// which stays under the same limit.
 pub const LAN_ROUTING_SERVICE_TYPE: &str = "_kanna-lan._tcp.local.";
 
+/// This module's own TXT-record shape version - independent of
+/// `machine_trust::MACHINE_TRUST_PROTOCOL_VERSION` (a different record, a
+/// different owner) and of the relay's `desktopRouting` capability version
+/// (a different transport entirely). A resolution advertising any other
+/// value is filtered out at discovery time: see `candidate_from_resolution`.
+pub const LAN_ROUTING_PROTOCOL_VERSION: u32 = 1;
+
 /// TXT record for the LAN routing service: identity and version only, never
-/// a credential. `environment` lets a receiver ignore an candidate advertised
-/// by a differently-environmented build sharing the same LAN (e.g. a staging
-/// desktop) without needing to trust the label for anything beyond that -
-/// the real authentication happens entirely later, in `invoke_desktop`.
-fn lan_routing_txt<'a>(desktop_id: &'a str, environment: &'a str) -> Vec<(&'a str, &'a str)> {
+/// a credential. `environment` and `protocolVersion` let a receiver filter
+/// out a candidate advertised by a differently-environmented or
+/// incompatible build sharing the same LAN (e.g. a staging desktop) without
+/// needing to trust the label for anything beyond that - the real
+/// authentication happens entirely later, in `invoke_desktop`.
+fn lan_routing_txt<'a>(desktop_id: &'a str, environment: &'a str) -> Vec<(&'a str, String)> {
     vec![
-        ("desktopId", desktop_id),
-        ("environment", environment),
-        ("protocolVersion", "1"),
+        ("desktopId", desktop_id.to_string()),
+        ("environment", environment.to_string()),
+        ("protocolVersion", LAN_ROUTING_PROTOCOL_VERSION.to_string()),
     ]
 }
 
@@ -132,16 +140,35 @@ fn instance_name(fullname: &str) -> Option<&str> {
 }
 
 /// The candidate a resolution should record, given its already-extracted
-/// desktop_id/address/port - kept as a pure function over primitives
-/// (rather than over `mdns_sd::ResolvedService` directly, which is
-/// `#[non_exhaustive]` with no public constructor and so cannot be built in
-/// a test) so the actual mapping logic stays unit-testable without a real
-/// mDNS daemon. `start_discovery` is what extracts these from a real event.
+/// desktop_id/address/port/environment/protocol-version - kept as a pure
+/// function over primitives (rather than over `mdns_sd::ResolvedService`
+/// directly, which is `#[non_exhaustive]` with no public constructor and so
+/// cannot be built in a test) so the actual mapping logic stays unit-testable
+/// without a real mDNS daemon. `start_discovery` is what extracts these from
+/// a real event.
+///
+/// `environment` and `protocol_version` are validated *here*, as filters on
+/// whether a candidate is worth recording at all - never as authority: a
+/// candidate advertising a different environment (a staging sibling sharing
+/// this LAN) or an unrecognized protocol version is simply never recorded,
+/// exactly as if discovery had never observed it. Nothing about this
+/// upgrades the candidate's trustworthiness once filtered in;
+/// `invoke_desktop`'s pinned-TLS client still independently authenticates
+/// the responder before anything is ever sent to this address.
 fn candidate_from_resolution(
     desktop_id: Option<&str>,
     address: Option<IpAddr>,
     port: u16,
+    advertised_environment: Option<&str>,
+    advertised_protocol_version: Option<&str>,
+    current_environment: &str,
 ) -> Option<(String, SocketAddr)> {
+    if advertised_environment != Some(current_environment) {
+        return None;
+    }
+    if advertised_protocol_version != Some(&LAN_ROUTING_PROTOCOL_VERSION.to_string()) {
+        return None;
+    }
     Some((desktop_id?.to_string(), SocketAddr::new(address?, port)))
 }
 
@@ -167,6 +194,7 @@ pub fn start_discovery(state: Arc<AppState>) -> Result<JoinHandle<()>, String> {
     let receiver = daemon
         .browse(LAN_ROUTING_SERVICE_TYPE)
         .map_err(|error| format!("failed to browse for LAN routing services: {error}"))?;
+    let current_environment = state.config().environment.clone();
     let handle = std::thread::Builder::new()
         .name("kanna-lan-routing-discovery".to_string())
         .spawn(move || {
@@ -176,9 +204,19 @@ pub fn start_discovery(state: Arc<AppState>) -> Result<JoinHandle<()>, String> {
                     ServiceEvent::ServiceResolved(resolved) => {
                         let desktop_id = resolved.txt_properties.get_property_val_str("desktopId");
                         let address = resolved.addresses.iter().next().map(|ip| ip.to_ip_addr());
-                        if let Some((desktop_id, address)) =
-                            candidate_from_resolution(desktop_id, address, resolved.port)
-                        {
+                        let advertised_environment =
+                            resolved.txt_properties.get_property_val_str("environment");
+                        let advertised_protocol_version = resolved
+                            .txt_properties
+                            .get_property_val_str("protocolVersion");
+                        if let Some((desktop_id, address)) = candidate_from_resolution(
+                            desktop_id,
+                            address,
+                            resolved.port,
+                            advertised_environment,
+                            advertised_protocol_version,
+                            &current_environment,
+                        ) {
                             log::info!("LAN routing candidate observed: {desktop_id} at {address}");
                             state.set_lan_candidate(desktop_id, address);
                         }
@@ -201,11 +239,20 @@ pub fn start_discovery(state: Arc<AppState>) -> Result<JoinHandle<()>, String> {
 mod tests {
     use super::*;
 
+    const PROTOCOL: &str = "1";
+
     #[test]
     fn a_resolution_with_a_desktop_id_and_address_becomes_a_candidate() {
         let address = IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 5));
-        let update =
-            candidate_from_resolution(Some("desktop-target"), Some(address), 4460).expect("update");
+        let update = candidate_from_resolution(
+            Some("desktop-target"),
+            Some(address),
+            4460,
+            Some("development"),
+            Some(PROTOCOL),
+            "development",
+        )
+        .expect("update");
         assert_eq!(update.0, "desktop-target");
         assert_eq!(update.1, SocketAddr::new(address, 4460));
     }
@@ -213,12 +260,76 @@ mod tests {
     #[test]
     fn a_resolution_with_no_desktop_id_produces_no_update() {
         let address = IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 5));
-        assert!(candidate_from_resolution(None, Some(address), 4460).is_none());
+        assert!(candidate_from_resolution(
+            None,
+            Some(address),
+            4460,
+            Some("development"),
+            Some(PROTOCOL),
+            "development",
+        )
+        .is_none());
     }
 
     #[test]
     fn a_resolution_with_no_address_produces_no_update() {
-        assert!(candidate_from_resolution(Some("desktop-target"), None, 4460).is_none());
+        assert!(candidate_from_resolution(
+            Some("desktop-target"),
+            None,
+            4460,
+            Some("development"),
+            Some(PROTOCOL),
+            "development",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_resolution_advertising_a_different_environment_produces_no_update() {
+        let address = IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 5));
+        assert!(
+            candidate_from_resolution(
+                Some("desktop-staging"),
+                Some(address),
+                4460,
+                Some("staging"),
+                Some(PROTOCOL),
+                "development",
+            )
+            .is_none(),
+            "a same-LAN sibling in a different environment must never become a candidate"
+        );
+    }
+
+    #[test]
+    fn a_resolution_missing_its_environment_label_produces_no_update() {
+        let address = IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 5));
+        assert!(candidate_from_resolution(
+            Some("desktop-target"),
+            Some(address),
+            4460,
+            None,
+            Some(PROTOCOL),
+            "development",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_resolution_advertising_an_unrecognized_protocol_version_produces_no_update() {
+        let address = IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 5));
+        assert!(
+            candidate_from_resolution(
+                Some("desktop-target"),
+                Some(address),
+                4460,
+                Some("development"),
+                Some("2"),
+                "development",
+            )
+            .is_none(),
+            "an unrecognized protocol version must never become a candidate"
+        );
     }
 
     #[test]

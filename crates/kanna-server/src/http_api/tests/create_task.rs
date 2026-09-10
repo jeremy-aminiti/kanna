@@ -136,6 +136,7 @@ async fn assert_created_task_overrides_reach_daemon_spawn(
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-create-overrides",
@@ -620,6 +621,7 @@ async fn create_task_route_round_trips_and_replays_eight_hex_requested_id() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-create-replay",
@@ -735,6 +737,7 @@ async fn requested_task_retry_repairs_prepare_before_daemon_spawn() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-create-repair",
@@ -1184,6 +1187,7 @@ async fn create_task_route_uses_saved_default_agent_provider_when_payload_omits_
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-default-provider",
@@ -1305,6 +1309,7 @@ async fn create_task_route_runs_a_non_review_builtin_agent_in_the_first_stage() 
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-create-commit-agent",
@@ -1417,6 +1422,7 @@ async fn create_task_route_persists_display_name_alias_and_returns_it_as_title()
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-create-title",
@@ -1598,6 +1604,7 @@ async fn create_task_route_preserves_stage_override_for_transferred_tasks() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-stage-override",
@@ -1749,6 +1756,7 @@ async fn create_task_route_sends_kanna_cli_runtime_env_to_daemon_spawn() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-create-env",
@@ -1838,6 +1846,7 @@ async fn create_task_route_rejects_invalid_blocker_before_creating_task_or_spawn
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-invalid-blocker",
@@ -1921,6 +1930,7 @@ async fn create_task_route_preserves_failed_prepare_diagnostics() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-create-bad-base",
@@ -2078,6 +2088,7 @@ async fn create_task_route_with_blocker_creates_dormant_task_without_spawning() 
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-create-dormant",
@@ -2235,6 +2246,7 @@ async fn create_task_route_with_only_closed_blockers_spawns_immediately() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-create-closed-blocker",
@@ -2374,6 +2386,7 @@ async fn create_task_route_preserves_failed_recovery_seed_diagnostics_without_sp
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-create-spawn-fail",
@@ -2508,6 +2521,7 @@ async fn create_task_route_persists_blocker_without_daemon_spawn() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-create-blocker",

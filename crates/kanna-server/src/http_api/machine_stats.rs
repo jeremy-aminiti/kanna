@@ -667,6 +667,9 @@ async fn gather_remote_detailed_stats(state: &Arc<AppState>) -> MachineStatsResp
     };
     let listing =
         tokio::time::timeout(REMOTE_STATS_TIMEOUT, state.list_active_relay_desktops()).await;
+    // A relay outage is its own reported error, exactly as before - but it
+    // must not also hide a trusted discovered LAN peer, which
+    // `eligible_lan_desktop_ids` adds unconditionally in either branch.
     let mut machine_ids = match listing {
         Ok(Ok(ids)) => ids,
         result => {
@@ -678,9 +681,10 @@ async fn gather_remote_detailed_stats(state: &Arc<AppState>) -> MachineStatsResp
                 machine_id: None,
                 error: bounded_text(&error, 512),
             });
-            return output;
+            Vec::new()
         }
     };
+    machine_ids.extend(super::invoke_desktop::eligible_lan_desktop_ids(state));
     machine_ids.sort();
     machine_ids.dedup();
     machine_ids.retain(|id| id != &state.config.desktop_id);

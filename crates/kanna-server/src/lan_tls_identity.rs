@@ -48,39 +48,92 @@ pub struct LanTlsIdentity {
     pub leaf_private_key_pem: String,
 }
 
-/// Loads the persisted identity, generating and persisting a new one only if
-/// none exists yet or the persisted file fails to parse as a well-formed
-/// identity. `desktop_id` becomes the leaf certificate's subject alternative
-/// name, so a client pinning to the CA can also assert *which* desktop it
-/// expected to reach via standard hostname verification against that SAN -
-/// the identity binds a specific desktop_id, not just "some same-account
-/// sibling holding some CA-issued cert".
-pub fn load_or_create(path: &Path, desktop_id: &str) -> Result<LanTlsIdentity, String> {
-    if let Some(identity) = try_load(path)? {
-        return Ok(identity);
+/// Loads the persisted identity, generating and persisting a new one if none
+/// exists yet, the persisted identity was minted for a different
+/// `desktop_id`/`environment`, or (unlike those two, which are ordinary
+/// recovery, not tampering) it fails outright: an unparseable file, a
+/// symlink, or a file that grants more than owner access. `desktop_id`
+/// becomes the leaf certificate's subject alternative name, so a client
+/// pinning to the CA can also assert *which* desktop it expected to reach
+/// via standard hostname verification against that SAN - the identity binds
+/// a specific desktop_id, not just "some same-account sibling holding some
+/// CA-issued cert"; `environment` keeps a staging and a production identity
+/// minted under the same reused config directory from ever being reused for
+/// each other.
+///
+/// A desktop_id/environment mismatch regenerates rather than fails closed:
+/// it is the expected shape of a config directory reused for a fresh
+/// identity, and every `machine_trust` grant that depended on the old
+/// identity is separately bound to `local_desktop_id`/`environment` there,
+/// so it already stops verifying the moment this identity changes -
+/// re-bootstrapping is required, not silently skipped.
+pub fn load_or_create(
+    path: &Path,
+    desktop_id: &str,
+    environment: &str,
+) -> Result<LanTlsIdentity, String> {
+    match try_load(path, desktop_id, environment)? {
+        LoadedIdentity::Reusable(identity) => return Ok(identity),
+        LoadedIdentity::Missing | LoadedIdentity::IdentityChanged => {}
     }
     let identity = generate(desktop_id)?;
-    save(path, &identity)?;
+    save(path, desktop_id, environment, &identity)?;
     Ok(identity)
 }
 
-/// `Ok(None)` for a missing file (the ordinary first-run case); `Err` for a
-/// file that exists but fails to parse - fail closed rather than silently
-/// discarding and regenerating over what might be an operator's own copy or
-/// a partially-written file from a crashed prior run.
-fn try_load(path: &Path) -> Result<Option<LanTlsIdentity>, String> {
+enum LoadedIdentity {
+    Reusable(LanTlsIdentity),
+    Missing,
+    IdentityChanged,
+}
+
+/// `Missing` for a missing file (the ordinary first-run case) or one minted
+/// for a different desktop_id/environment (ordinary recovery, not
+/// tampering); `Err` for a file that exists but fails to parse, is a
+/// symlink, or grants more than owner access - fail closed rather than
+/// silently discarding and regenerating over what might be an operator's own
+/// copy, a partially-written file from a crashed prior run, or a private key
+/// left readable by another account on the machine.
+fn try_load(path: &Path, desktop_id: &str, environment: &str) -> Result<LoadedIdentity, String> {
+    use std::os::unix::fs::PermissionsExt;
+
     if !path.exists() {
-        return Ok(None);
+        return Ok(LoadedIdentity::Missing);
     }
-    let content = std::fs::read_to_string(path)
-        .map_err(|error| format!("failed to read LAN TLS identity {}: {error}", path.display()))?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "failed to stat LAN TLS identity {}: {error}",
+            path.display()
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "LAN TLS identity {} is not a regular file",
+            path.display()
+        ));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(format!(
+            "LAN TLS identity {} must not grant group or other permissions",
+            path.display()
+        ));
+    }
+    let content = std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read LAN TLS identity {}: {error}",
+            path.display()
+        )
+    })?;
     let identity: PersistedIdentity = serde_json::from_str(&content).map_err(|error| {
         format!(
             "failed to parse LAN TLS identity {}: {error}",
             path.display()
         )
     })?;
-    Ok(Some(LanTlsIdentity {
+    if identity.desktop_id != desktop_id || identity.environment != environment {
+        return Ok(LoadedIdentity::IdentityChanged);
+    }
+    Ok(LoadedIdentity::Reusable(LanTlsIdentity {
         ca_certificate_pem: identity.ca_certificate_pem,
         leaf_certificate_pem: identity.leaf_certificate_pem,
         leaf_private_key_pem: identity.leaf_private_key_pem,
@@ -106,8 +159,8 @@ fn generate_ca() -> Result<(String, rcgen::Certificate, KeyPair), String> {
     params
         .distinguished_name
         .push(DnType::CommonName, "Kanna LAN Machine-Invoke CA");
-    let key_pair =
-        KeyPair::generate().map_err(|error| format!("failed to generate LAN TLS CA key: {error}"))?;
+    let key_pair = KeyPair::generate()
+        .map_err(|error| format!("failed to generate LAN TLS CA key: {error}"))?;
     let certificate = params
         .self_signed(&key_pair)
         .map_err(|error| format!("failed to self-sign LAN TLS CA certificate: {error}"))?;
@@ -159,6 +212,15 @@ fn sanitize_san(desktop_id: &str) -> String {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedIdentity {
+    /// Bound at generation time; checked against the *current* desktop_id
+    /// and environment on every load - see `try_load`. `#[serde(default)]`
+    /// makes a file persisted before this field existed deserialize as an
+    /// empty string, which never matches any real desktop_id and so safely
+    /// triggers a regeneration rather than a parse failure.
+    #[serde(default)]
+    desktop_id: String,
+    #[serde(default)]
+    environment: String,
     ca_certificate_pem: String,
     leaf_certificate_pem: String,
     leaf_private_key_pem: String,
@@ -169,8 +231,15 @@ struct PersistedIdentity {
 /// contains private keys, never group/other-readable, matching
 /// `machine_trust::MachineTrustStore`'s persistence stance for the same
 /// reason.
-fn save(path: &Path, identity: &LanTlsIdentity) -> Result<(), String> {
+fn save(
+    path: &Path,
+    desktop_id: &str,
+    environment: &str,
+    identity: &LanTlsIdentity,
+) -> Result<(), String> {
     let body = serde_json::to_string_pretty(&PersistedIdentity {
+        desktop_id: desktop_id.to_string(),
+        environment: environment.to_string(),
         ca_certificate_pem: identity.ca_certificate_pem.clone(),
         leaf_certificate_pem: identity.leaf_certificate_pem.clone(),
         leaf_private_key_pem: identity.leaf_private_key_pem.clone(),
@@ -208,8 +277,8 @@ mod tests {
     #[test]
     fn load_or_create_persists_and_reloads_the_same_identity() {
         let path = temp_identity_path();
-        let first = load_or_create(&path, "desktop-1").expect("first load creates");
-        let second = load_or_create(&path, "desktop-1").expect("second load reuses");
+        let first = load_or_create(&path, "desktop-1", "development").expect("first load creates");
+        let second = load_or_create(&path, "desktop-1", "development").expect("second load reuses");
         assert_eq!(
             first, second,
             "an ordinary restart must not regenerate the identity"
@@ -221,7 +290,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let path = temp_identity_path();
-        load_or_create(&path, "desktop-1").expect("create identity");
+        load_or_create(&path, "desktop-1", "development").expect("create identity");
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
         assert_eq!(
             mode & 0o777,
@@ -232,11 +301,78 @@ mod tests {
 
     #[test]
     fn a_corrupt_identity_file_fails_closed_instead_of_silently_regenerating() {
+        use std::os::unix::fs::PermissionsExt;
+
         let path = temp_identity_path();
         std::fs::write(&path, b"not valid json").expect("write corrupt file");
-        let error = load_or_create(&path, "desktop-1")
+        // Owner-only, so this exercises the parse failure specifically, not
+        // the separate (and separately tested) permission check.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("set owner-only permissions");
+        let error = load_or_create(&path, "desktop-1", "development")
             .expect_err("a corrupt identity file must not be silently replaced");
         assert!(error.contains("failed to parse"), "{error}");
+    }
+
+    #[test]
+    fn a_group_readable_identity_file_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_identity_path();
+        load_or_create(&path, "desktop-1", "development").expect("create identity");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("widen permissions to simulate tampering");
+
+        let error = load_or_create(&path, "desktop-1", "development")
+            .expect_err("group-readable must fail closed, not silently regenerate");
+        assert!(error.contains("group or other permissions"), "{error}");
+    }
+
+    #[test]
+    fn a_symlinked_identity_path_fails_closed() {
+        let target = temp_identity_path();
+        load_or_create(&target, "desktop-1", "development").expect("create identity");
+        let link = temp_identity_path();
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let error = load_or_create(&link, "desktop-1", "development")
+            .expect_err("a symlink must fail closed, not be followed and reused or replaced");
+        assert!(error.contains("not a regular file"), "{error}");
+    }
+
+    #[test]
+    fn a_changed_desktop_id_regenerates_rather_than_reusing_the_old_identity() {
+        let path = temp_identity_path();
+        let old = load_or_create(&path, "desktop-old", "development").expect("create old");
+
+        let new = load_or_create(&path, "desktop-new", "development")
+            .expect("a changed desktop id regenerates rather than failing closed");
+
+        assert_ne!(
+            old, new,
+            "the identity must not be reused across a changed desktop_id"
+        );
+        // Reloading again under the new id must now reuse what was just
+        // generated, not regenerate a third time.
+        let reloaded = load_or_create(&path, "desktop-new", "development")
+            .expect("reload under the new id reuses it");
+        assert_eq!(new, reloaded);
+    }
+
+    #[test]
+    fn a_changed_environment_regenerates_rather_than_reusing_the_old_identity() {
+        let path = temp_identity_path();
+        let old = load_or_create(&path, "desktop-1", "development").expect("create old");
+
+        let new = load_or_create(&path, "desktop-1", "staging")
+            .expect("a changed environment regenerates rather than failing closed");
+
+        assert_ne!(
+            old, new,
+            "the identity must not be reused across a changed environment - a staging and a \
+             production identity minted under the same reused config directory must never be \
+             interchangeable"
+        );
     }
 
     #[test]

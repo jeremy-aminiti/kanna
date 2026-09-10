@@ -5,9 +5,9 @@ use super::cloud_env::{
 use super::process::find_sidecar;
 use super::{
     current_server_version, default_desktop_name, desktop_credential, escape_toml_string,
-    file_sha256_hex, generate_device_token, local_server_port_for_cloud_env,
-    local_transfer_port_for_cloud_env, resolved_db_path, server_base_url, server_environment,
-    MobileServerState,
+    file_sha256_hex, generate_device_token, local_lan_routing_port_for_cloud_env,
+    local_server_port_for_cloud_env, local_transfer_port_for_cloud_env, resolved_db_path,
+    server_base_url, server_environment, MobileServerState,
 };
 use kanna_runtime_defaults::DesktopCloudEnvironment;
 use std::fs::{File, OpenOptions};
@@ -173,10 +173,16 @@ pub(super) fn build_server_config(state: &MobileServerState) -> Result<String, S
             return Err("KANNA_TRANSFER_PORT must be a valid nonzero port".to_string());
         }
     }
+    if let Ok(raw) = std::env::var("KANNA_LAN_ROUTING_PORT") {
+        if raw.parse::<u16>().ok().filter(|port| *port != 0).is_none() {
+            return Err("KANNA_LAN_ROUTING_PORT must be a valid nonzero port".to_string());
+        }
+    }
     let transfer_port = local_transfer_port_for_cloud_env(state.cloud_env);
+    let lan_routing_port = local_lan_routing_port_for_cloud_env(state.cloud_env);
 
     Ok(format!(
-        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nversion = \"{}\"\nenvironment = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\ntransfer_port = {}\npairing_store_path = \"{}\"\n",
+        "relay_url = \"{}\"\ndevice_token = \"{}\"\ndaemon_dir = \"{}\"\ndb_path = \"{}\"\n{}{}desktop_id = \"{}\"\ndesktop_secret = \"{}\"\ndesktop_name = \"{}\"\nversion = \"{}\"\nenvironment = \"{}\"\n{}lan_host = \"0.0.0.0\"\nlan_port = {}\ntransfer_port = {}\nlan_routing_port = {}\npairing_store_path = \"{}\"\n",
         escape_toml_string(&relay_url),
         escape_toml_string(&device_token),
         escape_toml_string(&daemon_dir),
@@ -191,6 +197,7 @@ pub(super) fn build_server_config(state: &MobileServerState) -> Result<String, S
         firebase_config,
         local_server_port_for_cloud_env(state.cloud_env),
         transfer_port,
+        lan_routing_port,
         escape_toml_string(&pairing_store_path.to_string_lossy()),
     ))
 }
@@ -267,6 +274,13 @@ pub(super) fn server_config_matches_runtime(
     }
     let expected_transfer_port = local_transfer_port_for_cloud_env(cloud_env);
     required_lines.push(format!("transfer_port = {expected_transfer_port}"));
+    if let Ok(raw) = std::env::var("KANNA_LAN_ROUTING_PORT") {
+        if raw.parse::<u16>().ok().filter(|port| *port != 0).is_none() {
+            return false;
+        }
+    }
+    let expected_lan_routing_port = local_lan_routing_port_for_cloud_env(cloud_env);
+    required_lines.push(format!("lan_routing_port = {expected_lan_routing_port}"));
     if let Some(device_token) = expected_device_token {
         required_lines.push(format!(
             "device_token = \"{}\"",
@@ -670,6 +684,105 @@ mod tests {
         ));
         // The same file read as production must not be accepted: its transfer
         // port belongs to the other install, and reusing it is the collision.
+        assert!(!server_config_matches_runtime(
+            &config_path,
+            &credential.desktop_id,
+            Some(DesktopCloudEnvironment::Production),
+        ));
+    }
+
+    #[test]
+    fn build_server_config_requires_and_writes_lan_routing_port() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            set_env_var("KANNA_LAN_ROUTING_PORT", "4470");
+        }
+
+        let state = MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48120),
+            config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
+            started: false,
+            cloud_env: None,
+        };
+
+        let config = build_server_config(&state).unwrap();
+
+        unsafe {
+            unset_env_var("KANNA_LAN_ROUTING_PORT");
+        }
+
+        assert!(config.contains("lan_routing_port = 4470"));
+    }
+
+    #[test]
+    fn build_server_config_writes_a_distinct_lan_routing_port_per_installed_environment() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_LAN_ROUTING_PORT");
+        }
+
+        let config_for = |cloud_env| {
+            let state = MobileServerState {
+                status: "stopped".to_string(),
+                desktop_name: "Studio Mac".to_string(),
+                api_base_url: server_base_url(48120),
+                config_path: PathBuf::from("/tmp/build.kanna/Kanna/server.toml"),
+                started: false,
+                cloud_env,
+            };
+            build_server_config(&state).unwrap()
+        };
+
+        let staging = config_for(Some(DesktopCloudEnvironment::Staging));
+        let production = config_for(Some(DesktopCloudEnvironment::Production));
+
+        assert!(staging.contains(&format!(
+            "lan_routing_port = {}",
+            kanna_runtime_defaults::STAGING_LAN_ROUTING_PORT
+        )));
+        assert!(production.contains(&format!(
+            "lan_routing_port = {}",
+            kanna_runtime_defaults::DEFAULT_LAN_ROUTING_PORT
+        )));
+        assert_ne!(
+            kanna_runtime_defaults::STAGING_LAN_ROUTING_PORT,
+            kanna_runtime_defaults::DEFAULT_LAN_ROUTING_PORT,
+            "installed staging and production must never collide on this listener's port"
+        );
+    }
+
+    #[test]
+    fn server_config_matches_runtime_rejects_the_other_environments_lan_routing_port() {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        unsafe {
+            unset_env_var("KANNA_LAN_ROUTING_PORT");
+        }
+
+        let dir = unique_test_root("lan-routing-port-match");
+        std::fs::create_dir_all(&dir).expect("test root should be created");
+        let config_path = dir.join("server.toml");
+        let credential = desktop_credential(&config_path).expect("credential should resolve");
+        let staging_config = build_server_config(&MobileServerState {
+            status: "stopped".to_string(),
+            desktop_name: "Studio Mac".to_string(),
+            api_base_url: server_base_url(48121),
+            config_path: config_path.clone(),
+            started: false,
+            cloud_env: Some(DesktopCloudEnvironment::Staging),
+        })
+        .expect("staging config should build");
+        std::fs::write(&config_path, &staging_config).expect("config should be written");
+
+        assert!(server_config_matches_runtime(
+            &config_path,
+            &credential.desktop_id,
+            Some(DesktopCloudEnvironment::Staging),
+        ));
+        // The same file read as production must not be accepted: its LAN
+        // routing port belongs to the other install, and reusing it is the
+        // collision this whole contract exists to prevent.
         assert!(!server_config_matches_runtime(
             &config_path,
             &credential.desktop_id,

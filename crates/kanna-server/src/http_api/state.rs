@@ -112,9 +112,20 @@ pub struct AppState {
     /// machine-invoke listener, by desktop_id. Discovery-owned (Bonjour), a
     /// candidate here is only ever a hint of where to *attempt* a
     /// connection - `invoke_desktop`'s TLS client is what actually proves
-    /// the responder's identity, never this map. Absent an entry, or a
-    /// desktop no longer advertised, there is simply nothing to dial.
+    /// the responder's identity, never this map. Discovery itself already
+    /// filters out a candidate whose advertised environment or protocol
+    /// version does not match this desktop's own before it ever reaches
+    /// this map - see `lan_discovery::candidate_from_resolution` - so
+    /// nothing here needs to re-carry that untrusted metadata. Absent an
+    /// entry, or a desktop no longer advertised, there is simply nothing to
+    /// dial.
     lan_candidates: Arc<StdMutex<HashMap<String, std::net::SocketAddr>>>,
+    /// Targets with an outbound LAN bootstrap currently in flight - a
+    /// de-duplication guard, not a scheduler: nothing here decides *when* to
+    /// bootstrap, only that a burst of calls for the same target while one
+    /// attempt is already running does not start a second one concurrently.
+    /// See `invoke_desktop::maybe_trigger_lan_bootstrap`.
+    lan_bootstrap_in_flight: Arc<StdMutex<HashSet<String>>>,
     relay_desktop_routing_available: Arc<AtomicBool>,
     relay_desktop_routing_unavailable_reason: Arc<StdMutex<Option<String>>>,
     relay_desktop_routing_unreachable_since: Arc<StdMutex<Option<String>>>,
@@ -493,6 +504,7 @@ impl AppState {
             relay_reconnect: Arc::new(Notify::new()),
             authenticated_account_uid: Arc::new(StdMutex::new(None)),
             lan_candidates: Arc::new(StdMutex::new(HashMap::new())),
+            lan_bootstrap_in_flight: Arc::new(StdMutex::new(HashSet::new())),
             anonymous_push_revocations_changed: Arc::new(Notify::new()),
             relay_desktop_routing_available: Arc::new(AtomicBool::new(false)),
             relay_desktop_routing_unavailable_reason: Arc::new(StdMutex::new(Some(
@@ -798,6 +810,39 @@ impl AppState {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(desktop_id)
             .copied()
+    }
+
+    /// Every desktop_id discovery currently has a candidate address for -
+    /// still just an address hint list, not a trust decision. See
+    /// `invoke_desktop::eligible_lan_desktop_ids`, which is what turns this
+    /// into machines actually worth listing.
+    pub(crate) fn lan_candidate_desktop_ids(&self) -> Vec<String> {
+        self.lan_candidates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Claims the in-flight slot for a LAN bootstrap of `target_desktop_id`.
+    /// `true` means the caller now owns it and must call
+    /// `finish_lan_bootstrap_attempt` when done; `false` means one is
+    /// already running and the caller must not start another.
+    pub(crate) fn begin_lan_bootstrap_attempt(&self, target_desktop_id: &str) -> bool {
+        self.lan_bootstrap_in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(target_desktop_id.to_string())
+    }
+
+    /// Releases the in-flight slot claimed by `begin_lan_bootstrap_attempt`,
+    /// regardless of whether the attempt succeeded.
+    pub(crate) fn finish_lan_bootstrap_attempt(&self, target_desktop_id: &str) {
+        self.lan_bootstrap_in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(target_desktop_id);
     }
 
     pub(crate) fn take_desktop_relay_requests(

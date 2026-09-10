@@ -236,21 +236,11 @@ async fn main() {
 
     // Sidecar-independent from the mobile advertisement above: its own
     // service type, its own port, its own optionality - a failure here must
-    // not affect mobile pairing or vice versa.
-    let lan_routing_port = std::env::var("KANNA_LAN_ROUTING_PORT")
-        .ok()
-        .and_then(|value| value.trim().parse::<u16>().ok())
-        .unwrap_or(4460);
-    let _lan_routing_bonjour = lan_discovery::LanRoutingAdvertisement::start(
-        &config.desktop_id,
-        &config.environment,
-        lan_routing_port,
-    )
-    .map_err(|error| {
-        log::warn!("LAN routing Bonjour advertisement unavailable: {}", error);
-        error
-    })
-    .ok();
+    // not affect mobile pairing or vice versa. Advertising itself is owned by
+    // `runtime::run_lan_machine_invoke_listener`, not started here: it only
+    // begins once that listener has actually bound its port, so a second
+    // instance that loses the port never advertises one it does not hold -
+    // see that function's own doc comment.
 
     // Capture the login-shell PATH before the first stage action needs it —
     // loading zshrc costs seconds and must never sit on a request path.

@@ -43,6 +43,17 @@ pub(crate) fn persistence_mutex() -> &'static Mutex<()> {
 /// renewal timer.
 pub const LEASE_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// This module's own record-shape version, independent of any relay
+/// `desktopRouting` capability version. Bumped only if a grant/pending
+/// record's own persisted shape changes incompatibly. A record whose
+/// `protocol_version` does not match the running build's is treated exactly
+/// like an account/environment/local-identity mismatch: not found, not
+/// verified - forcing a fresh bootstrap rather than trusting a record this
+/// build may not fully understand. `#[serde(default)]` on the field itself
+/// makes an already-persisted record from before this version existed
+/// deserialize as `0`, which never matches and so safely invalidates it.
+pub const MACHINE_TRUST_PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundGrant {
@@ -50,6 +61,14 @@ pub struct InboundGrant {
     pub secret_hash: String,
     pub account_uid: String,
     pub environment: String,
+    /// This desktop's own `desktop_id` at the moment it accepted the grant.
+    /// Checked at every use against the *current* `desktop_id`: a config
+    /// directory reused after a changed desktop identity must not keep
+    /// answering to inbound secrets bootstrapped for the old one.
+    #[serde(default)]
+    pub local_desktop_id: String,
+    #[serde(default)]
+    pub protocol_version: u32,
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
 }
@@ -70,6 +89,12 @@ pub struct OutboundGrant {
     pub trust_anchor_pem: Option<String>,
     pub account_uid: String,
     pub environment: String,
+    /// This desktop's own `desktop_id` at the moment it minted the request
+    /// this grant confirmed. See [`InboundGrant::local_desktop_id`].
+    #[serde(default)]
+    pub local_desktop_id: String,
+    #[serde(default)]
+    pub protocol_version: u32,
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
 }
@@ -86,6 +111,15 @@ pub struct PendingBootstrap {
     pub candidate_secret: String,
     pub account_uid: String,
     pub environment: String,
+    /// This desktop's own `desktop_id` when the request was prepared.
+    /// [`MachineTrustStore::confirm_outbound`] refuses an acknowledgement
+    /// whose pending record no longer matches the *current* local identity -
+    /// a desktop id changing mid-flight must force a fresh bootstrap rather
+    /// than confirm a grant under a stale local identity.
+    #[serde(default)]
+    pub local_desktop_id: String,
+    #[serde(default)]
+    pub protocol_version: u32,
     pub created_at_unix_ms: u64,
 }
 
@@ -97,6 +131,14 @@ pub struct MachineTrustStore {
     pub outbound: Vec<OutboundGrant>,
     #[serde(default)]
     pub pending: Vec<PendingBootstrap>,
+    /// The account uid this store's on-disk contents are known-consistent
+    /// with, as of the last reconciliation that actually *persisted*
+    /// successfully - see [`MachineTrustStore::retain_account`]'s own doc
+    /// comment for why this, not merely re-running `retain_account`, is what
+    /// makes a failed purge durably retry instead of silently reactivating
+    /// on a later sign-in to the very same account.
+    #[serde(default)]
+    pub reconciled_account_uid: Option<String>,
 }
 
 impl MachineTrustStore {
@@ -106,8 +148,12 @@ impl MachineTrustStore {
         }
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read machine trust store {}: {e}", path.display()))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("failed to parse machine trust store {}: {e}", path.display()))
+        serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "failed to parse machine trust store {}: {e}",
+                path.display()
+            )
+        })
     }
 
     /// Loads, failing closed on a store file that grants readability beyond
@@ -162,6 +208,7 @@ impl MachineTrustStore {
         target_desktop_id: &str,
         account_uid: &str,
         environment: &str,
+        local_desktop_id: &str,
         candidate_secret: impl FnOnce() -> Result<String, String>,
         now_ms: u64,
     ) -> Result<PendingBootstrap, String> {
@@ -169,6 +216,7 @@ impl MachineTrustStore {
             pending.target_desktop_id == target_desktop_id
                 && pending.account_uid == account_uid
                 && pending.environment == environment
+                && pending.local_desktop_id == local_desktop_id
         }) {
             return Ok(existing.clone());
         }
@@ -177,6 +225,8 @@ impl MachineTrustStore {
             candidate_secret: candidate_secret()?,
             account_uid: account_uid.to_string(),
             environment: environment.to_string(),
+            local_desktop_id: local_desktop_id.to_string(),
+            protocol_version: MACHINE_TRUST_PROTOCOL_VERSION,
             created_at_unix_ms: now_ms,
         };
         self.pending.push(pending.clone());
@@ -199,6 +249,7 @@ impl MachineTrustStore {
         &mut self,
         target_desktop_id: &str,
         candidate_secret: &str,
+        current_local_desktop_id: &str,
         trust_anchor_pem: Option<String>,
         expires_at_unix_ms: u64,
     ) -> Result<OutboundGrant, String> {
@@ -208,6 +259,7 @@ impl MachineTrustStore {
             .position(|pending| {
                 pending.target_desktop_id == target_desktop_id
                     && pending.candidate_secret == candidate_secret
+                    && pending.local_desktop_id == current_local_desktop_id
             })
             .ok_or_else(|| {
                 format!(
@@ -222,6 +274,8 @@ impl MachineTrustStore {
             trust_anchor_pem,
             account_uid: pending.account_uid,
             environment: pending.environment,
+            local_desktop_id: pending.local_desktop_id,
+            protocol_version: MACHINE_TRUST_PROTOCOL_VERSION,
             issued_at_unix_ms: pending.created_at_unix_ms,
             expires_at_unix_ms,
         };
@@ -243,12 +297,17 @@ impl MachineTrustStore {
         &self,
         target_desktop_id: &str,
         current_account_uid: Option<&str>,
+        current_environment: &str,
+        current_local_desktop_id: &str,
         now_ms: u64,
     ) -> Option<&OutboundGrant> {
         let current_account_uid = current_account_uid?;
         self.outbound.iter().find(|grant| {
             grant.target_desktop_id == target_desktop_id
                 && grant.account_uid == current_account_uid
+                && grant.environment == current_environment
+                && grant.local_desktop_id == current_local_desktop_id
+                && grant.protocol_version == MACHINE_TRUST_PROTOCOL_VERSION
                 && grant.expires_at_unix_ms > now_ms
         })
     }
@@ -264,6 +323,7 @@ impl MachineTrustStore {
         secret_hash: &str,
         account_uid: &str,
         environment: &str,
+        local_desktop_id: &str,
         now_ms: u64,
     ) -> InboundGrant {
         self.inbound
@@ -273,6 +333,8 @@ impl MachineTrustStore {
             secret_hash: secret_hash.to_string(),
             account_uid: account_uid.to_string(),
             environment: environment.to_string(),
+            local_desktop_id: local_desktop_id.to_string(),
+            protocol_version: MACHINE_TRUST_PROTOCOL_VERSION,
             issued_at_unix_ms: now_ms,
             expires_at_unix_ms: now_ms.saturating_add(LEASE_MS),
         };
@@ -292,6 +354,8 @@ impl MachineTrustStore {
         source_desktop_id: &str,
         secret: &str,
         current_account_uid: Option<&str>,
+        current_environment: &str,
+        current_local_desktop_id: &str,
         now_ms: u64,
     ) -> bool {
         let Some(current_account_uid) = current_account_uid else {
@@ -300,6 +364,9 @@ impl MachineTrustStore {
         let Some(grant) = self.inbound.iter().find(|grant| {
             grant.source_desktop_id == source_desktop_id
                 && grant.account_uid == current_account_uid
+                && grant.environment == current_environment
+                && grant.local_desktop_id == current_local_desktop_id
+                && grant.protocol_version == MACHINE_TRUST_PROTOCOL_VERSION
                 && grant.expires_at_unix_ms > now_ms
         }) else {
             return false;
@@ -318,9 +385,22 @@ impl MachineTrustStore {
     /// including one right after restart, so it is not defeated by a
     /// crashed frontend, a failed one-shot purge, or a missed sign-out
     /// event - the next reconciliation converges regardless of what the
-    /// previous one managed. Returns whether anything changed, so a caller
-    /// only pays for a `save` when needed.
+    /// previous one managed.
+    ///
+    /// Returns whether the caller must persist the result - which is not
+    /// simply "did any record change." A transition *into* `current_account_uid`
+    /// that finds nothing left to remove (every remaining record already
+    /// belongs to it) must still be saved so `reconciled_account_uid`
+    /// advances: if a *previous* purge for a *different* target uid failed to
+    /// persist, its stale records can otherwise reappear as trusted the
+    /// moment that same uid signs back in, purely because `retain_account`
+    /// found nothing to filter that time. Persisting the marker atomically
+    /// with the grants themselves is what makes a failed purge keep
+    /// re-attempting on every later reconciliation - including one for the
+    /// exact uid that failed to purge - until it actually succeeds, rather
+    /// than being silently treated as done because nothing needed removing.
     pub fn retain_account(&mut self, current_account_uid: Option<&str>) -> bool {
+        let transitioning = self.reconciled_account_uid.as_deref() != current_account_uid;
         let before = (self.inbound.len(), self.outbound.len(), self.pending.len());
         match current_account_uid {
             Some(uid) => {
@@ -334,7 +414,11 @@ impl MachineTrustStore {
                 self.pending.clear();
             }
         }
-        before != (self.inbound.len(), self.outbound.len(), self.pending.len())
+        let purged = before != (self.inbound.len(), self.outbound.len(), self.pending.len());
+        if transitioning {
+            self.reconciled_account_uid = current_account_uid.map(str::to_string);
+        }
+        purged || transitioning
     }
 
     /// Drops every expired inbound and outbound record. Expiry is already
@@ -362,6 +446,11 @@ pub fn unix_time_ms() -> Result<u64, String> {
 mod tests {
     use super::*;
 
+    /// This crate's own desktop_id for every test below, standing in for
+    /// `state.config().desktop_id` at every call site that binds to it.
+    const LOCAL: &str = "local-desktop";
+    const ENV: &str = "development";
+
     fn temp_store_path() -> std::path::PathBuf {
         crate::test_paths::unique_test_path("machine-trust-store")
     }
@@ -370,12 +459,13 @@ mod tests {
     fn persists_and_reloads_all_three_record_kinds() {
         let path = temp_store_path();
         let mut store = MachineTrustStore::default();
-        store.accept_inbound("desktop-a", "hash-a", "uid-1", "development", 1_000);
+        store.accept_inbound("desktop-a", "hash-a", "uid-1", ENV, LOCAL, 1_000);
         store
             .pending_or_create(
                 "desktop-b",
                 "uid-1",
-                "development",
+                ENV,
+                LOCAL,
                 || Ok("candidate-secret".to_string()),
                 1_000,
             )
@@ -422,8 +512,8 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
             .expect("widen permissions to simulate tampering");
 
-        let error =
-            MachineTrustStore::load_fail_closed(&path).expect_err("group-readable must fail closed");
+        let error = MachineTrustStore::load_fail_closed(&path)
+            .expect_err("group-readable must fail closed");
         assert!(error.contains("group or other permissions"), "{error}");
     }
 
@@ -435,7 +525,8 @@ mod tests {
             .pending_or_create(
                 "desktop-b",
                 "uid-1",
-                "development",
+                ENV,
+                LOCAL,
                 || {
                     calls += 1;
                     Ok("first-candidate".to_string())
@@ -447,7 +538,8 @@ mod tests {
             .pending_or_create(
                 "desktop-b",
                 "uid-1",
-                "development",
+                ENV,
+                LOCAL,
                 || {
                     calls += 1;
                     Ok("second-candidate".to_string())
@@ -462,20 +554,60 @@ mod tests {
     }
 
     #[test]
+    fn pending_or_create_mints_a_fresh_candidate_when_the_local_identity_changed() {
+        let mut store = MachineTrustStore::default();
+        store
+            .pending_or_create(
+                "desktop-b",
+                "uid-1",
+                ENV,
+                "old-local-desktop",
+                || Ok("first-candidate".to_string()),
+                1_000,
+            )
+            .expect("first pending");
+
+        let second = store
+            .pending_or_create(
+                "desktop-b",
+                "uid-1",
+                ENV,
+                "new-local-desktop",
+                || Ok("second-candidate".to_string()),
+                2_000,
+            )
+            .expect("pending under the new local identity");
+
+        assert_eq!(second.candidate_secret, "second-candidate");
+        assert_eq!(
+            store.pending.len(),
+            2,
+            "the old identity's pending record is orphaned, not silently reused"
+        );
+    }
+
+    #[test]
     fn confirm_outbound_moves_pending_to_outbound_and_consumes_it() {
         let mut store = MachineTrustStore::default();
         store
             .pending_or_create(
                 "desktop-b",
                 "uid-1",
-                "development",
+                ENV,
+                LOCAL,
                 || Ok("secret".to_string()),
                 1_000,
             )
             .expect("pending create");
 
         let confirmed = store
-            .confirm_outbound("desktop-b", "secret", Some("pem-1".to_string()), 50_000)
+            .confirm_outbound(
+                "desktop-b",
+                "secret",
+                LOCAL,
+                Some("pem-1".to_string()),
+                50_000,
+            )
             .expect("first confirm");
         assert!(store.pending.is_empty());
         assert_eq!(store.outbound.len(), 1);
@@ -491,7 +623,7 @@ mod tests {
         // the existing outbound grant alone instead of erroring the request.
         assert!(
             store
-                .confirm_outbound("desktop-b", "secret", None, 2_000)
+                .confirm_outbound("desktop-b", "secret", LOCAL, None, 2_000)
                 .is_err(),
             "confirming with no matching pending record must fail rather than fabricate one"
         );
@@ -505,18 +637,57 @@ mod tests {
             .pending_or_create(
                 "desktop-b",
                 "uid-1",
-                "development",
+                ENV,
+                LOCAL,
                 || Ok("real-secret".to_string()),
                 1_000,
             )
             .expect("pending create");
 
         let error = store
-            .confirm_outbound("desktop-b", "stale-secret-from-another-request", None, 2_000)
+            .confirm_outbound(
+                "desktop-b",
+                "stale-secret-from-another-request",
+                LOCAL,
+                None,
+                2_000,
+            )
             .expect_err("a mismatched secret must not confirm an unrelated pending request");
         assert!(error.contains("no matching pending bootstrap"), "{error}");
-        assert_eq!(store.pending.len(), 1, "the real pending request must survive");
+        assert_eq!(
+            store.pending.len(),
+            1,
+            "the real pending request must survive"
+        );
         assert!(store.outbound.is_empty());
+    }
+
+    #[test]
+    fn confirm_outbound_refuses_an_ack_whose_pending_record_has_a_different_local_identity() {
+        let mut store = MachineTrustStore::default();
+        store
+            .pending_or_create(
+                "desktop-b",
+                "uid-1",
+                ENV,
+                "old-local-desktop",
+                || Ok("secret".to_string()),
+                1_000,
+            )
+            .expect("pending create under the old identity");
+
+        // The local desktop identity changed between preparing the request
+        // and its acknowledgement arriving - confirming under the new
+        // identity must not silently carry the old pending record forward.
+        let error = store
+            .confirm_outbound("desktop-b", "secret", "new-local-desktop", None, 2_000)
+            .expect_err("an ack must not confirm a pending record from a different local identity");
+        assert!(error.contains("no matching pending bootstrap"), "{error}");
+        assert_eq!(
+            store.pending.len(),
+            1,
+            "the original pending record must survive untouched"
+        );
     }
 
     #[test]
@@ -526,13 +697,14 @@ mod tests {
             .pending_or_create(
                 "desktop-b",
                 "uid-1",
-                "development",
+                ENV,
+                LOCAL,
                 || Ok("first-secret".to_string()),
                 1_000,
             )
             .expect("first pending");
         store
-            .confirm_outbound("desktop-b", "first-secret", None, 1_000 + LEASE_MS)
+            .confirm_outbound("desktop-b", "first-secret", LOCAL, None, 1_000 + LEASE_MS)
             .expect("first confirm");
 
         // A fresh bootstrap for the same target (e.g. after the first grant
@@ -542,16 +714,21 @@ mod tests {
             .pending_or_create(
                 "desktop-b",
                 "uid-1",
-                "development",
+                ENV,
+                LOCAL,
                 || Ok("second-secret".to_string()),
                 5_000,
             )
             .expect("second pending");
         let renewed = store
-            .confirm_outbound("desktop-b", "second-secret", None, 5_000 + LEASE_MS)
+            .confirm_outbound("desktop-b", "second-secret", LOCAL, None, 5_000 + LEASE_MS)
             .expect("second confirm");
 
-        assert_eq!(store.outbound.len(), 1, "must not accumulate duplicate grants");
+        assert_eq!(
+            store.outbound.len(),
+            1,
+            "must not accumulate duplicate grants"
+        );
         assert_eq!(renewed.bearer_secret, "second-secret");
     }
 
@@ -562,38 +739,87 @@ mod tests {
             .pending_or_create(
                 "desktop-b",
                 "uid-1",
-                "development",
+                ENV,
+                LOCAL,
                 || Ok("secret".to_string()),
                 1_000,
             )
             .expect("pending create");
         store
-            .confirm_outbound("desktop-b", "secret", None, 1_000 + LEASE_MS)
+            .confirm_outbound("desktop-b", "secret", LOCAL, None, 1_000 + LEASE_MS)
             .expect("confirm");
 
         assert!(store
-            .outbound_grant_for("desktop-b", Some("uid-1"), 1_000)
+            .outbound_grant_for("desktop-b", Some("uid-1"), ENV, LOCAL, 1_000)
             .is_some());
         let just_before_expiry = 1_000 + LEASE_MS - 1;
         assert!(store
-            .outbound_grant_for("desktop-b", Some("uid-1"), just_before_expiry)
+            .outbound_grant_for("desktop-b", Some("uid-1"), ENV, LOCAL, just_before_expiry)
             .is_some());
         let after_expiry = 1_000 + LEASE_MS;
         assert!(
             store
-                .outbound_grant_for("desktop-b", Some("uid-1"), after_expiry)
+                .outbound_grant_for("desktop-b", Some("uid-1"), ENV, LOCAL, after_expiry)
                 .is_none(),
             "an expired grant must not be returned as usable"
         );
         assert!(
             store
-                .outbound_grant_for("desktop-b", Some("uid-2"), 1_000)
+                .outbound_grant_for("desktop-b", Some("uid-2"), ENV, LOCAL, 1_000)
                 .is_none(),
             "a grant minted under one account must not be returned as usable under another"
         );
         assert!(
-            store.outbound_grant_for("desktop-b", None, 1_000).is_none(),
+            store
+                .outbound_grant_for("desktop-b", None, ENV, LOCAL, 1_000)
+                .is_none(),
             "signed out (no current account) must never see an outbound grant"
+        );
+        assert!(
+            store
+                .outbound_grant_for("desktop-b", Some("uid-1"), "staging", LOCAL, 1_000)
+                .is_none(),
+            "a grant minted under one environment must not be usable under another"
+        );
+        assert!(
+            store
+                .outbound_grant_for(
+                    "desktop-b",
+                    Some("uid-1"),
+                    ENV,
+                    "a-different-local-desktop",
+                    1_000
+                )
+                .is_none(),
+            "a grant minted under one local desktop identity must not be usable under another"
+        );
+    }
+
+    #[test]
+    fn outbound_grant_for_hides_a_grant_from_an_unrecognized_protocol_version() {
+        let mut store = MachineTrustStore::default();
+        store
+            .pending_or_create(
+                "desktop-b",
+                "uid-1",
+                ENV,
+                LOCAL,
+                || Ok("secret".to_string()),
+                1_000,
+            )
+            .expect("pending create");
+        store
+            .confirm_outbound("desktop-b", "secret", LOCAL, None, 1_000 + LEASE_MS)
+            .expect("confirm");
+        // Simulate a record persisted under a build with a different (or
+        // absent, per `#[serde(default)]`) protocol version.
+        store.outbound[0].protocol_version = 0;
+
+        assert!(
+            store
+                .outbound_grant_for("desktop-b", Some("uid-1"), ENV, LOCAL, 1_000)
+                .is_none(),
+            "a grant from an unrecognized protocol version must not be treated as usable"
         );
     }
 
@@ -601,35 +827,80 @@ mod tests {
     fn verify_inbound_checks_hash_and_expiry() {
         let mut store = MachineTrustStore::default();
         let hash = pairing::hash_device_secret("real-secret");
-        store.accept_inbound("desktop-a", &hash, "uid-1", "development", 1_000);
+        store.accept_inbound("desktop-a", &hash, "uid-1", ENV, LOCAL, 1_000);
 
-        assert!(store.verify_inbound("desktop-a", "real-secret", Some("uid-1"), 1_000));
-        assert!(!store.verify_inbound("desktop-a", "wrong-secret", Some("uid-1"), 1_000));
-        assert!(!store.verify_inbound("desktop-unknown", "real-secret", Some("uid-1"), 1_000));
+        assert!(store.verify_inbound("desktop-a", "real-secret", Some("uid-1"), ENV, LOCAL, 1_000));
+        assert!(!store.verify_inbound(
+            "desktop-a",
+            "wrong-secret",
+            Some("uid-1"),
+            ENV,
+            LOCAL,
+            1_000
+        ));
+        assert!(!store.verify_inbound(
+            "desktop-unknown",
+            "real-secret",
+            Some("uid-1"),
+            ENV,
+            LOCAL,
+            1_000
+        ));
         assert!(
-            !store.verify_inbound("desktop-a", "real-secret", Some("uid-1"), 1_000 + LEASE_MS + 1),
+            !store.verify_inbound(
+                "desktop-a",
+                "real-secret",
+                Some("uid-1"),
+                ENV,
+                LOCAL,
+                1_000 + LEASE_MS + 1
+            ),
             "an expired inbound grant must stop verifying"
         );
         assert!(
-            !store.verify_inbound("desktop-a", "real-secret", Some("uid-2"), 1_000),
+            !store.verify_inbound("desktop-a", "real-secret", Some("uid-2"), ENV, LOCAL, 1_000),
             "a grant minted under one account must not verify under another"
         );
         assert!(
-            !store.verify_inbound("desktop-a", "real-secret", None, 1_000),
+            !store.verify_inbound("desktop-a", "real-secret", None, ENV, LOCAL, 1_000),
             "signed out (no current account) must never verify anything"
+        );
+        assert!(
+            !store.verify_inbound(
+                "desktop-a",
+                "real-secret",
+                Some("uid-1"),
+                "staging",
+                LOCAL,
+                1_000
+            ),
+            "a grant accepted under one environment must not verify under another"
+        );
+        assert!(
+            !store.verify_inbound(
+                "desktop-a",
+                "real-secret",
+                Some("uid-1"),
+                ENV,
+                "a-different-local-desktop",
+                1_000
+            ),
+            "a grant accepted under one local desktop identity must not verify under another - \
+             a config directory reused after a changed desktop id must not keep answering"
         );
     }
 
     #[test]
     fn retain_account_drops_every_record_from_another_account_including_pending() {
         let mut store = MachineTrustStore::default();
-        store.accept_inbound("desktop-a", "hash-a", "uid-1", "development", 1_000);
-        store.accept_inbound("desktop-c", "hash-c", "uid-2", "development", 1_000);
+        store.accept_inbound("desktop-a", "hash-a", "uid-1", ENV, LOCAL, 1_000);
+        store.accept_inbound("desktop-c", "hash-c", "uid-2", ENV, LOCAL, 1_000);
         store
             .pending_or_create(
                 "desktop-b",
                 "uid-1",
-                "development",
+                ENV,
+                LOCAL,
                 || Ok("secret-1".to_string()),
                 1_000,
             )
@@ -638,13 +909,14 @@ mod tests {
             .pending_or_create(
                 "desktop-d",
                 "uid-2",
-                "development",
+                ENV,
+                LOCAL,
                 || Ok("secret-2".to_string()),
                 1_000,
             )
             .expect("pending for uid-2");
         store
-            .confirm_outbound("desktop-b", "secret-1", None, 1_000 + LEASE_MS)
+            .confirm_outbound("desktop-b", "secret-1", LOCAL, None, 1_000 + LEASE_MS)
             .expect("confirm uid-1 outbound");
 
         let changed = store.retain_account(Some("uid-1"));
@@ -660,17 +932,19 @@ mod tests {
         // accompany it - pending records are trust in progress, not merely
         // metadata, so nothing uid-2-scoped should survive.
         assert!(store.pending.is_empty(), "{:?}", store.pending);
+        assert_eq!(store.reconciled_account_uid.as_deref(), Some("uid-1"));
     }
 
     #[test]
     fn retain_account_none_clears_everything_on_sign_out() {
         let mut store = MachineTrustStore::default();
-        store.accept_inbound("desktop-a", "hash-a", "uid-1", "development", 1_000);
+        store.accept_inbound("desktop-a", "hash-a", "uid-1", ENV, LOCAL, 1_000);
         store
             .pending_or_create(
                 "desktop-b",
                 "uid-1",
-                "development",
+                ENV,
+                LOCAL,
                 || Ok("secret".to_string()),
                 1_000,
             )
@@ -682,13 +956,80 @@ mod tests {
         assert!(store.inbound.is_empty());
         assert!(store.outbound.is_empty());
         assert!(store.pending.is_empty());
+        assert_eq!(store.reconciled_account_uid, None);
+    }
+
+    #[test]
+    fn retain_account_reports_a_change_when_transitioning_even_with_nothing_to_purge() {
+        // A store that already holds only uid-1's records (e.g. freshly
+        // reconciled once before) still must be saved when told to
+        // reconcile to uid-1 again for the *first time this instance knows
+        // of* - `reconciled_account_uid` starts `None`, so this is a real
+        // transition even though nothing needs filtering.
+        let mut store = MachineTrustStore::default();
+        store.accept_inbound("desktop-a", "hash-a", "uid-1", ENV, LOCAL, 1_000);
+
+        let changed = store.retain_account(Some("uid-1"));
+
+        assert!(
+            changed,
+            "the marker must advance (and so be saved) even when nothing was purged"
+        );
+        assert_eq!(store.reconciled_account_uid.as_deref(), Some("uid-1"));
+
+        // A second reconciliation to the *same* uid, with the marker already
+        // caught up, has genuinely nothing new to report.
+        assert!(!store.retain_account(Some("uid-1")));
+    }
+
+    #[test]
+    fn a_purge_that_never_persisted_is_retried_by_a_later_reconciliation() {
+        // Simulates relay.rs's reconcile_machine_trust_for_account: it
+        // mutates a freshly-loaded store in memory, then calls `save`, and
+        // on a save error only logs a warning and returns - the mutation is
+        // discarded along with the function's local `store` value, and the
+        // file on disk is untouched.
+        let path = temp_store_path();
+        let mut store = MachineTrustStore::default();
+        store.accept_inbound("desktop-a", "hash-a", "uid-1", ENV, LOCAL, 1_000);
+        assert!(store.retain_account(Some("uid-1")));
+        store
+            .save(&path)
+            .expect("initial save records reconciled_account_uid = uid-1");
+
+        // A sign-out purge (retain_account(None)) succeeds only in memory;
+        // its save fails, so nothing persists.
+        let mut failed_purge = MachineTrustStore::load(&path).expect("reload");
+        assert!(
+            failed_purge.retain_account(None),
+            "the purge itself succeeds in memory"
+        );
+        drop(failed_purge); // the save that would persist this never happens
+
+        // A later reconciliation - triggered by anything: a retry, a
+        // restart's own startup reconciliation, or this exact account
+        // signing back in - reloads from disk and must see this as still
+        // needing to purge and persist, because the disk state never
+        // actually recorded the sign-out in the first place.
+        let mut retried = MachineTrustStore::load(&path).expect("reload after the failed persist");
+        assert_eq!(
+            retried.inbound.len(),
+            1,
+            "the failed purge never reached disk"
+        );
+        assert_eq!(retried.reconciled_account_uid.as_deref(), Some("uid-1"));
+        assert!(
+            retried.retain_account(None),
+            "a purge that never persisted must be retried, not treated as already done"
+        );
+        assert!(retried.inbound.is_empty());
     }
 
     #[test]
     fn remove_expired_prunes_only_what_has_actually_expired() {
         let mut store = MachineTrustStore::default();
-        store.accept_inbound("desktop-a", "hash-a", "uid-1", "development", 1_000);
-        store.accept_inbound("desktop-b", "hash-b", "uid-1", "development", 1_000);
+        store.accept_inbound("desktop-a", "hash-a", "uid-1", ENV, LOCAL, 1_000);
+        store.accept_inbound("desktop-b", "hash-b", "uid-1", ENV, LOCAL, 1_000);
 
         // Manually age one record past its lease without waiting real time.
         store.inbound[0].expires_at_unix_ms = 1_500;

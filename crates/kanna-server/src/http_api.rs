@@ -109,8 +109,9 @@ pub(crate) async fn dispatch_authenticated_relay_http_invoke(
 pub async fn serve_lan_machine_invoke_listener(
     state: std::sync::Arc<AppState>,
     port: u16,
+    on_bound: impl FnOnce(std::net::SocketAddr),
 ) -> Result<(), String> {
-    lan_listener::serve(state, port).await
+    lan_listener::serve(state, port, on_bound).await
 }
 
 pub async fn serve(state: std::sync::Arc<AppState>) -> Result<(), String> {

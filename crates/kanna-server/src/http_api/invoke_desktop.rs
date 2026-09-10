@@ -116,6 +116,47 @@ pub(crate) async fn invoke_desktop(
     })
 }
 
+/// Discovered desktop_ids this desktop could actually reach over LAN right
+/// now: discovery's own candidate list, narrowed to the ones with a
+/// currently-usable outbound grant under the exact same binding
+/// `attempt_lan_invoke` itself requires (account, environment, local
+/// identity, protocol version, unexpired). This is the "one eligible-machine
+/// enumeration" every list/wait/stats/signal fanout consumer adds to its own
+/// relay-presence ids, so a trusted discovered LAN peer is never dropped
+/// from machine discovery merely because relay happens to be down - see
+/// `cloud_desktops::list_cloud_desktops` for the first caller. Discovery
+/// itself is never authority: an id only appears here because both a
+/// candidate address *and* an already-established trust grant exist for it,
+/// the same two facts `attempt_lan_invoke` itself checks before ever
+/// dialing.
+pub(crate) fn eligible_lan_desktop_ids(state: &Arc<AppState>) -> Vec<String> {
+    let Some(store_path) = state.config().machine_trust_store_path() else {
+        return Vec::new();
+    };
+    let Ok(now_ms) = crate::machine_trust::unix_time_ms() else {
+        return Vec::new();
+    };
+    let current_account_uid = state.authenticated_account_uid();
+    let Ok(store) = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path) else {
+        return Vec::new();
+    };
+    state
+        .lan_candidate_desktop_ids()
+        .into_iter()
+        .filter(|desktop_id| {
+            store
+                .outbound_grant_for(
+                    desktop_id,
+                    current_account_uid.as_deref(),
+                    &state.config().environment,
+                    &state.config().desktop_id,
+                    now_ms,
+                )
+                .is_some()
+        })
+        .collect()
+}
+
 /// The real LAN attempt: requires an unexpired outbound grant under the
 /// *current* account (with an already-attested TLS trust anchor) and a
 /// discovered candidate address, dials it with a client pinned to exactly
@@ -143,9 +184,14 @@ async fn attempt_lan_invoke(
             "machine trust store for {desktop_id} is unreadable"
         ));
     };
-    let Some(grant) =
-        store.outbound_grant_for(desktop_id, current_account_uid.as_deref(), now_ms)
-    else {
+    let Some(grant) = store.outbound_grant_for(
+        desktop_id,
+        current_account_uid.as_deref(),
+        &state.config().environment,
+        &state.config().desktop_id,
+        now_ms,
+    ) else {
+        maybe_trigger_lan_bootstrap(state, desktop_id, current_account_uid.as_deref());
         return LanAttemptOutcome::PreDispatch(format!(
             "no unexpired outbound LAN grant for desktop {desktop_id}"
         ));
@@ -175,6 +221,51 @@ async fn attempt_lan_invoke(
     .await
 }
 
+/// Opportunistically starts (or renews) outbound LAN trust with `desktop_id`
+/// in the background, from the server-owned routing boundary itself rather
+/// than a caller or a timer: the moment an actual operation needs a grant
+/// that does not exist yet or has expired is exactly when establishing one
+/// is worth the relay round trip, and covers first-use and renewal with the
+/// same trigger. Never blocks or affects *this* invoke's own outcome - the
+/// current attempt already fell back to relay regardless of what this does.
+///
+/// `begin_lan_bootstrap_attempt`'s in-flight guard is what keeps a burst of
+/// calls for the same target (e.g. several requests before a slow relay
+/// round trip completes) from starting more than one concurrent bootstrap -
+/// deliberately not a scheduler or a retry timer: nothing here decides *when*
+/// to try again beyond "the next time an operation needs this grant."
+/// `lan_bootstrap::request_bootstrap`'s own durable pending-record idempotence
+/// (see `machine_trust::MachineTrustStore::pending_or_create`) is what makes
+/// a lost acknowledgement converge without duplicating trust.
+fn maybe_trigger_lan_bootstrap(
+    state: &Arc<AppState>,
+    target_desktop_id: &str,
+    current_account_uid: Option<&str>,
+) {
+    let Some(account_uid) = current_account_uid else {
+        // Signed out: there is no account to bootstrap trust under.
+        return;
+    };
+    if !state.begin_lan_bootstrap_attempt(target_desktop_id) {
+        return;
+    }
+    let state = Arc::clone(state);
+    let target_desktop_id = target_desktop_id.to_string();
+    let account_uid = account_uid.to_string();
+    tokio::spawn(async move {
+        let result = super::lan_bootstrap::request_bootstrap(
+            Arc::clone(&state),
+            target_desktop_id.clone(),
+            &account_uid,
+        )
+        .await;
+        state.finish_lan_bootstrap_attempt(&target_desktop_id);
+        if let Err(error) = result {
+            log::warn!("LAN bootstrap of {target_desktop_id} failed: {error}");
+        }
+    });
+}
+
 /// Mirrors `lan_listener`'s own response envelope shape - duplicated rather
 /// than shared across the module boundary for the same reason
 /// `MachineInvokeResponse` is duplicated between kanna-mcp and kanna-cli:
@@ -188,6 +279,31 @@ struct LanGatewayResponse {
     error: Option<String>,
 }
 
+/// The short-RPC budget for every wrapped call except a long-poll wait.
+/// Mirrors the relay transport's own short-invoke budget (see
+/// `RelayHttpInvokePermits`), which this module has no direct dependency on
+/// but deliberately agrees with: both exist to keep an ordinary machine
+/// operation from hanging past a caller's own patience.
+const LAN_SHORT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The wait budget for a long-poll `/v1/task-events` request: the server on
+/// the other end may legitimately hold the connection open for up to
+/// `kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS`, so the transport timeout must
+/// exceed that ceiling rather than truncate a healthy wait - the margin
+/// covers connect/response overhead and this attempt's own recheck cadence,
+/// not another wait window layered on top.
+fn lan_request_timeout(path: &str) -> std::time::Duration {
+    // Mirrors `RelayHttpInvokePermits::for_path`'s own classification of
+    // this exact path - a separate, independently-owned budget for a
+    // different transport, deliberately agreeing on which paths are
+    // long-lived rather than sharing a type across the two modules.
+    if path.split('?').next() == Some("/v1/task-events") {
+        std::time::Duration::from_secs(kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS + 30)
+    } else {
+        LAN_SHORT_REQUEST_TIMEOUT
+    }
+}
+
 /// Builds a client trusting only `trust_anchor_pem` (the CA a relay
 /// bootstrap already attested for this exact target - never the system
 /// roots, never anything discovery supplied), overrides DNS for
@@ -197,6 +313,14 @@ struct LanGatewayResponse {
 /// while the TCP connection itself goes wherever discovery pointed -
 /// exactly the "connect anywhere, verify identity independently of that"
 /// split the design calls for.
+///
+/// Redirects are disabled: a 3xx is a definite response like any other
+/// (`resolve_lan_outcome`'s own contract), never a signal to transparently
+/// resend - possibly to a plaintext destination, possibly replaying a
+/// bearer secret and application bytes onto a connection this desktop never
+/// chose and never authenticated. `reqwest`'s default policy follows up to
+/// 10 redirects; refusing that keeps every dispatch to exactly the one
+/// pinned-TLS connection this function itself established.
 async fn dial_lan_invoke(
     this_desktop_id: &str,
     target_desktop_id: &str,
@@ -218,7 +342,8 @@ async fn dial_lan_invoke(
     let client = match reqwest::Client::builder()
         .use_preconfigured_tls(client_config)
         .resolve(target_desktop_id, candidate)
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(lan_request_timeout(path))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(client) => client,
@@ -311,6 +436,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: dir.join("pairings.json").to_string_lossy().into_owned(),
         }
@@ -330,6 +456,7 @@ mod tests {
         let target_identity = crate::lan_tls_identity::load_or_create(
             &target_identity_path,
             &target_config.desktop_id,
+            &target_config.environment,
         )
         .expect("create target identity");
 
@@ -341,14 +468,23 @@ mod tests {
         {
             let mut store = crate::machine_trust::MachineTrustStore::default();
             let hash = crate::pairing::hash_device_secret("the-bearer-secret");
-            store.accept_inbound("desktop-source", &hash, "uid-1", "development", now_ms);
+            store.accept_inbound(
+                "desktop-source",
+                &hash,
+                "uid-1",
+                "development",
+                &target_config.desktop_id,
+                now_ms,
+            );
             store.save(&target_store_path).expect("seed target trust");
         }
 
-        let listener_addr = super::super::lan_listener::spawn_for_test(Arc::clone(&target_state))
-            .await;
-        let candidate =
-            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), listener_addr.port());
+        let listener_addr =
+            super::super::lan_listener::spawn_for_test(Arc::clone(&target_state)).await;
+        let candidate = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            listener_addr.port(),
+        );
 
         let source_config = lan_e2e_test_config("desktop-source");
         let source_state = Arc::new(AppState::new(source_config.clone()));
@@ -362,6 +498,7 @@ mod tests {
                     "desktop-target",
                     "uid-1",
                     "development",
+                    &source_config.desktop_id,
                     || Ok("the-bearer-secret".to_string()),
                     now_ms,
                 )
@@ -370,6 +507,7 @@ mod tests {
                 .confirm_outbound(
                     "desktop-target",
                     "the-bearer-secret",
+                    &source_config.desktop_id,
                     Some(target_identity.ca_certificate_pem.clone()),
                     now_ms + 1000,
                 )
@@ -408,6 +546,7 @@ mod tests {
         let target_identity = crate::lan_tls_identity::load_or_create(
             &target_identity_path,
             &target_config.desktop_id,
+            &target_config.environment,
         )
         .expect("create target identity");
         let target_state = Arc::new(AppState::new(target_config.clone()));
@@ -418,7 +557,14 @@ mod tests {
         {
             let mut store = crate::machine_trust::MachineTrustStore::default();
             let hash = crate::pairing::hash_device_secret("the-real-secret");
-            store.accept_inbound("desktop-source-2", &hash, "uid-1", "development", now_ms);
+            store.accept_inbound(
+                "desktop-source-2",
+                &hash,
+                "uid-1",
+                "development",
+                &target_config.desktop_id,
+                now_ms,
+            );
             store.save(&target_store_path).expect("seed target trust");
         }
 
@@ -441,6 +587,7 @@ mod tests {
                     "desktop-target-2",
                     "uid-1",
                     "development",
+                    &source_config.desktop_id,
                     // Deliberately not "the-real-secret" the target accepted.
                     || Ok("a-wrong-secret".to_string()),
                     now_ms,
@@ -450,6 +597,7 @@ mod tests {
                 .confirm_outbound(
                     "desktop-target-2",
                     "a-wrong-secret",
+                    &source_config.desktop_id,
                     Some(target_identity.ca_certificate_pem.clone()),
                     now_ms + 1000,
                 )
@@ -475,6 +623,293 @@ mod tests {
         );
     }
 
+    /// A real pinned-TLS peer answering with a 3xx must be a definite
+    /// response, not an automatically-followed redirect: `reqwest`'s default
+    /// policy follows up to 10 redirects, which could resend the bearer
+    /// secret and application bytes to a destination this desktop never
+    /// authenticated - possibly plaintext. Proven at a real socket: a
+    /// minimal TLS responder presenting the target's actual attested
+    /// identity, counting exactly how many requests it receives.
+    #[tokio::test]
+    async fn a_redirect_from_the_gateway_is_definite_with_no_follow_up_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let target_config = lan_e2e_test_config("desktop-redirect-target");
+        let target_identity_path = target_config.lan_tls_identity_path().unwrap();
+        let target_identity = crate::lan_tls_identity::load_or_create(
+            &target_identity_path,
+            &target_config.desktop_id,
+            &target_config.environment,
+        )
+        .expect("create target identity");
+        let server_config = crate::lan_tls::server_config(&target_identity).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind minimal redirect responder");
+        let addr = listener.local_addr().unwrap();
+        let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let request_count_for_server = Arc::clone(&request_count);
+        tokio::spawn(async move {
+            let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+            while let Ok((stream, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                let request_count = Arc::clone(&request_count_for_server);
+                tokio::spawn(async move {
+                    request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Ok(mut tls) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let mut buf = [0_u8; 4096];
+                    let _ = tls.read(&mut buf).await;
+                    let body = "moved";
+                    let response = format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/elsewhere\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    );
+                    let _ = tls.write_all(response.as_bytes()).await;
+                    let _ = tls.shutdown().await;
+                });
+            }
+        });
+
+        let source_config = lan_e2e_test_config("desktop-redirect-source");
+        let source_state = Arc::new(AppState::new(source_config.clone()));
+        source_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+        source_state.set_lan_candidate(
+            "desktop-redirect-target".to_string(),
+            std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                addr.port(),
+            ),
+        );
+        let now_ms = crate::machine_trust::unix_time_ms().unwrap();
+        let source_store_path = source_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            store
+                .pending_or_create(
+                    "desktop-redirect-target",
+                    "uid-1",
+                    "development",
+                    &source_config.desktop_id,
+                    || Ok("the-bearer-secret".to_string()),
+                    now_ms,
+                )
+                .expect("prepare pending");
+            store
+                .confirm_outbound(
+                    "desktop-redirect-target",
+                    "the-bearer-secret",
+                    &source_config.desktop_id,
+                    Some(target_identity.ca_certificate_pem.clone()),
+                    now_ms + 1000,
+                )
+                .expect("confirm outbound grant");
+            store.save(&source_store_path).expect("seed source trust");
+        }
+
+        let routed = invoke_desktop(
+            Arc::clone(&source_state),
+            "desktop-redirect-target".to_string(),
+            "GET".to_string(),
+            "/v1/status".to_string(),
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("invoke_desktop should complete");
+
+        assert_eq!(routed.route, RouteProvenance::Lan, "{:?}", routed.response);
+        assert_eq!(routed.response.status, 302, "{:?}", routed.response);
+        // Give an errant automatic follow-up a moment to land, if the
+        // redirect policy were not actually disabled.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            request_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a redirect must never trigger a second request"
+        );
+    }
+
+    /// Finding #2's production wiring, proven through the actual routing
+    /// boundary rather than by manually seeding an outbound grant: with no
+    /// grant and no candidate for a target, `attempt_lan_invoke` itself must
+    /// kick off a real background bootstrap attempt using the real
+    /// `lan_bootstrap`/`machine_trust` code paths. The relay call inside it
+    /// fails fast (no relay connection in this test), but `request_bootstrap`
+    /// durably records its pending candidate *before* ever touching the
+    /// network - so that pending record's real presence on disk is direct
+    /// proof the production wiring ran, not a simulation of it.
+    #[tokio::test]
+    async fn no_outbound_grant_triggers_a_real_background_bootstrap_attempt() {
+        let source_config = lan_e2e_test_config("desktop-bootstrap-source");
+        let source_state = Arc::new(AppState::new(source_config.clone()));
+        source_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+        let store_path = source_config.machine_trust_store_path().unwrap();
+
+        let outcome = attempt_lan_invoke(
+            &source_state,
+            "desktop-bootstrap-target",
+            "GET",
+            "/v1/status",
+            &serde_json::Value::Null,
+        )
+        .await;
+        assert!(
+            matches!(outcome, LanAttemptOutcome::PreDispatch(_)),
+            "no grant yet must still fall back to relay from this attempt's own perspective"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(store) =
+                crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+            {
+                if store
+                    .pending
+                    .iter()
+                    .any(|pending| pending.target_desktop_id == "desktop-bootstrap-target")
+                {
+                    break;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "no pending bootstrap record appeared for desktop-bootstrap-target - \
+                     the production request_bootstrap wiring did not run"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The in-flight guard itself: a burst of calls for the same target
+    /// while one bootstrap attempt is already running must not each start
+    /// their own concurrent attempt.
+    #[test]
+    fn lan_bootstrap_in_flight_guard_admits_only_one_concurrent_attempt_per_target() {
+        let config = lan_e2e_test_config("desktop-guard");
+        let state = Arc::new(AppState::new(config));
+
+        assert!(state.begin_lan_bootstrap_attempt("desktop-target"));
+        assert!(
+            !state.begin_lan_bootstrap_attempt("desktop-target"),
+            "a second concurrent attempt for the same target must be refused"
+        );
+        assert!(
+            state.begin_lan_bootstrap_attempt("desktop-other"),
+            "a different target must not be blocked by an unrelated in-flight attempt"
+        );
+
+        state.finish_lan_bootstrap_attempt("desktop-target");
+        assert!(
+            state.begin_lan_bootstrap_attempt("desktop-target"),
+            "once finished, the same target may be attempted again"
+        );
+    }
+
+    #[test]
+    fn lan_request_timeout_uses_the_long_poll_budget_for_task_events() {
+        let short = lan_request_timeout("/v1/status");
+        let long_poll = lan_request_timeout("/v1/task-events?timeoutSecs=240");
+
+        assert_eq!(short, LAN_SHORT_REQUEST_TIMEOUT);
+        assert!(
+            long_poll > std::time::Duration::from_secs(kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS),
+            "the long-poll budget must exceed the longest wait a caller can actually request"
+        );
+        assert!(
+            long_poll > short,
+            "a long-poll request must never be truncated to the short-RPC budget"
+        );
+    }
+
+    #[test]
+    fn eligible_lan_desktop_ids_requires_both_a_candidate_and_a_usable_grant() {
+        let config = lan_e2e_test_config("desktop-eligible-source");
+        let state = Arc::new(AppState::new(config.clone()));
+        state.set_authenticated_account_uid(Some("uid-1".to_string()));
+        let now_ms = crate::machine_trust::unix_time_ms().unwrap();
+        let store_path = config.machine_trust_store_path().unwrap();
+
+        // "desktop-with-grant" has both a candidate and a real grant.
+        state.set_lan_candidate(
+            "desktop-with-grant".to_string(),
+            "127.0.0.1:1".parse().unwrap(),
+        );
+        // "desktop-candidate-only" has a candidate but no grant at all.
+        state.set_lan_candidate(
+            "desktop-candidate-only".to_string(),
+            "127.0.0.1:2".parse().unwrap(),
+        );
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            store
+                .pending_or_create(
+                    "desktop-with-grant",
+                    "uid-1",
+                    "development",
+                    &config.desktop_id,
+                    || Ok("secret".to_string()),
+                    now_ms,
+                )
+                .unwrap();
+            store
+                .confirm_outbound(
+                    "desktop-with-grant",
+                    "secret",
+                    &config.desktop_id,
+                    Some("fake-ca".to_string()),
+                    now_ms + 1000,
+                )
+                .unwrap();
+            // "desktop-expired-grant" has a candidate and a grant, but it has
+            // already expired.
+            store
+                .pending_or_create(
+                    "desktop-expired-grant",
+                    "uid-1",
+                    "development",
+                    &config.desktop_id,
+                    || Ok("expired-secret".to_string()),
+                    now_ms,
+                )
+                .unwrap();
+            store
+                .confirm_outbound(
+                    "desktop-expired-grant",
+                    "expired-secret",
+                    &config.desktop_id,
+                    Some("fake-ca".to_string()),
+                    now_ms,
+                )
+                .unwrap();
+            store.save(&store_path).unwrap();
+        }
+        state.set_lan_candidate(
+            "desktop-expired-grant".to_string(),
+            "127.0.0.1:3".parse().unwrap(),
+        );
+
+        let eligible = eligible_lan_desktop_ids(&state);
+
+        assert_eq!(eligible, vec!["desktop-with-grant".to_string()]);
+    }
+
+    #[test]
+    fn eligible_lan_desktop_ids_is_empty_when_signed_out() {
+        let config = lan_e2e_test_config("desktop-eligible-signed-out");
+        let state = Arc::new(AppState::new(config));
+        // Deliberately never calling set_authenticated_account_uid.
+        state.set_lan_candidate(
+            "desktop-with-grant".to_string(),
+            "127.0.0.1:1".parse().unwrap(),
+        );
+
+        assert!(eligible_lan_desktop_ids(&state).is_empty());
+    }
+
     #[test]
     fn preflight_negative_falls_back_to_relay() {
         let outcome = LanAttemptOutcome::PreDispatch("no candidate".to_string());
@@ -492,10 +927,7 @@ mod tests {
         let routed = resolve_lan_outcome(LanAttemptOutcome::PostDispatchUncertain)
             .expect("uncertain delivery is terminal, not a fallback trigger");
         assert_eq!(routed.route, RouteProvenance::Lan);
-        assert_eq!(
-            routed.response.error.as_deref(),
-            Some("delivery_uncertain")
-        );
+        assert_eq!(routed.response.error.as_deref(), Some("delivery_uncertain"));
     }
 
     #[test]

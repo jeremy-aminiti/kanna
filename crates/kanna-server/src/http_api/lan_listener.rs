@@ -135,16 +135,19 @@ async fn bind(state: &Arc<AppState>, port: u16) -> Result<(TlsListener, SocketAd
         .config()
         .lan_tls_identity_path()
         .ok_or_else(|| "LAN TLS identity is not configured".to_string())?;
-    let identity =
-        crate::lan_tls_identity::load_or_create(&identity_path, &state.config().desktop_id)?;
+    let identity = crate::lan_tls_identity::load_or_create(
+        &identity_path,
+        &state.config().desktop_id,
+        &state.config().environment,
+    )?;
     let server_config = crate::lan_tls::server_config(&identity)?;
     let bind_addr = format!("{}:{port}", state.config().lan_host);
     let tcp = TcpListener::bind(&bind_addr).await.map_err(|error| {
         format!("failed to bind LAN machine-invoke listener on {bind_addr}: {error}")
     })?;
-    let addr = tcp.local_addr().map_err(|error| {
-        format!("failed to read LAN machine-invoke listener address: {error}")
-    })?;
+    let addr = tcp
+        .local_addr()
+        .map_err(|error| format!("failed to read LAN machine-invoke listener address: {error}"))?;
     Ok((
         TlsListener {
             tcp,
@@ -156,8 +159,17 @@ async fn bind(state: &Arc<AppState>, port: u16) -> Result<(TlsListener, SocketAd
 
 /// Binds and serves the LAN machine-invoke listener on `port` until this
 /// desktop's own persisted TLS identity or the port itself is unavailable.
-pub(crate) async fn serve(state: Arc<AppState>, port: u16) -> Result<(), String> {
+/// `on_bound` runs exactly once, only after the bind actually succeeds, with
+/// the real bound address - the caller uses it to start advertising the
+/// listener only once there is something real to advertise, never before
+/// (see `runtime::run_lan_machine_invoke_listener`).
+pub(crate) async fn serve(
+    state: Arc<AppState>,
+    port: u16,
+    on_bound: impl FnOnce(SocketAddr),
+) -> Result<(), String> {
     let (listener, addr) = bind(&state, port).await?;
+    on_bound(addr);
     log::info!("LAN machine-invoke listener on {addr}");
     axum::serve(listener, router(state))
         .await
@@ -175,4 +187,98 @@ pub(super) async fn spawn_for_test(state: Arc<AppState>) -> SocketAddr {
         let _ = axum::serve(listener, router(state)).await;
     });
     addr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config(desktop_id: &str) -> crate::config::Config {
+        let dir = crate::test_paths::unique_test_dir(&format!("lan-listener-{desktop_id}"));
+        crate::config::Config {
+            relay_url: String::new(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: dir.join("daemon").to_string_lossy().into_owned(),
+            db_path: crate::db::Db::test_db_path(&format!("lan-listener-{desktop_id}")),
+            kanna_cli_path: None,
+            desktop_id: desktop_id.to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: format!("{desktop_id} Mac"),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            lan_routing_port: 4460,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: dir.join("pairings.json").to_string_lossy().into_owned(),
+        }
+    }
+
+    /// The production ordering contract this whole `on_bound` parameter
+    /// exists for: a caller learns the real bound address (and so only
+    /// starts advertising) exactly when, and only when, the bind actually
+    /// succeeded.
+    #[tokio::test]
+    async fn on_bound_fires_once_with_the_real_bound_address_after_a_successful_bind() {
+        let state = Arc::new(AppState::new(test_config("desktop-bind-success")));
+        let observed = Arc::new(std::sync::Mutex::new(Vec::<SocketAddr>::new()));
+        let observed_in_callback = Arc::clone(&observed);
+
+        let serving = tokio::spawn(async move {
+            serve(state, 0, move |addr| {
+                observed_in_callback.lock().unwrap().push(addr);
+            })
+            .await
+        });
+        // Let the bind complete and on_bound run before inspecting it or
+        // tearing the task down - it never actually serves a request.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        serving.abort();
+
+        let calls = observed.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "on_bound must fire exactly once");
+        assert_ne!(
+            calls[0].port(),
+            0,
+            "on_bound must report the real bound port, not the requested ephemeral 0"
+        );
+    }
+
+    /// The other half of the same contract: a failed bind (here, a port
+    /// already held by another listener) must never advertise anything -
+    /// on_bound must not fire at all.
+    #[tokio::test]
+    async fn on_bound_never_fires_when_the_port_is_already_taken() {
+        let holder_state = Arc::new(AppState::new(test_config("desktop-bind-holder")));
+        let (holder_listener, holder_addr) = bind(&holder_state, 0)
+            .await
+            .expect("bind the port-holding listener");
+        // Keep the holder's TCP socket alive (but never serving) for the
+        // duration of this test, so the port stays genuinely occupied.
+        let _holder_task = tokio::spawn(async move {
+            let _ = axum::serve(holder_listener, router(holder_state)).await;
+        });
+
+        let contending_state = Arc::new(AppState::new(test_config("desktop-bind-contender")));
+        let on_bound_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let on_bound_called_in_callback = Arc::clone(&on_bound_called);
+
+        let result = serve(contending_state, holder_addr.port(), move |_addr| {
+            on_bound_called_in_callback.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
+
+        assert!(
+            result.is_err(),
+            "binding an already-occupied port must fail"
+        );
+        assert!(
+            !on_bound_called.load(std::sync::atomic::Ordering::SeqCst),
+            "on_bound must never fire for a bind that failed"
+        );
+    }
 }

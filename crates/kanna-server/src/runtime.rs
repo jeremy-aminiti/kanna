@@ -234,14 +234,42 @@ async fn run_human_control_service(state: Arc<http_api::AppState>) {
 /// identity write failure), so a failure here is logged and this future
 /// then never resolves, rather than tearing down every other service in
 /// the `select!` below with it.
+///
+/// Advertising is owned here, not by startup: `LanRoutingAdvertisement` is
+/// only ever constructed from `on_bound`, which `http_api::serve_lan_machine_invoke_listener`
+/// calls exactly once and only after the real bind succeeds - so a second
+/// instance that loses the port never advertises one it does not actually
+/// hold. Holding the advertisement in this function's own local variable
+/// means it is dropped (withdrawing it) the moment `serve` returns for any
+/// reason, matching the listener's own lifetime exactly.
 async fn run_lan_machine_invoke_listener(state: Arc<http_api::AppState>) {
-    let port = std::env::var("KANNA_LAN_ROUTING_PORT")
-        .ok()
-        .and_then(|value| value.trim().parse::<u16>().ok())
-        .unwrap_or(4460);
-    if let Err(error) = http_api::serve_lan_machine_invoke_listener(state, port).await {
+    let port = state.config().lan_routing_port;
+    let desktop_id = state.config().desktop_id.clone();
+    let environment = state.config().environment.clone();
+    let advertisement: Arc<
+        std::sync::Mutex<Option<crate::lan_discovery::LanRoutingAdvertisement>>,
+    > = Arc::new(std::sync::Mutex::new(None));
+    let advertisement_slot = Arc::clone(&advertisement);
+    let on_bound = move |addr: std::net::SocketAddr| {
+        match crate::lan_discovery::LanRoutingAdvertisement::start(
+            &desktop_id,
+            &environment,
+            addr.port(),
+        ) {
+            Ok(started) => {
+                *advertisement_slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(started);
+            }
+            Err(error) => {
+                log::warn!("LAN routing Bonjour advertisement unavailable: {error}");
+            }
+        }
+    };
+    if let Err(error) = http_api::serve_lan_machine_invoke_listener(state, port, on_bound).await {
         log::warn!("LAN machine-invoke listener unavailable: {error}");
     }
+    drop(advertisement);
     std::future::pending::<()>().await;
 }
 
@@ -684,6 +712,7 @@ mod tests {
             lan_host: "127.0.0.1".into(),
             lan_port: 0,
             transfer_port: 0,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: String::new(),
         }
@@ -1072,6 +1101,7 @@ mod tests {
             lan_host: "127.0.0.1".into(),
             lan_port,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: pairing_store_path.clone(),
         };

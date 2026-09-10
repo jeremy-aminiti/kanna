@@ -7042,6 +7042,7 @@ fn prepare_task_uses_builtin_default_workflow_when_repo_has_no_local_default_wor
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -7173,6 +7174,7 @@ fn prepare_task_prefers_explicit_then_repo_then_agent_definition_over_default_pr
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };

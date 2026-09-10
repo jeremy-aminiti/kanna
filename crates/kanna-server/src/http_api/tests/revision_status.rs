@@ -214,6 +214,7 @@ async fn request_revision_route_resolves_branch_style_task_id() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-revision-branch",
@@ -489,6 +490,7 @@ async fn automatic_revision_completion_dispatches_commit_post_through_http_route
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-revision-loop",
@@ -795,6 +797,7 @@ async fn request_revision_route_preserves_title_and_sends_revision_prompt() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-revision-title",
@@ -993,6 +996,7 @@ fn setup_revision_budget_fixture_with_spent_rounds(
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-revision-budget",
@@ -1848,6 +1852,7 @@ async fn review_prompt_receives_the_implementer_result_while_prev_result_keeps_t
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings-prev-main", "json"),
     };

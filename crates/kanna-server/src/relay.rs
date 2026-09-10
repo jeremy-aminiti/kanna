@@ -115,8 +115,13 @@ fn apply_relay_authentication(
         capabilities,
     } = authentication;
     log::info!("Relay authenticated as user {user_id}");
-    reconcile_machine_trust_for_account(http_state, Some(&user_id));
+    // Authority changes before cleanup runs: every LAN trust lookup reads
+    // `authenticated_account_uid` fresh at point of use, so a concurrent
+    // request during reconciliation must already see the *new* account
+    // rather than briefly still seeing the old one while the store is mid
+    // purge - see this account's own module doc comment.
     http_state.set_authenticated_account_uid(Some(user_id.clone()));
+    reconcile_machine_trust_for_account(http_state, Some(&user_id));
     *authenticated_user_id = Some(user_id);
     *desktop_routing_version = capabilities
         .desktop_routing
@@ -286,8 +291,8 @@ async fn run_relay_loop_with_timing(
         let signed_out_or_rejected = config.desktop_secret.is_none()
             || account_auth == relay_client::AccountAuthProbe::Rejected;
         if signed_out_or_rejected {
-            reconcile_machine_trust_for_account(&http_state, None);
             http_state.set_authenticated_account_uid(None);
+            reconcile_machine_trust_for_account(&http_state, None);
         }
         let use_anonymous_push = anonymous_identity_available && signed_out_or_rejected;
         if use_anonymous_push {
@@ -1841,6 +1846,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48_120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: std::env::temp_dir()
                 .join(format!("{unique}-pairings.json"))
@@ -1877,8 +1883,22 @@ mod tests {
 
         let now_ms = crate::machine_trust::unix_time_ms().expect("clock");
         let mut store = crate::machine_trust::MachineTrustStore::default();
-        store.accept_inbound("desktop-a", "hash-a", "uid-1", "development", now_ms);
-        store.accept_inbound("desktop-b", "hash-b", "uid-2", "development", now_ms);
+        store.accept_inbound(
+            "desktop-a",
+            "hash-a",
+            "uid-1",
+            "development",
+            &config.desktop_id,
+            now_ms,
+        );
+        store.accept_inbound(
+            "desktop-b",
+            "hash-b",
+            "uid-2",
+            "development",
+            &config.desktop_id,
+            now_ms,
+        );
         store.save(&store_path).expect("seed machine trust store");
 
         reconcile_machine_trust_for_account(&state, Some("uid-1"));
@@ -1903,7 +1923,14 @@ mod tests {
 
         let now_ms = crate::machine_trust::unix_time_ms().expect("clock");
         let mut store = crate::machine_trust::MachineTrustStore::default();
-        store.accept_inbound("desktop-a", "hash-a", "uid-1", "development", now_ms);
+        store.accept_inbound(
+            "desktop-a",
+            "hash-a",
+            "uid-1",
+            "development",
+            &config.desktop_id,
+            now_ms,
+        );
         store.save(&store_path).expect("seed machine trust store");
 
         reconcile_machine_trust_for_account(&state, None);
@@ -2325,6 +2352,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48_120,
             transfer_port: 4_455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: std::env::temp_dir()
                 .join(format!("{unique}-pairings.json"))
@@ -2496,6 +2524,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: format!("/tmp/{unique}-pairings.json"),
         }
@@ -2800,6 +2829,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: format!("/tmp/{unique}-pairings.json"),
         };
@@ -3071,6 +3101,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: pairing_store_path.to_string_lossy().into_owned(),
         };
@@ -3388,6 +3419,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: pairing_store_path.to_string_lossy().into_owned(),
         };
@@ -3568,6 +3600,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: pairing_store_path.to_string_lossy().into_owned(),
         };
@@ -3728,6 +3761,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: pairing_store_path.to_string_lossy().into_owned(),
         };
@@ -3923,6 +3957,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: format!("/tmp/{unique}-pairings.json"),
         };
@@ -4036,6 +4071,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: format!("/tmp/{unique}-pairings.json"),
         };
@@ -4177,6 +4213,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: isolated_dir
                 .join("pairings.json")
@@ -4514,6 +4551,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48_120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: std::env::temp_dir()
                 .join(format!("{unique}-pairings.json"))
@@ -4725,6 +4763,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48_120,
             transfer_port,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: std::env::temp_dir()
                 .join(format!("{unique}-pairings.json"))

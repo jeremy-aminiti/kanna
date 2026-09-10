@@ -192,6 +192,7 @@ async fn close_task_route_reports_success_when_post_commit_worktree_cleanup_fail
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-close-cleanup",
@@ -379,6 +380,7 @@ async fn close_task_route_releases_claimed_ports() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-close-ports",
@@ -498,6 +500,7 @@ async fn reopen_task_route_reopens_and_reclaims_ports_from_remote_default_config
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-reopen-ports",
@@ -611,6 +614,7 @@ async fn reopen_task_route_rejects_cloud_identity_conflict_without_claiming_port
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-reopen-identity",
@@ -864,6 +868,7 @@ async fn close_pr_task_sends_blocker_close_instruction_with_renamed_branch_to_ru
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings-close-pr", "json"),
     };
@@ -1348,6 +1353,7 @@ async fn close_task_route_resolves_branch_style_task_id() {
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings-close", "json"),
     };
@@ -1576,6 +1582,7 @@ async fn close_task_route_tears_down_current_stage_environment_before_repo_teard
         lan_host: "0.0.0.0".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings-close-env", "json"),
     };
@@ -1868,6 +1875,7 @@ async fn pr_completion_starts_dormant_dependent_from_current_branch_optimistical
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-pr-optimistic",
@@ -2194,6 +2202,7 @@ async fn complete_pr_stage_without_pr_url_leaves_dormant_dependent_unstarted() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-pr-stays-blocked",
@@ -2314,6 +2323,7 @@ async fn close_last_blocker_starts_dormant_dependent_from_blocker_branch() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-close-unblocks",
@@ -2546,6 +2556,7 @@ fn dependent_scenario_config(label: &str, unique: &str, daemon_dir: &Path) -> Co
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     }
@@ -2951,6 +2962,7 @@ async fn request_revision_finalization_error_rolls_back_db_and_prepared_worktree
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-revision-rollback",
@@ -3135,6 +3147,7 @@ async fn conflicting_sibling_blockers_create_integration_task_and_leave_dependen
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-conflict-integrates",
@@ -3376,6 +3389,7 @@ async fn closing_integration_task_starts_dependent_from_integration_branch() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-integration-closes",
@@ -3650,6 +3664,7 @@ async fn renamed_multi_blocker_pr_branches_survive_earlier_worktree_cleanup() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-clean-multi",
@@ -3871,6 +3886,7 @@ async fn close_non_final_blocker_leaves_dormant_dependent_unstarted() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-close-non-final",
@@ -4627,6 +4643,7 @@ async fn advance_stage_route_records_stage_run_for_spawned_next_task() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-advance-stage",
@@ -4847,6 +4864,7 @@ async fn advance_stage_route_notifies_after_detached_setup_failure_is_persisted(
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-advance-failure",
@@ -5124,6 +5142,7 @@ async fn advance_stage_detached_transition_aborts_when_task_closes_before_stage_
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-advance-close-race",
@@ -5383,6 +5402,7 @@ async fn advance_stage_route_closes_final_stage_and_tears_down_environment_befor
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-final-close",
@@ -6509,6 +6529,7 @@ async fn complete_post_and_transition(refinish: bool) {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-post-refinish",
@@ -6886,6 +6907,7 @@ async fn advance_stage_route_stays_responsive_while_prepare_blocks_on_git() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-advance-block",
@@ -7005,6 +7027,7 @@ async fn close_last_blocker_stays_responsive_while_dependent_prepare_blocks() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-close-unblock-block",
@@ -7221,6 +7244,7 @@ async fn complete_pr_stage_stays_responsive_while_dependent_prepare_blocks() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file(
             "kanna-pairings-pr-optimistic-block",

@@ -23,6 +23,14 @@ pub struct Config {
     /// the single owner of that derivation: the server hands it to the sidecar
     /// it spawns and dials the same port from the inbound tunnel bridge.
     pub transfer_port: u16,
+    /// The dedicated authenticated LAN machine-invoke listener's port.
+    /// Startup binds this exact port and advertises only once that bind
+    /// succeeds - see `runtime::run_lan_machine_invoke_listener` - so both
+    /// ends of "what did we actually bind" and "what are we telling
+    /// same-account siblings to dial" read this one resolved value rather
+    /// than each independently reading an environment variable and risking
+    /// disagreement between them.
+    pub lan_routing_port: u16,
     pub pairing_store_path: String,
     /// Seconds an activity value must hold before its transition reaches the
     /// event feed. Display state remains immediate; manager notifications are
@@ -48,6 +56,7 @@ struct RawConfig {
     lan_host: Option<String>,
     lan_port: Option<u16>,
     transfer_port: Option<u16>,
+    lan_routing_port: Option<u16>,
     pairing_store_path: Option<String>,
     activity_event_debounce_seconds: Option<u64>,
 }
@@ -72,6 +81,24 @@ fn default_lan_host() -> String {
 
 fn default_lan_port() -> u16 {
     48_120
+}
+
+/// Resolution order: the config file's own `lan_routing_port`, then
+/// `KANNA_LAN_ROUTING_PORT` (the dev/task-instance reservation `kd` sets, so
+/// an existing worktree's env-driven setup keeps working unchanged), then
+/// this crate-wide fallback. Whichever value wins, `main.rs`/`runtime.rs`
+/// read it exactly once, here, rather than each separately reading the
+/// environment variable and risking disagreement between the bound and
+/// advertised port.
+fn resolve_lan_routing_port(configured: Option<u16>) -> u16 {
+    configured
+        .or_else(|| {
+            std::env::var("KANNA_LAN_ROUTING_PORT")
+                .ok()
+                .and_then(|value| value.trim().parse::<u16>().ok())
+        })
+        .filter(|port| *port != 0)
+        .unwrap_or(kanna_runtime_defaults::DEFAULT_LAN_ROUTING_PORT)
 }
 
 fn default_firebase_project_id() -> String {
@@ -179,6 +206,7 @@ fn load_from_path(
         lan_host: raw.lan_host.unwrap_or_else(default_lan_host),
         lan_port: raw.lan_port.unwrap_or_else(default_lan_port),
         transfer_port,
+        lan_routing_port: resolve_lan_routing_port(raw.lan_routing_port),
         pairing_store_path: raw
             .pairing_store_path
             .unwrap_or_else(|| default_pairing_store_path_for_root(data_root)),
