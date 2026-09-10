@@ -10,15 +10,15 @@
  *
  * That ordering is the whole design here:
  *
- * 1. Immutable pool artifacts go up first, at content-addressed paths nothing
+ * 1. Immutable pool artifacts go up first, at versioned paths nothing
  *    already published refers to. Uploading them changes what any client sees:
  *    nothing points at them yet.
  * 2. Indexes are built and every referenced artifact's checksum is verified
  *    against what was actually uploaded.
  * 3. `InRelease` is replaced last, in one write. That write is the commit
- *    point: before it, clients see the previous release entirely; after it,
- *    the new one entirely. There is no window in which a client can see an
- *    index referring to a package that is not there.
+ *    point: before it, by-hash clients can fetch the previous release entirely;
+ *    after it, the new one entirely. There is no window in which a client can
+ *    see an index referring to a package that is not there.
  *
  * An interrupted publish therefore leaves orphaned pool files and a valid
  * older archive, which is recoverable by re-running. The failure it makes
@@ -54,9 +54,8 @@ export interface AptArtifact {
 /**
  * The pool path for an artifact.
  *
- * Immutable by construction: the path contains the version, so republishing a
- * changed build under a version that already shipped would collide rather than
- * silently replace what users already fetched.
+ * The name carries the version. The publication adapter must enforce
+ * create-only writes: a versioned name alone does not prevent replacement.
  */
 export function poolPath(artifact: AptArtifact): string {
   const name = artifact.controlFields.Package ?? "kanna";
@@ -65,6 +64,14 @@ export function poolPath(artifact: AptArtifact): string {
 
 export function packagesIndexPath(channel: AptChannel, architecture: string): string {
   return `dists/${aptSuite(channel)}/${APT_COMPONENT}/binary-${architecture}/Packages`;
+}
+
+/** Keep historical objects at these paths for clients holding older InRelease
+ *  files. See https://wiki.debian.org/DebianRepository/Format (by-hash). */
+export function packagesByHashPath(channel: AptChannel, architecture: string, contents: string): string {
+  const path = packagesIndexPath(channel, architecture);
+  const digest = createHash("sha256").update(contents, "utf8").digest("hex");
+  return `${path.slice(0, path.lastIndexOf("/"))}/by-hash/SHA256/${digest}`;
 }
 
 export function releaseIndexPath(channel: AptChannel): string {
@@ -93,7 +100,7 @@ export function buildPackagesIndex(artifacts: AptArtifact[]): string {
           .map((key) => `${key}: ${fields[key]}`)
           .join("\n");
         const rest = Object.entries(fields)
-          .filter(([key]) => !["Package", "Version", "Architecture"].includes(key))
+          .filter(([key]) => !["package", "version", "architecture", "filename", "size", "sha256"].includes(key.toLowerCase()))
           .map(([key, value]) => `${key}: ${value}`)
           .join("\n");
         return [
@@ -162,38 +169,12 @@ export function buildReleaseIndex(input: ReleaseIndexInput): string {
   return lines.join("\n") + "\n";
 }
 
-/** The `gpg` invocation that turns a `Release` into a clearsigned `InRelease`.
- *  The key is named, never defaulted: signing with whatever key happens to be
- *  first in a keyring is how a staging key ends up on a production archive. */
-export function signInReleaseCommand(input: {
-  releasePath: string;
-  outputPath: string;
-  keyFingerprint: string;
-  homeDir?: string;
-}): [string, string[]] {
-  return [
-    "gpg",
-    [
-      ...(input.homeDir ? ["--homedir", input.homeDir] : []),
-      "--batch",
-      "--yes",
-      "--local-user",
-      input.keyFingerprint,
-      "--clearsign",
-      "--digest-algo",
-      "SHA512",
-      "--output",
-      input.outputPath,
-      input.releasePath,
-    ],
-  ];
-}
-
 export interface PublishStep {
   /** `data` steps are safe to repeat and safe to interrupt: nothing points at
    *  what they write until the commit step. `commit` is the single write that
    *  makes the new archive current. */
   kind: "data" | "index" | "commit";
+  write: "immutable" | "replace";
   path: string;
   reason: string;
 }
@@ -212,25 +193,36 @@ export function planPublish(input: {
 }): PublishStep[] {
   const steps: PublishStep[] = input.artifacts.map((artifact) => ({
     kind: "data",
+    write: "immutable",
     path: poolPath(artifact),
     reason: "immutable pool artifact; nothing refers to it yet",
   }));
   for (const architecture of [...input.architectures].sort()) {
+    const contents = buildPackagesIndex(input.artifacts.filter((artifact) => artifact.architecture === architecture));
     steps.push({
       kind: "index",
+      write: "immutable",
+      path: packagesByHashPath(input.channel, architecture, contents),
+      reason: "immutable index retained for clients holding any previous InRelease",
+    });
+    steps.push({
+      kind: "index",
+      write: "replace",
       path: packagesIndexPath(input.channel, architecture),
       reason: "package index; not trusted until Release covers it",
     });
   }
   steps.push({
     kind: "index",
+    write: "replace",
     path: releaseIndexPath(input.channel),
     reason: "unsigned index; apt ignores it without a signature",
   });
   steps.push({
     kind: "commit",
+    write: "replace",
     path: inReleasePath(input.channel),
-    reason: "the commit point: clients see the previous archive entirely before this write and the new one entirely after",
+    reason: "the commit point: by-hash clients can fetch the previous archive before this write and the new one after",
   });
   return steps;
 }

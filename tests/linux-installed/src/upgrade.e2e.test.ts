@@ -55,11 +55,22 @@ let host: HostCapability;
 let repo: FixtureRepo;
 let worker: InstalledWorker | null = null;
 let taskId = "";
+let runId = "";
+let taskBranch: string | null = null;
+let taskWorktree: string | null = null;
 let agentPid = 0;
 let agentStart: string | null = null;
 let daemonBefore = 0;
 let versionA = "";
 const paths = installedPaths(CHANNEL);
+
+interface TaskDetail {
+  id: string;
+  runtimeState: string;
+  branch: string | null;
+  worktreePath: string | null;
+  latestRun: { id: string; status: string; summary: string | null };
+}
 
 beforeAll(async () => {
   host = await inspectHost(DEVELOPER_TOOLS);
@@ -115,13 +126,19 @@ describe("an installed upgrade with a live agent session", () => {
 
     const added = await worker.cli(["repo", "add", "--path", repo.path]);
     expect(added.code, `${added.stdout}${added.stderr}`).toBe(0);
-    const repos = await worker.sql("SELECT id, path FROM repo", []);
-    const repoId = String(repos.find((row) => String(row.path).endsWith("/repo"))?.id);
+    const addedRepo = JSON.parse(added.stdout);
+    expect(addedRepo.path).toBe(repo.path);
+    expect(addedRepo.id).toEqual(expect.any(String));
+    expect(addedRepo.id.length).toBeGreaterThan(0);
+    const repoId = addedRepo.id;
     const created = await worker.cli([
       "task", "create", "--repo-id", repoId, "--prompt", "installed upgrade task", "--workflow-name", "gate",
     ]);
     expect(created.code, created.stderr).toBe(0);
-    taskId = String((await worker.sql("SELECT id FROM pipeline_item ORDER BY rowid DESC LIMIT 1", []))[0]?.id);
+    const createdTask = JSON.parse(created.stdout);
+    expect(createdTask.repoId).toBe(repoId);
+    expect(createdTask.taskId).toMatch(/^[a-f0-9]{8,64}$/);
+    taskId = createdTask.taskId;
 
     await waitFor(
       async () => (await worker!.cli(["task", "logs", "--task-id", taskId])).stdout.includes("SCRIPT_READY"),
@@ -132,6 +149,15 @@ describe("an installed upgrade with a live agent session", () => {
     agentPid = await agentPidForDaemon(daemonBefore);
     agentStart = await processStartTime(agentPid);
     expect(agentStart).toBeTruthy();
+    const detail = await worker.json<TaskDetail>(`/v1/tasks/${taskId}`);
+    expect(detail.id).toBe(taskId);
+    expect(detail.latestRun.status).toBe("running");
+    runId = detail.latestRun.id;
+    taskBranch = detail.branch;
+    taskWorktree = detail.worktreePath;
+    expect(runId).toBeTruthy();
+    expect(taskBranch).toBeTruthy();
+    expect(taskWorktree).toBeTruthy();
   });
 
   /**
@@ -170,7 +196,12 @@ describe("an installed upgrade with a live agent session", () => {
     expect(processIsAlive(agentPid)).toBe(true);
     expect(await processStartTime(agentPid)).toBe(agentStart);
 
-    const detail = await worker!.json<Record<string, unknown>>(`/v1/tasks/${taskId}`);
+    const detail = await worker!.json<TaskDetail>(`/v1/tasks/${taskId}`);
+    expect(detail.id).toBe(taskId);
+    expect(detail.latestRun.id).toBe(runId);
+    expect(detail.latestRun.status).toBe("running");
+    expect(detail.branch).toBe(taskBranch);
+    expect(detail.worktreePath).toBe(taskWorktree);
     expect(["busy", "idle", "waiting"]).toContain(detail.runtimeState);
   });
 
@@ -193,10 +224,14 @@ describe("an installed upgrade with a live agent session", () => {
     ]);
     expect(sent.code, sent.stderr).toBe(0);
 
-    const rows = await worker!.sql("SELECT message, source FROM task_input WHERE task_id = ?1", [taskId]);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.message).toBe(POST_UPGRADE_MESSAGE);
-    expect(rows[0]?.source).toBe("operator");
+    const ledger = await worker!.json<{
+      taskId: string; total: number;
+      inputs: Array<{ taskId: string; runId: string | null; message: string; source: string }>;
+    }>(`/v1/tasks/${taskId}/inputs`);
+    expect(ledger.taskId).toBe(taskId);
+    expect(ledger.total).toBe(1);
+    expect(ledger.inputs).toHaveLength(1);
+    expect(ledger.inputs[0]).toMatchObject({ taskId, runId, message: POST_UPGRADE_MESSAGE, source: "operator" });
 
     await waitFor(
       async () => (await repo.agentInput()).includes(POST_UPGRADE_MESSAGE),
@@ -212,11 +247,13 @@ describe("an installed upgrade with a live agent session", () => {
     ]);
     expect(completed.code, completed.stderr).toBe(0);
 
-    const runs = await worker!.sql(
-      "SELECT status, result FROM stage_run WHERE task_id = ?1 ORDER BY rowid", [taskId]
-    );
-    expect(runs.some((row) => row.status === "succeeded")).toBe(true);
-    const events = await worker!.sql("SELECT type FROM task_event WHERE task_id = ?1", [taskId]);
-    expect(events.map((row) => row.type)).toContain("run.finished");
+    const detail = await worker!.json<TaskDetail>(`/v1/tasks/${taskId}`);
+    expect(detail.latestRun).toMatchObject({ id: runId, status: "succeeded", summary: "survived the installed upgrade" });
+    const batch = await worker!.json<{
+      events: Array<{ type: string; taskId: string; payload: { runId?: string; status?: string } }>;
+    }>(`/v1/task-events?taskIds=${taskId}&eventTypes=run.finished&localOnly=true&timeoutSecs=0`);
+    expect(batch.events).toContainEqual(expect.objectContaining({
+      type: "run.finished", taskId, payload: expect.objectContaining({ runId, status: "succeeded" }),
+    }));
   });
 });
