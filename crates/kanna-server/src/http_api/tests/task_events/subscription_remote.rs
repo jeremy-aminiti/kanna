@@ -121,7 +121,13 @@ fn connect_repo_peers(
 ) -> RelayFixture {
     let mut requests = source.take_desktop_relay_requests().unwrap();
     source.set_desktop_routing_available(true);
-    let permits = Arc::new(crate::relay::RelayHttpInvokePermits::new(1));
+    // One permit per peer: unlike `connect` (one remote peer, so a budget of
+    // 1 also doubles as a busy/503 knob for tests that hold it), bootstrap
+    // dispatches a zero-timeout call to every currently-listed peer at once
+    // — a budget smaller than the peer count would starve one of them with
+    // an artificial busy rejection on every registration, not just when a
+    // test deliberately exhausts it. Nothing here exhausts this budget.
+    let permits = Arc::new(crate::relay::RelayHttpInvokePermits::new(peers.len().max(1)));
     let budget = permits.for_path("/v1/task-events");
     let counts = Arc::new(Counts::default());
     let observed = counts.clone();
