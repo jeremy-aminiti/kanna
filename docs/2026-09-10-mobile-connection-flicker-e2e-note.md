@@ -46,6 +46,26 @@ each section's own "executed"/"not executed"/"authored, not run" language as
 current for its own claim rather than assuming the whole note is still at its
 original all-source-only state.
 
+**Status as of this pass:** the `e2e-trust`/`e2e-pair` scheme fix
+(`6fee7e01c`) was independently rechecked against the currently-merged
+`main` (`3f9520ae2`, the Android PR) — every consumer of its exports
+(`apps/mobile/src/e2eTrustSeed.ts`, `.test.ts`, and its one real caller
+`appModel.ts`; confirmed by grep, nothing else in the tree references them)
+is intact, and the one PR #1419 line that touched a file this fix also
+touches (`mobileEnvironment.ts` gaining an unrelated `androidPackageId`
+field) leaves the `scheme` field this fix reads untouched. The Codex
+reproduction (`tests/live/codex-logical-submission.test.ts`) is corrected
+and committed, ready for its next real run — **its last two real runs both
+failed on a harness readiness precondition (an MCP-server-boot race in
+composer detection), not on anything resembling the submission question
+itself; the missing-Enter symptom is not fixed, not reproduced, and not
+ruled out by either run.** A simulator first-attach lane is prepared below
+with the exact identity and a genuine disposable pairing sequence (real
+`POST /v1/pairing/sessions`, not trust-seeding alone) — held on Mac Studio
+load, not on a person, per the owner's lift of recovery-related holds; the
+still-unknown original incident provider/session is a separate information
+gap (owner-only) that does not block either of these independent checks.
+
 ## Flicker: a source-demonstrated overlay bug, not yet a proven cure
 
 **What is established by reading the code, not by watching a device:**
@@ -379,12 +399,17 @@ confirmed clean before and after. Logs/screenshots preserved under `.tmp/`
 (gitignored, not committed): `mobile-flicker-capture/screen-01-pre-deeplink.png`,
 `cdp-eval.mjs`.
 
-**Next simulator lane, ready to run once the native/simulator gate is free
-again** (held for another task's foreground lane as of this writing) —
-superseding the pre-execution draft this section used to carry, which named
-a generic `"iPhone 17 Pro"` device, `simctl io booted` (exactly the generic
-`booted` targeting this task was told never to use), and a blanket
-`git stash` baseline switch:
+**Next simulator lane, prepared and ready to run — held on Studio load, not
+on a predecessor task anymore.** The specific predecessor that previously
+held the Mac Studio's foreground finished; that hold is lifted. As of this
+writing the Studio itself is reported ~90% busy, which blocks starting a new
+heavy/native launch this minute regardless — waiting on the next available
+foreground lane (manager-tracked; a "MOBILE VERIFICATION LANE CLEAR" signal
+releases it), not on any further human input. This procedure supersedes the
+pre-execution draft this section used to carry, which named a generic
+`"iPhone 17 Pro"` device, `simctl io booted` (exactly the generic `booted`
+targeting this task was told never to use), and a blanket `git stash`
+baseline switch:
 
 **1. Bring up the simulator dev stack with the trust-seed flag actually set**
 (the executed run above did not set it — see the correction two paragraphs
@@ -399,18 +424,35 @@ EXPO_PUBLIC_KANNA_ENABLE_E2E_TRUST_SEED=1 \
 listed (`webviewDebuggingEnabled` is gated on the same flag) — before relying
 on it, exactly as flagged above.
 
-**2. Reach the task's terminal using the now-fixed seam**, against the exact
-UDID from step 1, never `booted`:
+**2. Reach the task's terminal using the now-fixed seam, with a genuine
+disposable pairing — not trust-seeding alone.** `e2e-trust` alone writes a
+`TrustedDesktopRecord` with no `deviceSecret`
+(`apps/mobile/src/e2eTrustSeed.ts::seedTrustedDesktopFromUrl` — confirmed by
+reading its `persistence.save()` call, which has no `deviceSecret` field at
+all). A real credential comes only from `e2e-pair`
+(`claimPairingPayloadFromUrl` → `controller.pairMachineByPayload` →
+`store.upsertTrustedDesktop`, an upsert keyed by `desktopId` — confirmed in
+`apps/mobile/src/state/mobileController.ts`), which needs an actual pairing
+payload. The dev server issues real, disposable ones on its own local HTTP
+API — this is the exact mechanism `apps/mobile/e2e/helpers/relay-harness.ts::
+createHarnessPairingSession` already uses, not a new one:
+```
+curl -s -X POST http://127.0.0.1:<KANNA_MOBILE_SERVER_PORT>/v1/pairing/sessions
+# -> {"code": "...", "pairingPayload": "...", ...} — local-process-trusted,
+#    no token needed; each call issues a fresh, single-use session.
+```
+Sequence: `e2e-trust` first (it upserts the initial record and presets
+`selectedRepoId`/`selectedTaskId` so the app lands directly on the task,
+without a device secret yet), then `e2e-pair` (its upsert adds the real
+credential onto the same `desktopId` — sending them in the other order would
+have the trust-only write clobber the credential the pairing call just
+established):
 ```
 xcrun simctl openurl 1CCF3E78-D553-46A9-A4A3-74F4D1BDE0A4 \
-  "kanna-dev://e2e-trust?desktopId=<id>&displayName=Dev&lanBaseUrl=http%3A%2F%2F127.0.0.1%3A<port>&selectedRepoId=<repo>&selectedTaskId=<task>"
-```
-For a genuine disposable *pairing* (not trust-seeding alone — e2e-trust has
-no credential) rather than reusing this session's scratch-task pattern, also
-send the real pairing payload the desktop's own pairing session issues:
-```
+  "kanna-dev://e2e-trust?desktopId=<id from /v1/status>&displayName=Dev&lanBaseUrl=http%3A%2F%2F127.0.0.1%3A<port>&selectedRepoId=<repo>&selectedTaskId=<task>"
+
 xcrun simctl openurl 1CCF3E78-D553-46A9-A4A3-74F4D1BDE0A4 \
-  "kanna-dev://e2e-pair?payload=<url-encoded pairing payload>"
+  "kanna-dev://e2e-pair?payload=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))' '<pairingPayload from above>')"
 ```
 
 **3. Capture frame-accurate evidence of the redraw itself**, targeted at the
