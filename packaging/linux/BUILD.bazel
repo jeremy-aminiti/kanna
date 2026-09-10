@@ -1,0 +1,22 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "resolve_sysroot.py",
+    "runtime-policy.json",
+    "runtime-policy.schema.json",
+    "sysroot-amd64.lock.json",
+    "sysroot-arm64.lock.json",
+    "sysroot_repository.bzl",
+])
+
+py_test(
+    name = "resolve_sysroot_test",
+    srcs = [
+        "resolve_sysroot.py",
+        "tests/test_resolve_sysroot.py",
+    ],
+    main = "tests/test_resolve_sysroot.py",
+    python_version = "PY3",
+)

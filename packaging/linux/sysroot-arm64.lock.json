@@ -1,0 +1,3229 @@
+{
+  "architecture": "arm64",
+  "components": [
+    "main",
+    "universe"
+  ],
+  "formatVersion": 1,
+  "indexes": [
+    {
+      "component": "main",
+      "sha256": "4a1901e6124fb0a111f5dffc8f5c14474f449e2ecfa71f2eaf0b29917edb53f9",
+      "size": 1376632,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/dists/noble/main/binary-arm64/Packages.xz"
+    },
+    {
+      "component": "universe",
+      "sha256": "6df230cf5cfebcbd59e4e2713b8eed07dc0aaed66fb471ebf046cb70ccb07275",
+      "size": 15313828,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/dists/noble/universe/binary-arm64/Packages.xz"
+    }
+  ],
+  "packages": [
+    {
+      "architecture": "all",
+      "name": "adwaita-icon-theme",
+      "sha256": "530d1991a87ffda50f35f9a6d23712ed04c10b742c3e434097840fed50b1eb4e",
+      "size": 722560,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/adwaita-icon-theme/adwaita-icon-theme_46.0-1_all.deb",
+      "version": "46.0-1"
+    },
+    {
+      "architecture": "all",
+      "name": "at-spi2-common",
+      "sha256": "7e05959b067031468f21ae46c6653a6813f1dccd994ef12a0b5f75de0ed346b6",
+      "size": 8674,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/at-spi2-core/at-spi2-common_2.52.0-1build1_all.deb",
+      "version": "2.52.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "bubblewrap",
+      "sha256": "289226d284540afa1e6d7b1ca542a2cc5477857e3a8f65ebe235aa576d84401f",
+      "size": 49386,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/b/bubblewrap/bubblewrap_0.9.0-1build1_arm64.deb",
+      "version": "0.9.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "dconf-gsettings-backend",
+      "sha256": "1f038bed4dfbecb3739edf3c5e851305926c2f99980c24e6932ad3b99bf9f248",
+      "size": 21990,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/d/dconf/dconf-gsettings-backend_0.40.0-4build2_arm64.deb",
+      "version": "0.40.0-4build2"
+    },
+    {
+      "architecture": "all",
+      "name": "debconf",
+      "sha256": "bb390da466a7461bfc87aa3e6b7cd145dae84af3e26bf437f2c0c218ba226294",
+      "size": 124096,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/d/debconf/debconf_1.5.86ubuntu1_all.deb",
+      "version": "1.5.86ubuntu1"
+    },
+    {
+      "architecture": "all",
+      "name": "dictionaries-common",
+      "sha256": "601e7cb4d662aca433785eaafd8094e51b1386aab5f5aef6572a1a565b80f21e",
+      "size": 187642,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/d/dictionaries-common/dictionaries-common_1.29.7_all.deb",
+      "version": "1.29.7"
+    },
+    {
+      "architecture": "arm64",
+      "name": "dpkg",
+      "sha256": "4e95eb1b7442b15561b17349f293da82a786f6a95346ef3196fb39b7998348d4",
+      "size": 1265468,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/d/dpkg/dpkg_1.22.6ubuntu6_arm64.deb",
+      "version": "1.22.6ubuntu6"
+    },
+    {
+      "architecture": "all",
+      "name": "emacsen-common",
+      "sha256": "d802bbf9167ad1d8aa633b65684439e08672379f15bf752662d7fd7b9798dce1",
+      "size": 12116,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/e/emacsen-common/emacsen-common_3.0.5_all.deb",
+      "version": "3.0.5"
+    },
+    {
+      "architecture": "arm64",
+      "name": "fontconfig",
+      "sha256": "75ea910f583cfff0c9c4464ca53aeecbc15b7b98f39f47f1d6cfc57b53ce928a",
+      "size": 190332,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/fontconfig/fontconfig_2.15.0-1.1ubuntu2_arm64.deb",
+      "version": "2.15.0-1.1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "fontconfig-config",
+      "sha256": "86ea76c38d2168989fbcf22792ca1e786643a971ffb87248ca9dfcf0c3c7d1e1",
+      "size": 37396,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/fontconfig/fontconfig-config_2.15.0-1.1ubuntu2_arm64.deb",
+      "version": "2.15.0-1.1ubuntu2"
+    },
+    {
+      "architecture": "all",
+      "name": "fonts-dejavu-core",
+      "sha256": "40049660c194f3b8a2541fc7369efebb10e9f94bdac836a2f38fafedd10fa73a",
+      "size": 835172,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/fonts-dejavu/fonts-dejavu-core_2.37-8_all.deb",
+      "version": "2.37-8"
+    },
+    {
+      "architecture": "all",
+      "name": "fonts-dejavu-mono",
+      "sha256": "8a599d6553307db7ecb795d2f0e5a301e03234afc75c7358b0ba43466454c89a",
+      "size": 502232,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/fonts-dejavu/fonts-dejavu-mono_2.37-8_all.deb",
+      "version": "2.37-8"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gcc-14-base",
+      "sha256": "a473987e9704cbfa2c795b7c94b57f38ed2b27f7068c8338e1deed9bbf279877",
+      "size": 47626,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gcc-14/gcc-14-base_14-20240412-0ubuntu1_arm64.deb",
+      "version": "14-20240412-0ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-atk-1.0",
+      "sha256": "0acde7229bd974750b8d8e37ac87d66592027e7d3ef325e906a45168790bc0ec",
+      "size": 23142,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/at-spi2-core/gir1.2-atk-1.0_2.52.0-1build1_arm64.deb",
+      "version": "2.52.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-atspi-2.0",
+      "sha256": "99a4417b61baf5efb6be685ca65f545814069cd7b291c64c78a0d015231c28d3",
+      "size": 19794,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/at-spi2-core/gir1.2-atspi-2.0_2.52.0-1build1_arm64.deb",
+      "version": "2.52.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-ayatanaappindicator3-0.1",
+      "sha256": "af339cc4e6649129b8afaaa7224dff15345fd9d37fd0e7041f47a536c86fc1e8",
+      "size": 5832,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/liba/libayatana-appindicator/gir1.2-ayatanaappindicator3-0.1_0.5.93-1build3_arm64.deb",
+      "version": "0.5.93-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-ayatanaido3-0.4",
+      "sha256": "86efd6bb231eeb194069a10759dd37417a82bf3e01044fbad408eab37ffa9883",
+      "size": 6406,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/ayatana-ido/gir1.2-ayatanaido3-0.4_0.10.1-1build2_arm64.deb",
+      "version": "0.10.1-1build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-dbusmenu-glib-0.4",
+      "sha256": "2d200f83169a80cde652b30800b02d3e85423bbb0a9ad1a9e985696ff5f8e96b",
+      "size": 7080,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdbusmenu/gir1.2-dbusmenu-glib-0.4_18.10.20180917~bzr492+repack1-3.1ubuntu5_arm64.deb",
+      "version": "18.10.20180917~bzr492+repack1-3.1ubuntu5"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-freedesktop",
+      "sha256": "494832f412627e0524d63ce0c6e8314eb62d9cfd663cf066ad2b18f0c001d341",
+      "size": 49684,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gobject-introspection/gir1.2-freedesktop_1.80.1-1_arm64.deb",
+      "version": "1.80.1-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-freedesktop-dev",
+      "sha256": "829b265d711f145c6502bf469a42f005a04acd0374557cda41979fecd7a170ea",
+      "size": 28824,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gobject-introspection/gir1.2-freedesktop-dev_1.80.1-1_arm64.deb",
+      "version": "1.80.1-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-gdkpixbuf-2.0",
+      "sha256": "990a13ddf3017288e119b67134286a177170f4e6a970481ef52cd188588e86d1",
+      "size": 9474,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gdk-pixbuf/gir1.2-gdkpixbuf-2.0_2.42.10+dfsg-3ubuntu3_arm64.deb",
+      "version": "2.42.10+dfsg-3ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-glib-2.0",
+      "sha256": "3d1adbfef20f67b03e8b8981acc54e0c1a37c3ebb26c4f21d681c19605a89809",
+      "size": 182554,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glib2.0/gir1.2-glib-2.0_2.80.0-6ubuntu1_arm64.deb",
+      "version": "2.80.0-6ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-glib-2.0-dev",
+      "sha256": "d588a0ebfe6104a3a312e89c8401d94897a47de7217104a7e27e3bb554a4b1ef",
+      "size": 847936,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glib2.0/gir1.2-glib-2.0-dev_2.80.0-6ubuntu1_arm64.deb",
+      "version": "2.80.0-6ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-gtk-3.0",
+      "sha256": "46db08a6acb51d80775cfdfbbfb06bb95c493218a7382205b5a79a40df9d8928",
+      "size": 244966,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gtk+3.0/gir1.2-gtk-3.0_3.24.41-4ubuntu1_arm64.deb",
+      "version": "3.24.41-4ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-harfbuzz-0.0",
+      "sha256": "9a26ee2280fea0d92f5e2a7a201857e5e632fb938bfac5d4010db1d4f0077c40",
+      "size": 44484,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/h/harfbuzz/gir1.2-harfbuzz-0.0_8.3.0-2build2_arm64.deb",
+      "version": "8.3.0-2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-javascriptcoregtk-4.1",
+      "sha256": "8afbbfda17f318bcf97244df63dea5457a00b87622a332b383ab33eeced2c4b8",
+      "size": 37254,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/webkit2gtk/gir1.2-javascriptcoregtk-4.1_2.44.0-2_arm64.deb",
+      "version": "2.44.0-2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-pango-1.0",
+      "sha256": "e8b31b06f0a9e35c6f914ded566041b0ee66790fded46bda7833487db160c1b1",
+      "size": 34756,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pango1.0/gir1.2-pango-1.0_1.52.1+ds-1build1_arm64.deb",
+      "version": "1.52.1+ds-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-soup-3.0",
+      "sha256": "100b17bc4be149a59c8ebcf7b9e52a571ca42f0226285532c78d3dd53cd5feda",
+      "size": 22508,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libsoup3/gir1.2-soup-3.0_3.4.4-5build2_arm64.deb",
+      "version": "3.4.4-5build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gir1.2-webkit2-4.1",
+      "sha256": "d22155892f46cd094c76896e03fcb899e51ae1140d5e4f834005ba7e3256a666",
+      "size": 102978,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/webkit2gtk/gir1.2-webkit2-4.1_2.44.0-2_arm64.deb",
+      "version": "2.44.0-2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "glib-networking",
+      "sha256": "f229b9b01b384d73bf17d50a549802432bbcca36bb3eb74f0dac11f628f5c380",
+      "size": 63904,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glib-networking/glib-networking_2.80.0-1build1_arm64.deb",
+      "version": "2.80.0-1build1"
+    },
+    {
+      "architecture": "all",
+      "name": "glib-networking-common",
+      "sha256": "c9bc3b5c3dc8a75e752efcf246e5ef2d3b9e80cd1301fd37fcb0c36562062931",
+      "size": 6702,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glib-networking/glib-networking-common_2.80.0-1build1_all.deb",
+      "version": "2.80.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "glib-networking-services",
+      "sha256": "a93e273d521c2a06ab579a17af4bfc1e4270f48b01af5cd957f7a1c82202c5fd",
+      "size": 12748,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glib-networking/glib-networking-services_2.80.0-1build1_arm64.deb",
+      "version": "2.80.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gstreamer1.0-plugins-base",
+      "sha256": "80c6016be049d00dd1100a70980fa1b742e891ca399039abb5d62d37b2b1b093",
+      "size": 690918,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gst-plugins-base1.0/gstreamer1.0-plugins-base_1.24.2-1_arm64.deb",
+      "version": "1.24.2-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gstreamer1.0-plugins-good",
+      "sha256": "21c1df358e965e70d67d6e3e5641269e421305fbc89ae1224119d2c962ea14c1",
+      "size": 2155450,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gst-plugins-good1.0/gstreamer1.0-plugins-good_1.24.2-1ubuntu1_arm64.deb",
+      "version": "1.24.2-1ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "gtk-update-icon-cache",
+      "sha256": "622003f4bd7a65859771cafb73e674370ad37a011973a910c97fb1b62b3695b5",
+      "size": 51894,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gtk+3.0/gtk-update-icon-cache_3.24.41-4ubuntu1_arm64.deb",
+      "version": "3.24.41-4ubuntu1"
+    },
+    {
+      "architecture": "all",
+      "name": "hicolor-icon-theme",
+      "sha256": "9000eb98868252261978ff49501c0ace3124cb369c395e9f5015ddc556fe2ba6",
+      "size": 9976,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/h/hicolor-icon-theme/hicolor-icon-theme_0.17-2_all.deb",
+      "version": "0.17-2"
+    },
+    {
+      "architecture": "all",
+      "name": "humanity-icon-theme",
+      "sha256": "a9bb76c7eb926bd97e50455a79f266de826a246b2250e1ac4aebcda013dd51c7",
+      "size": 1281812,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/h/humanity-icon-theme/humanity-icon-theme_0.6.16_all.deb",
+      "version": "0.6.16"
+    },
+    {
+      "architecture": "all",
+      "name": "hunspell-en-us",
+      "sha256": "d231c94b54792215038a4f719c562deafe8efe0a7710c0c7218974cab513330c",
+      "size": 280206,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/s/scowl/hunspell-en-us_2020.12.07-2_all.deb",
+      "version": "1:2020.12.07-2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "icu-devtools",
+      "sha256": "ff34db9a88b48fe579ac27fb0b2a3c1a6729c01155faee584d250f8d2645a436",
+      "size": 208934,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/i/icu/icu-devtools_74.2-1ubuntu3_arm64.deb",
+      "version": "74.2-1ubuntu3"
+    },
+    {
+      "architecture": "all",
+      "name": "iso-codes",
+      "sha256": "cafca0a3a1f07b44fbba53ab7a1f1d9755e6b80cc041173afe2b52e53bed97a7",
+      "size": 3491500,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/i/iso-codes/iso-codes_4.16.0-1_all.deb",
+      "version": "4.16.0-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libaa1",
+      "sha256": "c6ba7e5a2d291a92fc3f9604ac298193e0102dc02c3b7d67c112819a7a9a2511",
+      "size": 49726,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/aalib/libaa1_1.4p5-51.1_arm64.deb",
+      "version": "1.4p5-51.1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libacl1",
+      "sha256": "9085ce0c1a9ff8da0ffdbfa3aaf34c2f7504c46ba17198d3a6b9c968398ce495",
+      "size": 17036,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/acl/libacl1_2.3.2-1build1_arm64.deb",
+      "version": "2.3.2-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libapparmor1",
+      "sha256": "8c29035a9153c5087a4853dae51db5b804d52be90ca5b6f08e9d9684e6d64448",
+      "size": 50004,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/apparmor/libapparmor1_4.0.0-beta3-0ubuntu3_arm64.deb",
+      "version": "4.0.0-beta3-0ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libaspell15",
+      "sha256": "7a3da894c71c254c7ed7074284bb035eabb44f0e56cabaf96186e345813d1d6f",
+      "size": 315930,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/aspell/libaspell15_0.60.8.1-1build1_arm64.deb",
+      "version": "0.60.8.1-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libasyncns0",
+      "sha256": "acda11529a3bdc32961cec888060417d835be9626b00ab8f34607f7935cda11f",
+      "size": 11152,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/liba/libasyncns/libasyncns0_0.8-6build4_arm64.deb",
+      "version": "0.8-6build4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libatk-bridge2.0-0t64",
+      "sha256": "7a2ce532caa857c4d7d8bced0a8143d1c7cf8a3093f8da926e025252ef70117f",
+      "size": 66298,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/at-spi2-core/libatk-bridge2.0-0t64_2.52.0-1build1_arm64.deb",
+      "version": "2.52.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libatk-bridge2.0-dev",
+      "sha256": "3c4edc01e1df6d00e2a10b84d13d214f1dd970dce4849ef89e498ffa58874517",
+      "size": 4278,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/at-spi2-core/libatk-bridge2.0-dev_2.52.0-1build1_arm64.deb",
+      "version": "2.52.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libatk1.0-0t64",
+      "sha256": "8939633b3912c6476f3f501c2e8aa0fcc681dbd343b0a8138bf0ed5af8e9a77a",
+      "size": 55122,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/at-spi2-core/libatk1.0-0t64_2.52.0-1build1_arm64.deb",
+      "version": "2.52.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libatk1.0-dev",
+      "sha256": "16b78b6db115e8e8f248a52cedd65335831c58dc485a718b937f59a957c1fb95",
+      "size": 100068,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/at-spi2-core/libatk1.0-dev_2.52.0-1build1_arm64.deb",
+      "version": "2.52.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libatomic1",
+      "sha256": "017fa4bd88e8ff1cbaf75a26765b8c1255a5cd91d6ce838273bcb64190f15e37",
+      "size": 11390,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gcc-14/libatomic1_14-20240412-0ubuntu1_arm64.deb",
+      "version": "14-20240412-0ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libatspi2.0-0t64",
+      "sha256": "c65f137507a665c969f9d158c8f63188b308037e66b48bca85ea2e7cf31bb84e",
+      "size": 80934,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/at-spi2-core/libatspi2.0-0t64_2.52.0-1build1_arm64.deb",
+      "version": "2.52.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libatspi2.0-dev",
+      "sha256": "283c539af7e92f72c8ba92a5fe4d06bd054738ff74591f589c7b9c224bd31a73",
+      "size": 76182,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/at-spi2-core/libatspi2.0-dev_2.52.0-1build1_arm64.deb",
+      "version": "2.52.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libavahi-client3",
+      "sha256": "b5f8c3e898ec95881cf72258fa467ff1a40146d494b14df2cdfeda0b537e318c",
+      "size": 27240,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/avahi/libavahi-client3_0.8-13ubuntu6_arm64.deb",
+      "version": "0.8-13ubuntu6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libavahi-common-data",
+      "sha256": "fff8454a661e4d5d080a939da26e9e79c0d8cd8e7029b8271e952558ec20d9dc",
+      "size": 29648,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/avahi/libavahi-common-data_0.8-13ubuntu6_arm64.deb",
+      "version": "0.8-13ubuntu6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libavahi-common3",
+      "sha256": "35d11774032c38967e2d15cfbb02101fc6d43aba0ef989d703b33864736cddf7",
+      "size": 23314,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/avahi/libavahi-common3_0.8-13ubuntu6_arm64.deb",
+      "version": "0.8-13ubuntu6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libavc1394-0",
+      "sha256": "b707ec893678e9dec0b80e4481ed2dc581eac3d21de2be65984121640e3d5afe",
+      "size": 15778,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/liba/libavc1394/libavc1394-0_0.5.4-5build3_arm64.deb",
+      "version": "0.5.4-5build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libayatana-appindicator3-1",
+      "sha256": "a46d9c097be81bd7aa428babd94f20c300800ff87f9d469495bde30f3027eb95",
+      "size": 24354,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/liba/libayatana-appindicator/libayatana-appindicator3-1_0.5.93-1build3_arm64.deb",
+      "version": "0.5.93-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libayatana-appindicator3-dev",
+      "sha256": "c07bdf36cbab6c330dfa5f57b9c1f9585b2e83a810511ad5a92ff0aeb5d60cc6",
+      "size": 15034,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/liba/libayatana-appindicator/libayatana-appindicator3-dev_0.5.93-1build3_arm64.deb",
+      "version": "0.5.93-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libayatana-ido3-0.4-0",
+      "sha256": "352e6dd9fb99e3094628a0ddd5d4d3f5f5351c4d0176380095e879c621cf5527",
+      "size": 54020,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/ayatana-ido/libayatana-ido3-0.4-0_0.10.1-1build2_arm64.deb",
+      "version": "0.10.1-1build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libayatana-ido3-dev",
+      "sha256": "bacda90b2d2b3f96cbcbf2762e6cf00b6c2482b07d1e0f21fff5380325e991a2",
+      "size": 14236,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/a/ayatana-ido/libayatana-ido3-dev_0.10.1-1build2_arm64.deb",
+      "version": "0.10.1-1build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libayatana-indicator3-7",
+      "sha256": "051df6f95ccda3c5af0ef109e6f065440017295e32110c4e128d895ad094f2b3",
+      "size": 31240,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/liba/libayatana-indicator/libayatana-indicator3-7_0.9.4-1build1_arm64.deb",
+      "version": "0.9.4-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libayatana-indicator3-dev",
+      "sha256": "ade2d6f53485b219b7ddb19b893a7a8d02fafdff8e8305e7e6bb3d7548472af4",
+      "size": 6944,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/liba/libayatana-indicator/libayatana-indicator3-dev_0.9.4-1build1_arm64.deb",
+      "version": "0.9.4-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libblkid-dev",
+      "sha256": "453ed327d64aed45c3895a1e1cc7700f12006055e56bc404d36d9742991e71dd",
+      "size": 218686,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/u/util-linux/libblkid-dev_2.39.3-9ubuntu6_arm64.deb",
+      "version": "2.39.3-9ubuntu6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libblkid1",
+      "sha256": "274fa3f3fce678479ad85e834ef99247c0874fe56c6c4a76f086a1110614ffef",
+      "size": 122736,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/u/util-linux/libblkid1_2.39.3-9ubuntu6_arm64.deb",
+      "version": "2.39.3-9ubuntu6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libbrotli-dev",
+      "sha256": "9049decef2672534a714ad92713844282dfdb15722f5c760e6a204048c28e4b7",
+      "size": 359556,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/b/brotli/libbrotli-dev_1.1.0-2build2_arm64.deb",
+      "version": "1.1.0-2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libbrotli1",
+      "sha256": "cabf3462d908e72f2e594f19ae87c581c4614f099947e38fbd865bf8eae27014",
+      "size": 339424,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/b/brotli/libbrotli1_1.1.0-2build2_arm64.deb",
+      "version": "1.1.0-2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libbsd0",
+      "sha256": "6200ae28cdd976f9bf98571e4f7d49f9c632cfbc7eba241a3fed0f21ec8fe3ca",
+      "size": 40926,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libb/libbsd/libbsd0_0.12.1-1build1_arm64.deb",
+      "version": "0.12.1-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libbz2-1.0",
+      "sha256": "89eefec795475ab9fd9bd13d74412a4ec49b06bffb3a3fbd3af78aed60941aa9",
+      "size": 35656,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/b/bzip2/libbz2-1.0_1.0.8-5.1_arm64.deb",
+      "version": "1.0.8-5.1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libbz2-dev",
+      "sha256": "bae84cbf1bcbb34360786c30639728cfdedf6c32a93b6311c244576d3d868861",
+      "size": 35782,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/b/bzip2/libbz2-dev_1.0.8-5.1_arm64.deb",
+      "version": "1.0.8-5.1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libc++1",
+      "sha256": "fbca5d6605a31cdacef03af9245ec97332b90cd2d2d13968d86ffca7562ec485",
+      "size": 5594,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/universe/l/llvm-defaults/libc++1_18.0-59~exp2_arm64.deb",
+      "version": "1:18.0-59~exp2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libc++1-18",
+      "sha256": "1e0b66184032a68105bba3d9be58dcbc80f8ff3593e0af412fb65993f9c829af",
+      "size": 267300,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/universe/l/llvm-toolchain-18/libc++1-18_18.1.3-1_arm64.deb",
+      "version": "1:18.1.3-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libc++abi1",
+      "sha256": "522c0698c207d88b915db79d1448fe62fa7ea12994ca221310d5999c85cc4391",
+      "size": 5518,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/universe/l/llvm-defaults/libc++abi1_18.0-59~exp2_arm64.deb",
+      "version": "1:18.0-59~exp2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libc++abi1-18",
+      "sha256": "a84f87991ee0f9e5ac868c7e5c09dd7ded9ee12640bb3ddce8818ab89434f1c7",
+      "size": 67970,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/universe/l/llvm-toolchain-18/libc++abi1-18_18.1.3-1_arm64.deb",
+      "version": "1:18.1.3-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libc-dev-bin",
+      "sha256": "151ec13d51227eaf412ae2ad891fb1484fb541d4c24034eca5bdb638ed99b5df",
+      "size": 19666,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glibc/libc-dev-bin_2.39-0ubuntu8_arm64.deb",
+      "version": "2.39-0ubuntu8"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libc6",
+      "sha256": "04d7cb73e608b41713b63ef915577f7f5d75e95b1b33174e82e05687fdb6cfaf",
+      "size": 2774086,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glibc/libc6_2.39-0ubuntu8_arm64.deb",
+      "version": "2.39-0ubuntu8"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libc6-dev",
+      "sha256": "cf8d2af040044ea5f9205a7a7a3eceabe9bc182fd780a1dac8e849f8eccee1f1",
+      "size": 1596150,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glibc/libc6-dev_2.39-0ubuntu8_arm64.deb",
+      "version": "2.39-0ubuntu8"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcaca0",
+      "sha256": "cf01925c5260ba8121aa75ffd2470c1a88da418a69ecbabf7dc3435d2f96c639",
+      "size": 206034,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libc/libcaca/libcaca0_0.99.beta20-4build2_arm64.deb",
+      "version": "0.99.beta20-4build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcairo-gobject2",
+      "sha256": "413153d7898f726cd993a4e0f2f80d412ac42c8d717d49041d71342cc1d581cb",
+      "size": 126542,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/c/cairo/libcairo-gobject2_1.18.0-3build1_arm64.deb",
+      "version": "1.18.0-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcairo-script-interpreter2",
+      "sha256": "48d29061f967f3d4c88b986c600862e0f629624bf22c131aa66c79667a781be3",
+      "size": 60910,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/c/cairo/libcairo-script-interpreter2_1.18.0-3build1_arm64.deb",
+      "version": "1.18.0-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcairo2",
+      "sha256": "d7820deae45510a3ca1c1f6e32baa2e8b12a234a410d185e42e75e9dd5fcd6da",
+      "size": 554800,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/c/cairo/libcairo2_1.18.0-3build1_arm64.deb",
+      "version": "1.18.0-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcairo2-dev",
+      "sha256": "5fa1bc87dfd6bdf24ba2a2adb629d98e1c01d347adfa8118aad74893639b6e60",
+      "size": 41140,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/c/cairo/libcairo2-dev_1.18.0-3build1_arm64.deb",
+      "version": "1.18.0-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcap2",
+      "sha256": "88c75467ee09a14981661782bf62f4a0029458922245d7f22225c2ca4441eeee",
+      "size": 30200,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libc/libcap2/libcap2_2.66-5ubuntu2_arm64.deb",
+      "version": "1:2.66-5ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcap2-bin",
+      "sha256": "274606669b68336bf54c7098614660b7987fcb906b68a1d23be3c7efdc92c3bb",
+      "size": 33496,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libc/libcap2/libcap2-bin_2.66-5ubuntu2_arm64.deb",
+      "version": "1:2.66-5ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcdparanoia0",
+      "sha256": "eb23ce43347dc8f734f66c24109198309d4844d9d9045ae9ca97cfa25061f63e",
+      "size": 46918,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/c/cdparanoia/libcdparanoia0_3.10.2+debian-14build3_arm64.deb",
+      "version": "3.10.2+debian-14build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcolord2",
+      "sha256": "60b686a9b04b90dc5f250a462b720c6f8bd88e22de920f7c97f8dc9cc3be4f2c",
+      "size": 148520,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/c/colord/libcolord2_1.4.7-1build2_arm64.deb",
+      "version": "1.4.7-1build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcom-err2",
+      "sha256": "369be6a7c9e8d85de7eb81697bad038016805cf510ea5d7cb03b0c6e91d7eda5",
+      "size": 22376,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/e/e2fsprogs/libcom-err2_1.47.0-2.4~exp1ubuntu4_arm64.deb",
+      "version": "1.47.0-2.4~exp1ubuntu4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcrypt-dev",
+      "sha256": "cadcc00021aa1082a8cb5cd1c2686b25b7a4d396f2029eaa1b12159ca46f1766",
+      "size": 118238,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcrypt/libcrypt-dev_4.4.36-4build1_arm64.deb",
+      "version": "1:4.4.36-4build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcrypt1",
+      "sha256": "5cd73ba112507dabd8e43b528ca9f530719a370e014b8e3e797770e6e940cccf",
+      "size": 85888,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcrypt/libcrypt1_4.4.36-4build1_arm64.deb",
+      "version": "1:4.4.36-4build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcups2t64",
+      "sha256": "7b7261315f6d384d1f342dd4686d76d7c748a83f4895ceff9c8a28ccb622e95e",
+      "size": 273392,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/c/cups/libcups2t64_2.4.7-1.2ubuntu7_arm64.deb",
+      "version": "2.4.7-1.2ubuntu7"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libcurl3t64-gnutls",
+      "sha256": "795b9b9700909bc9e15d0d3f1b756bdf1594b9b2f0778ea78a79430bbd60893a",
+      "size": 326804,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/c/curl/libcurl3t64-gnutls_8.5.0-2ubuntu10_arm64.deb",
+      "version": "8.5.0-2ubuntu10"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdatrie-dev",
+      "sha256": "6937eaed7d1a9e72a70d1cbf1d0303138c8e190d5679b3e480a69b7fade16cd8",
+      "size": 20340,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdatrie/libdatrie-dev_0.2.13-3build1_arm64.deb",
+      "version": "0.2.13-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdatrie1",
+      "sha256": "cb148b2bb3c4ee4be7c1316ba4970e60d9aade63d71d41ae5b2897f5004704d0",
+      "size": 19158,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdatrie/libdatrie1_0.2.13-3build1_arm64.deb",
+      "version": "0.2.13-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdb5.3t64",
+      "sha256": "b04d246b871e2e745538fa71ce2d1a127dfd65e7b1438bc6b8e2bb86538f519e",
+      "size": 732284,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/d/db5.3/libdb5.3t64_5.3.28+dfsg2-7_arm64.deb",
+      "version": "5.3.28+dfsg2-7"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdbus-1-3",
+      "sha256": "c269be28a2ed45d08f85ca2e7eb8a333f7ef5b01a052f4ad561e6834fe4c8964",
+      "size": 209862,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/d/dbus/libdbus-1-3_1.14.10-4ubuntu4_arm64.deb",
+      "version": "1.14.10-4ubuntu4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdbus-1-dev",
+      "sha256": "1fa300a05822252e95f3bb7690e184080dc24891b96c27484a42662a873aa3ab",
+      "size": 200296,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/d/dbus/libdbus-1-dev_1.14.10-4ubuntu4_arm64.deb",
+      "version": "1.14.10-4ubuntu4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdbusmenu-glib-dev",
+      "sha256": "ba2ac64df6fb5f636394b36b7c598108ac2d4bcdffd2482f27b5a6b94f41a61a",
+      "size": 75012,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdbusmenu/libdbusmenu-glib-dev_18.10.20180917~bzr492+repack1-3.1ubuntu5_arm64.deb",
+      "version": "18.10.20180917~bzr492+repack1-3.1ubuntu5"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdbusmenu-glib4",
+      "sha256": "2e6a87d0ea8c85274aaeab4f56ec22a692859619cb9f32a3052950ea39664916",
+      "size": 42652,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdbusmenu/libdbusmenu-glib4_18.10.20180917~bzr492+repack1-3.1ubuntu5_arm64.deb",
+      "version": "18.10.20180917~bzr492+repack1-3.1ubuntu5"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdbusmenu-gtk3-4",
+      "sha256": "f8c0bf1d8ebf4ab7e7c2440a76cb49baaad9689de5e6c1cdcd9b78698fd45a6a",
+      "size": 26688,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdbusmenu/libdbusmenu-gtk3-4_18.10.20180917~bzr492+repack1-3.1ubuntu5_arm64.deb",
+      "version": "18.10.20180917~bzr492+repack1-3.1ubuntu5"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdeflate0",
+      "sha256": "79fdd9e2b37c72a661631d3bf1aa3f3ce1069ee3cd98b9c79b0f2ca67423f240",
+      "size": 43448,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdeflate/libdeflate0_1.19-1build1_arm64.deb",
+      "version": "1.19-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdrm-amdgpu1",
+      "sha256": "6e2ba81e4a1f4458ee376da4069c92156dc6c1bda35284a97452c5c638371a37",
+      "size": 20460,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdrm/libdrm-amdgpu1_2.4.120-2build1_arm64.deb",
+      "version": "2.4.120-2build1"
+    },
+    {
+      "architecture": "all",
+      "name": "libdrm-common",
+      "sha256": "84d60f8726a47b57c2ba9bd4105d838ff8554b7309035a61543e2bee4ed7914a",
+      "size": 8096,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdrm/libdrm-common_2.4.120-2build1_all.deb",
+      "version": "2.4.120-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdrm-nouveau2",
+      "sha256": "1f738b4be96174b84cc16e4bd68d7be0f2dbcd14543a51a7d1bf9684756814ad",
+      "size": 17788,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdrm/libdrm-nouveau2_2.4.120-2build1_arm64.deb",
+      "version": "2.4.120-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdrm-radeon1",
+      "sha256": "72f05c20585496348acf0a51f0e1b646b46ec456f3ee0c58372e211a87da4638",
+      "size": 20890,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdrm/libdrm-radeon1_2.4.120-2build1_arm64.deb",
+      "version": "2.4.120-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdrm2",
+      "sha256": "ca73373d35a95c7c912d638fe14c543054e937ef63b8459665c3b70c83ee3f22",
+      "size": 42102,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdrm/libdrm2_2.4.120-2build1_arm64.deb",
+      "version": "2.4.120-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libduktape207",
+      "sha256": "21cae9d4994eba43aa41623e55186df6434301faa47176196dbf33987550fec1",
+      "size": 143556,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/d/duktape/libduktape207_2.7.0+tests-0ubuntu3_arm64.deb",
+      "version": "2.7.0+tests-0ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdv4t64",
+      "sha256": "0d91e6739333a460c61467e55156b38ac426e40c92bda606197e91b6f98864be",
+      "size": 60228,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libd/libdv/libdv4t64_1.0.0-17.1build1_arm64.deb",
+      "version": "1.0.0-17.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libdw1t64",
+      "sha256": "dbc1c3a67c3e3be48aa88cf7f2c6a6b2a84ad7bb20efa8b4cc14e9210e88305f",
+      "size": 257904,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/e/elfutils/libdw1t64_0.190-1.1build4_arm64.deb",
+      "version": "0.190-1.1build4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libedit2",
+      "sha256": "cf642fec16d86517e0e715520c3a7cdaee650e7ae8a4993f82d0e1e7a5883efb",
+      "size": 97526,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libe/libedit/libedit2_3.1-20230828-1build1_arm64.deb",
+      "version": "3.1-20230828-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libegl-dev",
+      "sha256": "99e364f5b5d5847feeb57bf4bd866331da93f16ba767c25286dd7f65e4b828ec",
+      "size": 18200,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libegl-dev_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libegl-mesa0",
+      "sha256": "430ebf45033b9f6822871d78a174f9fc53219d0caf889702cc332db529e8e39d",
+      "size": 116152,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/m/mesa/libegl-mesa0_24.0.5-1ubuntu1_arm64.deb",
+      "version": "24.0.5-1ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libegl1",
+      "sha256": "8813f4435c06abab54272e929cf8682b5b01a763abe29cb26b328922e4b081f9",
+      "size": 29522,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libegl1_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libegl1-mesa-dev",
+      "sha256": "cdcee23bbbe50e5fc4c6577c441f59345543042a1eced2c13b806b5ee02e65b9",
+      "size": 21626,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/m/mesa/libegl1-mesa-dev_24.0.5-1ubuntu1_arm64.deb",
+      "version": "24.0.5-1ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libelf1t64",
+      "sha256": "cac9f6e3b9b0829335d2194d20e92c5003c5033a15676cf9adb9a1495239d45a",
+      "size": 57984,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/e/elfutils/libelf1t64_0.190-1.1build4_arm64.deb",
+      "version": "0.190-1.1build4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libenchant-2-2",
+      "sha256": "a8334fe77eabef07ead474657e38faeb7590da494d012480feb230e05a70b7ed",
+      "size": 50298,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/e/enchant-2/libenchant-2-2_2.3.3-2build2_arm64.deb",
+      "version": "2.3.3-2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libepoxy-dev",
+      "sha256": "976557dd0a474f859db69f092c15ae83c366c7a42400be45ccf7921b314c257f",
+      "size": 131570,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libe/libepoxy/libepoxy-dev_1.5.10-1build1_arm64.deb",
+      "version": "1.5.10-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libepoxy0",
+      "sha256": "103381283fcdbb4af06c155568c1e945f0a647d75f2522e0c2418ebb70b855ba",
+      "size": 240300,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libe/libepoxy/libepoxy0_1.5.10-1build1_arm64.deb",
+      "version": "1.5.10-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libevdev2",
+      "sha256": "4fd17e552a00e3a2dc5d39a6578b26a1ac973afc80384d165647d72441f3a064",
+      "size": 35848,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libe/libevdev/libevdev2_1.13.1+dfsg-1build1_arm64.deb",
+      "version": "1.13.1+dfsg-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libexpat1",
+      "sha256": "f6cea0cbe617519480ab3501166eab7092a9a75332cb186c30eee8107da381b9",
+      "size": 76070,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/e/expat/libexpat1_2.6.1-2build1_arm64.deb",
+      "version": "2.6.1-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libexpat1-dev",
+      "sha256": "ad9f9b9116442096cf217286c14622b8c9ff4968bb8e71686121a6ebb167cf91",
+      "size": 127726,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/e/expat/libexpat1-dev_2.6.1-2build1_arm64.deb",
+      "version": "2.6.1-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libffi-dev",
+      "sha256": "887755d6aa91c12ee0eb3404b61f6dc138c4c59234aa2add0264baf270337708",
+      "size": 59476,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libf/libffi/libffi-dev_3.4.6-1build1_arm64.deb",
+      "version": "3.4.6-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libffi8",
+      "sha256": "a4d4607144bc599328a913d7312761fd8f4a650d67c7d5058f1f3667d771d37c",
+      "size": 22716,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libf/libffi/libffi8_3.4.6-1build1_arm64.deb",
+      "version": "3.4.6-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libflac12t64",
+      "sha256": "9738c071c167b2baa8dd1a509d85076150108953a1429de839280f87b0b01b83",
+      "size": 169516,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/flac/libflac12t64_1.4.3+ds-2.1ubuntu2_arm64.deb",
+      "version": "1.4.3+ds-2.1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libfontconfig-dev",
+      "sha256": "782307ad68ea4937b86bb3b173dd97625efb45999be268ac06e3e3b810203abb",
+      "size": 165268,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/fontconfig/libfontconfig-dev_2.15.0-1.1ubuntu2_arm64.deb",
+      "version": "2.15.0-1.1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libfontconfig1",
+      "sha256": "4df2aefa7395140499033b339a96164925f1fd3039df52669b87acb6bec20f19",
+      "size": 141868,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/fontconfig/libfontconfig1_2.15.0-1.1ubuntu2_arm64.deb",
+      "version": "2.15.0-1.1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libfontconfig1-dev",
+      "sha256": "1cdd8797f1aa2e78767e103632a0df3df0d1c86baec9c52021a132e475b11e5d",
+      "size": 1840,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/fontconfig/libfontconfig1-dev_2.15.0-1.1ubuntu2_arm64.deb",
+      "version": "2.15.0-1.1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libfreetype-dev",
+      "sha256": "84f67a7f615a40241a021d2b5948262e4b1fe6eb261de92314e8b1c04113aaf3",
+      "size": 573406,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/freetype/libfreetype-dev_2.13.2+dfsg-1build3_arm64.deb",
+      "version": "2.13.2+dfsg-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libfreetype6",
+      "sha256": "7f61d8fb0e17b94344454211ba910c6d63752a63d628f2e86344e54583948dae",
+      "size": 393228,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/freetype/libfreetype6_2.13.2+dfsg-1build3_arm64.deb",
+      "version": "2.13.2+dfsg-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libfribidi-dev",
+      "sha256": "cc5e5b25051af26d618f585b0ef2c58aa175123256c4c049632aa04c26e844b7",
+      "size": 64982,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/fribidi/libfribidi-dev_1.0.13-3build1_arm64.deb",
+      "version": "1.0.13-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libfribidi0",
+      "sha256": "52d3d13602ec19e01932d653b53ea9fe43252ff39aa196b81f96b69006e4c3a2",
+      "size": 26502,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/f/fribidi/libfribidi0_1.0.13-3build1_arm64.deb",
+      "version": "1.0.13-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgbm1",
+      "sha256": "8589f317e7dacff6b958b9a2395fda3c9d62304b3da1390a53adbdb3afb33436",
+      "size": 43596,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/m/mesa/libgbm1_24.0.5-1ubuntu1_arm64.deb",
+      "version": "24.0.5-1ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgcc-s1",
+      "sha256": "bb1c262f2ac9aeb357d3344a06f22f1057306694f6200896775a03ecced08b13",
+      "size": 61720,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gcc-14/libgcc-s1_14-20240412-0ubuntu1_arm64.deb",
+      "version": "14-20240412-0ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgcrypt20",
+      "sha256": "ef72eafe2393bdc23d37750a2c8ee025b0d61f8158397bd8bca21b5319b5e2c6",
+      "size": 471954,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libgcrypt20/libgcrypt20_1.10.3-2build1_arm64.deb",
+      "version": "1.10.3-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgdk-pixbuf-2.0-0",
+      "sha256": "c25130f8cc84ed4d678cc7d452cbe19aa30d3bbe70743787c9684621f5fe4021",
+      "size": 145256,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gdk-pixbuf/libgdk-pixbuf-2.0-0_2.42.10+dfsg-3ubuntu3_arm64.deb",
+      "version": "2.42.10+dfsg-3ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgdk-pixbuf-2.0-dev",
+      "sha256": "5abe47bc9e71ddb0c5b138fc0e1f985e57b7cd7ee62d8ab686027640d42f14f9",
+      "size": 47948,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gdk-pixbuf/libgdk-pixbuf-2.0-dev_2.42.10+dfsg-3ubuntu3_arm64.deb",
+      "version": "2.42.10+dfsg-3ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgdk-pixbuf2.0-bin",
+      "sha256": "be11d3b2b722b03d0ac32fbdd9b8c8626b9e730ee217876f6936d7cdc986db6c",
+      "size": 14168,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gdk-pixbuf/libgdk-pixbuf2.0-bin_2.42.10+dfsg-3ubuntu3_arm64.deb",
+      "version": "2.42.10+dfsg-3ubuntu3"
+    },
+    {
+      "architecture": "all",
+      "name": "libgdk-pixbuf2.0-common",
+      "sha256": "851ed73005dad3178d1022191e84311c3eb2a84159347b6542308449dfe402e0",
+      "size": 7852,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gdk-pixbuf/libgdk-pixbuf2.0-common_2.42.10+dfsg-3ubuntu3_all.deb",
+      "version": "2.42.10+dfsg-3ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgirepository-2.0-0",
+      "sha256": "f3ec78a8e931f67ee5940e679cde4c4421ca9c5eba07607b8ac1da67d6e6d296",
+      "size": 71524,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glib2.0/libgirepository-2.0-0_2.80.0-6ubuntu1_arm64.deb",
+      "version": "2.80.0-6ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgl-dev",
+      "sha256": "9bc28c1265bb82ff2498c234893cbb891529e43fa6b100c007ba677c0a77bbc1",
+      "size": 102444,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libgl-dev_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgl1",
+      "sha256": "8b2478bdeaf7a13d3c3b993f0238ac74640ab5a623b9d2645ebf6f1336c9881b",
+      "size": 106320,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libgl1_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgl1-mesa-dri",
+      "sha256": "a69a8f5cef7acf6db341cf6e93cc6c46efa21b085a5a964283bc3e802e66ec11",
+      "size": 8225628,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/m/mesa/libgl1-mesa-dri_24.0.5-1ubuntu1_arm64.deb",
+      "version": "24.0.5-1ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libglapi-mesa",
+      "sha256": "42842b92db5ca5744cf5b216fd9819aea984b78c8a5264ad1d71cdc999ee2326",
+      "size": 58386,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/m/mesa/libglapi-mesa_24.0.5-1ubuntu1_arm64.deb",
+      "version": "24.0.5-1ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgles-dev",
+      "sha256": "df742afc0b66f24d80920b419723e072ab59d70726519d5994f50cf09e1f3961",
+      "size": 50444,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libgles-dev_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgles1",
+      "sha256": "a7c9cd011c8e05fb573445560cab86d61583cda0f79c248fd73680e2d0618b54",
+      "size": 11642,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libgles1_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgles2",
+      "sha256": "b4be5859b727d181e6d4d8360f4864a4c4cadcfef3af794b837245800deff714",
+      "size": 17570,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libgles2_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libglib2.0-0t64",
+      "sha256": "752ba1420f11452a2c3c9c8b8a68988defc4ea39d2d26a0372676722a27ebe0c",
+      "size": 1289432,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu1_arm64.deb",
+      "version": "2.80.0-6ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libglib2.0-bin",
+      "sha256": "084c9781697eb373e377310c2b87ca6ed20f6686820d140d0ea3e6a8d63e9d94",
+      "size": 97278,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glib2.0/libglib2.0-bin_2.80.0-6ubuntu1_arm64.deb",
+      "version": "2.80.0-6ubuntu1"
+    },
+    {
+      "architecture": "all",
+      "name": "libglib2.0-data",
+      "sha256": "cdbd46c7aee91b61496ad78c3c7c3cae0d190ce87b49d936c290bcf25e4122ff",
+      "size": 48108,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glib2.0/libglib2.0-data_2.80.0-6ubuntu1_all.deb",
+      "version": "2.80.0-6ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libglib2.0-dev",
+      "sha256": "232ce9efbecefbf80f464ae352f89f3b75f867ff6bfc38ea834b1ade9a50b580",
+      "size": 1965728,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glib2.0/libglib2.0-dev_2.80.0-6ubuntu1_arm64.deb",
+      "version": "2.80.0-6ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libglib2.0-dev-bin",
+      "sha256": "df302fb855741027ef342567c0752a92ad41bcbdd2450d867ca1d7d04472c1f8",
+      "size": 138334,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/glib2.0/libglib2.0-dev-bin_2.80.0-6ubuntu1_arm64.deb",
+      "version": "2.80.0-6ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libglvnd-core-dev",
+      "sha256": "a367e29a5073c8a344c0b6aa4c5b05dae74bc773142091835a360e650441709f",
+      "size": 13546,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libglvnd-core-dev_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libglvnd-dev",
+      "sha256": "fdf1e75a3e11572e4cf3c9a6cac055f9928456a0fd746da7b790b89908c89751",
+      "size": 3196,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libglvnd-dev_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libglvnd0",
+      "sha256": "3d0c30187bb5f0993b42cc9af94abfc42098451503fbde23d51fd152c4b7ff7e",
+      "size": 60588,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libglvnd0_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libglx-dev",
+      "sha256": "dc75223f01a41118e9ba8a7861ed9c0a01578c85cf303a9fecf48515b82fe352",
+      "size": 14168,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libglx-dev_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libglx-mesa0",
+      "sha256": "452a526093ad3ed84daf0682d66a54246aad76a9eb22d33aa67d85577d72f82f",
+      "size": 165834,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/m/mesa/libglx-mesa0_24.0.5-1ubuntu1_arm64.deb",
+      "version": "24.0.5-1ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libglx0",
+      "sha256": "830625e5a00b176afcc47742cd2b123c74555afd58da91f6bc7e68f0781b684a",
+      "size": 33236,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libglx0_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgmp10",
+      "sha256": "8b09803a6318428836ed522f8891edb2a7cf3197433d6aa1bbdedcd07d4124db",
+      "size": 243082,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gmp/libgmp10_6.3.0+dfsg-2ubuntu6_arm64.deb",
+      "version": "2:6.3.0+dfsg-2ubuntu6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgnutls30t64",
+      "sha256": "81d4ecb48598a3c5012f325c911d6232c6b4c7f497f017fce96d10a92a968273",
+      "size": 942468,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gnutls28/libgnutls30t64_3.8.3-1.1ubuntu3_arm64.deb",
+      "version": "3.8.3-1.1ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgpg-error0",
+      "sha256": "0dd8e2b5abba5ebbdc33cbb403367cebc29db9ea0a68970689f433fcc2255c0a",
+      "size": 69962,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libgpg-error/libgpg-error0_1.47-3build2_arm64.deb",
+      "version": "1.47-3build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgpm2",
+      "sha256": "b884220385df602599360aa892bfc24620f24d4595a116a0d627ad21d8abf0da",
+      "size": 14746,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gpm/libgpm2_1.20.7-11_arm64.deb",
+      "version": "1.20.7-11"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgraphite2-3",
+      "sha256": "8f15a4393c26af67bf07751f85027f2bef5fcce239eab21194fb5fac4f5b9959",
+      "size": 70752,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/graphite2/libgraphite2-3_1.3.14-2build1_arm64.deb",
+      "version": "1.3.14-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgraphite2-dev",
+      "sha256": "9920a506c1a4c870e10c8e23e3552186f97cda291d6295eccf98fbe080dd8c7a",
+      "size": 14708,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/graphite2/libgraphite2-dev_1.3.14-2build1_arm64.deb",
+      "version": "1.3.14-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgssapi-krb5-2",
+      "sha256": "27d6f3321a5b126ff1cfa76399506bb11e53ac38b5d263c3acdae2452356932d",
+      "size": 141356,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/k/krb5/libgssapi-krb5-2_1.20.1-6ubuntu2_arm64.deb",
+      "version": "1.20.1-6ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgstreamer-gl1.0-0",
+      "sha256": "35a2b2cc9b288601856a15de1d8dd49814964cda5bbe5416410e69dc31a2e338",
+      "size": 208616,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gst-plugins-base1.0/libgstreamer-gl1.0-0_1.24.2-1_arm64.deb",
+      "version": "1.24.2-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgstreamer-plugins-base1.0-0",
+      "sha256": "f0676fc387f8853b3329b39e7f5c5f66fd958d4cdb2a3a8c95f0ba5799d84991",
+      "size": 828878,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gst-plugins-base1.0/libgstreamer-plugins-base1.0-0_1.24.2-1_arm64.deb",
+      "version": "1.24.2-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgstreamer-plugins-good1.0-0",
+      "sha256": "be520ed8baa5030d9e5476d58b2c12c86daa47ca312764e0bf5d24a6a92d5082",
+      "size": 32342,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gst-plugins-good1.0/libgstreamer-plugins-good1.0-0_1.24.2-1ubuntu1_arm64.deb",
+      "version": "1.24.2-1ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgstreamer1.0-0",
+      "sha256": "3036e57ba385e46a6aff0638e5963fea042cac803eca28f49fc419d6e807d663",
+      "size": 1146336,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gstreamer1.0/libgstreamer1.0-0_1.24.2-1_arm64.deb",
+      "version": "1.24.2-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgtk-3-0t64",
+      "sha256": "6926b72c981eb4362f1ad2be00d9d25beec70b9e61284ed698c866db62991ebc",
+      "size": 2868574,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gtk+3.0/libgtk-3-0t64_3.24.41-4ubuntu1_arm64.deb",
+      "version": "3.24.41-4ubuntu1"
+    },
+    {
+      "architecture": "all",
+      "name": "libgtk-3-common",
+      "sha256": "6d759eff29934e012e6bb1cb32bd2c9d9056e3100138c55d802dcd3e964f352b",
+      "size": 1202164,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gtk+3.0/libgtk-3-common_3.24.41-4ubuntu1_all.deb",
+      "version": "3.24.41-4ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgtk-3-dev",
+      "sha256": "5cb0ece5473fafd778e2cd0a13ec1ef49e2017ed026f249ca4516c8558fc8a57",
+      "size": 1096102,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gtk+3.0/libgtk-3-dev_3.24.41-4ubuntu1_arm64.deb",
+      "version": "3.24.41-4ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libgudev-1.0-0",
+      "sha256": "ce395eea11fdbd542597c35d10cb931e288243467e9d2e14654225cd8e80dac5",
+      "size": 15084,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libgudev/libgudev-1.0-0_238-5ubuntu1_arm64.deb",
+      "version": "1:238-5ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libharfbuzz-cairo0",
+      "sha256": "499475cb6df2c9113ab76303ce26de1dbfd82d4014b43c8a6d14426c76ca06b5",
+      "size": 25076,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/h/harfbuzz/libharfbuzz-cairo0_8.3.0-2build2_arm64.deb",
+      "version": "8.3.0-2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libharfbuzz-dev",
+      "sha256": "2897a334893c407502f3787fb1ca10ddfd2e35c05a19637396afcfd55873db8d",
+      "size": 142344,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/h/harfbuzz/libharfbuzz-dev_8.3.0-2build2_arm64.deb",
+      "version": "8.3.0-2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libharfbuzz-gobject0",
+      "sha256": "76ff2a9e05eeaa3cf82f2c220d4cf12f2d91215c45f905560693c32126ef5f59",
+      "size": 32808,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/h/harfbuzz/libharfbuzz-gobject0_8.3.0-2build2_arm64.deb",
+      "version": "8.3.0-2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libharfbuzz-icu0",
+      "sha256": "92f1311987c69b90432408c19e28b4796ff7584927cb55c9cec74bd3bab9efb4",
+      "size": 13236,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/h/harfbuzz/libharfbuzz-icu0_8.3.0-2build2_arm64.deb",
+      "version": "8.3.0-2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libharfbuzz-subset0",
+      "sha256": "2e84bb4da1aaabd74eca66f04847a2b8c89acac349bb37aef2a1d6ba7d2770e1",
+      "size": 412956,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/h/harfbuzz/libharfbuzz-subset0_8.3.0-2build2_arm64.deb",
+      "version": "8.3.0-2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libharfbuzz0b",
+      "sha256": "f6917480f6e2df79563398f4fcfc25167fcaa512f35fe1f595a6e3fa7b78a46d",
+      "size": 463200,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/h/harfbuzz/libharfbuzz0b_8.3.0-2build2_arm64.deb",
+      "version": "8.3.0-2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libhogweed6t64",
+      "sha256": "baabcb3ee4dc69580797e788255faa259f9eb7ea86703ec9222550553e6df46f",
+      "size": 198788,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/n/nettle/libhogweed6t64_3.9.1-2.2build1_arm64.deb",
+      "version": "3.9.1-2.2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libhunspell-1.7-0",
+      "sha256": "905d26e0c736b7334027ff9a0e12f8faa913d33ff861c0ca5c9c20b43071bca7",
+      "size": 274062,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/h/hunspell/libhunspell-1.7-0_1.7.2+really1.7.2-10build3_arm64.deb",
+      "version": "1.7.2+really1.7.2-10build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libhyphen0",
+      "sha256": "ac159cf84661f8027d0f4274d9ff559eb41ab9e2a476d5d63cf2573bda542c94",
+      "size": 26408,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/h/hyphen/libhyphen0_2.8.8-7build3_arm64.deb",
+      "version": "2.8.8-7build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libice-dev",
+      "sha256": "1f3747cb43d1129dd87b1f2cbbd9014aedf536edec719a84712e9c266e897c62",
+      "size": 52330,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libi/libice/libice-dev_1.0.10-1build3_arm64.deb",
+      "version": "2:1.0.10-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libice6",
+      "sha256": "6e619ba1611f8733aac8fa6ac2cec2af9348e679db381f64c01a8856c67af511",
+      "size": 41072,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libi/libice/libice6_1.0.10-1build3_arm64.deb",
+      "version": "2:1.0.10-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libicu-dev",
+      "sha256": "39e5272bf80d9b09053fb7bb14bc58a9519180afc488d06a7c8ffd0015a0e46a",
+      "size": 11881566,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/i/icu/libicu-dev_74.2-1ubuntu3_arm64.deb",
+      "version": "74.2-1ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libicu74",
+      "sha256": "041df33ab32c57287a62ba141890a82512bf092854be455259c8034ab7ae9fbc",
+      "size": 10806994,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/i/icu/libicu74_74.2-1ubuntu3_arm64.deb",
+      "version": "74.2-1ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libidn2-0",
+      "sha256": "2f0dad97c31c7e59d51f65b0591ca3e9a7a794081f5b965640f14e17b2fa2d8f",
+      "size": 67194,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libi/libidn2/libidn2-0_2.3.7-2build1_arm64.deb",
+      "version": "2.3.7-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libiec61883-0",
+      "sha256": "83644951ab8aff10f530066e74129431f723dc5b810e14025520b4f70bb58bbe",
+      "size": 24256,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libi/libiec61883/libiec61883-0_1.2.0-6build1_arm64.deb",
+      "version": "1.2.0-6build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libjavascriptcoregtk-4.1-0",
+      "sha256": "6e25402c2095efdd17c4382fa1cf46912d36fb91e63ba5a053574988e866275a",
+      "size": 7995712,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/webkit2gtk/libjavascriptcoregtk-4.1-0_2.44.0-2_arm64.deb",
+      "version": "2.44.0-2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libjavascriptcoregtk-4.1-dev",
+      "sha256": "0814006375a749338e1598862ef92e4a51210b6d5bde889e9dfe166b0dd88743",
+      "size": 67066,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/universe/w/webkit2gtk/libjavascriptcoregtk-4.1-dev_2.44.0-2_arm64.deb",
+      "version": "2.44.0-2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libjbig0",
+      "sha256": "cf9e3ba2e2b6baae84f84a080c30e2eb97248bcc0212350f793d19a73e844e97",
+      "size": 29324,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/j/jbigkit/libjbig0_2.1-6.1ubuntu2_arm64.deb",
+      "version": "2.1-6.1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libjpeg-dev",
+      "sha256": "58d6765185b95dd10f231a6499ac09b12356824eef9f38ea88345e18363b853a",
+      "size": 1482,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libj/libjpeg8-empty/libjpeg-dev_8c-2ubuntu11_arm64.deb",
+      "version": "8c-2ubuntu11"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libjpeg-turbo8",
+      "sha256": "119ddd97c19d970c5e21b97cff353afef138b05f1a3bd9e2c01b814dd193adce",
+      "size": 162812,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.5-2ubuntu2_arm64.deb",
+      "version": "2.1.5-2ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libjpeg-turbo8-dev",
+      "sha256": "5c54206783086e80d6b1962e8e6ad95666126ddddd532d5dfcca1bfd35c54189",
+      "size": 305408,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libj/libjpeg-turbo/libjpeg-turbo8-dev_2.1.5-2ubuntu2_arm64.deb",
+      "version": "2.1.5-2ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libjpeg8",
+      "sha256": "6b4bc8f09e565284f72c99bb8f37365b6a49843f80b64bd2b0755ea0622523a4",
+      "size": 2148,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libj/libjpeg8-empty/libjpeg8_8c-2ubuntu11_arm64.deb",
+      "version": "8c-2ubuntu11"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libjpeg8-dev",
+      "sha256": "6aef39c6d2d572236a72eacd10bf6f1ec98d3eafae7805ba6daa98a32a5b39d2",
+      "size": 1484,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libj/libjpeg8-empty/libjpeg8-dev_8c-2ubuntu11_arm64.deb",
+      "version": "8c-2ubuntu11"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libk5crypto3",
+      "sha256": "6b372dcd362202fba55fe40dabc9e6216fb96757b3f908a0056049fd1d3e6706",
+      "size": 85566,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/k/krb5/libk5crypto3_1.20.1-6ubuntu2_arm64.deb",
+      "version": "1.20.1-6ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libkeyutils1",
+      "sha256": "d141e94ed3b32ea6540f2e927a83b3d42cd4378256a1aad60cda583ffdbd78af",
+      "size": 9654,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/k/keyutils/libkeyutils1_1.6.3-3build1_arm64.deb",
+      "version": "1.6.3-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libkrb5-3",
+      "sha256": "45f2427ee2de6006348e6acfc6f104a4624fbe8577275ce7ab6a9a510842cdc3",
+      "size": 349134,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/k/krb5/libkrb5-3_1.20.1-6ubuntu2_arm64.deb",
+      "version": "1.20.1-6ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libkrb5support0",
+      "sha256": "f24500abe0707ad5f16371e9f511d48923d8378f240afe9caa77a91b4854a95a",
+      "size": 33890,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/k/krb5/libkrb5support0_1.20.1-6ubuntu2_arm64.deb",
+      "version": "1.20.1-6ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "liblcms2-2",
+      "sha256": "0240c72c95aff6197c044aaf50d26953af08eab686bee97b6b1cd0dd08a714c5",
+      "size": 160956,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/l/lcms2/liblcms2-2_2.14-2build1_arm64.deb",
+      "version": "2.14-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libldap2",
+      "sha256": "296e93e99af40c59050b0b18e51de3e0bf85c713936b4ced9dbede799f61298a",
+      "size": 193248,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/o/openldap/libldap2_2.6.7+dfsg-1~exp1ubuntu8_arm64.deb",
+      "version": "2.6.7+dfsg-1~exp1ubuntu8"
+    },
+    {
+      "architecture": "arm64",
+      "name": "liblerc4",
+      "sha256": "465b42ee07a203d3f2c009535fbe464233460d1b99f5059da33400cbe03ca896",
+      "size": 153630,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/l/lerc/liblerc4_4.0.0+ds-4ubuntu2_arm64.deb",
+      "version": "4.0.0+ds-4ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libllvm17t64",
+      "sha256": "aa1c6daed97b7579ccc2779b43b53adc16ac5efb187f5379bb1b8f897c742b3e",
+      "size": 25034872,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/l/llvm-toolchain-17/libllvm17t64_17.0.6-9ubuntu1_arm64.deb",
+      "version": "1:17.0.6-9ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "liblz4-1",
+      "sha256": "ca49b1a29c5fc04533248d9bbe1b7fca75e38f6b9e808683a62b569541ef9d98",
+      "size": 64062,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/l/lz4/liblz4-1_1.9.4-1build1_arm64.deb",
+      "version": "1.9.4-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "liblzma5",
+      "sha256": "649856baf5e43a011c46b0fd3a2a1bad574f4663e0b90c39a3ac609f297d60b7",
+      "size": 125356,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xz-utils/liblzma5_5.6.1+really5.4.5-1_arm64.deb",
+      "version": "5.6.1+really5.4.5-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "liblzo2-2",
+      "sha256": "f7ab7f7248e47d20535cec8321c03df0b76a7c19f5f3151b01b1d42d363592df",
+      "size": 50648,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/l/lzo2/liblzo2-2_2.10-2build4_arm64.deb",
+      "version": "2.10-2build4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libmanette-0.2-0",
+      "sha256": "9e5585c1d791e192f48ed4d6579c5dbdbc79f2330afc4f7998fd5e72e654bf2b",
+      "size": 30406,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libm/libmanette/libmanette-0.2-0_0.2.7-1build2_arm64.deb",
+      "version": "0.2.7-1build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libmd0",
+      "sha256": "9d957330c83693dfd870a56794317395b9519b385a69933828ff8e8e14829aa0",
+      "size": 24590,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libm/libmd/libmd0_1.1.0-2build1_arm64.deb",
+      "version": "1.1.0-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libmount-dev",
+      "sha256": "b10cc6e19cdc06882497bb9da65133e8cfb55abe8434a679e6a7ad3de40e4907",
+      "size": 14884,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/u/util-linux/libmount-dev_2.39.3-9ubuntu6_arm64.deb",
+      "version": "2.39.3-9ubuntu6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libmount1",
+      "sha256": "c25e54d256ad15e8b183165bf47021bc97f4604372b3264c63904d56955c9098",
+      "size": 132878,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/u/util-linux/libmount1_2.39.3-9ubuntu6_arm64.deb",
+      "version": "2.39.3-9ubuntu6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libmp3lame0",
+      "sha256": "a12e5e953294f424fba8a9fa0c47e081a0216150b277c4b02da1468d4b78507f",
+      "size": 140858,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/l/lame/libmp3lame0_3.100-6build1_arm64.deb",
+      "version": "3.100-6build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libmpg123-0t64",
+      "sha256": "407c5b065540e57bb7f50633f6b5defad52aa5033f131e06e05a4a5ef5f69d51",
+      "size": 171102,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/m/mpg123/libmpg123-0t64_1.32.5-1ubuntu1_arm64.deb",
+      "version": "1.32.5-1ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libncurses6",
+      "sha256": "28bd1bd3d9a647d15da1a9c3d397eed873e0d03df2dc427c62bf6411d5049615",
+      "size": 109668,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/n/ncurses/libncurses6_6.4+20240113-1ubuntu2_arm64.deb",
+      "version": "6.4+20240113-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libncursesw6",
+      "sha256": "b301f776112fadae74852adb953e9b3f8ce5f896a4b927a916b402e51d8b08a9",
+      "size": 145424,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/n/ncurses/libncursesw6_6.4+20240113-1ubuntu2_arm64.deb",
+      "version": "6.4+20240113-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libnettle8t64",
+      "sha256": "582e3e512e7077d42e9bec32b1c52ea311402837b1474a2613334ab1dced8edf",
+      "size": 192208,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/n/nettle/libnettle8t64_3.9.1-2.2build1_arm64.deb",
+      "version": "3.9.1-2.2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libnghttp2-14",
+      "sha256": "65ff3fdec8eb72301d652f7d05887c8366a988606d933217e0b50294f012ec87",
+      "size": 74082,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/n/nghttp2/libnghttp2-14_1.59.0-1build4_arm64.deb",
+      "version": "1.59.0-1build4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libnghttp2-dev",
+      "sha256": "aa921b39923ea0a5d5f89bca5889f6a9781c99951d064a9e1fa1e5909a75d614",
+      "size": 118088,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/n/nghttp2/libnghttp2-dev_1.59.0-1build4_arm64.deb",
+      "version": "1.59.0-1build4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libogg0",
+      "sha256": "ed92eb736754ccdea645db7a12734961d2e686369f4fb4c070126b70462b02e1",
+      "size": 22616,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libo/libogg/libogg0_1.3.5-3build1_arm64.deb",
+      "version": "1.3.5-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libopengl-dev",
+      "sha256": "a025844d4d801ad784411101337611f58c11066050d7b882edee1ff47fed5786",
+      "size": 3440,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libopengl-dev_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libopengl0",
+      "sha256": "85227472e62fe06c64dd9574a3fc1bc075dd7fc4bed157f9cc92d97bc5261cee",
+      "size": 35136,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libg/libglvnd/libopengl0_1.7.0-1build1_arm64.deb",
+      "version": "1.7.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libopus0",
+      "sha256": "9e0b07689ce79772e62f8d4d1849bde1b1fc5b041bef85b791b61d7e3fee0ff7",
+      "size": 197908,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/o/opus/libopus0_1.4-1build1_arm64.deb",
+      "version": "1.4-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "liborc-0.4-0t64",
+      "sha256": "92f71302b42155cb7ec13a7a6eb7c3ca8a00912fdaa03ed46b15d890a9e28baa",
+      "size": 204796,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/o/orc/liborc-0.4-0t64_0.4.38-1build1_arm64.deb",
+      "version": "1:0.4.38-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libp11-kit0",
+      "sha256": "9307130913c6173ddb03bdb3493807c19aac38ccadf612dfe98d074b3746ebc9",
+      "size": 275798,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/p11-kit/libp11-kit0_0.25.3-4ubuntu2_arm64.deb",
+      "version": "0.25.3-4ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpango-1.0-0",
+      "sha256": "4964bc4c61df425e41a32108e58a493cf311a8366a9cb2522e8ca07e30a81eb4",
+      "size": 227646,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pango1.0/libpango-1.0-0_1.52.1+ds-1build1_arm64.deb",
+      "version": "1.52.1+ds-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpango1.0-dev",
+      "sha256": "c280fa4a955a6d199202acb4b1c4c2f948ba60f1efbfab42e842a01c27201c31",
+      "size": 146760,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pango1.0/libpango1.0-dev_1.52.1+ds-1build1_arm64.deb",
+      "version": "1.52.1+ds-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpangocairo-1.0-0",
+      "sha256": "702129315e19f1bbf04a03d8c68c740b147b4d04ab677207e4b725c5ea174478",
+      "size": 27354,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pango1.0/libpangocairo-1.0-0_1.52.1+ds-1build1_arm64.deb",
+      "version": "1.52.1+ds-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpangoft2-1.0-0",
+      "sha256": "2fd4f45be306fbd8c9479a5180b496c9a98a33e5eee57d46e0e839a9cdb2b7c9",
+      "size": 42022,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pango1.0/libpangoft2-1.0-0_1.52.1+ds-1build1_arm64.deb",
+      "version": "1.52.1+ds-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpangoxft-1.0-0",
+      "sha256": "ccbcf67695d05a0063d30f54ed7caf098e0479dcec2a219b20c6f9a7f21a0d53",
+      "size": 20066,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pango1.0/libpangoxft-1.0-0_1.52.1+ds-1build1_arm64.deb",
+      "version": "1.52.1+ds-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpcre2-16-0",
+      "sha256": "a9a31509605b31a3cec1b7798c8c71d8f4f67c92aa4b026aa97a417d7af8b5fc",
+      "size": 196018,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pcre2/libpcre2-16-0_10.42-4ubuntu2_arm64.deb",
+      "version": "10.42-4ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpcre2-32-0",
+      "sha256": "37b98f242823802d59b252d0adc7c7411de994b7a9a35d17ada6ad6c16c413b9",
+      "size": 183780,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pcre2/libpcre2-32-0_10.42-4ubuntu2_arm64.deb",
+      "version": "10.42-4ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpcre2-8-0",
+      "sha256": "9ebb6ce8788d75beeb127ee13ebd28746511cf6f2d0499cab5f8f031858152ee",
+      "size": 211682,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pcre2/libpcre2-8-0_10.42-4ubuntu2_arm64.deb",
+      "version": "10.42-4ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpcre2-dev",
+      "sha256": "e79fd5827b83a713236a6c99b94496276cdce8e2dc01d66e67b2a43ed9862b01",
+      "size": 680154,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pcre2/libpcre2-dev_10.42-4ubuntu2_arm64.deb",
+      "version": "10.42-4ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpcre2-posix3",
+      "sha256": "5044616c2a2fda233f1b68865130a348218785d53ef2b873bda9bef3381d0831",
+      "size": 6642,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pcre2/libpcre2-posix3_10.42-4ubuntu2_arm64.deb",
+      "version": "10.42-4ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpixman-1-0",
+      "sha256": "81065c180e30302950a1bd39428d335797126ef89dc2922f89216678720d4eca",
+      "size": 204208,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pixman/libpixman-1-0_0.42.2-1build1_arm64.deb",
+      "version": "0.42.2-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpixman-1-dev",
+      "sha256": "019acc35083e9e3fde9fe69710bdebbec8927dc2c4870b812ec5194550da7634",
+      "size": 227972,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pixman/libpixman-1-dev_0.42.2-1build1_arm64.deb",
+      "version": "0.42.2-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpkgconf3",
+      "sha256": "f476cb81e1ecec6bf974f21181469cf5edcc749c4ead621469cdbf584dfd3be8",
+      "size": 31226,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pkgconf/libpkgconf3_1.8.1-2build1_arm64.deb",
+      "version": "1.8.1-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpng-dev",
+      "sha256": "7dc3a86050310ef00d7d631ee8072f92c6a9f8c1f523fbb0e71ea39dec7c5bac",
+      "size": 266454,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libp/libpng1.6/libpng-dev_1.6.43-5build1_arm64.deb",
+      "version": "1.6.43-5build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpng16-16t64",
+      "sha256": "5c13f372e60f1e183f3c9426dee24a0dbecaaee762d3a12d9cbe6296b40e5801",
+      "size": 184944,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libp/libpng1.6/libpng16-16t64_1.6.43-5build1_arm64.deb",
+      "version": "1.6.43-5build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libproxy1v5",
+      "sha256": "4ea61580d2b5c6ec4f05445ed63618130743256d0208501cd5af14c28764040b",
+      "size": 26098,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libp/libproxy/libproxy1v5_0.5.4-4build1_arm64.deb",
+      "version": "0.5.4-4build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpsl-dev",
+      "sha256": "fa3a949e05f9f0d4ffb6a9c194a26537d1c646309110940e00c59a4540159174",
+      "size": 77160,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libp/libpsl/libpsl-dev_0.21.2-1.1build1_arm64.deb",
+      "version": "0.21.2-1.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpsl5t64",
+      "sha256": "886d485c74567b855bcd19b6f353a769a08b58c111b2d8275a908a469c15d4bf",
+      "size": 57436,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libp/libpsl/libpsl5t64_0.21.2-1.1build1_arm64.deb",
+      "version": "0.21.2-1.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpthread-stubs0-dev",
+      "sha256": "c96f81b92c2ae0a40513b57df70926746165c600aaa65ae4754a0af246b52567",
+      "size": 4734,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libp/libpthread-stubs/libpthread-stubs0-dev_0.4-1build3_arm64.deb",
+      "version": "0.4-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpulse0",
+      "sha256": "2c69979a7089c090977def3157eef72129ee9f509d9330c51365cd43ae63849e",
+      "size": 270298,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pulseaudio/libpulse0_16.1+dfsg1-2ubuntu10_arm64.deb",
+      "version": "1:16.1+dfsg1-2ubuntu10"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpython3-stdlib",
+      "sha256": "f6fb3faf5bba564776a040f2911233dc56caccb7627c81cebae3bc919f5d5d0a",
+      "size": 9896,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/python3-defaults/libpython3-stdlib_3.12.3-0ubuntu1_arm64.deb",
+      "version": "3.12.3-0ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpython3.12-minimal",
+      "sha256": "905e0dfd142df77fe170c6a4b19512cc627d95ee1df98a7d919936a3aad265f6",
+      "size": 828606,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/python3.12/libpython3.12-minimal_3.12.3-1_arm64.deb",
+      "version": "3.12.3-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libpython3.12-stdlib",
+      "sha256": "f5669a5361bcb028bbbcf88d5811f83298278ae8247eff249164a5e0333c9a7e",
+      "size": 2036086,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/python3.12/libpython3.12-stdlib_3.12.3-1_arm64.deb",
+      "version": "3.12.3-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libraw1394-11",
+      "sha256": "3a55e774189eb21b220e5cbf14a635e627f370dba0a52bbe6eea6b5a785e0a87",
+      "size": 26948,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libr/libraw1394/libraw1394-11_2.1.2-2build3_arm64.deb",
+      "version": "2.1.2-2build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libreadline8t64",
+      "sha256": "7f46b2f3ca588cd2f05d2cfb6844017309760b4201105cdfda4b339f9e6c69da",
+      "size": 153046,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/r/readline/libreadline8t64_8.2-4build1_arm64.deb",
+      "version": "8.2-4build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "librtmp1",
+      "sha256": "fb771b2743120d9d44ee9989fd485205680976f7bf89f2f1ac5df50238ea1db7",
+      "size": 57804,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/r/rtmpdump/librtmp1_2.4+20151223.gitfa8646d.1-2build7_arm64.deb",
+      "version": "2.4+20151223.gitfa8646d.1-2build7"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsasl2-2",
+      "sha256": "7cce03f3c6731bb8dc22b4b657247b9c6a176d92c21b09fdbfa8ea24e1e50e7e",
+      "size": 54690,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/c/cyrus-sasl2/libsasl2-2_2.1.28+dfsg1-5ubuntu3_arm64.deb",
+      "version": "2.1.28+dfsg1-5ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsasl2-modules-db",
+      "sha256": "bf5766523b1035645199962fda669c13130146b7e563a579dff0a8f9a785cb0c",
+      "size": 21446,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/c/cyrus-sasl2/libsasl2-modules-db_2.1.28+dfsg1-5ubuntu3_arm64.deb",
+      "version": "2.1.28+dfsg1-5ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libseccomp2",
+      "sha256": "938632f5c41bee14ba2eed9b8c79eae1979653b720d7ec56c67f96475c84fd05",
+      "size": 51088,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libseccomp/libseccomp2_2.5.5-1ubuntu3_arm64.deb",
+      "version": "2.5.5-1ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsecret-1-0",
+      "sha256": "b489847c20b4990e9e97dc701215c2af40ac071d9f1d465196a8a215b17ae2a4",
+      "size": 115974,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libsecret/libsecret-1-0_0.21.4-1build3_arm64.deb",
+      "version": "0.21.4-1build3"
+    },
+    {
+      "architecture": "all",
+      "name": "libsecret-common",
+      "sha256": "41866e9026e451fd25a4cbe887fa56c43219f9f3eda88d1831452ba6d6b8bb5b",
+      "size": 4962,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libsecret/libsecret-common_0.21.4-1build3_all.deb",
+      "version": "0.21.4-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libselinux1",
+      "sha256": "07a4937bc8eb5a30373a6dcbd54f72761981d4dc342cd62b2e5fb5efe7f0b9b7",
+      "size": 79892,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libselinux/libselinux1_3.5-2ubuntu2_arm64.deb",
+      "version": "3.5-2ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libselinux1-dev",
+      "sha256": "e66a92cf6bc5d93a1ddcecbe43976daafd9b26be15d8fe2d67b2dd4918486afe",
+      "size": 171902,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libselinux/libselinux1-dev_3.5-2ubuntu2_arm64.deb",
+      "version": "3.5-2ubuntu2"
+    },
+    {
+      "architecture": "all",
+      "name": "libsensors-config",
+      "sha256": "148103a436fd273dabfe0fe41dc54873df46227b59b2c7ac7339d7e2ddfd033b",
+      "size": 5546,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/l/lm-sensors/libsensors-config_3.6.0-9build1_all.deb",
+      "version": "1:3.6.0-9build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsensors5",
+      "sha256": "62df0293b46a8bf8b9ae8e63bd0286176738673f55eee15e78c3e4d2d15505b6",
+      "size": 26956,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/l/lm-sensors/libsensors5_3.6.0-9build1_arm64.deb",
+      "version": "1:3.6.0-9build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsepol-dev",
+      "sha256": "a683217cd059d5989b9e89b2f740ec546f92d6e11ac52457657d8598717fa60b",
+      "size": 394650,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libsepol/libsepol-dev_3.5-2build1_arm64.deb",
+      "version": "3.5-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsepol2",
+      "sha256": "43339b502a91d0900b2e96ba9c30a3cc0175797a916d4d91dae26870f6d4655a",
+      "size": 290818,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libsepol/libsepol2_3.5-2build1_arm64.deb",
+      "version": "3.5-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsharpyuv0",
+      "sha256": "6c43a11b85602d88ab1886c9e703a9f1667e159f686ffd7ec510914771bce03f",
+      "size": 14536,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libw/libwebp/libsharpyuv0_1.3.2-0.4build3_arm64.deb",
+      "version": "1.3.2-0.4build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libshout3",
+      "sha256": "3099f4bdaf6bf7ee418a4db7b7d3a191c9a36902164dc22d62e7e10b40ffe94f",
+      "size": 51010,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libshout/libshout3_2.4.6-1build2_arm64.deb",
+      "version": "2.4.6-1build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libslang2",
+      "sha256": "77b4b81dd3d5783772dc0b742c79680ce1eef18a771cf1f421e9a9e5eaf2d71e",
+      "size": 476406,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/s/slang2/libslang2_2.3.3-3build2_arm64.deb",
+      "version": "2.3.3-3build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsm-dev",
+      "sha256": "1653f6c80e5a801333ce40fa896ae9795063f0e4251bb53d0ef1a768e3e28647",
+      "size": 18864,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libsm/libsm-dev_1.2.3-1build3_arm64.deb",
+      "version": "2:1.2.3-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsm6",
+      "sha256": "4740e3b3c9584aedc8639c47307333f4eff0906a07f3e4b37f825c5202a65926",
+      "size": 15564,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libsm/libsm6_1.2.3-1build3_arm64.deb",
+      "version": "2:1.2.3-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsndfile1",
+      "sha256": "99917aec7c96b056ff237b752c708fd922e3f15beeb3f99a0203c97943d04bb4",
+      "size": 207742,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libsndfile/libsndfile1_1.2.2-1ubuntu5_arm64.deb",
+      "version": "1.2.2-1ubuntu5"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsoup-3.0-0",
+      "sha256": "992992a5641acde35d84582ea21955957f51609e7084c398101af58b91a96fa8",
+      "size": 287934,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libsoup3/libsoup-3.0-0_3.4.4-5build2_arm64.deb",
+      "version": "3.4.4-5build2"
+    },
+    {
+      "architecture": "all",
+      "name": "libsoup-3.0-common",
+      "sha256": "c446ff98dd3e13470fcd918c012643af323ff632c684dfd0407ba97a6813ef36",
+      "size": 10006,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libsoup3/libsoup-3.0-common_3.4.4-5build2_all.deb",
+      "version": "3.4.4-5build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsoup-3.0-dev",
+      "sha256": "42c63afd952e0994ab816f8ed1b6b066b6a6343924fde6f3eff96aeee21c8058",
+      "size": 104798,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/universe/libs/libsoup3/libsoup-3.0-dev_3.4.4-5build2_arm64.deb",
+      "version": "3.4.4-5build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libspeex1",
+      "sha256": "f5433d7e400c932f948dd97235bbdf25b8979d73fed93ca8dea3ee0619e32531",
+      "size": 56058,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/s/speex/libspeex1_1.2.1-2ubuntu2_arm64.deb",
+      "version": "1.2.1-2ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsqlite3-0",
+      "sha256": "b71c08ea650c212b2c8fa5bbcef9957e5e85c8f5c484a85cfb8961a8271bf376",
+      "size": 703114,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/s/sqlite3/libsqlite3-0_3.45.1-1ubuntu2_arm64.deb",
+      "version": "3.45.1-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsqlite3-dev",
+      "sha256": "66abecbe7d7e9abfa6184f2d6fa581e62b67e90660c690128b06a8f2f7e12a8a",
+      "size": 916410,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/s/sqlite3/libsqlite3-dev_3.45.1-1ubuntu2_arm64.deb",
+      "version": "3.45.1-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libssh-4",
+      "sha256": "633cbff0912d85db99f50ec7fa2a61bea7a1b3252f5d4ef2a1bb53145f15611c",
+      "size": 189126,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libs/libssh/libssh-4_0.10.6-2build2_arm64.deb",
+      "version": "0.10.6-2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libssl3t64",
+      "sha256": "d2207f12435060893997880a34d7ed91d14e163862d5d1394d51918d0723d7e0",
+      "size": 1793064,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/o/openssl/libssl3t64_3.0.13-0ubuntu3_arm64.deb",
+      "version": "3.0.13-0ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libstdc++6",
+      "sha256": "cd9ad360c8eee25e1fd9869303f4782eeaa47723594e85631c3def7ec42c3b08",
+      "size": 747982,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/g/gcc-14/libstdc++6_14-20240412-0ubuntu1_arm64.deb",
+      "version": "14-20240412-0ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsysprof-capture-4-dev",
+      "sha256": "341eebc5fca49a5d78329c39732f83099b5e810ede2d7f299bd680eaa7319494",
+      "size": 53908,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/universe/s/sysprof/libsysprof-capture-4-dev_46.0-1build1_arm64.deb",
+      "version": "46.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libsystemd0",
+      "sha256": "f608afcee73fd60999388deaa2a88e399601f5e55f6ff301f737602e0e76977e",
+      "size": 424374,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/s/systemd/libsystemd0_255.4-1ubuntu8_arm64.deb",
+      "version": "255.4-1ubuntu8"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libtag1v5",
+      "sha256": "d6d23bb62694e291775b65ce618a04393d9b2ca61c88c765a05cd9df6e1cba81",
+      "size": 11684,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/t/taglib/libtag1v5_1.13.1-1build1_arm64.deb",
+      "version": "1.13.1-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libtag1v5-vanilla",
+      "sha256": "27db0f02f005a969e7e557e3ca7670a1f215814f4f446bab155446ace17d496c",
+      "size": 303348,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/t/taglib/libtag1v5-vanilla_1.13.1-1build1_arm64.deb",
+      "version": "1.13.1-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libtasn1-6",
+      "sha256": "1271fe13aad91222da5b73a4027c12c8642e1fba036016c6be7f5f3c4eb536e6",
+      "size": 43080,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libt/libtasn1-6/libtasn1-6_4.19.0-3build1_arm64.deb",
+      "version": "4.19.0-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libtext-iconv-perl",
+      "sha256": "25e749dbe3331ec8c04dfde36cc3e24d4871a2f7a46dff4282d521973f4698b6",
+      "size": 13118,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libt/libtext-iconv-perl/libtext-iconv-perl_1.7-8build3_arm64.deb",
+      "version": "1.7-8build3"
+    },
+    {
+      "architecture": "all",
+      "name": "libthai-data",
+      "sha256": "6035d4a714290b97816bed7f3bf64921c6358ddb84d1dacdddccdc1cf39bffb7",
+      "size": 158016,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libt/libthai/libthai-data_0.1.29-2build1_all.deb",
+      "version": "0.1.29-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libthai-dev",
+      "sha256": "fddd1a4b7fae155a56b6740d9eac63f3da74116b33918d6a6b2d1a95da7d0c32",
+      "size": 26330,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libt/libthai/libthai-dev_0.1.29-2build1_arm64.deb",
+      "version": "0.1.29-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libthai0",
+      "sha256": "c4c01317f90cec985253f360451df9cf3f45ef68cf409c8e21ab5d379ee1e883",
+      "size": 18168,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libt/libthai/libthai0_0.1.29-2build1_arm64.deb",
+      "version": "0.1.29-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libtheora0",
+      "sha256": "78ebaa1c851465dac9e13532623a4e41d28ed55f3df0353daf7c29d96a2e2b87",
+      "size": 224402,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libt/libtheora/libtheora0_1.1.1+dfsg.1-16.1build3_arm64.deb",
+      "version": "1.1.1+dfsg.1-16.1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libtiff6",
+      "sha256": "05c90fe2f62a893f5b2a73274c8ee85d92671033d5cdf7d154351c486e02252b",
+      "size": 191184,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/t/tiff/libtiff6_4.5.1+git230720-4ubuntu2_arm64.deb",
+      "version": "4.5.1+git230720-4ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libtinfo6",
+      "sha256": "e8d06277be81d0f6e7d49ce796a477a9fc88e755bf3048e0afe44fc14a310b72",
+      "size": 104360,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/n/ncurses/libtinfo6_6.4+20240113-1ubuntu2_arm64.deb",
+      "version": "6.4+20240113-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libtwolame0",
+      "sha256": "f2fffdedec9f9bc58fc700ccbc146c50a5a1d5ae2e6881e501bd727234aa5d16",
+      "size": 51738,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/t/twolame/libtwolame0_0.4.0-2build3_arm64.deb",
+      "version": "0.4.0-2build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libudev1",
+      "sha256": "62567062c6f08702d6876bd5ad8993ff618478df9bd8613270032e9477b82e93",
+      "size": 172824,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/s/systemd/libudev1_255.4-1ubuntu8_arm64.deb",
+      "version": "255.4-1ubuntu8"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libunistring5",
+      "sha256": "d0801a0cd5602d8b4b98d52e3a7682aca63b35f567d1163ee18cfb2f994563df",
+      "size": 529568,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libu/libunistring/libunistring5_1.1-2build1_arm64.deb",
+      "version": "1.1-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libunwind-18",
+      "sha256": "91035c38ee0e5f81ad46b71dd72842bd5ae349dba4436ef9706d35f54ab8e06d",
+      "size": 60170,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/universe/l/llvm-toolchain-18/libunwind-18_18.1.3-1_arm64.deb",
+      "version": "1:18.1.3-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libunwind8",
+      "sha256": "21d211481f312227e111c51889470ca90b9e7a31cf996c16d9bcb236e5db614f",
+      "size": 53452,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libu/libunwind/libunwind8_1.6.2-3build1_arm64.deb",
+      "version": "1.6.2-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libuuid1",
+      "sha256": "f168c956126f5051136a5ce6fc43e0eab4fc762ae9488ce5d3692ce54b6f1235",
+      "size": 35402,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/u/util-linux/libuuid1_2.39.3-9ubuntu6_arm64.deb",
+      "version": "2.39.3-9ubuntu6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libv4l-0t64",
+      "sha256": "0efed54458a4a3da075defb2675b243d7123115d26219ea2ffb88750e777f0e3",
+      "size": 46392,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/v/v4l-utils/libv4l-0t64_1.26.1-4build3_arm64.deb",
+      "version": "1.26.1-4build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libv4lconvert0t64",
+      "sha256": "cfb01d4343d1ed4a92476df431d4ef89f6871708c8befd6ef8e711a40dfc0808",
+      "size": 88632,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/v/v4l-utils/libv4lconvert0t64_1.26.1-4build3_arm64.deb",
+      "version": "1.26.1-4build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libvisual-0.4-0",
+      "sha256": "c9b6a8bcf0e9d57c1a32e363dc391d3ad3db1a01b51a406b5c847d32680baa72",
+      "size": 109718,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libv/libvisual/libvisual-0.4-0_0.4.2-2build1_arm64.deb",
+      "version": "0.4.2-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libvorbis0a",
+      "sha256": "e21bd74f3bf593b4697f77c6b52bfbd34cb5dfc5ed5f115545d31e43599c1ef8",
+      "size": 94032,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libv/libvorbis/libvorbis0a_1.3.7-1build3_arm64.deb",
+      "version": "1.3.7-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libvorbisenc2",
+      "sha256": "a6ab660d303d44fbf040c07816a7072a40240d1639c37f6246624dba8d28407a",
+      "size": 80030,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libv/libvorbis/libvorbisenc2_1.3.7-1build3_arm64.deb",
+      "version": "1.3.7-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libvpx9",
+      "sha256": "809bf0d9435520793838a99072ca365ab23956def3583c3b8b4e253135d8e9f4",
+      "size": 1233024,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libv/libvpx/libvpx9_1.14.0-1ubuntu2_arm64.deb",
+      "version": "1.14.0-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libvulkan1",
+      "sha256": "9459488a53ead304d00587c874f9b31d56d59c9aeae5c46b6f78801a89d53e63",
+      "size": 149690,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/v/vulkan-loader/libvulkan1_1.3.275.0-1build1_arm64.deb",
+      "version": "1.3.275.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwavpack1",
+      "sha256": "fd86ac4ecc6aaa218744e38ba7e8c0d4bb13f45c5508c3247e059fdcee33ad55",
+      "size": 79156,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/wavpack/libwavpack1_5.6.0-1build1_arm64.deb",
+      "version": "5.6.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwayland-bin",
+      "sha256": "a2cc274d08d3b966008d0a1f43545bc569c7934d383355829706fb25220b842e",
+      "size": 20302,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/wayland/libwayland-bin_1.22.0-2.1build1_arm64.deb",
+      "version": "1.22.0-2.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwayland-client0",
+      "sha256": "f1d258e71fd42820cbc7ddd0cae3ae0b928e27b46e0b63877caa6affbe653752",
+      "size": 25904,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/wayland/libwayland-client0_1.22.0-2.1build1_arm64.deb",
+      "version": "1.22.0-2.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwayland-cursor0",
+      "sha256": "ee69ed1d5ff3c430cb09173809b73dfb044a9c3595e21ee1a31f67f9d5c07451",
+      "size": 10256,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/wayland/libwayland-cursor0_1.22.0-2.1build1_arm64.deb",
+      "version": "1.22.0-2.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwayland-dev",
+      "sha256": "6d94b723710aae35d0ff765978818601f4320c1dc4e0eec57e73b000943a1758",
+      "size": 71332,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/wayland/libwayland-dev_1.22.0-2.1build1_arm64.deb",
+      "version": "1.22.0-2.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwayland-egl1",
+      "sha256": "50e4ac8e2714b9eb84a47b8fe84d51a806104ec998530c61de349ec5b659ff43",
+      "size": 5622,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/wayland/libwayland-egl1_1.22.0-2.1build1_arm64.deb",
+      "version": "1.22.0-2.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwayland-server0",
+      "sha256": "2b6dec0d40070685f4ce346d20b064fc5e118a3149f30be88465251985b496ed",
+      "size": 34640,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/wayland/libwayland-server0_1.22.0-2.1build1_arm64.deb",
+      "version": "1.22.0-2.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwebkit2gtk-4.1-0",
+      "sha256": "22536f06b9de149c7457da6ab1c8b4af303af9fbd9a566d12d3138b561322dfe",
+      "size": 22745584,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/webkit2gtk/libwebkit2gtk-4.1-0_2.44.0-2_arm64.deb",
+      "version": "2.44.0-2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwebkit2gtk-4.1-dev",
+      "sha256": "6af50973c8e7e4aacf07caf30533f695785202958f8ae283d5394275c14f33d7",
+      "size": 284038,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/universe/w/webkit2gtk/libwebkit2gtk-4.1-dev_2.44.0-2_arm64.deb",
+      "version": "2.44.0-2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwebp7",
+      "sha256": "528e8ceaeb592c368288a78255bb6eb257d94a4b0dec4187b594537cdfee96aa",
+      "size": 191236,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libw/libwebp/libwebp7_1.3.2-0.4build3_arm64.deb",
+      "version": "1.3.2-0.4build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwebpdemux2",
+      "sha256": "234d050c6710e104ce91cf4f6dead4d61cee0c03af2e494d50af0a2f05908333",
+      "size": 12296,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libw/libwebp/libwebpdemux2_1.3.2-0.4build3_arm64.deb",
+      "version": "1.3.2-0.4build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libwoff1",
+      "sha256": "01b015124ee5b01cb0e194fb98f14d9902dbfce6aba78d2e044dbd35fc7eea93",
+      "size": 44800,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/woff2/libwoff1_1.0.2-2build1_arm64.deb",
+      "version": "1.0.2-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libx11-6",
+      "sha256": "16d10ae5d27f1a0feb054001ff2b213b51acd29894f86ff088c31eebeba65fe3",
+      "size": 649412,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libx11/libx11-6_1.8.7-1build1_arm64.deb",
+      "version": "2:1.8.7-1build1"
+    },
+    {
+      "architecture": "all",
+      "name": "libx11-data",
+      "sha256": "9ae01f7747e7f479394c697c55acf11d3baf139e8e54b7c4adfb55ef9c50de08",
+      "size": 115446,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libx11/libx11-data_1.8.7-1build1_all.deb",
+      "version": "2:1.8.7-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libx11-dev",
+      "sha256": "69b028d3917aae9fb44b2c56aa94739c7a1711afd3c86ccc7117dbf63a91c3c3",
+      "size": 741842,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libx11/libx11-dev_1.8.7-1build1_arm64.deb",
+      "version": "2:1.8.7-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libx11-xcb1",
+      "sha256": "3e900fac4bb54a117dd80f2a01ac9a2ab9519b4af1ec3607e1b6258e4b23f9ea",
+      "size": 7870,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libx11/libx11-xcb1_1.8.7-1build1_arm64.deb",
+      "version": "2:1.8.7-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxau-dev",
+      "sha256": "246ffb5b49c3d26b243fe4ce18777815484112c64f167ef37cf48b805a6a4ca2",
+      "size": 10024,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxau/libxau-dev_1.0.9-1build6_arm64.deb",
+      "version": "1:1.0.9-1build6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxau6",
+      "sha256": "348d0732ff9571f95d6ff18373a93e827bfe00474d792ef5e9071e6dd618605c",
+      "size": 7264,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxau/libxau6_1.0.9-1build6_arm64.deb",
+      "version": "1:1.0.9-1build6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb-dri2-0",
+      "sha256": "b677b745b14a5360aa7ed06818ed2e0467937b6d009693df5d6249dfa77881c6",
+      "size": 7418,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb-dri2-0_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb-dri3-0",
+      "sha256": "5c356f1b46a4756fc829083b718c6028bade7caec5f55956e30ebb4321ef0968",
+      "size": 7196,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb-dri3-0_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb-glx0",
+      "sha256": "d13b3f909e0cc478408e86eee1acc7e90b25f782feee8872e3a9c4f3e24e8e9e",
+      "size": 25474,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb-glx0_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb-present0",
+      "sha256": "e36f016e2407868fd9f416780d7783529e060d608e6043924cc99dde88b783de",
+      "size": 5866,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb-present0_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb-randr0",
+      "sha256": "d1dc1d06b42da9a332274e34121ff57c6f6c1c155e4fe726c652f80f392ed419",
+      "size": 18442,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb-randr0_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb-render0",
+      "sha256": "de6dafb552bab55a848b4017087eb0d9ce25fc0e1fd083a4fca5f71de9058934",
+      "size": 16580,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb-render0_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb-render0-dev",
+      "sha256": "0923bf6c1732fd50111defba1f4cb434af611ee7c9543c828ea6cc7b0ce661f2",
+      "size": 20874,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb-render0-dev_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb-shm0",
+      "sha256": "1d3f59159910a43ec798a0bf467ca2f78d1f9e1351ac04fb8d3db8469d4a516c",
+      "size": 5876,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb-shm0_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb-shm0-dev",
+      "sha256": "3a90523bfffd1c72f4f369c70fc57c0aac9fba37fa4c408ec6a376a2d93f3cd5",
+      "size": 8750,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb-shm0-dev_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb-sync1",
+      "sha256": "9886f3632d9242c0b5a0235e663455d8a25746b3006bd9f8b4d809f06d757515",
+      "size": 9682,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb-sync1_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb-xfixes0",
+      "sha256": "c0842d78979b8c6b904f0fa2049647733a7da7985fbbc6825d0cc071804e4085",
+      "size": 10646,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb-xfixes0_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb1",
+      "sha256": "5483e5d19bbfa28e961d951645944e7763e943262ac17e216b2870d83597f319",
+      "size": 49408,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb1_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcb1-dev",
+      "sha256": "10f2f12652c1825df1158c80ce3715c2cf48eddb0d3a102191b0c5974a15bc1d",
+      "size": 91166,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcb/libxcb1-dev_1.15-1ubuntu2_arm64.deb",
+      "version": "1.15-1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcomposite-dev",
+      "sha256": "8a832b47d63067a6f9ba30b5487ad81e322f662a7221bb27fa5069034f837a84",
+      "size": 9618,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcomposite/libxcomposite-dev_0.4.5-1build3_arm64.deb",
+      "version": "1:0.4.5-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcomposite1",
+      "sha256": "94f0d6d602d00e9ac53d307509897672f1132c875e2576a06fd9f3dcd00dd81e",
+      "size": 6336,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcomposite/libxcomposite1_0.4.5-1build3_arm64.deb",
+      "version": "1:0.4.5-1build3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcursor-dev",
+      "sha256": "1421a6ae484c903f859c5158346755b2c344871f39a10c848136e91d374bbb56",
+      "size": 33268,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcursor/libxcursor-dev_1.2.1-1build1_arm64.deb",
+      "version": "1:1.2.1-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxcursor1",
+      "sha256": "c059273cab51ca26f4776ce169dbfa8d4a442ea15fd1e478b0683156eb430e6b",
+      "size": 21066,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxcursor/libxcursor1_1.2.1-1build1_arm64.deb",
+      "version": "1:1.2.1-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxdamage-dev",
+      "sha256": "da03d3d63c9285a7743c7ad721f10c54bb47f420792805088987e324a8424117",
+      "size": 5508,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxdamage/libxdamage-dev_1.1.6-1build1_arm64.deb",
+      "version": "1:1.1.6-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxdamage1",
+      "sha256": "6f54865fd13492e6bd9045e18c48270cd6c422c447c5531a17358a26748e5d50",
+      "size": 6236,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxdamage/libxdamage1_1.1.6-1build1_arm64.deb",
+      "version": "1:1.1.6-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxdmcp-dev",
+      "sha256": "dcbc325116fd8c91188a7dc7118dbfe8948ef349f337fbcc1a57e97d42139ac5",
+      "size": 26280,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxdmcp/libxdmcp-dev_1.1.3-0ubuntu6_arm64.deb",
+      "version": "1:1.1.3-0ubuntu6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxdmcp6",
+      "sha256": "6b96dbbae4e515ac8f32d6dacfcb6afd1266118400a85ae7cb3f887895017f53",
+      "size": 10364,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxdmcp/libxdmcp6_1.1.3-0ubuntu6_arm64.deb",
+      "version": "1:1.1.3-0ubuntu6"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxext-dev",
+      "sha256": "570434025b9ec5d99f72acee82c35d46e4f576c5034a802270d06794574ea0ff",
+      "size": 84942,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxext/libxext-dev_1.3.4-1build2_arm64.deb",
+      "version": "2:1.3.4-1build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxext6",
+      "sha256": "1140abacd8d23cb83cc63fb9aebb15a201e2dddbf5ca79fd999c0cbd181d0088",
+      "size": 30434,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxext/libxext6_1.3.4-1build2_arm64.deb",
+      "version": "2:1.3.4-1build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxfixes-dev",
+      "sha256": "48adc74f59a6fc6847168e74cc00450a8a5e60bc1992e412a3aa2d36b877ae6b",
+      "size": 12970,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxfixes/libxfixes-dev_6.0.0-2build1_arm64.deb",
+      "version": "1:6.0.0-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxfixes3",
+      "sha256": "884fc6560c5a8bc91fb6b7d067f557d8088ccee86ad1974b6a57085ac121e8de",
+      "size": 11206,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxfixes/libxfixes3_6.0.0-2build1_arm64.deb",
+      "version": "1:6.0.0-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxft-dev",
+      "sha256": "6c5bc37ad632b47ad7d63dcf6afc6e345a0f918bdfb00e5867452526f4bc647c",
+      "size": 65048,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xft/libxft-dev_2.3.6-1build1_arm64.deb",
+      "version": "2.3.6-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxft2",
+      "sha256": "0a4f24c57196b20d9edaba93111c37c031470714f3052aca7bb7ddbbec7775a2",
+      "size": 44128,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xft/libxft2_2.3.6-1build1_arm64.deb",
+      "version": "2.3.6-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxi-dev",
+      "sha256": "f7596e9d21f81ebef7149f07ca7014c0544fb732e234f5ce0ab19a6586a5b0c9",
+      "size": 192926,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxi/libxi-dev_1.8.1-1build1_arm64.deb",
+      "version": "2:1.8.1-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxi6",
+      "sha256": "aeeb74a6ff6ea16312fd8eb1988b1ddf32afbb4503ab7121763530ee700058e3",
+      "size": 31924,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxi/libxi6_1.8.1-1build1_arm64.deb",
+      "version": "2:1.8.1-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxinerama-dev",
+      "sha256": "41efb09e27827ac2b13c9abd35ae31872d987e1bb950512fa7a1f132f647c9ea",
+      "size": 8148,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxinerama/libxinerama-dev_1.1.4-3build1_arm64.deb",
+      "version": "2:1.1.4-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxinerama1",
+      "sha256": "d93a71ccaced2ccac4efb25c23238ceee7b4fc352118f105a1265be7b55c638b",
+      "size": 6394,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxinerama/libxinerama1_1.1.4-3build1_arm64.deb",
+      "version": "2:1.1.4-3build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxkbcommon-dev",
+      "sha256": "de01e5d50d114ddc5419d61cde552d8a956a2dc9e6c004ce50b7f37a02a47c1d",
+      "size": 56262,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxkbcommon/libxkbcommon-dev_1.6.0-1build1_arm64.deb",
+      "version": "1.6.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxkbcommon0",
+      "sha256": "4ef68b9d56971a3119f40684f52a200be5c7c1bf8c5ef430a2d502e910bf8b61",
+      "size": 122198,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxkbcommon/libxkbcommon0_1.6.0-1build1_arm64.deb",
+      "version": "1.6.0-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxml2",
+      "sha256": "6045818c821a498cfa2b9c93deeac87db5d0d6bd07f160176f1073af0c2858e4",
+      "size": 734754,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxml2/libxml2_2.9.14+dfsg-1.3ubuntu3_arm64.deb",
+      "version": "2.9.14+dfsg-1.3ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxrandr-dev",
+      "sha256": "7f965ded4be71fee097bddcbb051e42ef425f5018b59888533457cc83923e554",
+      "size": 27156,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxrandr/libxrandr-dev_1.5.2-2build1_arm64.deb",
+      "version": "2:1.5.2-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxrandr2",
+      "sha256": "7470632764f1fde987e760850c2be58973e265f41b2bb8015c415d247898d2c4",
+      "size": 19610,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxrandr/libxrandr2_1.5.2-2build1_arm64.deb",
+      "version": "2:1.5.2-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxrender-dev",
+      "sha256": "74a00e089f4d16c9de451dbf87a987cd0322ebef3ee89b2cf1f8c06bec5ebf2f",
+      "size": 26858,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxrender/libxrender-dev_0.9.10-1.1build1_arm64.deb",
+      "version": "1:0.9.10-1.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxrender1",
+      "sha256": "0a3aedab15d9b0d7a74b0b043676f0caacc104f188be16a008196dbc20e9e2e2",
+      "size": 18800,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxrender/libxrender1_0.9.10-1.1build1_arm64.deb",
+      "version": "1:0.9.10-1.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxshmfence1",
+      "sha256": "8764cf3566b060817cd4ad7dd367c45ca29d133d325c4145644cbcbd639830b2",
+      "size": 4938,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxshmfence/libxshmfence1_1.3-1build5_arm64.deb",
+      "version": "1.3-1build5"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxslt1.1",
+      "sha256": "2bbfa359f20f0c4cf6bc16b6335c8031825ecd37da3887403f8fc8e5359983f2",
+      "size": 166466,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxslt/libxslt1.1_1.1.39-0exp1build1_arm64.deb",
+      "version": "1.1.39-0exp1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxtst-dev",
+      "sha256": "22144753e11db1059ba2e5e12822e6387884bfc843f083eeb3cde2d6c5347aa1",
+      "size": 16558,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxtst/libxtst-dev_1.2.3-1.1build1_arm64.deb",
+      "version": "2:1.2.3-1.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxtst6",
+      "sha256": "0eb4b6a4f8ba8c3b19674063f60b9a8545952c68155d1d32c84abe427acaafc1",
+      "size": 12988,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxtst/libxtst6_1.2.3-1.1build1_arm64.deb",
+      "version": "2:1.2.3-1.1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libxxf86vm1",
+      "sha256": "e3977d43433269eb5081cbc83a7fefb59f90cbc457902d8046a032a3e280e292",
+      "size": 9130,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libx/libxxf86vm/libxxf86vm1_1.1.4-1build4_arm64.deb",
+      "version": "1:1.1.4-1build4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "libzstd1",
+      "sha256": "98568129024af1a71702d5a13f2e01c53afd5e2c3f71b2ee97fdd9a19cd97eda",
+      "size": 271224,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1_arm64.deb",
+      "version": "1.5.5+dfsg2-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "linux-libc-dev",
+      "sha256": "7fd438efa44a794b438e7dde7ac280166fb8d4b1cf7846393ce019714d8bb3e3",
+      "size": 1572188,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/l/linux/linux-libc-dev_6.8.0-31.31_arm64.deb",
+      "version": "6.8.0-31.31"
+    },
+    {
+      "architecture": "all",
+      "name": "lsb-base",
+      "sha256": "08a563e3c1984acdb295f12b77b4ec18d2ccf52fd03280a5bea29e506a3350ee",
+      "size": 4606,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/l/lsb/lsb-base_11.6_all.deb",
+      "version": "11.6"
+    },
+    {
+      "architecture": "all",
+      "name": "media-types",
+      "sha256": "31bfb7eec55ab6d34a50ba995150e1498d4cb897714085d8025e330d3b529747",
+      "size": 27474,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/m/media-types/media-types_10.1.0_all.deb",
+      "version": "10.1.0"
+    },
+    {
+      "architecture": "all",
+      "name": "netbase",
+      "sha256": "8cdbc9c3dca01e660759bf9d840f72e45ac72faf5d19ca1faecacaf6a60c1a87",
+      "size": 13112,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/n/netbase/netbase_6.4_all.deb",
+      "version": "6.4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "pango1.0-tools",
+      "sha256": "f3a1291fc53de3bbfaadff82b0e5b831780268a2194f3c456bc177594fb5f711",
+      "size": 36296,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pango1.0/pango1.0-tools_1.52.1+ds-1build1_arm64.deb",
+      "version": "1.52.1+ds-1build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "perl-base",
+      "sha256": "107537c94bf3a8822c93281a67d301d4cec7f65e0139b53abd9627cdd20a66da",
+      "size": 1777024,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/perl/perl-base_5.38.2-3.2build2_arm64.deb",
+      "version": "5.38.2-3.2build2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "pkg-config",
+      "sha256": "460d166c529651438347548fc1b2731440ce52c2643f678ec993a29dce5a3647",
+      "size": 7264,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pkgconf/pkg-config_1.8.1-2build1_arm64.deb",
+      "version": "1.8.1-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "pkgconf",
+      "sha256": "818ac3b4ae09f3747098872c7d5a9e387118798155b0107bb1625c2ab675664b",
+      "size": 16768,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pkgconf/pkgconf_1.8.1-2build1_arm64.deb",
+      "version": "1.8.1-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "pkgconf-bin",
+      "sha256": "bcd0d24c48b8b73ed7ba20ffc21a3575d5d9bdd53c3cee5a8051b7bde5fbf638",
+      "size": 20458,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/pkgconf/pkgconf-bin_1.8.1-2build1_arm64.deb",
+      "version": "1.8.1-2build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "python3",
+      "sha256": "6ee6fcd0dae8beaa3090704c21864cf44121646444d14127cf675131ced5d6cb",
+      "size": 24100,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/python3-defaults/python3_3.12.3-0ubuntu1_arm64.deb",
+      "version": "3.12.3-0ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "python3-minimal",
+      "sha256": "7aed0e332aeb4de38ae918a35c8853e9ac1c85e50f16790395bb50a7cee29c7b",
+      "size": 27214,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/python3-defaults/python3-minimal_3.12.3-0ubuntu1_arm64.deb",
+      "version": "3.12.3-0ubuntu1"
+    },
+    {
+      "architecture": "all",
+      "name": "python3-packaging",
+      "sha256": "decc936e9512c2de78fcf9e8d8459ce58952c40bf8bd1f06e62556d7fe887db6",
+      "size": 41094,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/python-packaging/python3-packaging_24.0-1_all.deb",
+      "version": "24.0-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "python3.12",
+      "sha256": "c73fb14a5bdbdc9a026d62d4bee3aeec0f1d5df0c40abd6cc136403b1b24df9a",
+      "size": 650732,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/python3.12/python3.12_3.12.3-1_arm64.deb",
+      "version": "3.12.3-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "python3.12-minimal",
+      "sha256": "c5ce70a0cc04dbe9e7e6a1bdf21c0989f7d7c69ef2fd53ff98a6d3ac00d02d5f",
+      "size": 2251184,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/p/python3.12/python3.12-minimal_3.12.3-1_arm64.deb",
+      "version": "3.12.3-1"
+    },
+    {
+      "architecture": "all",
+      "name": "readline-common",
+      "sha256": "879bfd7f8a9bc4c0f7cdc777cdd8bc6de5f8c4a2ac80c060322a1b22f13504bb",
+      "size": 56484,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/r/readline/readline-common_8.2-4build1_all.deb",
+      "version": "8.2-4build1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "rpcsvc-proto",
+      "sha256": "ae527152fc2bf9c1a645c2620d802b0849db32c8aa48328b4ae94c59cc57bcc9",
+      "size": 64816,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/r/rpcsvc-proto/rpcsvc-proto_1.4.2-0ubuntu7_arm64.deb",
+      "version": "1.4.2-0ubuntu7"
+    },
+    {
+      "architecture": "arm64",
+      "name": "sed",
+      "sha256": "fdcaa3eaaaa511ec87d7847622aa4036d56f17f251c48b4113b515f589a0b121",
+      "size": 190710,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/s/sed/sed_4.9-2build1_arm64.deb",
+      "version": "4.9-2build1"
+    },
+    {
+      "architecture": "all",
+      "name": "sgml-base",
+      "sha256": "b112268e2feca483398805e92e29e31b07592ddbc4bb021bd5f8f64f8042ca86",
+      "size": 11446,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/s/sgml-base/sgml-base_1.31_all.deb",
+      "version": "1.31"
+    },
+    {
+      "architecture": "arm64",
+      "name": "shared-mime-info",
+      "sha256": "8acca1a3c161f14b46ab61acdebb88c2497b342b9fd843d203a9dc1636af5166",
+      "size": 471690,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/s/shared-mime-info/shared-mime-info_2.4-4_arm64.deb",
+      "version": "2.4-4"
+    },
+    {
+      "architecture": "arm64",
+      "name": "sysvinit-utils",
+      "sha256": "7a29cd884b9cf3e787745e7453c170728e794266bf2af9391488068246dc4666",
+      "size": 33828,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/s/sysvinit/sysvinit-utils_3.08-6ubuntu3_arm64.deb",
+      "version": "3.08-6ubuntu3"
+    },
+    {
+      "architecture": "arm64",
+      "name": "tar",
+      "sha256": "2df76253d79fd27b8e10b4b1426e2a229c1f374406a80607878eb66bdc1edcf6",
+      "size": 247906,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/t/tar/tar_1.35+dfsg-3build1_arm64.deb",
+      "version": "1.35+dfsg-3build1"
+    },
+    {
+      "architecture": "all",
+      "name": "tzdata",
+      "sha256": "f5bca0c788a4fc465c435f7e8a54b2594e9cbf1a22abb263a59e393f1cb666e1",
+      "size": 273318,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/t/tzdata/tzdata_2024a-2ubuntu1_all.deb",
+      "version": "2024a-2ubuntu1"
+    },
+    {
+      "architecture": "all",
+      "name": "ubuntu-mono",
+      "sha256": "3a58114f10170b253d2a574db854fa1c4399565888c78f28bbe53ce889894cdb",
+      "size": 150904,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/u/ubuntu-themes/ubuntu-mono_24.04-0ubuntu1_all.deb",
+      "version": "24.04-0ubuntu1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "uuid-dev",
+      "sha256": "f10a3c5317a4c4ce68b0f1997ec401d4f50b518964ddc87092decb4a696a17c4",
+      "size": 34780,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/u/util-linux/uuid-dev_2.39.3-9ubuntu6_arm64.deb",
+      "version": "2.39.3-9ubuntu6"
+    },
+    {
+      "architecture": "all",
+      "name": "wayland-protocols",
+      "sha256": "0c20ca9f4c2a48e3ff6a4b678d5b788e68aea8a6b96e8b3ff8c8359dfd539afb",
+      "size": 85210,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/w/wayland-protocols/wayland-protocols_1.34-1_all.deb",
+      "version": "1.34-1"
+    },
+    {
+      "architecture": "all",
+      "name": "x11-common",
+      "sha256": "b545fa5196dd7467ba3770d6ce575abcd7941071961ea9f7535a319d9d20fd46",
+      "size": 21748,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xorg/x11-common_7.7+23ubuntu3_all.deb",
+      "version": "1:7.7+23ubuntu3"
+    },
+    {
+      "architecture": "all",
+      "name": "x11proto-core-dev",
+      "sha256": "d7c8cbeb485a45ca6e5486b46df7a5ead737440954ae4489866222101ac2f0d7",
+      "size": 2444,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xorgproto/x11proto-core-dev_2023.2-1_all.deb",
+      "version": "2023.2-1"
+    },
+    {
+      "architecture": "all",
+      "name": "x11proto-dev",
+      "sha256": "3bf13a2ffb79ecd4014d438936014e5863f79eb59ebf76e8f43356271c90e7ce",
+      "size": 602398,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xorgproto/x11proto-dev_2023.2-1_all.deb",
+      "version": "2023.2-1"
+    },
+    {
+      "architecture": "all",
+      "name": "x11proto-record-dev",
+      "sha256": "a0fa8c86cb1f78952835175d624e107b61f085f0077904dba722b0d385d7b26d",
+      "size": 2446,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xorgproto/x11proto-record-dev_2023.2-1_all.deb",
+      "version": "2023.2-1"
+    },
+    {
+      "architecture": "all",
+      "name": "x11proto-render-dev",
+      "sha256": "605ebe525c88c0d6947f39d2bc3876f2ac39b72550f757237cfc4e1215526ae1",
+      "size": 2456,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xorgproto/x11proto-render-dev_2023.2-1_all.deb",
+      "version": "2:2023.2-1"
+    },
+    {
+      "architecture": "all",
+      "name": "x11proto-xext-dev",
+      "sha256": "310eda2ca21080a074dd324cc0702db08cae4e07864c38d8e03017c31d6532bb",
+      "size": 2444,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xorgproto/x11proto-xext-dev_2023.2-1_all.deb",
+      "version": "2023.2-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "xdg-dbus-proxy",
+      "sha256": "bdf2f11ced6631d1bebb2f7d682e30193064a462e1f080b950ca40c7b69b01d9",
+      "size": 25416,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xdg-dbus-proxy/xdg-dbus-proxy_0.1.5-1build2_arm64.deb",
+      "version": "0.1.5-1build2"
+    },
+    {
+      "architecture": "all",
+      "name": "xkb-data",
+      "sha256": "5f0a5188398b606d723f1bed48ee38c11eaeb98357ab29a3bf33c451056815d1",
+      "size": 395132,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xkeyboard-config/xkb-data_2.41-2ubuntu1_all.deb",
+      "version": "2.41-2ubuntu1"
+    },
+    {
+      "architecture": "all",
+      "name": "xml-core",
+      "sha256": "0775fdd720d5ed81250da73a1d825a863be7a997122ae11077c89db37d82cb6d",
+      "size": 20340,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xml-core/xml-core_0.19_all.deb",
+      "version": "0.19"
+    },
+    {
+      "architecture": "all",
+      "name": "xorg-sgml-doctools",
+      "sha256": "277f662c6d94606c22078f2af82ac1b6e01386d5a4dec6ca7487bca4c5b23c07",
+      "size": 10936,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xorg-sgml-doctools/xorg-sgml-doctools_1.11-1.1_all.deb",
+      "version": "1:1.11-1.1"
+    },
+    {
+      "architecture": "all",
+      "name": "xtrans-dev",
+      "sha256": "45277c51d5d83db351b61859314b59595c9626ac372fbb2fc0d5542e169d9086",
+      "size": 68900,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/x/xtrans/xtrans-dev_1.4.0-1_all.deb",
+      "version": "1.4.0-1"
+    },
+    {
+      "architecture": "arm64",
+      "name": "zlib1g",
+      "sha256": "66aaebb68401a88b4f70a5f48e1a516b611fdcaae15208d8aee677c556d2cf01",
+      "size": 61682,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2_arm64.deb",
+      "version": "1:1.3.dfsg-3.1ubuntu2"
+    },
+    {
+      "architecture": "arm64",
+      "name": "zlib1g-dev",
+      "sha256": "3ca97d064a8f3dbe3fed05b6132ba0890237d26fae16060c1fb8ea22c2a846e9",
+      "size": 893540,
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z/pool/main/z/zlib/zlib1g-dev_1.3.dfsg-3.1ubuntu2_arm64.deb",
+      "version": "1:1.3.dfsg-3.1ubuntu2"
+    }
+  ],
+  "release": "noble",
+  "seeds": [
+    "libayatana-appindicator3-dev",
+    "libc++1",
+    "libc++abi1",
+    "libc6",
+    "libgcc-s1",
+    "libglib2.0-0t64",
+    "libgtk-3-0t64",
+    "libgtk-3-dev",
+    "libsoup-3.0-0",
+    "libsoup-3.0-dev",
+    "libssl3t64",
+    "libstdc++6",
+    "libunwind-18",
+    "libwebkit2gtk-4.1-0",
+    "libwebkit2gtk-4.1-dev",
+    "zlib1g"
+  ],
+  "snapshot": "20260909T000000Z",
+  "snapshotRoot": "https://snapshot.ubuntu.com/ubuntu/20260909T000000Z"
+}
