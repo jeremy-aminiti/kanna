@@ -218,6 +218,19 @@ pub fn import_task_bundle_refs(
     let transfer_root = format!("refs/kanna/transfers/{transfer_id}/{expected_head_oid}");
     let head_ref = format!("{transfer_root}/head");
     let base_ref = format!("{transfer_root}/base");
+    for (reference, expected) in [
+        (&head_ref, expected_head_oid),
+        (&base_ref, expected_base_oid),
+    ] {
+        if let Ok(existing) = git(
+            repo_path,
+            &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+        ) {
+            if existing != expected {
+                return Err(format!("transfer ref rebinding refused for {reference}: existing {existing}, requested {expected}"));
+            }
+        }
+    }
     let bundle_path = bundle_path
         .to_str()
         .ok_or_else(|| "bundle path is not valid unicode".to_string())?;
