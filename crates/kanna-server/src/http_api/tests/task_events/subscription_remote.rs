@@ -1626,9 +1626,11 @@ async fn subscription_remote_stale_coverage_survives_a_pending_leg_until_positiv
     );
     fixture.ack(&recovered).await;
     // The third leg's own success confirmed the peer but, by itself, did not
-    // complete this native call's batch (no events accumulated; `minEvents`
-    // defaults to 1), so the production collector legitimately re-arms the
-    // peer's just-completed leg once more before the call finishes
+    // complete this native call's batch: it carried no events, and a
+    // subscription's collector (`subscription_timing::Collection::ready`)
+    // requires at least one observed event before it will seal a batch at
+    // all, urgent or not. So the production collector legitimately re-arms
+    // the peer's just-completed leg once more before the call finishes
     // collecting (task_events.rs's re-arm block) — one normal extra
     // admission, not runaway churn. Bound-wait for exactly that leg and
     // account for it rather than forbidding it or changing production
@@ -1654,13 +1656,24 @@ async fn subscription_remote_stale_coverage_survives_a_pending_leg_until_positiv
 /// `confirmedMachines` and `machineErrors` on the very same response — and
 /// `accept_page`'s add-fault-then-clear-confirmed order let the stale
 /// confirmation erase the real fault, silently reporting the peer healthy.
-/// `minEvents: 2` forces the ordering deterministically: the first success's
-/// own single event cannot complete the batch, guaranteeing the re-arm
-/// rather than racing for it. Proves the peer stays stale through both the
-/// diagnostic row and a plain compact read plus ACK, the first leg's
-/// successful event and checkpoint are retained rather than lost to the
-/// later fault, and a subsequent *unchanged* failure does not mint another
-/// coverage-only wake.
+///
+/// A subscription's own collector (`subscription_timing::Collection::ready`,
+/// via `query.subscription_timing`) governs batch completion here, not the
+/// public wait's `minEvents`/`task_event_batch_is_complete` — subscriptions
+/// have no such field (`SubscribeRequest` denies unknown fields and never
+/// had one). `ready` seals a batch immediately once anything *urgent*
+/// arrives (see `subscription_timing::urgent`), so an urgent first event
+/// would complete the batch on the spot and the re-arm this test exists to
+/// exercise would never happen. `task.pr_created` is explicitly non-urgent,
+/// so the single successful event leaves `ready` false until the
+/// subscription's own quiet/max-hold window elapses — guaranteeing the
+/// re-arm deterministically, the same way `minEvents` would have on the
+/// public wait, without needing (or adding) any such field here.
+///
+/// Proves the peer stays stale through both the diagnostic row and a plain
+/// compact read plus ACK, the first leg's successful event and checkpoint
+/// are retained rather than lost to the later fault, and a subsequent
+/// *unchanged* failure does not mint another coverage-only wake.
 #[tokio::test(start_paused = true)]
 async fn subscription_remote_same_call_success_then_failure_keeps_the_peer_stale() {
     let (source, peer) = aggregate_pending_leg_states();
@@ -1693,13 +1706,12 @@ async fn subscription_remote_same_call_success_then_failure_keeps_the_peer_stale
     let peer_id = peer.config().desktop_id.clone();
     let (relay, mut gate) = connect_gated_peer(&source, peer);
     let app = router(source.clone());
-    let (status, initial) = subscription_request(
-        &app,
-        "POST",
-        "/v1/event-subscriptions",
-        WatchFixture::request_with(json!({"minEvents": 2})),
-    )
-    .await;
+    // Existing, supported subscription timing parameters (the same override
+    // `WatchFixture::request` already uses) — no `minEvents` and none needed:
+    // a non-urgent first event already leaves `ready` false on its own.
+    let (status, initial) =
+        subscription_request(&app, "POST", "/v1/event-subscriptions", WatchFixture::request())
+            .await;
     assert_eq!(status, StatusCode::OK, "{initial}");
     let fixture = GatedPeerFixture {
         source: source.clone(),
@@ -1709,24 +1721,34 @@ async fn subscription_remote_same_call_success_then_failure_keeps_the_peer_stale
         service: tokio::spawn(super::super::super::event_subscriptions::run(source.clone())),
     };
 
-    // The peer's leg succeeds first, with one real event — short of
-    // `minEvents: 2`, so this call is not yet complete and production
-    // re-arms the same peer for another leg within this same native call.
+    // The peer's leg succeeds first, with one real, non-urgent event: not
+    // enough on its own to satisfy the subscription's own collector, so this
+    // call is not yet complete and production re-arms the same peer for
+    // another leg within this same native call.
     let first_leg = recv_gated(&mut gate, "first (successful) long poll").await;
     first_leg.resolve(Ok(HttpInvokeResponse {
         status: 200,
         body: Some(json!({
             "waitOutcome": "events",
             "cursor": "native-after-first-success",
-            "events": [{"taskId": "pending-peer-child", "type": "task.awaiting_input", "seq": 501}],
+            "events": [{"taskId": "pending-peer-child", "type": "task.pr_created", "seq": 501}],
             "hasMore": false,
         })),
         error: None,
     }));
 
     // The re-armed leg then fails, still within the same native call as the
-    // success above.
+    // success above. Deterministic proof of that ordering: the re-armed
+    // dispatch is captured before any batch has been sealed for this
+    // subscription — if the first success had already concluded its own
+    // native call, this row would already be `ready`.
     let second_leg = recv_gated(&mut gate, "re-armed long poll after the success").await;
+    assert_ne!(
+        fixture.row().wake_state,
+        "ready",
+        "the re-armed leg must be dispatched inside the same in-flight native \
+         call as the first success, before any batch is sealed"
+    );
     second_leg.resolve(Ok(HttpInvokeResponse {
         status: 502,
         body: None,
@@ -1738,13 +1760,18 @@ async fn subscription_remote_same_call_success_then_failure_keeps_the_peer_stale
     assert!(batch.get("watchError").is_none(), "{batch}");
     assert_eq!(
         event_pairs(batch),
-        vec![("pending-peer-child".into(), "task.awaiting_input".into())],
+        vec![("pending-peer-child".into(), "task.pr_created".into())],
         "the earlier successful event must not be lost to the later failure: {batch}"
     );
     assert_eq!(batch["machineErrors"][0]["machineId"], json!(peer_id));
     assert!(
-        batch["confirmedMachines"].as_array().is_some_and(Vec::is_empty),
-        "the later same-call failure must revoke the earlier same-call confirmation: {batch}"
+        !batch["confirmedMachines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|id| id.as_str() == Some(peer_id.as_str())),
+        "the later same-call failure must revoke the earlier same-call confirmation for the peer \
+         (unrelated healthy machines may still legitimately confirm): {batch}"
     );
     fixture.ack(&page).await;
     assert_eq!(
@@ -1771,7 +1798,15 @@ async fn subscription_remote_same_call_success_then_failure_keeps_the_peer_stale
     );
 
     // A later, unchanged failure for the same peer must not mint another
-    // coverage-only wake — the set of stale machines has not changed.
+    // coverage-only wake — the set of stale machines has not changed. The
+    // dispatch of `third_leg` already pushes `attempts` to 3 (it counts at
+    // admission, not completion), so waiting on `attempts >= 3` here would
+    // be checking a condition that is already true and would prove nothing
+    // about this outage collection having actually settled. Synchronize
+    // instead on the *next* (fourth) admission, which can only happen after
+    // this call concludes, reaches `accept_page`, and the worker starts its
+    // next cycle — proof the unchanged failure was fully processed before
+    // asserting no new batch was minted from it.
     let batch_id_before = fixture.row().batch_id;
     let third_leg = recv_gated(&mut gate, "next cycle's peer long poll").await;
     third_leg.resolve(Ok(HttpInvokeResponse {
@@ -1779,7 +1814,11 @@ async fn subscription_remote_same_call_success_then_failure_keeps_the_peer_stale
         body: None,
         error: Some("peer connection reset".into()),
     }));
-    until(|| fixture.relay.counts.attempts.load(Ordering::SeqCst) >= 3).await;
+    let _fourth_leg = recv_gated(
+        &mut gate,
+        "peer's following long poll, proving the unchanged-failure call settled",
+    )
+    .await;
     assert_eq!(
         fixture.row().batch_id, batch_id_before,
         "an unchanged (still-down) peer must not manufacture a new pending batch"

@@ -545,13 +545,14 @@ once for it to matter.
 New integration coverage:
 `subscription_remote_same_call_success_then_failure_keeps_the_peer_stale`
 (`subscription_remote.rs`) forces exactly that ordering deterministically —
-`minEvents: 2` so a re-armed peer's first, single-event success cannot
-complete the batch on its own, guaranteeing the re-arm rather than racing
-for it — then resolves the re-armed leg with a failure in the same call.
-Proves: the peer reads stale through both the diagnostic row and a plain
-compact read, and after ACK; the earlier successful event and its checkpoint
-are retained, not lost to the later fault; and a subsequent unchanged
-failure for the same peer does not mint another coverage-only wake.
+using a single non-urgent first event (see `subscription_timing::urgent`) so
+the subscription's own collector (`Collection::ready`) does not seal the
+batch on its own, guaranteeing the re-arm rather than racing for it — then
+resolves the re-armed leg with a failure in the same call. Proves: the peer
+reads stale through both the diagnostic row and a plain compact read, and
+after ACK; the earlier successful event and its checkpoint are retained, not
+lost to the later fault; and a subsequent unchanged failure for the same
+peer does not mint another coverage-only wake.
 
 Also repaired: `GatedInvoke.response.send(...)`, used throughout the Round 2
 gated-peer test, was a *partial move* of only the `response` field —
@@ -567,16 +568,75 @@ updating every call site (including the new Round 3 test) to use it. Also
 bounded every `gate.recv()` wait with a new `recv_gated` helper (mirrors
 `until`'s virtual-clock budget) so a fixture regression fails the test
 instead of hanging the suite, and corrected the existing gated test's final
-admission-count assertion: the third leg's own non-terminal success (no
-events accumulated; `minEvents` defaults to 1) legitimately triggers one
-more re-armed dispatch before that native call concludes, which the
-assertion now explicitly bound-waits for and accounts for (4 attempts, not
-3) rather than forbidding — without touching production re-arming to satisfy
-the fixture.
+admission-count assertion: the third leg's own non-terminal success carried
+no events, and a subscription's collector requires at least one observed
+event before it will seal a batch at all (urgent or not), so it legitimately
+triggers one more re-armed dispatch before that native call concludes, which
+the assertion now explicitly bound-waits for and accounts for (4 attempts,
+not 3) rather than forbidding — without touching production re-arming to
+satisfy the fixture.
 
 Not run: `cargo build`/`test`/`clippy`/`fmt` — still held this round per
 instructions. Verified by manual tracing of `apply_aggregate_completion`,
 the re-arm block, `wait_aggregate_task_events`'s collection loop exit
-conditions, and `GatedInvoke`'s exact partial-move semantics, including
-re-deriving why the new test's re-armed second leg is guaranteed (not
-racy) given `minEvents: 2` and a single-event first success.
+conditions, and `GatedInvoke`'s exact partial-move semantics.
+
+## Round 4: the Round 3 test never actually exercised the ordering it claimed
+
+Independent review caught two defects in Round 3's new regression test that
+manual tracing alone had missed, both stemming from one wrong assumption:
+that the public wait's `minEvents`/`task_event_batch_is_complete` governs
+subscription batch completion. It does not — `SubscribeRequest`
+(`event_subscriptions.rs`) has `deny_unknown_fields` and has never had a
+`minEvents` field; a subscription's own collector
+(`subscription_timing::Collection::ready`, selected by
+`query.subscription_timing`) governs completion instead. Concretely:
+
+1. The test's subscribe POST included `"minEvents": 2`, an unknown field
+   `SubscribeRequest` rejects outright — the registration itself would have
+   failed with 400 before the worker ever started, so the test as written
+   could not have run at all.
+2. Even with that field removed, the test's crafted event used
+   `task.awaiting_input`, which `subscription_timing::urgent` treats as
+   urgent — `Collection::ready` seals a batch immediately on any urgent
+   event, so the very first success would have completed the batch on its
+   own and the re-arm the test exists to exercise would never have happened.
+
+Fixed by using `WatchFixture::request()`'s existing, already-supported
+`quietMs`/`maxHoldMs` overrides (no new field added) and switching the
+crafted event to `task.pr_created`, which `subscription_timing::urgent`
+explicitly treats as non-urgent — so a single successful event leaves
+`Collection::ready` false (no urgency, under capacity, quiet/max-hold not yet
+reached) until the subscription's own window elapses, guaranteeing the
+re-arm deterministically the same way `minEvents` would have on the public
+wait, without needing or adding any such field on subscriptions. Added an
+explicit deterministic proof that the re-armed second leg is dispatched
+before any batch is sealed (`wake_state != "ready"` at that point), directly
+proving the success and the subsequent failure land in the same native
+collection rather than inferring it.
+
+Also corrected in the same test: the `confirmedMachines` assertion after the
+failure now checks the peer's own id is absent from that list, rather than
+requiring the whole list to be empty — an unrelated healthy machine (the
+local leg, say) completing successfully within the same call may legitimately
+appear there too, and the fix under test only concerns the peer's own
+entry. And the final "no new batch from an unchanged failure" check
+previously synchronized on `attempts >= 3`, a condition already true the
+moment the third request is *received* (admission is counted at dispatch,
+not completion) — so it proved nothing about that outage collection having
+actually settled through `accept_page` before the assertion ran. Fixed by
+synchronizing on the *next* (fourth) admission instead, which can only be
+dispatched after the third leg's own native call fully concludes and the
+worker starts its next cycle.
+
+The sibling Round 3 test's own trailing comment (why the third leg's empty
+success still triggers one more re-arm) also cited the same wrong
+`minEvents` premise; corrected to cite `Collection::ready`'s actual
+`count > 0` requirement — the code and the passing assertion were already
+correct, only the stated reason was wrong.
+
+No production code changed this round; no new API field was added. Not run:
+`cargo build`/`test`/`clippy`/`fmt` — still held. Verified by manual tracing
+of `SubscribeRequest`'s `deny_unknown_fields`, `subscription_timing::urgent`
+and `Collection::ready`, and the worker's `step`/`accept_page` sequencing
+that makes the fourth-admission synchronization sound.
