@@ -87,6 +87,72 @@ pub(super) struct RelayAttestedSource {
     pub(super) account_uid: String,
 }
 
+/// Authority for the dedicated LAN machine-invoke listener (a separate
+/// router on its own TLS port - see `lan_listener`). This is the *inbound*
+/// side of automatic same-account LAN trust: the caller presents the
+/// bearer secret a relay bootstrap gave it, verified against
+/// `machine_trust::MachineTrustStore::verify_inbound` under this desktop's
+/// *current* authenticated account - never a `machine_trust` record whose
+/// account no longer matches. Reuses the same device-id/device-secret
+/// header names the mobile pairing model already uses; the two are
+/// unrelated wire conventions sharing header names, not the same trust
+/// store or verification path.
+pub(super) struct LanMachineInvokeAuthenticated {
+    pub(super) source_desktop_id: String,
+}
+
+impl FromRequestParts<Arc<AppState>> for LanMachineInvokeAuthenticated {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let unauthorized = || {
+            (
+                StatusCode::UNAUTHORIZED,
+                "LAN machine invoke requires a device id and a verified device secret"
+                    .to_string(),
+            )
+        };
+        let device_id =
+            header_value_from_map(&parts.headers, DEVICE_ID_HEADER).ok_or_else(unauthorized)?;
+        let device_secret = header_value_from_map(&parts.headers, DEVICE_SECRET_HEADER)
+            .ok_or_else(unauthorized)?;
+        let Some(store_path) = state.config().machine_trust_store_path() else {
+            return Err(unauthorized());
+        };
+        let Ok(store) = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+        else {
+            return Err(unauthorized());
+        };
+        let Ok(now_ms) = crate::machine_trust::unix_time_ms() else {
+            return Err(unauthorized());
+        };
+        let current_account_uid = state.authenticated_account_uid();
+        if !store.verify_inbound(
+            &device_id,
+            &device_secret,
+            current_account_uid.as_deref(),
+            now_ms,
+        ) {
+            return Err(unauthorized());
+        }
+        Ok(Self {
+            source_desktop_id: device_id,
+        })
+    }
+}
+
+fn header_value_from_map(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 impl FromRequestParts<Arc<AppState>> for RelayAttestedSource {
     type Rejection = (StatusCode, String);
 

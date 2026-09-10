@@ -228,6 +228,23 @@ async fn run_human_control_service(state: Arc<http_api::AppState>) {
     std::future::pending::<()>().await;
 }
 
+/// The LAN machine-invoke listener is optional the same way the privileged
+/// input override channel above is: the general LAN/relay API remains
+/// useful if this cannot bind (a reserved port already taken, a TLS
+/// identity write failure), so a failure here is logged and this future
+/// then never resolves, rather than tearing down every other service in
+/// the `select!` below with it.
+async fn run_lan_machine_invoke_listener(state: Arc<http_api::AppState>) {
+    let port = std::env::var("KANNA_LAN_ROUTING_PORT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .unwrap_or(4460);
+    if let Err(error) = http_api::serve_lan_machine_invoke_listener(state, port).await {
+        log::warn!("LAN machine-invoke listener unavailable: {error}");
+    }
+    std::future::pending::<()>().await;
+}
+
 pub(crate) async fn run_server_services(
     config: Config,
     db: db::Db,
@@ -269,6 +286,7 @@ pub(crate) async fn run_server_services(
                 Ok(()) => log::warn!("LAN API exited unexpectedly"),
                 Err(err) => log::error!("LAN API failed: {}", err),
             },
+            _ = run_lan_machine_invoke_listener(Arc::clone(&http_state)) => {},
             _ = run_human_control_service(http_state) => {},
             _ = protected_input_maintenance => {},
         }
@@ -276,6 +294,7 @@ pub(crate) async fn run_server_services(
     }
 
     let human_control_state = Arc::clone(&http_state);
+    let lan_machine_invoke_state = Arc::clone(&http_state);
     tokio::select! {
         _ = subscription_service => {},
         result = http_api::serve(Arc::clone(&http_state)) => match result {
@@ -286,6 +305,7 @@ pub(crate) async fn run_server_services(
             Ok(()) => log::warn!("relay loop exited unexpectedly"),
             Err(err) => log::error!("relay loop failed: {}", err),
         },
+        _ = run_lan_machine_invoke_listener(lan_machine_invoke_state) => {},
         _ = run_human_control_service(human_control_state) => {},
         _ = protected_input_maintenance => {},
     }

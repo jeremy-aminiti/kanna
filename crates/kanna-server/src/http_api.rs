@@ -14,6 +14,7 @@ mod harness_wake;
 pub(crate) mod invoke_desktop;
 mod ksp;
 mod lan_bootstrap;
+mod lan_listener;
 mod lan_trust;
 mod machine_stats;
 mod mobile_notifications;
@@ -103,6 +104,13 @@ pub(crate) async fn dispatch_authenticated_relay_http_invoke(
         body,
     )
     .await
+}
+
+pub async fn serve_lan_machine_invoke_listener(
+    state: std::sync::Arc<AppState>,
+    port: u16,
+) -> Result<(), String> {
+    lan_listener::serve(state, port).await
 }
 
 pub async fn serve(state: std::sync::Arc<AppState>) -> Result<(), String> {

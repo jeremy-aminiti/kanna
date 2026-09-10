@@ -637,6 +637,33 @@ pub async fn dispatch_authenticated_relay_http_invoke(
     .await
 }
 
+/// Dispatches a call that arrived on the dedicated LAN machine-invoke
+/// listener, already authenticated by `LanMachineInvokeAuthenticated`'s
+/// bearer-secret check. The actor is this desktop's own current account
+/// (a LAN caller does not carry a separate account claim the way a relay
+/// message does - `LanMachineInvokeAuthenticated` already proved the
+/// caller's secret verifies under exactly that account), and
+/// `source_desktop_id` is the verified device id from that same check.
+pub async fn dispatch_authenticated_lan_http_invoke(
+    state: Arc<AppState>,
+    source_desktop_id: String,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> HttpInvokeResponse {
+    let actor = state.authenticated_account_uid();
+    dispatch_http_invoke_with_access(
+        state,
+        method,
+        path,
+        body,
+        true,
+        actor,
+        Some(source_desktop_id),
+    )
+    .await
+}
+
 async fn dispatch_http_invoke_with_access(
     state: Arc<AppState>,
     method: &str,

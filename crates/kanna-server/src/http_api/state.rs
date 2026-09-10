@@ -108,6 +108,13 @@ pub struct AppState {
     /// usable between an account transition and the next reconciliation
     /// pass.
     authenticated_account_uid: Arc<StdMutex<Option<String>>>,
+    /// The last LAN address observed for a same-account sibling's secure
+    /// machine-invoke listener, by desktop_id. Discovery-owned (Bonjour), a
+    /// candidate here is only ever a hint of where to *attempt* a
+    /// connection - `invoke_desktop`'s TLS client is what actually proves
+    /// the responder's identity, never this map. Absent an entry, or a
+    /// desktop no longer advertised, there is simply nothing to dial.
+    lan_candidates: Arc<StdMutex<HashMap<String, std::net::SocketAddr>>>,
     relay_desktop_routing_available: Arc<AtomicBool>,
     relay_desktop_routing_unavailable_reason: Arc<StdMutex<Option<String>>>,
     relay_desktop_routing_unreachable_since: Arc<StdMutex<Option<String>>>,
@@ -485,6 +492,7 @@ impl AppState {
             known_singleton_owners: Arc::new(StdMutex::new(HashMap::new())),
             relay_reconnect: Arc::new(Notify::new()),
             authenticated_account_uid: Arc::new(StdMutex::new(None)),
+            lan_candidates: Arc::new(StdMutex::new(HashMap::new())),
             anonymous_push_revocations_changed: Arc::new(Notify::new()),
             relay_desktop_routing_available: Arc::new(AtomicBool::new(false)),
             relay_desktop_routing_unavailable_reason: Arc::new(StdMutex::new(Some(
@@ -758,6 +766,38 @@ impl AppState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// Records the last LAN address discovery observed for a same-account
+    /// sibling's secure machine-invoke listener. Called only by discovery
+    /// (Bonjour); never by anything that has itself verified the address -
+    /// see the field's own doc comment.
+    pub(crate) fn set_lan_candidate(&self, desktop_id: String, address: std::net::SocketAddr) {
+        self.lan_candidates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(desktop_id, address);
+    }
+
+    /// Removes a desktop's LAN candidate - discovery lost it (advertisement
+    /// expired/withdrawn), so there is nothing left to attempt.
+    pub(crate) fn remove_lan_candidate(&self, desktop_id: &str) {
+        self.lan_candidates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(desktop_id);
+    }
+
+    /// The address to *attempt* dialing `desktop_id` at, if discovery has
+    /// ever observed one. This is a candidate, not a credential: whatever
+    /// answers there still has to complete the pinned TLS handshake before
+    /// anything trusts it.
+    pub(crate) fn lan_candidate_for(&self, desktop_id: &str) -> Option<std::net::SocketAddr> {
+        self.lan_candidates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(desktop_id)
+            .copied()
     }
 
     pub(crate) fn take_desktop_relay_requests(

@@ -4,16 +4,14 @@
 //! directly should call [`invoke_desktop`] instead. `invoke_relay_desktop`
 //! itself is untouched and remains exactly what this module falls back to.
 //!
-//! The LAN attempt itself ([`attempt_lan_invoke`]) is a documented stub: a
-//! real attempt needs a mutually-authenticated TLS client dialing the
-//! desktop's own pinned trust anchor, which needs `rustls`/`tokio-rustls`/
-//! `rcgen` added as direct dependencies of this crate - a Cargo.toml/
-//! Cargo.lock change this task is holding until `cargo` gates are available
-//! to verify it compiles. Until then, `invoke_desktop`'s observable behavior
-//! is identical to calling `invoke_relay_desktop` directly: what's new here
-//! is the shared routing seam, the fallback/uncertainty decision table, and
-//! truthful route provenance - all real and unit-tested independent of the
-//! transport that will eventually fill in `attempt_lan_invoke`.
+//! [`attempt_lan_invoke`] dials the target with a client pinned to exactly
+//! the CA a relay bootstrap attested for it (see `lan_tls`), at whatever
+//! address discovery last observed (`AppState::lan_candidate_for`) - never
+//! trusting that address for anything but where to *try* connecting. With
+//! no candidate, no grant, or no attested trust anchor yet, the fallback/
+//! uncertainty decision table below still applies unchanged: those are
+//! ordinary `PreDispatch` cases, so behavior degrades to relay exactly as
+//! it always has, never fails the caller's request outright.
 
 use super::state::{AppState, HttpInvokeResponse};
 use std::sync::Arc;
@@ -118,46 +116,364 @@ pub(crate) async fn invoke_desktop(
     })
 }
 
-/// Stub pending the TLS client (see module docs). Looks up whether an
-/// outbound grant exists at all, purely so the eventual real attempt has
-/// somewhere obvious to start; it never dials anything yet, so a grant's
-/// presence changes nothing observable until this function's body is
-/// replaced with a real TLS dial.
+/// The real LAN attempt: requires an unexpired outbound grant under the
+/// *current* account (with an already-attested TLS trust anchor) and a
+/// discovered candidate address, dials it with a client pinned to exactly
+/// that trust anchor, and verifies the standard TLS handshake - normal
+/// WebPKI chain validation plus normal hostname verification against
+/// `desktop_id` (the leaf's own SAN) - before the bearer secret or any
+/// application byte ever goes out. Discovery only ever supplies the
+/// address to *attempt*; it is never itself trusted.
 async fn attempt_lan_invoke(
     state: &Arc<AppState>,
     desktop_id: &str,
-    _method: &str,
-    _path: &str,
-    _body: &serde_json::Value,
+    method: &str,
+    path: &str,
+    body: &serde_json::Value,
 ) -> LanAttemptOutcome {
     let Some(store_path) = state.config().machine_trust_store_path() else {
         return LanAttemptOutcome::PreDispatch("no machine trust store configured".to_string());
     };
+    let Ok(now_ms) = crate::machine_trust::unix_time_ms() else {
+        return LanAttemptOutcome::PreDispatch("clock unavailable".to_string());
+    };
     let current_account_uid = state.authenticated_account_uid();
-    let has_grant = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
-        .ok()
-        .zip(crate::machine_trust::unix_time_ms().ok())
-        .is_some_and(|(store, now_ms)| {
-            store
-                .outbound_grant_for(desktop_id, current_account_uid.as_deref(), now_ms)
-                .is_some()
-        });
-    if !has_grant {
+    let Ok(store) = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path) else {
+        return LanAttemptOutcome::PreDispatch(format!(
+            "machine trust store for {desktop_id} is unreadable"
+        ));
+    };
+    let Some(grant) =
+        store.outbound_grant_for(desktop_id, current_account_uid.as_deref(), now_ms)
+    else {
         return LanAttemptOutcome::PreDispatch(format!(
             "no unexpired outbound LAN grant for desktop {desktop_id}"
         ));
+    };
+    let Some(trust_anchor_pem) = grant.trust_anchor_pem.clone() else {
+        return LanAttemptOutcome::PreDispatch(format!(
+            "no attested TLS trust anchor yet for desktop {desktop_id}"
+        ));
+    };
+    let bearer_secret = grant.bearer_secret.clone();
+    let Some(candidate) = state.lan_candidate_for(desktop_id) else {
+        return LanAttemptOutcome::PreDispatch(format!(
+            "no LAN candidate address discovered for desktop {desktop_id}"
+        ));
+    };
+
+    dial_lan_invoke(
+        &state.config().desktop_id,
+        desktop_id,
+        candidate,
+        &trust_anchor_pem,
+        &bearer_secret,
+        method,
+        path,
+        body,
+    )
+    .await
+}
+
+/// Mirrors `lan_listener`'s own response envelope shape - duplicated rather
+/// than shared across the module boundary for the same reason
+/// `MachineInvokeResponse` is duplicated between kanna-mcp and kanna-cli:
+/// a tiny wire shape, not worth a shared-visibility fight over private
+/// struct fields.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LanGatewayResponse {
+    status: u16,
+    body: Option<serde_json::Value>,
+    error: Option<String>,
+}
+
+/// Builds a client trusting only `trust_anchor_pem` (the CA a relay
+/// bootstrap already attested for this exact target - never the system
+/// roots, never anything discovery supplied), overrides DNS for
+/// `target_desktop_id` to the discovered `candidate` address, and sends
+/// the invoke. `resolve` is what lets TLS verification run against the
+/// stable logical name (`target_desktop_id`, matching the leaf's SAN)
+/// while the TCP connection itself goes wherever discovery pointed -
+/// exactly the "connect anywhere, verify identity independently of that"
+/// split the design calls for.
+async fn dial_lan_invoke(
+    this_desktop_id: &str,
+    target_desktop_id: &str,
+    candidate: std::net::SocketAddr,
+    trust_anchor_pem: &str,
+    bearer_secret: &str,
+    method: &str,
+    path: &str,
+    body: &serde_json::Value,
+) -> LanAttemptOutcome {
+    let client_config = match crate::lan_tls::client_config_pinned_to_ca(trust_anchor_pem) {
+        Ok(config) => config,
+        Err(error) => return LanAttemptOutcome::PreDispatch(error),
+    };
+    let client_config = match std::sync::Arc::try_unwrap(client_config) {
+        Ok(config) => config,
+        Err(shared) => (*shared).clone(),
+    };
+    let client = match reqwest::Client::builder()
+        .use_preconfigured_tls(client_config)
+        .resolve(target_desktop_id, candidate)
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return LanAttemptOutcome::PreDispatch(format!(
+                "failed to build LAN client for {target_desktop_id}: {error}"
+            ))
+        }
+    };
+    // The listener's own gateway endpoint is always POST - it is an RPC
+    // wrapper carrying the actual method/path/body as its payload, exactly
+    // like the general API's own /v1/cloud/desktops/{id}/invoke. `method`
+    // here names the *wrapped* request, never the outer HTTP method.
+    let url = format!("https://{target_desktop_id}:{}/invoke", candidate.port());
+    let request = client
+        .post(&url)
+        .header(super::lan_trust::DEVICE_ID_HEADER, this_desktop_id)
+        .header(super::lan_trust::DEVICE_SECRET_HEADER, bearer_secret)
+        .json(&serde_json::json!({ "method": method, "path": path, "body": body }));
+
+    match request.send().await {
+        Ok(response) => {
+            let outer_status = response.status();
+            // The gateway itself answered 200: unwrap its {status, body,
+            // error} envelope to get the *wrapped* invoke's own result -
+            // exactly the shape invoke_cloud_desktop's own callers already
+            // unwrap for the relay/local paths, so a caller of
+            // invoke_desktop sees the same shape regardless of transport.
+            // Anything else (401 from the bearer check, 400 from the
+            // gateway's own path validation) has no such envelope: that
+            // status/body pair *is* the definite answer.
+            if outer_status == reqwest::StatusCode::OK {
+                match response.json::<LanGatewayResponse>().await {
+                    Ok(envelope) => LanAttemptOutcome::Definite(HttpInvokeResponse {
+                        status: envelope.status,
+                        body: envelope.body,
+                        error: envelope.error,
+                    }),
+                    Err(_) => LanAttemptOutcome::PostDispatchUncertain,
+                }
+            } else {
+                let body = response.json::<serde_json::Value>().await.ok();
+                LanAttemptOutcome::Definite(HttpInvokeResponse {
+                    status: outer_status.as_u16(),
+                    body,
+                    error: None,
+                })
+            }
+        }
+        Err(error) => {
+            // `is_connect` covers failures at or before TCP/TLS
+            // establishment - nothing reached the peer, so relay fallback
+            // cannot double-apply anything. Anything else (a timeout after
+            // the request was already written, a connection reset mid
+            // response) is deliberately treated as uncertain rather than
+            // guessed at: this is the conservative direction, since the
+            // alternative risks replaying a mutation the peer may already
+            // have applied.
+            if error.is_connect() {
+                LanAttemptOutcome::PreDispatch(format!(
+                    "LAN connect to {target_desktop_id} failed: {error}"
+                ))
+            } else {
+                LanAttemptOutcome::PostDispatchUncertain
+            }
+        }
     }
-    // TODO(lan-tls): dial the grant's pinned trust anchor over TLS and send
-    // the invoke here once rustls/tokio-rustls/rcgen are added as direct
-    // kanna-server dependencies. Until then, a grant's presence is
-    // deliberately inert: falling back to relay is always correct because
-    // nothing above has ever opened a connection.
-    LanAttemptOutcome::PreDispatch("LAN transport not yet implemented".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lan_e2e_test_config(desktop_id: &str) -> crate::config::Config {
+        let dir = crate::test_paths::unique_test_dir(&format!("lan-e2e-{desktop_id}"));
+        crate::config::Config {
+            relay_url: String::new(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: dir.join("daemon").to_string_lossy().into_owned(),
+            db_path: crate::db::Db::test_db_path(&format!("lan-e2e-{desktop_id}")),
+            kanna_cli_path: None,
+            desktop_id: desktop_id.to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: format!("{desktop_id} Mac"),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: dir.join("pairings.json").to_string_lossy().into_owned(),
+        }
+    }
+
+    /// The full chain end to end over a real loopback TLS socket: a target's
+    /// real `lan_listener` accepts a connection from the real
+    /// `invoke_desktop` client path, completes a standard rustls handshake
+    /// pinned to the target's actual attested CA, authenticates the bearer
+    /// secret against the target's real `machine_trust` store, and dispatches
+    /// into the target's real router - proving the seam this task exists to
+    /// build, not a simulation of any part of it.
+    #[tokio::test]
+    async fn a_real_lan_invoke_completes_over_a_real_tls_socket_end_to_end() {
+        let target_config = lan_e2e_test_config("desktop-target");
+        let target_identity_path = target_config.lan_tls_identity_path().unwrap();
+        let target_identity = crate::lan_tls_identity::load_or_create(
+            &target_identity_path,
+            &target_config.desktop_id,
+        )
+        .expect("create target identity");
+
+        let target_state = Arc::new(AppState::new(target_config.clone()));
+        target_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+
+        let now_ms = crate::machine_trust::unix_time_ms().unwrap();
+        let target_store_path = target_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            let hash = crate::pairing::hash_device_secret("the-bearer-secret");
+            store.accept_inbound("desktop-source", &hash, "uid-1", "development", now_ms);
+            store.save(&target_store_path).expect("seed target trust");
+        }
+
+        let listener_addr = super::super::lan_listener::spawn_for_test(Arc::clone(&target_state))
+            .await;
+        let candidate =
+            std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), listener_addr.port());
+
+        let source_config = lan_e2e_test_config("desktop-source");
+        let source_state = Arc::new(AppState::new(source_config.clone()));
+        source_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+        source_state.set_lan_candidate("desktop-target".to_string(), candidate);
+        let source_store_path = source_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            store
+                .pending_or_create(
+                    "desktop-target",
+                    "uid-1",
+                    "development",
+                    || Ok("the-bearer-secret".to_string()),
+                    now_ms,
+                )
+                .expect("prepare pending");
+            store
+                .confirm_outbound(
+                    "desktop-target",
+                    "the-bearer-secret",
+                    Some(target_identity.ca_certificate_pem.clone()),
+                    now_ms + 1000,
+                )
+                .expect("confirm outbound grant");
+            store.save(&source_store_path).expect("seed source trust");
+        }
+
+        let routed = invoke_desktop(
+            Arc::clone(&source_state),
+            "desktop-target".to_string(),
+            "GET".to_string(),
+            "/v1/status".to_string(),
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("invoke_desktop should complete");
+
+        assert_eq!(routed.route, RouteProvenance::Lan, "{:?}", routed.response);
+        assert_eq!(routed.response.status, 200, "{:?}", routed.response);
+        let body = routed.response.body.expect("status response body");
+        assert_eq!(body["desktopId"], "desktop-target");
+    }
+
+    /// A real TLS handshake can succeed (the client trusts the target's
+    /// real CA) while the application-layer bearer secret still does not
+    /// verify - a source whose outbound grant somehow diverged from what
+    /// the target actually accepts (a stale/corrupted grant, a manually
+    /// edited store). This is a *definite* 401 answered by the real
+    /// listener, not a connection failure, so route ends up Lan and no
+    /// relay fallback happens even though the wrapped call did not
+    /// succeed - matching the fallback contract exactly.
+    #[tokio::test]
+    async fn a_real_lan_invoke_with_the_wrong_bearer_secret_is_rejected_definitely() {
+        let target_config = lan_e2e_test_config("desktop-target-2");
+        let target_identity_path = target_config.lan_tls_identity_path().unwrap();
+        let target_identity = crate::lan_tls_identity::load_or_create(
+            &target_identity_path,
+            &target_config.desktop_id,
+        )
+        .expect("create target identity");
+        let target_state = Arc::new(AppState::new(target_config.clone()));
+        target_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+
+        let now_ms = crate::machine_trust::unix_time_ms().unwrap();
+        let target_store_path = target_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            let hash = crate::pairing::hash_device_secret("the-real-secret");
+            store.accept_inbound("desktop-source-2", &hash, "uid-1", "development", now_ms);
+            store.save(&target_store_path).expect("seed target trust");
+        }
+
+        let listener_addr =
+            super::super::lan_listener::spawn_for_test(Arc::clone(&target_state)).await;
+        let candidate = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            listener_addr.port(),
+        );
+
+        let source_config = lan_e2e_test_config("desktop-source-2");
+        let source_state = Arc::new(AppState::new(source_config.clone()));
+        source_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+        source_state.set_lan_candidate("desktop-target-2".to_string(), candidate);
+        let source_store_path = source_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            store
+                .pending_or_create(
+                    "desktop-target-2",
+                    "uid-1",
+                    "development",
+                    // Deliberately not "the-real-secret" the target accepted.
+                    || Ok("a-wrong-secret".to_string()),
+                    now_ms,
+                )
+                .expect("prepare pending");
+            store
+                .confirm_outbound(
+                    "desktop-target-2",
+                    "a-wrong-secret",
+                    Some(target_identity.ca_certificate_pem.clone()),
+                    now_ms + 1000,
+                )
+                .expect("confirm outbound grant");
+            store.save(&source_store_path).expect("seed source trust");
+        }
+
+        let routed = invoke_desktop(
+            Arc::clone(&source_state),
+            "desktop-target-2".to_string(),
+            "GET".to_string(),
+            "/v1/status".to_string(),
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("invoke_desktop should complete");
+
+        assert_eq!(routed.route, RouteProvenance::Lan, "{:?}", routed.response);
+        assert_eq!(
+            routed.response.status, 401,
+            "a mismatched bearer secret must be answered definitely, not treated as a connection failure: {:?}",
+            routed.response
+        );
+    }
 
     #[test]
     fn preflight_negative_falls_back_to_relay() {
