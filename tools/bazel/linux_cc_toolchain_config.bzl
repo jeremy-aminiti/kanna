@@ -3,6 +3,8 @@
 load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 load("@bazel_tools//tools/cpp:cc_toolchain_config_lib.bzl", "feature", "flag_group", "flag_set", "tool_path")
 load("@rules_cc//cc:defs.bzl", "cc_toolchain")
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+load("@rules_cc//cc/toolchains:cc_toolchain_config_info.bzl", "CcToolchainConfigInfo")
 
 _COMPILE_ACTIONS = [
     ACTION_NAMES.c_compile,
@@ -143,6 +145,7 @@ zig_cc_toolchain_config = rule(
         "target_cpu": attr.string(mandatory = True),
         "toolchain_identifier": attr.string(mandatory = True),
     },
+    provides = [CcToolchainConfigInfo],
 )
 
 def zig_linux_cc_toolchain(name, target, target_cpu, multiarch, sysroot, sysroot_marker, exec_compatible_with, target_compatible_with):
