@@ -1114,23 +1114,45 @@ pub(crate) async fn run(command: TaskCommands) {
             exclude_task_ids,
             local_only,
             delivery,
+            diagnostic,
+            event_types,
+            exclude_event_types,
+            quiet_ms,
+            max_hold_ms,
+            min_admission_interval_ms,
             server_url,
         } => {
-            let mut args = json!({"task_id": task_id, "task_ids":task_ids, "exclude_task_ids":exclude_task_ids, "local_only":local_only, "delivery":delivery});
+            let mut args = json!({"task_id": task_id, "task_ids":task_ids, "exclude_task_ids":exclude_task_ids, "local_only":local_only, "delivery":delivery, "diagnostic":diagnostic});
             if let Some(repo) = repo_id {
                 args["repo_id"] = json!(repo);
             }
             if let Some(parent) = parent_task_id {
                 args["parent_task_id"] = json!(parent);
             }
+            if !event_types.is_empty() {
+                args["event_types"] = json!(event_types);
+            }
+            if !exclude_event_types.is_empty() {
+                args["exclude_event_types"] = json!(exclude_event_types);
+            }
+            if let Some(quiet_ms) = quiet_ms {
+                args["quiet_ms"] = json!(quiet_ms);
+            }
+            if let Some(max_hold_ms) = max_hold_ms {
+                args["max_hold_ms"] = json!(max_hold_ms);
+            }
+            if let Some(min_admission_interval_ms) = min_admission_interval_ms {
+                args["min_admission_interval_ms"] = json!(min_admission_interval_ms);
+            }
             run_catalog_task_tool("kanna_subscribe_events", &args, server_url.as_deref()).await;
         }
         TaskCommands::ReadEventSubscription {
             subscription_id,
             acknowledge_batch_id,
+            diagnostic,
             server_url,
         } => {
-            let mut args = json!({"subscription_id":subscription_id});
+            let mut args = json!({"subscription_id":subscription_id, "diagnostic":diagnostic});
             if let Some(batch) = acknowledge_batch_id {
                 args["acknowledge_batch_id"] = json!(batch);
             }
@@ -1143,11 +1165,12 @@ pub(crate) async fn run(command: TaskCommands) {
         }
         TaskCommands::UnsubscribeEvents {
             subscription_id,
+            diagnostic,
             server_url,
         } => {
             run_catalog_task_tool(
                 "kanna_unsubscribe_events",
-                &json!({"subscription_id":subscription_id}),
+                &json!({"subscription_id":subscription_id, "diagnostic":diagnostic}),
                 server_url.as_deref(),
             )
             .await;
