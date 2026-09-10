@@ -85,7 +85,7 @@ zig_cc_wrapper = rule(
 )
 
 def _zig_cc_toolchain_config_impl(ctx):
-    wrapper = ctx.file.compiler
+    wrapper = ctx.file.compiler_wrapper
     marker = _exec_path(ctx.file.sysroot_marker)
     sysroot = marker[:-len("/.kanna-sysroot")]
     return cc_common.create_cc_toolchain_config_info(
@@ -135,7 +135,7 @@ zig_cc_toolchain_config = rule(
     implementation = _zig_cc_toolchain_config_impl,
     attrs = {
         "ar": attr.label(mandatory = True, allow_single_file = True),
-        "compiler": attr.label(mandatory = True, allow_single_file = True),
+        "compiler_wrapper": attr.label(mandatory = True, allow_single_file = True),
         "multiarch": attr.string(mandatory = True),
         "nm": attr.label(mandatory = True, allow_single_file = True),
         "objcopy": attr.label(mandatory = True, allow_single_file = True),
@@ -172,7 +172,7 @@ def zig_linux_cc_toolchain(name, target, target_cpu, multiarch, sysroot, sysroot
     zig_cc_toolchain_config(
         name = name + "_config",
         ar = wrappers["ar"],
-        compiler = wrappers["cc"],
+        compiler_wrapper = wrappers["cc"],
         multiarch = multiarch,
         nm = wrappers["nm"],
         objcopy = wrappers["objcopy"],
