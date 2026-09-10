@@ -384,6 +384,12 @@ describe("local transfer repo acquisition", () => {
       mode: "task-bundle",
     });
     expect(typeof outgoingPayload.repo?.remote_url).toBe("string");
+    const { stdout: importedOrigin } = await execFileAsync(
+      "git",
+      ["remote", "get-url", "origin"],
+      { cwd: importedRepoPath },
+    );
+    expect(importedOrigin.trim()).toBe(outgoingPayload.repo?.remote_url);
 
     await waitForPrimaryTaskClosed(sourceTaskId);
   });

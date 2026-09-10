@@ -68,6 +68,10 @@ pub fn remote_url(repo_path: &Path) -> Option<String> {
         .filter(|url| !url.is_empty())
 }
 
+pub fn add_origin(repo_path: &Path, remote_url: &str) -> Result<(), String> {
+    git(repo_path, &["remote", "add", "origin", remote_url]).map(|_| ())
+}
+
 /// Normalizes a ref name and refuses anything git would not read as one.
 ///
 /// The destination's checkout ref comes from a *peer's* payload, so this is a
@@ -257,12 +261,18 @@ fn read_final_transfer_ref(repo_path: &Path, reference: &str) -> Result<Option<S
 /// pre-publication ref state, which starting threads together does not by
 /// itself guarantee.
 #[cfg(test)]
-static PUBLICATION_SEAM: std::sync::OnceLock<
-    std::sync::Mutex<Option<std::sync::Arc<std::sync::Barrier>>>,
-> = std::sync::OnceLock::new();
+struct PublicationSeam {
+    repo_path: PathBuf,
+    transfer_id: String,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+}
 
 #[cfg(test)]
-fn set_publication_seam(barrier: Option<std::sync::Arc<std::sync::Barrier>>) {
+static PUBLICATION_SEAM: std::sync::OnceLock<std::sync::Mutex<Option<PublicationSeam>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn set_publication_seam(seam: Option<PublicationSeam>) {
     *PUBLICATION_SEAM
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
@@ -270,12 +280,14 @@ fn set_publication_seam(barrier: Option<std::sync::Arc<std::sync::Barrier>>) {
 }
 
 #[cfg(test)]
-fn wait_at_publication_seam() {
+fn wait_at_publication_seam(repo_path: &Path, transfer_id: &str) {
     let barrier = PUBLICATION_SEAM
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
         .expect("publication seam mutex poisoned")
-        .clone();
+        .as_ref()
+        .filter(|seam| seam.repo_path == repo_path && seam.transfer_id == transfer_id)
+        .map(|seam| std::sync::Arc::clone(&seam.barrier));
     if let Some(barrier) = barrier {
         barrier.wait();
     }
@@ -283,7 +295,7 @@ fn wait_at_publication_seam() {
 
 #[cfg(not(test))]
 #[inline(always)]
-fn wait_at_publication_seam() {}
+fn wait_at_publication_seam(_repo_path: &Path, _transfer_id: &str) {}
 
 /// Import and prove both immutable refs a transferred review needs. The
 /// source names are read only from the bundle; destination branches live in a
@@ -367,7 +379,7 @@ pub fn import_task_bundle_refs(
     // before the transaction itself does. A test can force concurrent
     // callers to all arrive here together; production takes the same path
     // with the wait compiled out entirely.
-    wait_at_publication_seam();
+    wait_at_publication_seam(repo_path, transfer_id);
 
     let mut child = Command::new("git")
         .args(["update-ref", "--stdin"])
@@ -1322,8 +1334,34 @@ mod tests {
 
         const RACERS_PER_CONTRACT: usize = 3;
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(RACERS_PER_CONTRACT * 2));
-        set_publication_seam(Some(std::sync::Arc::clone(&barrier)));
+        set_publication_seam(Some(PublicationSeam {
+            repo_path: destination.clone(),
+            transfer_id: "racing-transfer".into(),
+            barrier: std::sync::Arc::clone(&barrier),
+        }));
         let _reset_seam = PublicationSeamGuard;
+
+        // A concurrent import into the same repository for another transfer
+        // must never enroll in this transfer's test barrier.
+        let unrelated_destination = destination.clone();
+        let unrelated_bundle = bundle_a.clone();
+        let unrelated_head = head_oid.clone();
+        let unrelated_base = base_a_oid.clone();
+        let unrelated = std::thread::spawn(move || {
+            import_task_bundle_refs(
+                &unrelated_destination,
+                &unrelated_bundle,
+                "unrelated-transfer",
+                "task-1",
+                &unrelated_head,
+                "base-a",
+                &unrelated_base,
+            )
+        });
+        unrelated
+            .join()
+            .expect("unrelated import thread")
+            .expect("unrelated import must bypass the scoped publication seam");
 
         let mut handles = Vec::new();
         for (bundle, source_base_ref, expected_base) in [

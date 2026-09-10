@@ -1031,6 +1031,21 @@ pub(super) async fn advance_stage(
     )
     .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
     let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    {
+        let state = Arc::clone(&state);
+        let guarded_task_id = task_id.clone();
+        super::blocking::run_handler_blocking("stage advance transfer proof check", move || {
+            let db = Db::open(&state.config.db_path).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {e}"),
+                )
+            })?;
+            reject_unprepared_transfer(&db, &guarded_task_id)
+                .map_err(|e| (axum::http::StatusCode::CONFLICT, e))
+        })
+        .await?;
+    }
     let response = crate::mobile_api::TaskActionResponse {
         task_id: task_id.clone(),
         follow_task: None,

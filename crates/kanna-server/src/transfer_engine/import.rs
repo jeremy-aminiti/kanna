@@ -1070,9 +1070,21 @@ async fn acquire_repo(
         }
         RepoAcquisitionMode::TaskBundle => {
             let repo_name = repo_name.clone();
+            let remote_url = payload.repo.remote_url.clone();
+            if remote_url
+                .as_deref()
+                .is_some_and(|url| !super::git::is_credential_free_clone_source(url))
+            {
+                return Err(ImportFailure::Terminal(
+                    "incoming transfer remote URL contains credentials or signed parameters".into(),
+                ));
+            }
             super::run_blocking("transfer repo restore", move || {
                 let repo_path = super::git::allocate_repo_path(&repos_home()?, &repo_name)?;
                 super::git::init_empty_repo(&repo_path)?;
+                if let Some(remote_url) = remote_url.as_deref() {
+                    super::git::add_origin(&repo_path, remote_url)?;
+                }
                 Ok(repo_path)
             })
             .await?
@@ -2931,6 +2943,12 @@ mod tests {
         let source_repo = crate::test_paths::unique_test_dir("kanna-transfer-acquisition-source");
         let (head_oid, base_oid, bundle_path, workflow_definition) =
             init_import_source_repo(&source_repo);
+        let source_remote = crate::test_paths::unique_test_dir("kanna-transfer-acquisition-origin");
+        let init_remote = std::process::Command::new("git")
+            .args(["init", "--bare", source_remote.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(init_remote.status.success(), "{init_remote:?}");
         let source_input = crate::db::TaskInputRecord {
             id: 1,
             task_id: reservation.source_task_id.clone(),
@@ -3002,6 +3020,7 @@ mod tests {
                 "mode": "task-bundle",
                 "name": "Acquisition Retry",
                 "path": source_repo.to_string_lossy(),
+                "remote_url": source_remote.to_string_lossy(),
                 "default_branch": "main",
                 "bundle": {
                     "artifact_id": "acquisition-bundle",
@@ -3128,6 +3147,11 @@ mod tests {
             std::fs::canonicalize(&acquired_path).unwrap(),
             std::fs::canonicalize(&source_repo).unwrap(),
             "the regression must exercise a newly allocated destination repository"
+        );
+        assert_eq!(
+            super::super::git::remote_url(Path::new(&acquired_path)).as_deref(),
+            Some(source_remote.to_string_lossy().as_ref()),
+            "new bundle-backed acquisition must preserve the credential-free origin"
         );
         assert_eq!(
             state
@@ -3257,6 +3281,11 @@ mod tests {
         assert_eq!(second_binding.0, first_binding.0);
         assert_eq!(second_binding.3, first_binding.3);
         assert_eq!(db.list_repos_for_maintenance().unwrap().len(), 1);
+        assert_eq!(
+            super::super::git::remote_url(Path::new(&acquired_path)).as_deref(),
+            Some(source_remote.to_string_lossy().as_ref()),
+            "retry must retain the original destination origin"
+        );
         assert!(db
             .get_pipeline_item(&destination_task_id)
             .unwrap()
@@ -3295,5 +3324,6 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(destination_home);
         let _ = std::fs::remove_dir_all(source_repo);
+        let _ = std::fs::remove_dir_all(source_remote);
     }
 }
