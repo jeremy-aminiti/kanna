@@ -2559,6 +2559,91 @@ already-settled work, then the server owns observation independently of MCP
 request lifetime or provider background execution. Filters and cursors are the
 existing task-event implementation; no new completion detector is introduced.
 
+Subscription notification relevance is applied **before** batch size, minimum,
+and debounce decisions, in the native wait and in the collecting server. Both
+`input` and `codex_app_server` consume that same mailbox. The explicit default is:
+
+- Keep recorded failures even if the task has since changed stage, daemon-confirmed
+  `task.awaiting_input`, manual completion/awaiting-advance and settled manual
+  main agents without a verdict, unresolved or exhausted revisions, parked
+  providers, and lifecycle/teardown/merge-handoff faults.
+- Keep blocked/unblocked edges, closure, PR readiness and merge handoff: these
+  reconcile dependencies, fan-out ownership and ready work even when their cause
+  was automatic. Closing cancels remaining runs; those cancellations are redundant
+  with closure. Provider rejection with recovery is redundant with its fallback
+  or dedicated parked event. Successful runs with a successor are serviced.
+- Keep an open successful final automatic main stage without a post: the engine
+  has no continuation and explicit advancement is still required. This uses the
+  task's resolved workflow, not the `auto` policy alone. A fresh settled scan also
+  keeps an open exited session whose latest run was cancelled without a stage
+  verdict; its earlier completion is outside a new subscriber's cursor. The
+  durable runtime echo stays quiet, as do closed or replaced sessions.
+- Drop routine creation/start/stage progress, successful automatic main completion
+  with an engine continuation and successful post completion, busy/read/activity edges, input-delivery echoes, ordinary transfer
+  progress, and automatic-stage idle. A runtime waiting edge duplicates the
+  explicit question event; an initial settled waiting snapshot still surfaces it.
+  Unknown event kinds or missing failure/policy information remain visible. If a
+  peer lacks continuation metadata, an unserviced successful main completion
+  stays visible conservatively; a recorded successor still makes it quiet.
+
+`task.lifecycle_failed` is appended when preparation or detached execution of an
+accepted stage transition fails (`payload.operation: "stage_transition"`,
+`payload.error`). A successful main run is not rewritten into a failure just
+because its subsequent transition failed. No transcript or speech classifier
+participates in relevance.
+
+Raw durable history, general-purpose HTTP/MCP waits and the legacy CLI watch keep
+their behavior. The subscription wait sends the optional
+`orchestrationNotifications=true` parameter to peer legs; older servers may ignore
+it. The collector applies the same predicate before counting or truncating their
+raw rows, keeps the exact native checkpoint through excluded rows, and re-arms
+raw pages internally. `hasMore` from an unfiltered page cannot fill a relevant
+batch. Filtered initial snapshots still advance the existing settled-scan cursor;
+acknowledgement does not alter human read state. No cursor format, relay protocol,
+mailbox backpressure or delivery retry contract changes.
+
+The owning subscription collector also applies one internal timing policy:
+**1000ms trailing quiet**, **5000ms maximum collection hold** from the first
+relevant observation, and **5000ms minimum between adapter-call admissions**.
+These are manager-adopted engineering defaults, not owner-specified values or
+measured tuning. Capacity remains 100, minimum one. Quiet resets only on relevant
+observations; the collection closes at the earliest of last observation + 1s,
+first observation + 5s, or the existing receiver deadline. Full pages seal early.
+Failed run/main/post facts, lifecycle/teardown/merge-handoff failures, provider
+parking, confirmed input requests, watch/machine errors and unknown attention
+seal urgently. Urgency skips quiet debounce, never admission pacing, FIFO cursors,
+immutable pending pages, matching acknowledgement or adapter/run safety.
+
+The minimum admission interval applies to both adapters, including full pages and
+notification-triggered retries that provably delivered nothing. There are no
+accumulated burst credits: admissions are at least 5s apart (12/minute sustained).
+No adapter wake accompanies the immediately observed bootstrap. Timing is selected
+only by `wait_subscription_events` at the top-level collector, not by the wire
+relevance flag; peer legs and public native/MCP waits keep their existing timing.
+Collectors return normally at quiet, cap, capacity or fault boundaries to retain
+unfinished aggregate legs. Known observation faults do not wait for silent healthy
+peers. Admission cooldown uses a lifecycle-owned deadline wait and reloads the row
+before reserving `sending` with CAS; an acknowledgement before reservation cancels
+that scheduled wake. A transient transport failure still requires a notification
+before retry: cooldown expiry is not a generic retry loop.
+
+The JSON record adds optional-on-read `wakeAdmitted`, preserved through ack and
+protected against stale delivery writes. Live timing is monotonic and survives
+same-id pause/recovery; service/process recovery conservatively rearms at most one
+5s cooldown, including legacy rows. No persisted wall time can cause a burst or an
+indefinite wait. A recovered `sending` page remains uncertain, without resubmission.
+Older servers may ignore this additive hint: mailbox/cursor compatibility survives,
+but enforcing temporal pacing requires the new owning server.
+
+These are conditional scheduler-delay bounds **after observation in the current
+collecting page**, assuming healthy execution and available acknowledgement:
+ordinary collection adds at most 5s; an observed urgent page is eligible immediately
+if the admission slot is free, otherwise after its remaining cooldown (at most 5s).
+They are not universal event-creation-to-wake bounds. An unacknowledged page, older
+backlog, unavailable transport or stalled server can delay observation/delivery;
+a busy harness may consume admitted output later. No urgent page overtakes those
+facts or replaces an unacknowledged page.
+
 The durable `event_subscription` row binds to the manager's current run,
 stage, and branch. Stage replacement or closure stops the worker. One pending
 page bounds the mailbox; later events stay in the feed until it is acknowledged.

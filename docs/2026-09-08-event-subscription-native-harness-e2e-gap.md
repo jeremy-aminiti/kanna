@@ -50,3 +50,32 @@ Claude Fable versus Opus background-watcher behavior has not been isolated to
 model versus prompting. Neither is a dependency of the server-owned watch.
 Cursor retention and cross-machine recovery remain task f63b3698's coverage
 and deployment prerequisite for unattended continuity.
+
+## Timing follow-up, 2026-09-09
+
+Work item `6b153714` adds a shared subscription policy (manager-adopted 1s trailing
+quiet, 5s max collection, 5s admission floor). New paused-clock worker fixtures use
+an isolated scripted executable for the actual Codex proxy path and scripted
+daemon I/O for input. They measure admissions, native toolOutput/thread identity,
+engine provenance and mailbox continuity. All twelve timing fixtures passed in
+the authorized focused Rust slot; see the exact commands and remaining failures in
+[the actionable-events verification note](2026-09-09-actionable-events-e2e-gap.md).
+They do not establish live Codex TUI timing: authenticated
+shared app-server root-thread compatibility, busy-harness consumption and actual
+operator-visible wake behavior remain operator E2E gaps. Do not infer a universal
+event-creation latency from the conditional scheduler bounds.
+
+
+After heavy verification was released, the full server lane also passed all
+1,439 unit tests, including those twelve actual-adapter cases. The separate-process
+input timing fixture passed with authenticated source and peer servers, a real
+relay, daemons and scripted PTYs. It checks 105 blocker changes across full pages,
+local failure behind acknowledged backlog, and remote failure returned through
+one retained positive-timeout peer wait. Actual engine PTY submissions match the
+acknowledged pages. Exact 1s/5s timing assertions remain at the paused-clock
+adapter-call boundary; PTY consumption timestamps do not substitute for admissions.
+
+The canonical full gate and remote suite nevertheless returned exit 1; see the
+linked verification note for worker environment, desktop terminal registration,
+and terminal-flow evidence. The scripted Codex protocol coverage is not a
+separate-process live TUI compatibility pass. No staging build or publish ran.

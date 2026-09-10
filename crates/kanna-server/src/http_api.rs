@@ -30,6 +30,7 @@ mod signal_agent;
 mod snapshot;
 mod state;
 mod status;
+mod subscription_timing;
 mod task_actions;
 pub(crate) mod task_activity;
 mod task_agent_session;

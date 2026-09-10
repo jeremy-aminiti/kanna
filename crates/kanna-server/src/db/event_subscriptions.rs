@@ -22,6 +22,10 @@ pub(crate) struct EventSubscription {
     pub wake_state: String,
     pub error: Option<String>,
     pub active: bool,
+    /// Additive recovery hint only. Live pacing uses a monotonic clock; no
+    /// wall-clock timestamp survives restart to invent credit or a long wait.
+    #[serde(default)]
+    pub wake_admitted: bool,
 }
 
 fn decode(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventSubscription> {

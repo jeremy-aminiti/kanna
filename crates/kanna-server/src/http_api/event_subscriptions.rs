@@ -72,8 +72,8 @@ fn still_bound(state: &AppState, row: &EventSubscription) -> Result<bool, String
     }) && run.is_some_and(|run| run.id == row.run_id))
 }
 
-/// Consume only engine-noise pages internally, preserving the cursor even
-/// when the filter leaves no messages. The page itself is the mailbox record.
+/// Selection belongs to the wait, before batching. The returned page is the
+/// mailbox record, including its checkpoint through excluded events.
 async fn collect(
     state: Arc<AppState>,
     row: &EventSubscription,
@@ -84,11 +84,7 @@ async fn collect(
     if let Some(cursor) = &row.cursor {
         query["cursor"] = json!(cursor);
     }
-    let mut batch = task_events::wait_subscription_events(state, query).await?;
-    if let Some(events) = batch["events"].as_array_mut() {
-        events.retain(kanna_tool_catalog::is_actionable_task_event);
-    }
-    Ok(batch)
+    task_events::wait_subscription_events(state, query).await
 }
 
 fn accept_page(row: &mut EventSubscription, mut batch: Value, observed: bool) {
@@ -237,6 +233,7 @@ pub(super) async fn subscribe(
         wake_state: "idle".into(),
         error: None,
         active: true,
+        wake_admitted: false,
     };
     drop(db);
     let batch = collect(state.clone(), &row, 0).await.map_err(failure)?;
@@ -314,12 +311,16 @@ enum Step {
     Iterate,
 }
 
-async fn work(state: Arc<AppState>, id: String) -> Result<(), String> {
+async fn work(
+    state: Arc<AppState>,
+    id: String,
+    admission: &mut super::subscription_timing::Admission,
+) -> Result<(), String> {
     let mut changes = state.subscribe_state_changes();
     loop {
         let mut changed = Box::pin(state.event_subscriptions_changed.notified());
         changed.as_mut().enable();
-        let step = step(&state, &id, changed.as_mut(), &mut changes).await;
+        let step = step(&state, &id, changed.as_mut(), &mut changes, admission).await;
         match step {
             Ok(Step::Stop) => return Ok(()),
             Ok(Step::Iterate) => {}
@@ -341,6 +342,7 @@ async fn step(
     id: &str,
     mut changed: std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>,
     changes: &mut tokio::sync::broadcast::Receiver<kanna_agent_protocol::ServerFrame>,
+    admission: &mut super::subscription_timing::Admission,
 ) -> Result<Step, String> {
     let Some(mut row) = database(state)?
         .event_subscription(id)
@@ -364,11 +366,40 @@ async fn step(
                 return Ok(Step::Iterate);
             }
         } else if row.wake_state == "pending" {
+            if let Some(deadline) = admission.deadline() {
+                // Expiry is a scheduled admission, not a transport retry.
+                // Re-enter step to reload the row and binding before CAS: ack,
+                // retirement or replacement may have invalidated this page.
+                tokio::select! {
+                    _ = changed.as_mut() => {},
+                    _ = changes.recv() => {},
+                    _ = tokio::time::sleep_until(deadline) => {},
+                }
+                return Ok(Step::Iterate);
+            }
             row.wake_state = "sending".into();
+            row.wake_admitted = true;
             if !save(state, &mut row)? {
                 return Ok(Step::Iterate);
             }
+            admission.admitted();
+            #[cfg(test)]
+            if let Some(events) = &state.subscription_test_events {
+                let _ = events.send(super::subscription_timing::TestEvent::Admitted(
+                    row.batch_id,
+                    tokio::time::Instant::now(),
+                ));
+            }
             let result = harness_wake::deliver(state.clone(), &row).await;
+            #[cfg(test)]
+            if let Some(barrier) = &state.subscription_delivery_barrier {
+                if let Some(events) = &state.subscription_test_events {
+                    let _ = events.send(super::subscription_timing::TestEvent::Delivered);
+                }
+                if let Ok(permit) = barrier.acquire().await {
+                    permit.forget();
+                }
+            }
             match result {
                 Ok(outcome) => {
                     row.wake_state = outcome.into();
@@ -459,23 +490,34 @@ async fn step(
 pub(crate) async fn run(state: Arc<AppState>) {
     let mut workers = tokio::task::JoinSet::new();
     let mut running = HashMap::new();
+    // Keep monotonic pacing across pause/same-id recovery in this service.
+    // On process/service recovery rearm at most one cooldown, including old
+    // rows without the additive hint. Fresh registration remains immediate.
+    let mut admission_clocks: HashMap<String, super::subscription_timing::Admission> =
+        HashMap::new();
+    let mut recovering = true;
     loop {
         let mut changed = Box::pin(state.event_subscriptions_changed.notified());
         changed.as_mut().enable();
         match database(&state).and_then(|db| db.event_subscriptions().map_err(|e| e.to_string())) {
             Ok(rows) => {
+                admission_clocks.retain(|id, _| rows.iter().any(|row| &row.id == id));
                 for row in rows.into_iter().filter(|row| row.active) {
                     if running.contains_key(&row.id) {
                         continue;
                     }
                     let worker_id = row.id.clone();
                     let worker_state = state.clone();
+                    let mut admission = admission_clocks.remove(&row.id).unwrap_or_else(|| {
+                        super::subscription_timing::Admission::new(recovering || row.wake_admitted)
+                    });
                     let handle = workers.spawn(async move {
-                        let result = work(worker_state, row.id.clone()).await;
-                        (row.id, result)
+                        let result = work(worker_state, row.id.clone(), &mut admission).await;
+                        (row.id, result, admission)
                     });
                     running.insert(worker_id, handle.id());
                 }
+                recovering = false;
             }
             Err(error) => log::error!("event subscription recovery failed: {error}"),
         }
@@ -483,8 +525,9 @@ pub(crate) async fn run(state: Arc<AppState>) {
             _ = changed => {},
             Some(result) = workers.join_next(), if !workers.is_empty() => {
                 match result {
-                    Ok((id, result)) => {
+                    Ok((id, result, admission)) => {
                         running.remove(&id);
+                        admission_clocks.insert(id.clone(), admission);
                         if let Err(error) = result {
                             log::error!("event subscription {id} failed: {error}");
                             if let Ok(mut row) = load(&state, &id) {

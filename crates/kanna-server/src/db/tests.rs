@@ -3521,6 +3521,7 @@ fn task_event_type_names_are_stable() {
             "task.raw_input_delivered",
             "task.teardown_failed",
             "task.lifecycle_operation_retired",
+            "task.lifecycle_failed",
             "task.transfer_finalizing",
             "task.blocked",
             "task.unblocked",

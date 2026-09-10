@@ -19,6 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
 mod subscription_remote;
+mod subscription_timing;
 
 fn seed_orchestration(db: &Db) {
     db.insert_test_repo("repo-events", "Events Repo")
@@ -5715,3 +5716,5 @@ async fn min_events_counts_events_across_every_machine_of_a_fan_out() {
 
     relay.abort();
 }
+
+mod subscription_relevance;

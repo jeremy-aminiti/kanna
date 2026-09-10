@@ -311,7 +311,7 @@ const SINGLE_STAGE_WORKFLOW = "remote-single-stage";
 /// workflows interpose commit/approve posts that would need real agents to
 /// satisfy; the scripted agent only echoes.
 export async function pinSingleStageWorkflow(
-  harness: RemoteHarness,
+  harness: Pick<RemoteDesktop, "repoRoot" | "paths">,
   taskId: string
 ): Promise<void> {
   const definition = JSON.stringify({

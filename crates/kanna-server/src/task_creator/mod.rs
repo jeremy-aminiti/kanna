@@ -79,15 +79,16 @@ pub(crate) use lifecycle::{
 pub(crate) use merge::prepare_merge_agent_for_api;
 pub use merge::run_merge_agent;
 pub(crate) use prompt::RevisionRound;
-#[cfg(test)]
-pub(crate) use stages::{prepare_advance_stage_for_api, prepare_stage_completion_for_api};
 pub(crate) use stages::{
-    prepare_advance_stage_for_api_with_intent, prepare_fresh_restart_after_rejected_resume,
-    prepare_provider_fallback_for_api, prepare_resume_task_for_api, prepare_revision_task_for_api,
+    main_completion_continuation, prepare_advance_stage_for_api_with_intent,
+    prepare_fresh_restart_after_rejected_resume, prepare_provider_fallback_for_api,
+    prepare_resume_task_for_api, prepare_revision_task_for_api,
     prepare_stage_completion_for_api_with_trigger, resolve_revision_budget, resolve_revision_limit,
     resolve_stage_transition, stage_declares_merge_approve_post, RevisionBudget,
     StageAdvanceIntent,
 };
+#[cfg(test)]
+pub(crate) use stages::{prepare_advance_stage_for_api, prepare_stage_completion_for_api};
 pub(crate) use worktree::{local_branch_exists, resolve_current_source_worktree_branch};
 
 pub(crate) const FALLBACK_WORKFLOW_NAME: &str = "no-review";

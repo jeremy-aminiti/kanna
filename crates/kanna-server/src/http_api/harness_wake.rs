@@ -100,6 +100,14 @@ async fn native_codex(state: Arc<AppState>, row: &EventSubscription) -> Result<(
         let thread = run.provider_session_id;
         (thread, run.cwd.ok_or("subscriber run has no worktree")?)
     };
+    #[cfg(test)]
+    let executable = match &state.subscription_proxy_executable {
+        Some(executable) => executable.clone(),
+        None => crate::task_creator::resolve_agent_executable(
+            kanna_agent_protocol::AgentProvider::Codex,
+        )?,
+    };
+    #[cfg(not(test))]
     let executable =
         crate::task_creator::resolve_agent_executable(kanna_agent_protocol::AgentProvider::Codex)?;
     let mut child = tokio::process::Command::new(executable)

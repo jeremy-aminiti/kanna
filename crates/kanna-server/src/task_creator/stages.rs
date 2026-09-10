@@ -320,7 +320,7 @@ pub(crate) fn prepare_stage_completion_for_api_with_trigger(
                 return prepare_post_dispatch(db, config, &context, index, StageTrigger::Auto)
                     .map(Some);
             }
-            if loaded.workflow.stages.get(index + 1).is_none() {
+            if !main_completion_has_continuation(&loaded.workflow, index) {
                 // An auto main-run completion never closes the task; only an
                 // explicit advance (or a post completion) moves past the
                 // final stage.
@@ -1404,6 +1404,37 @@ pub(crate) fn resolve_stage_transition(
         Some(StagePosition::Post { .. }) => {
             Some(WorkflowStageTransition::Auto.as_str().to_string())
         }
+        None => None,
+    })
+}
+
+// Shared with notification enrichment: an auto main completion dispatches a
+// post or enters a successor, but never closes a final stage without a post.
+fn main_completion_has_continuation(workflow: &WorkflowDefinition, index: usize) -> bool {
+    workflow.stages[index].post.is_some() || workflow.stages.get(index + 1).is_some()
+}
+
+pub(crate) fn main_completion_continuation(
+    db: &Db,
+    task_id: &str,
+    stage: &str,
+) -> Result<Option<bool>, String> {
+    let identity = load_stage_identity(db, task_id)?;
+    let source = &identity.source_task;
+    let workflow = match source
+        .pipeline_def
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(stored) => parse_stored_workflow_definition(stored)?,
+        None => RepoDefinitions::resolve(&identity.repo)?
+            .workflow(source.pipeline.as_deref().unwrap_or(FALLBACK_WORKFLOW_NAME))?,
+    };
+    Ok(match resolve_stage_position(&workflow, stage) {
+        Some(StagePosition::Stage(index)) => {
+            Some(main_completion_has_continuation(&workflow, index))
+        }
+        Some(StagePosition::Post { .. }) => Some(true),
         None => None,
     })
 }

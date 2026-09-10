@@ -124,6 +124,8 @@ pub enum TaskEventKind {
     /// unblocked at the cost of that projection. `payload.reason` says why,
     /// and `payload.operationId`/`kind`/`phase` identify what was retired.
     LifecycleOperationRetired,
+    /// Preparing or executing an accepted stage transition failed.
+    LifecycleFailed,
     /// A cross-machine transfer is shutting the task's agent down so its
     /// conversation can be shipped. `payload.phase` names the step —
     /// `wrap-up-sent`, `idle`, `quit-sent`, `exited`, `already-exited`, or
@@ -188,6 +190,7 @@ impl TaskEventKind {
             Self::RawInputDelivered => "task.raw_input_delivered",
             Self::TeardownFailed => "task.teardown_failed",
             Self::LifecycleOperationRetired => "task.lifecycle_operation_retired",
+            Self::LifecycleFailed => "task.lifecycle_failed",
             Self::TransferFinalizing => "task.transfer_finalizing",
             Self::TaskBlocked => "task.blocked",
             Self::TaskUnblocked => "task.unblocked",
@@ -217,6 +220,7 @@ impl TaskEventKind {
         Self::RawInputDelivered,
         Self::TeardownFailed,
         Self::LifecycleOperationRetired,
+        Self::LifecycleFailed,
         Self::TransferFinalizing,
         Self::TaskBlocked,
         Self::TaskUnblocked,

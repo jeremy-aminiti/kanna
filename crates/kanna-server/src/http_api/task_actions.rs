@@ -1226,6 +1226,21 @@ impl StageTransitionOwnership {
     }
 }
 
+/// Failure is a lifecycle fact, separate from the successful run that asked
+/// the engine to advance. Subscription selection must not infer it from idle.
+fn record_stage_transition_failure(state: &AppState, task_id: &str, error: &str) {
+    let recorded = Db::open(&state.config.db_path).and_then(|db| {
+        db.append_task_event(
+            task_id,
+            crate::db::TaskEventKind::LifecycleFailed,
+            serde_json::json!({ "operation": "stage_transition", "error": error }),
+        )
+    });
+    if let Err(record_error) = recorded {
+        log::error!("failed to record stage transition failure for {task_id}: {record_error}");
+    }
+}
+
 /// Same, but the detached worker takes ownership of a per-task operation
 /// guard for the whole transition.
 ///
@@ -1247,6 +1262,7 @@ fn execute_stage_transition_detached_holding(
     // prep). Drive the whole future from the blocking pool so none of it can
     // occupy a runtime worker and starve the shared KSP terminal transport.
     let worker_task_id = task_id.clone();
+    let failure_state = state.clone();
     tokio::spawn(async move {
         // Bound to the worker's own scope: every exit path below — daemon
         // connect failure, transition error, success, join error, or the task
@@ -1265,6 +1281,7 @@ fn execute_stage_transition_detached_holding(
                                 task_id,
                                 error
                             );
+                            record_stage_transition_failure(&state, &task_id, &error.to_string());
                             return;
                         }
                     };
@@ -1272,6 +1289,7 @@ fn execute_stage_transition_detached_holding(
                     execute_stage_transition(&state, &mut daemon, &task_id, transition).await
                 {
                     log::error!("stage transition for {} failed: {}", task_id, message);
+                    record_stage_transition_failure(&state, &task_id, &message);
                     state.publish_state_changed(StateChangeScope::Tasks);
                 }
             })
@@ -1279,6 +1297,11 @@ fn execute_stage_transition_detached_holding(
         .await;
         ownership.release();
         if let Err(join_error) = joined {
+            record_stage_transition_failure(
+                &failure_state,
+                &worker_task_id,
+                &join_error.to_string(),
+            );
             log::error!(
                 "stage transition worker for {} failed: {}",
                 worker_task_id,
@@ -1785,7 +1808,10 @@ pub(super) async fn complete_stage(
                     .and_then(|run| run.completion_transition.as_deref()),
                 finished_run.as_ref().map(|run| run.trigger.as_str()),
             )
-            .map_err(|e| (stage_action_error_status(&e), e))
+            .map_err(|e| {
+                record_stage_transition_failure(&state, &task_id, &e);
+                (stage_action_error_status(&e), e)
+            })
         })
         .await?
     };
@@ -2423,4 +2449,60 @@ fn validate_revision_run_binding(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod notification_failure_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn detached_transition_without_daemon_publishes_actionable_failure() {
+        let state = super::super::test_support::test_state_with_seed(
+            "transition-notification",
+            "Transition",
+            |db| {
+                db.insert_test_repo("repo", "Repo").unwrap();
+                db.insert_test_pipeline_item(
+                    "task",
+                    "repo",
+                    "work",
+                    None,
+                    "pr",
+                    "2026-09-09 00:00:00",
+                )
+                .unwrap();
+            },
+        );
+        // The fixture owns an isolated daemon directory with no daemon.
+        execute_stage_transition_detached_holding(
+            state.clone(),
+            "task".into(),
+            crate::task_creator::PreparedStageTransition::Close {
+                task_id: "task".into(),
+                workspace_teardown: None,
+            },
+            StageTransitionOwnership::default(),
+        );
+        let page = super::super::task_events::wait_subscription_events(
+            state.clone(),
+            serde_json::json!({"taskIds":"task", "localOnly":true,
+                "includeCurrentActivity":false, "timeoutSecs":5}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page["events"].as_array().unwrap().len(), 1, "{page}");
+        assert_eq!(page["events"][0]["type"], "task.lifecycle_failed");
+        assert_eq!(
+            page["events"][0]["payload"]["operation"],
+            "stage_transition"
+        );
+        assert!(page["events"][0]["payload"]["error"].is_string());
+        assert!(Db::open(&state.config.db_path)
+            .unwrap()
+            .get_pipeline_item("task")
+            .unwrap()
+            .unwrap()
+            .closed_at
+            .is_none());
+    }
 }
