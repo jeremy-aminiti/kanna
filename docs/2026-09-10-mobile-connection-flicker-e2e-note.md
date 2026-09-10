@@ -54,16 +54,21 @@ original all-source-only state.
 is intact, and the one PR #1419 line that touched a file this fix also
 touches (`mobileEnvironment.ts` gaining an unrelated `androidPackageId`
 field) leaves the `scheme` field this fix reads untouched. The Codex
-reproduction (`tests/live/codex-logical-submission.test.ts`) is corrected
-and committed, ready for its next real run — **its last two real runs both
-failed on a harness readiness precondition (an MCP-server-boot race in
-composer detection), not on anything resembling the submission question
-itself; the missing-Enter symptom is not fixed, not reproduced, and not
-ruled out by either run.** A simulator first-attach lane is prepared below
-with the exact identity and a genuine disposable pairing sequence (real
-`POST /v1/pairing/sessions`, not trust-seeding alone) — held on Mac Studio
-load, not on a person, per the owner's lift of recovery-related holds; the
-still-unknown original incident provider/session is a separate information
+reproduction (`tests/live/codex-logical-submission.test.ts`) has now run
+four times total across two lane authorizations — **all four failed on a
+harness readiness precondition (a `codex_apps` MCP-server-boot race, now
+narrowed from "wrong composer pattern" to "the boot itself outlasts the
+wait window"), never on anything resembling the submission question itself;
+the missing-Enter symptom is not fixed, not reproduced, and not ruled out
+by any of them.** Composer-readiness detection is now solid (each of runs 2
+and 3 independently falsified a different single-regex approach); the
+remaining gap and its concrete next fix (a `--disable` feature flag, name
+unconfirmed, or a longer wait) are documented in the test file itself. A
+simulator first-attach lane is prepared below with the exact identity and a
+genuine disposable pairing sequence (real `POST /v1/pairing/sessions`, not
+trust-seeding alone) — held on Mac Studio load, not on a person, per the
+owner's lift of recovery-related holds; the still-unknown original incident
+provider/session is a separate information
 gap (owner-only) that does not block either of these independent checks.
 
 ## Flicker: a source-demonstrated overlay bug, not yet a proven cure
@@ -673,13 +678,50 @@ harness can currently drive interactively at all.
    comes from reading the actual transcript, not from guessing a cause for a
    bare timeout. Narrowed `COMPOSER` to `/Use\/skills/i` (dropping only the
    half proven to match early) as a further source correction after run 2,
-   **not re-run a third time this pass** — the one-fix-then-report bound.
+   not re-run in that pass — the one-fix-then-report bound.
    `codex-tui-quit.test.ts` itself is untouched (out of scope; its own
    environment/usage may not hit this MCP-boot race, and this pass did not
-   re-verify it). No auth secrets appear in either preserved log; only this
+   re-verify it). No auth secrets appear in any preserved log; only this
    test's own PTY children were killed; no other repeated live-suite runs or
    loops. Claude's file was not run this pass (no automatic second provider
    run) and remains authored/unverified.
+
+   **Run 3** (lane cleared, `.tmp/codex-logical-submission-run-3.log`, not
+   committed) failed both cases again at `reachComposer` — but the narrowed
+   `/Use\/skills/i` never matched at all: that placeholder tip *rotates* and
+   is not reliably present. The same transcript showed the real, stable
+   composer signal directly: `› Ask Codex to do anything`, codex's actual
+   input-box placeholder. Root cause of both `COMPOSER` attempts failing the
+   same underlying way: `PtySession.output`/`waitForOutput` search the
+   *entire* accumulated byte history, not the current screen — this bridge
+   concatenates and ANSI-strips, it does not emulate a terminal grid — so a
+   stale `Booting MCP server` banner from seconds earlier stays matchable
+   forever regardless of current state. **Fix:** replaced pattern-matching
+   against the whole history with `waitForComposerReady`, polling a recency
+   window (last 3,000 chars) of output and requiring both the ready
+   placeholder present *and* the busy-boot banner absent from that window —
+   a fact about the current screen, not the whole session. **Run 4**, the one
+   bounded rerun this fix earned: genuine progress —
+   `.tmp/codex-logical-submission-run-4.log` (not committed) shows
+   `reachComposer` no longer failing, both cases got past it — but the
+   busy-phase proof still failed: codex kept printing `Booting MCP server:
+   codex_apps` well past the readiness read, and the submitted instruction
+   landed as `tab to queue message` rather than executing, so
+   `.kanna-busy-phase-start` never appeared in the 30s wait. Checked
+   (non-agentic, zero-cost `codex --help` / `codex mcp --help` / `codex mcp
+   list` against a bare-fresh `CODEX_HOME` — not a live turn): `codex_apps`
+   is not a user-configured MCP server (`codex mcp list` reports none for a
+   fresh home) — it is a built-in feature, and `--disable <FEATURE>` (`-c
+   features.<name>=false`) is documented for exactly this, though the exact
+   feature name was not confirmed live. Documented as the concrete next fix
+   in the test file's own header comment; **not attempted a third time this
+   pass** — the one-fix-then-report bound, now spent twice over two lane
+   authorizations. Net across all four runs: composer-readiness detection is
+   now solid (two real runs each falsified a different single-regex
+   approach, which is itself real, evidenced progress) — but the underlying
+   question ("does codex's parser treat this CR as submit mid-turn") is
+   still untested; every failure so far has been a harness precondition, not
+   a result either way.
 
 **Raw on-screen direct-typing is not ruled out either, and not for the reason
 this note previously gave.** `sendTaskTerminalInput` → raw KSP bytes forwards
@@ -707,14 +749,17 @@ the reported conditions, which is real but partial: it says nothing about
 whether a live CLI's parser actually treats that CR as submit, and the one
 existing live-CLI submission test pins a stale, no-longer-shipped contract.
 No fix was authored for this symptom because no currently-reproducing defect
-was located by any means available here. One real Codex consumption lane
-has now run (twice — above) and, on the actual evidence, answered a
-*different* question than the one it was built for: both runs failed on a
-harness precondition (an MCP-server-boot race in composer-readiness
-detection), not on anything resembling a swallowed submission boundary or a
-CLI parser defect. The CLI-side parser question this whole reproduction
-exists to answer is therefore still genuinely open — not "probably fine
-because the daemon-byte tests pass," and not "reproduced" either. Closing
+was located by any means available here. The real Codex consumption lane has
+now run four times across two lane authorizations and, on the actual
+evidence, answered a *different* question than the one it was built for
+every time: all four runs failed on a harness precondition (a `codex_apps`
+MCP-server-boot race, narrowed run over run from "wrong composer pattern"
+matched too early, to that pattern never matching at all, to composer
+detection now working but the boot itself outlasting the wait window), never
+on anything resembling a swallowed submission boundary or a CLI parser
+defect. The CLI-side parser question this whole reproduction exists to
+answer is therefore still genuinely open — not "probably fine because the
+daemon-byte tests pass," and not "reproduced" either. Closing
 this fully needs, in order of what it would actually settle: (a) the
 owner's affected session/provider/timestamp — still pending, not invented
 here — so the real daemon write timeline for that delivery can be read
