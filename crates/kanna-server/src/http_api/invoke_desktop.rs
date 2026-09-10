@@ -229,16 +229,16 @@ async fn attempt_lan_invoke(
         ));
     };
 
-    dial_lan_invoke(
-        &state.config().desktop_id,
-        desktop_id,
+    dial_lan_invoke(LanDialRequest {
+        this_desktop_id: &state.config().desktop_id,
+        target_desktop_id: desktop_id,
         candidate,
-        &trust_anchor_pem,
-        &bearer_secret,
+        trust_anchor_pem: &trust_anchor_pem,
+        bearer_secret: &bearer_secret,
         method,
         path,
         body,
-    )
+    })
     .await
 }
 
@@ -342,16 +342,33 @@ fn lan_request_timeout(path: &str) -> std::time::Duration {
 /// chose and never authenticated. `reqwest`'s default policy follows up to
 /// 10 redirects; refusing that keeps every dispatch to exactly the one
 /// pinned-TLS connection this function itself established.
-async fn dial_lan_invoke(
-    this_desktop_id: &str,
-    target_desktop_id: &str,
+/// Bundles `dial_lan_invoke`'s parameters - every one of them a distinct
+/// fact the caller already resolved (an already-attested trust anchor and
+/// bearer secret, an already-discovered candidate address, the wrapped
+/// method/path/body) and none of them related enough to merge, so a struct
+/// rather than fewer, wider parameters.
+struct LanDialRequest<'a> {
+    this_desktop_id: &'a str,
+    target_desktop_id: &'a str,
     candidate: std::net::SocketAddr,
-    trust_anchor_pem: &str,
-    bearer_secret: &str,
-    method: &str,
-    path: &str,
-    body: &serde_json::Value,
-) -> LanAttemptOutcome {
+    trust_anchor_pem: &'a str,
+    bearer_secret: &'a str,
+    method: &'a str,
+    path: &'a str,
+    body: &'a serde_json::Value,
+}
+
+async fn dial_lan_invoke(request: LanDialRequest<'_>) -> LanAttemptOutcome {
+    let LanDialRequest {
+        this_desktop_id,
+        target_desktop_id,
+        candidate,
+        trust_anchor_pem,
+        bearer_secret,
+        method,
+        path,
+        body,
+    } = request;
     let client_config = match crate::lan_tls::client_config_pinned_to_ca(trust_anchor_pem) {
         Ok(config) => config,
         Err(error) => return LanAttemptOutcome::PreDispatch(error),

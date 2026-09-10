@@ -13,7 +13,7 @@
 //! desktop_id the bootstrap actually attested, never anything read off the
 //! discovered address itself.
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use std::sync::Arc;
 
@@ -50,14 +50,6 @@ pub fn client_config_pinned_to_ca(ca_certificate_pem: &str) -> Result<Arc<Client
     Ok(Arc::new(config))
 }
 
-/// The `ServerName` a client must present for the handshake's standard
-/// hostname verification to succeed - the target desktop_id the bootstrap
-/// attested, never anything read off the discovered candidate address.
-pub fn server_name_for_desktop(desktop_id: &str) -> Result<ServerName<'static>, String> {
-    ServerName::try_from(desktop_id.to_string())
-        .map_err(|error| format!("desktop id {desktop_id} is not a valid TLS server name: {error}"))
-}
-
 fn parse_certificate(pem: &str, label: &str) -> Result<CertificateDer<'static>, String> {
     let mut reader = std::io::BufReader::new(pem.as_bytes());
     let mut certs = rustls_pemfile::certs(&mut reader);
@@ -84,9 +76,26 @@ fn parse_private_key(pem: &str) -> Result<PrivateKeyDer<'static>, String> {
 mod tests {
     use super::*;
     use crate::lan_tls_identity::LanTlsIdentity;
+    use rustls::pki_types::ServerName;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+    /// The `ServerName` a client must present for the handshake's standard
+    /// hostname verification to succeed - the target desktop_id the
+    /// bootstrap attested, never anything read off the discovered candidate
+    /// address. Production dials via `reqwest` instead (see
+    /// `invoke_desktop::dial_lan_invoke`), which derives the same `ServerName`
+    /// from the request URL's host (`target_desktop_id`) plus its
+    /// `.resolve()` override; this helper exists to prove that same
+    /// hostname-verification contract directly against the raw rustls
+    /// primitives this module builds, one level below reqwest's own
+    /// abstraction.
+    fn server_name_for_desktop(desktop_id: &str) -> Result<ServerName<'static>, String> {
+        ServerName::try_from(desktop_id.to_string()).map_err(|error| {
+            format!("desktop id {desktop_id} is not a valid TLS server name: {error}")
+        })
+    }
 
     fn generate_identity(desktop_id: &str) -> LanTlsIdentity {
         let path = crate::test_paths::unique_test_path("lan-tls-handshake-identity");

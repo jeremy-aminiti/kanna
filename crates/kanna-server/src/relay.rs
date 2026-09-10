@@ -201,7 +201,16 @@ pub(crate) fn reconcile_machine_trust_for_account(
     }
     let mut store = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
         .map_err(|error| format!("failed to load machine trust store: {error}"))?;
-    if !store.retain_account(current_account_uid) {
+    let account_changed = store.retain_account(current_account_uid);
+    // Every account-transition reconciliation already loads and is about to
+    // save this same store under this same lock, so it is also the natural,
+    // no-extra-cost place to reclaim space from records expiry already
+    // makes unusable on every lookup (`remove_expired`'s own doc comment) -
+    // rather than needing a dedicated timer nothing currently schedules.
+    let expired_purged = crate::machine_trust::unix_time_ms()
+        .map(|now_ms| store.remove_expired(now_ms))
+        .unwrap_or(false);
+    if !account_changed && !expired_purged {
         return Ok(());
     }
     store
