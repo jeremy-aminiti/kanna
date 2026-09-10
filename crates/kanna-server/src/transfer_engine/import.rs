@@ -3031,7 +3031,9 @@ mod tests {
                 source_desktop_id: None,
                 target_desktop_id: None,
                 source_task_id: Some(reservation.source_task_id.clone()),
-                local_task_id: Some(destination_task_id.clone()),
+                // Model the production producer: acquisition starts unbound;
+                // the fenced importing transition binds the destination task.
+                local_task_id: None,
                 error: None,
                 payload_json: Some(payload_json.to_string()),
             })
