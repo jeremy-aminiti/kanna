@@ -2752,7 +2752,12 @@ baseline exclusion (`task.activity_changed`, `task.runtime_settled`,
 `min_admission_interval_ms` override that one subscription's collection
 window and admission floor (defaults 300000/300000/60000ms); each is
 rejected below a 1000ms floor, and `max_hold_ms` is rejected below
-`quiet_ms`. Urgent-event handling is unaffected: an urgent batch still seals
+`quiet_ms`. There is deliberately no policy ceiling — `subscribe` instead
+rejects a value too large to add to an `Instant` (checked once at
+registration via `subscription_timing::fits_instant`), the actual overflow
+class `Collection::deadline`/`Admission` would otherwise panic on; unlike
+`Duration::from_millis`, `Instant + Duration` does not accept every `u64`.
+Urgent-event handling is unaffected: an urgent batch still seals
 its collection immediately regardless of these overrides, gated only by the
 (possibly overridden) minimum admission interval — no new urgency taxonomy,
 no runtime retry loop.
