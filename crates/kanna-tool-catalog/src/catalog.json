@@ -72,7 +72,7 @@
     },
     {
       "name": "kanna_read_event_subscription",
-      "description": "Read the durable mailbox without acknowledging it. Pass acknowledge_batch_id only after servicing that exact batch to advance the observation cursor and release the next page. Reading and acknowledging never affect human read/unread state or task completion. The error and wakeState fields expose failed or uncertain native/input delivery; do not blindly retry uncertain input. Kanna continues observing independently of the harness.",
+      "description": "Read the durable mailbox without acknowledging it. Pass acknowledge_batch_id only after servicing that exact batch to advance the observation cursor and release the next page. Reading and acknowledging never affect human read/unread state or task completion. The error and wakeState fields expose failed or uncertain native/input delivery; do not blindly retry uncertain input. A repo/parent-scoped subscription fans out across machines: one unreachable remote peer degrades only that peer's leg, reported in staleMachines (machine id -> last error) and in a delivered batch's machineErrors, while this machine's own observation and acknowledgement continue and the peer's checkpoint is retained untouched for it to catch up from on return. An unchanged, already-reported peer fault does not by itself produce a fresh page. Only a fault in this machine's own leg still fails the whole subscription (active becomes false); that is never silently reset — read error and resubscribe to retry it. Kanna continues observing independently of the harness.",
       "method": "POST",
       "path": "/v1/event-subscriptions/{subscription_id}/read",
       "response": "json",

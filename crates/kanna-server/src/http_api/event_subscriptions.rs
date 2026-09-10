@@ -11,7 +11,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -87,17 +87,48 @@ async fn collect(
     task_events::wait_subscription_events(state, query).await
 }
 
-fn accept_page(row: &mut EventSubscription, mut batch: Value, observed: bool) {
-    if batch["machineErrors"]
-        .as_array()
-        .is_some_and(|errors| !errors.is_empty())
-    {
-        batch["watchError"] = json!("Some machines could not be observed; reconcile the reported gaps and resubscribe after recovery.");
+/// A remote peer's fault is this subscription's fault-isolation boundary:
+/// it degrades that one leg's coverage, never the mailbox as a whole. Only a
+/// fault attributed to this machine's own leg (`wait_local_task_events`
+/// itself failing) still fails the whole subscription — that is a local
+/// DB/delivery fault, not peer unavailability, and must stay fully
+/// actionable rather than being quietly absorbed like a stale peer.
+fn accept_page(
+    row: &mut EventSubscription,
+    mut batch: Value,
+    observed: bool,
+    local_machine_id: &str,
+) {
+    let machine_errors = batch["machineErrors"].as_array().cloned().unwrap_or_default();
+    let local_faulted = machine_errors
+        .iter()
+        .any(|error| error["machineId"].as_str() == Some(local_machine_id));
+    if local_faulted {
+        batch["watchError"] = json!("This machine's own event observation failed; reconcile the reported fault and resubscribe after recovery.");
     }
+    // Remote-only faults: tracked for de-duplication, never fed into
+    // watchError. A peer that is still down and was already reported stale
+    // must not re-wake the subscriber on every observation cycle; a new
+    // fault or a recovery (the set changes) is worth one wake.
+    let remote_errors: BTreeMap<String, String> = machine_errors
+        .iter()
+        .filter_map(|error| {
+            let machine_id = error["machineId"].as_str()?;
+            if machine_id == local_machine_id {
+                return None;
+            }
+            Some((
+                machine_id.to_string(),
+                error["error"].as_str().unwrap_or_default().to_string(),
+            ))
+        })
+        .collect();
+    let coverage_changed = !local_faulted && remote_errors != row.stale_machines;
     if batch.get("watchError").is_some()
         || batch["events"]
             .as_array()
             .is_some_and(|events| !events.is_empty())
+        || coverage_changed
     {
         row.batch_id += 1;
         row.pending = Some(batch);
@@ -105,6 +136,7 @@ fn accept_page(row: &mut EventSubscription, mut batch: Value, observed: bool) {
     } else {
         row.cursor = batch["cursor"].as_str().map(str::to_owned);
     }
+    row.stale_machines = remote_errors;
 }
 
 pub(super) async fn subscribe(
@@ -234,10 +266,12 @@ pub(super) async fn subscribe(
         error: None,
         active: true,
         wake_admitted: false,
+        stale_machines: BTreeMap::new(),
     };
     drop(db);
+    let local_machine_id = state.config().desktop_id.clone();
     let batch = collect(state.clone(), &row, 0).await.map_err(failure)?;
-    accept_page(&mut row, batch, true);
+    accept_page(&mut row, batch, true, &local_machine_id);
     database(&state)
         .map_err(failure)?
         .insert_event_subscription(&row)
@@ -474,12 +508,13 @@ async fn step(
             }
         }
     };
+    let local_machine_id = state.config().desktop_id.clone();
     match batch {
-        Ok(batch) => accept_page(&mut row, batch, false),
+        Ok(batch) => accept_page(&mut row, batch, false, &local_machine_id),
         Err(error) => {
             let batch = json!({"events": [], "cursor": row.cursor,
                 "watchError": format!("event watch stopped: {error}; reconcile current state before establishing a new subscription")});
-            accept_page(&mut row, batch, false);
+            accept_page(&mut row, batch, false, &local_machine_id);
         }
     }
     save(state, &mut row)?;

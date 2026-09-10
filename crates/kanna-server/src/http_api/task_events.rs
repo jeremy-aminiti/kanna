@@ -2373,8 +2373,20 @@ async fn wait_aggregate_task_events(
     let debounce = hold_duration(query.debounce_ms);
     let mut debounce_deadline: Option<tokio::time::Instant> = None;
     let interval_deadline = interval_hold_deadline(query.min_interval_ms, deadline);
+    // A fault attributed to this machine's own leg is fast-surfaced: this
+    // machine's own observation cannot be trusted, so there is nothing worth
+    // waiting out. A remote peer's fault must not carry the same weight — it
+    // only shrinks this wait's coverage, and the remaining active machines
+    // (this one included) still run their normal collection/timeout cycle so
+    // healthy legs keep producing batches instead of the whole wait cutting
+    // short the instant one peer errors.
+    let local_machine_faulted = |errors: &[Value]| -> bool {
+        errors
+            .iter()
+            .any(|error| error["machineId"].as_str() == Some(local_machine_id.as_str()))
+    };
     loop {
-        if query.subscription_timing && !machine_errors.is_empty() {
+        if query.subscription_timing && local_machine_faulted(&machine_errors) {
             break;
         }
         let remaining_secs = if timeout_secs == 0 {
@@ -2455,7 +2467,8 @@ async fn wait_aggregate_task_events(
         }
         let now = tokio::time::Instant::now();
         let batch_complete = if query.subscription_timing {
-            timing.ready(events.len(), limit, deadline, now) || !machine_errors.is_empty()
+            timing.ready(events.len(), limit, deadline, now)
+                || local_machine_faulted(&machine_errors)
         } else {
             kanna_tool_catalog::task_event_batch_is_complete(
                 events.len(),

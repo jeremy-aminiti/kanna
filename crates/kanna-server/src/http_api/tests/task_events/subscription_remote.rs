@@ -364,11 +364,22 @@ async fn subscription_retirement_abandons_one_leg_until_peer_deadline() {
     }
 }
 
+/// A busy/unreachable remote peer degrades only that one leg. The local
+/// leg's own delivery and acknowledgement continue uninterrupted, the peer's
+/// checkpoint survives untouched across several acks, an unchanged fault
+/// does not re-wake the subscriber on every notification, and the peer's
+/// return replays its backlog from the preserved checkpoint with no
+/// unsubscribe/resubscribe dance — the subscription was never paused.
 #[tokio::test(start_paused = true)]
-async fn subscription_busy_peer_pause_and_same_id_recovery_preserve_checkpoint() {
+async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
     let (watch, held) = WatchFixture::new(true).await;
     let checkpoint = watch.row().cursor.unwrap();
+    let peer_checkpoint =
+        decode_cursor(&checkpoint)["cursorsByMachine"]["desktop-pending-peer"].clone();
     notifications(&watch.source).await;
+
+    // First local event while the peer is down: still delivered normally,
+    // annotated with the peer's fault, never as a whole-subscription pause.
     Db::open(&watch.source.config().db_path)
         .unwrap()
         .update_pipeline_item_pr(
@@ -377,28 +388,93 @@ async fn subscription_busy_peer_pause_and_same_id_recovery_preserve_checkpoint()
             "https://example.test/pull/101",
         )
         .unwrap();
-    let failed = watch.page().await;
-    let batch = failed.pending.as_ref().unwrap();
-    assert!(batch["watchError"].is_string());
+    let first = watch.page().await;
+    let batch = first.pending.as_ref().unwrap();
+    assert!(
+        batch.get("watchError").is_none(),
+        "a remote-only fault must not synthesize a whole-subscription watchError: {batch}"
+    );
     assert!(batch["machineErrors"][0]["error"]
         .as_str()
         .unwrap()
         .contains("too many concurrent requests"));
-    let peer_before =
-        decode_cursor(&checkpoint)["cursorsByMachine"]["desktop-pending-peer"].clone();
+    assert_eq!(
+        event_pairs(batch),
+        vec![("pending-local-child".into(), "task.pr_created".into())]
+    );
     assert_eq!(
         decode_cursor(batch["cursor"].as_str().unwrap())["cursorsByMachine"]
             ["desktop-pending-peer"],
-        peer_before
+        peer_checkpoint,
+        "the down peer's own checkpoint must not move while it cannot be observed"
     );
-    let paused = watch.ack(&failed).await;
-    assert_eq!(paused["active"], false);
-    assert_eq!(paused["cursor"], batch["cursor"]);
+    let acked = watch.ack(&first).await;
+    assert_eq!(
+        acked["active"], true,
+        "a peer outage must not pause the whole subscription"
+    );
+    assert!(acked["error"].is_null());
+
+    // A pure notification storm with the peer still down and nothing new
+    // locally must not manufacture a fresh wake from the already-reported,
+    // unchanged fault. Synchronize on the next call's own peer dispatch
+    // (rather than a fixed number of scheduler turns) before asserting
+    // nothing woke the subscriber from it.
     notifications(&watch.source).await;
-    assert_eq!(watch.relay.counts.attempts.load(Ordering::SeqCst), 1);
+    until(|| watch.relay.counts.attempts.load(Ordering::SeqCst) >= 2).await;
+    assert_eq!(
+        watch.row().wake_state,
+        "idle",
+        "an unchanged, already-reported peer fault must not re-wake the subscriber"
+    );
+    assert_eq!(watch.row().active, true);
+    assert_eq!(
+        decode_cursor(watch.row().cursor.as_ref().unwrap())["cursorsByMachine"]
+            ["desktop-pending-peer"],
+        peer_checkpoint
+    );
+
+    // A second local event, still with the peer down: the checkpoint keeps
+    // surviving across repeated acknowledgements, not just the first one.
+    Db::open(&watch.source.config().db_path)
+        .unwrap()
+        .update_pipeline_item_pr(
+            "pending-local-child",
+            Some(102),
+            "https://example.test/pull/102",
+        )
+        .unwrap();
+    watch
+        .source
+        .publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+    let second = watch.page().await;
+    let second_batch = second.pending.as_ref().unwrap();
+    assert!(second_batch.get("watchError").is_none());
+    assert_eq!(
+        event_pairs(second_batch),
+        vec![("pending-local-child".into(), "task.pr_created".into())]
+    );
+    assert_eq!(
+        decode_cursor(second_batch["cursor"].as_str().unwrap())["cursorsByMachine"]
+            ["desktop-pending-peer"],
+        peer_checkpoint
+    );
+    let second_acked = watch.ack(&second).await;
+    assert_eq!(second_acked["active"], true);
+    // Let the next call's own peer dispatch begin (and fail, held is still
+    // exhausted) before jumping the clock, so its local-only deadline is
+    // anchored to the current time rather than to whatever the worker has
+    // not yet gotten around to starting.
+    until(|| watch.relay.counts.attempts.load(Ordering::SeqCst) >= 3).await;
+
     drop(held);
     // This event must be replayed from the retained checkpoint, not skipped
-    // by a recovery that silently starts over at from=now.
+    // by a recovery that silently starts over at from=now — and no
+    // unsubscribe/resubscribe is needed, because the subscription stayed
+    // active through the whole outage. The leg already in flight marked the
+    // peer failed for its own call and will not retry it mid-call; advance
+    // past its own local-only deadline so the worker starts a fresh call
+    // that gives the now-healthy peer a new attempt.
     Db::open(&watch.peer.config().db_path)
         .unwrap()
         .update_pipeline_item_pr(
@@ -407,36 +483,22 @@ async fn subscription_busy_peer_pause_and_same_id_recovery_preserve_checkpoint()
             "https://example.test/pull/201",
         )
         .unwrap();
-    let resumed = watch.register().await;
-    assert_eq!(resumed["cursor"], paused["cursor"]);
-    assert_eq!(resumed["active"], true);
-    assert!(resumed["error"].is_null());
+    tokio::time::advance(Duration::from_secs(kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS)).await;
     let recovered = watch.page().await;
-    let mut delivered = event_pairs(batch);
-    delivered.extend(event_pairs(recovered.pending.as_ref().unwrap()));
-    delivered.sort();
-    assert_eq!(delivered, vec![
-        ("pending-local-child".into(), "task.pr_created".into()),
-        ("pending-peer-child".into(), "task.pr_created".into()),
-    ], "an urgent peer fault may return before the local PR is observed; recovery must retain both facts");
-    assert!(recovered
-        .pending
-        .as_ref()
-        .unwrap()
-        .get("watchError")
-        .is_none());
-    // Recovery consumes the PR leg, then rearms it during the ordinary quiet
-    // window. That new silent leg survives the normal batch return and ack.
-    assert_eq!(watch.relay.counts.attempts.load(Ordering::SeqCst), 3);
-    assert_eq!(watch.relay.counts.admitted.load(Ordering::SeqCst), 2);
-    assert_eq!(watch.relay.counts.released.load(Ordering::SeqCst), 1);
-    assert_eq!(watch.relay.budget.available_permits(), 0);
-    assert_eq!(watch.relay.counts.busy.load(Ordering::SeqCst), 1);
-    assert_eq!(watch.relay.counts.abandoned.load(Ordering::SeqCst), 0);
-    watch.ack(&recovered).await;
-    notifications(&watch.source).await;
-    assert_eq!(watch.relay.counts.attempts.load(Ordering::SeqCst), 3);
-    assert_eq!(watch.relay.counts.abandoned.load(Ordering::SeqCst), 0);
+    let recovered_batch = recovered.pending.as_ref().unwrap();
+    assert!(recovered_batch.get("watchError").is_none());
+    assert_eq!(
+        recovered_batch["machineErrors"],
+        json!([]),
+        "the peer's return must clear its fault annotation, not just deliver its backlog"
+    );
+    assert_eq!(
+        event_pairs(recovered_batch),
+        vec![("pending-peer-child".into(), "task.pr_created".into())]
+    );
+    let recovered_acked = watch.ack(&recovered).await;
+    assert_eq!(recovered_acked["active"], true);
+    assert!(recovered_acked["error"].is_null());
 }
 
 #[tokio::test(start_paused = true)]
