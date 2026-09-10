@@ -570,7 +570,7 @@ describe("TaskCard", () => {
     },
   );
 
-  it("shows running independently from unread output", () => {
+  it("keeps busy runtime accessible without a visible running badge", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
     const tree = TaskCard({
       task: {
@@ -588,16 +588,13 @@ describe("TaskCard", () => {
     expect(tree.props?.accessibilityValue).toEqual({
       text: "working, unread"
     });
-    expect(
-      findNodeByProp(tree, "testID", "mobile.task-running.task-1")
-    ).not.toBeNull();
-    expect(findTextNodeByCompleteText(tree, "running")).not.toBeNull();
+    expect(findTextNodeByCompleteText(tree, "running")).toBeNull();
     expect(flattenStyle(
       findTextNodeByCompleteText(tree, "Busy with unread output")?.props?.style
     )).toMatchObject({ fontWeight: "bold", fontStyle: "normal" });
   });
 
-  it("does not show the running indicator for an unread idle task", () => {
+  it("exposes unread activity for an unread idle task", () => {
     if (!TaskCard) throw new Error("TaskCard was not loaded");
     const tree = TaskCard({
       task: {
@@ -613,9 +610,6 @@ describe("TaskCard", () => {
     }) as ElementNode;
 
     expect(tree.props?.accessibilityValue).toEqual({ text: "unread" });
-    expect(
-      findNodeByProp(tree, "testID", "mobile.task-running.task-1")
-    ).toBeNull();
   });
 
   it.each<{
