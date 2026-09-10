@@ -2780,10 +2780,25 @@ healthy) — comparing text would manufacture a fresh wake every collection
 cycle for an unreachable peer that never actually changed. An unchanged,
 already-reported peer fault therefore produces no new page; a new fault, a
 recovery, or real events (with the fault riding along as an annotation) do.
-The unreachable peer's own native checkpoint is left exactly as `apply_
-aggregate_completion` last recorded it — never advanced, never dropped from
-the aggregate's machine roster — so its return replays every event since
-that checkpoint through the same subscription, with no unsubscribe/
+`accept_page` reconciles rather than replaces this set: one page's
+`machineErrors` is never the complete current truth about every peer, since
+`wait_aggregate_task_events` can seal a batch on this machine's own
+urgent/full/quiet criteria while a listed peer's own leg is still pending in
+the registry, in which case that peer appears in neither `machineErrors` nor
+`confirmedMachines` — that silence is left untouched, never read as
+recovery. Only `confirmedMachines` (a positive, successful completion of
+that machine's own leg this call — including an empty response whose
+checkpoint does not move) may clear an entry, and `step`'s own native-call
+chain accumulates it the same way it already accumulates events across
+chained calls, so a peer's recovery observed mid-chain is never silently
+dropped by the chain continuing past it; a peer already recorded stale
+being confirmed is also what ends that chain early, the same way a fresh
+failure already does, rather than sitting unreported until the chain
+otherwise runs out of things to say. The unreachable peer's own native
+checkpoint is left exactly as `apply_aggregate_completion` last recorded it
+— never advanced, never dropped from the aggregate's machine roster — so
+its return replays every event since that checkpoint through the same
+subscription, with no unsubscribe/
 resubscribe needed.
 
 `kanna_subscribe_events` also accepts optional, validated, per-subscription

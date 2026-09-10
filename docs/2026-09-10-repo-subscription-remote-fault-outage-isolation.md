@@ -445,3 +445,75 @@ editing a doc this task did not author beyond what reconciliation required.
 
 Head is `3f9ba7998`. Still not run: `cargo build`/`test`/`clippy`/`fmt` on
 the merged tree — everything above is verified by manual reading only.
+
+## Revision round 2: recovery required positive confirmation, not silence
+
+Review traced an ordering bug in the merged `accept_page`: it replaced
+`row.stale_machines` wholesale with one page's `machineErrors` every call.
+`machineErrors` is per-call and only lists discovery-excluded machines and
+legs that actually completed (failed) in that call — `wait_aggregate_task_events`
+can seal a batch on this machine's own urgent/full/quiet criteria while a
+listed peer's own retained leg is still pending in the registry, never
+having completed at all. That peer then appears in neither list. The old
+code read that silence as recovery, clearing stale coverage with zero
+evidence; the peer's eventual (still-failing) completion would then read as
+a brand new coverage change and mint another error-only wake for the same
+continuous outage — reintroducing, one layer down, exactly the wake flood
+this task exists to prevent.
+
+Fix: `wait_aggregate_task_events` now reports `confirmedMachines` — machines
+whose own leg positively, successfully completed this call, including an
+empty response whose checkpoint does not move — alongside `machineErrors`.
+`accept_page` reconciles instead of replacing: start from the durable set,
+apply this call's fresh/updated faults, and clear only machines this call
+positively confirmed. A machine in neither list is left exactly as it was.
+
+Tracing this through `step`'s real native-call chain (added by tuning to
+honor a quiet/max-hold window larger than one 240s native call) surfaced a
+second, related gap purely from adding a new field to a response the chain
+already partially discards: the chain's `continue 'chain` path only
+explicitly carries `retained_events` forward, so a peer's positive-but-empty
+confirmation from an earlier chained call would be silently dropped the
+moment the chain moved on to a fresh one — and, separately, nothing
+previously gave the chain a reason to stop *early* for a confirmation the
+way a fresh failure already does, so a recovered-but-otherwise-quiet
+subscription could sit chaining natively forever without ever reporting it.
+Fixed both in `step`, mirroring `retained_events`'s own existing pattern
+rather than inventing a new mechanism: accumulate `confirmedMachines` across
+chained calls (dropping any machine this call's `machineErrors` just
+re-failed, so the most recent signal always wins), and stop the chain early
+specifically when an accumulated confirmation matches a machine the
+subscription currently has recorded stale — never for an ordinary healthy
+peer succeeding, which remains free to keep the chain running its full
+quiet/max-hold window exactly as before.
+
+Also completed, per the review's second finding: the compact `staleMachines`
+contract is now exercised through actual (non-diagnostic) HTTP reads in all
+three outage/restart integration tests — visible with `pending: null` after
+multiple real acks, present in `pending.machineErrors` while a batch exists,
+cleared on confirmed recovery, and the compact-response-omits-cursors
+contract asserted on every such read — including specifically after the
+restart test's fresh `AppState` rebuild, the scenario the review named
+explicitly.
+
+New integration coverage:
+`subscription_remote_stale_coverage_survives_a_pending_leg_until_positive_recovery`
+(`subscription_remote.rs`), driven through a new `connect_gated_peer`
+fixture whose long polls the test resolves explicitly and deterministically
+(a specific failure, held genuinely unresolved, another failure, then a
+specific success) rather than relying on a real peer round trip — proving
+stale coverage survives an unresolved leg and a second failure untouched, no
+fault-only batch is minted while nothing changed, the checkpoint never
+moves, no extra admission or abandonment touches the retained request, and
+confirmed recovery wakes exactly once. The existing
+`event_subscriptions::outage_isolation_tests::unchanged_remote_fault_does_not_rewake_even_as_its_text_churns`
+unit test was corrected to require the same explicit `confirmedMachines`
+evidence for its own recovery step (it previously inferred recovery from an
+empty `machineErrors` alone, the exact semantic the review found wrong) and
+extended with an explicit still-pending-leg case at the unit level.
+
+Not run: `cargo build`/`test`/`clippy`/`fmt` — this round's instructions
+hold builds/tests until released, same as prior rounds. Verified by careful
+manual reading only, including full re-derivation of `step`'s native-call
+chain timing to confirm the new integration test's synchronization points
+are reachable without hanging (documented inline in the test itself).

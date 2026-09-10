@@ -14,7 +14,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -219,20 +219,44 @@ fn accept_page(
     // treat that natural churn as a new fault every cycle and reintroduce
     // the exact wake flood this exists to prevent. The latest text is still
     // stored below, so a status read reports the current reason.
-    let remote_errors: BTreeMap<String, String> = machine_errors
-        .iter()
-        .filter_map(|error| {
-            let machine_id = error["machineId"].as_str()?;
-            if machine_id == local_machine_id {
-                return None;
-            }
-            Some((
-                machine_id.to_string(),
-                error["error"].as_str().unwrap_or_default().to_string(),
-            ))
-        })
-        .collect();
-    let coverage_changed = !local_faulted && !remote_errors.keys().eq(row.stale_machines.keys());
+    //
+    // This one page's `machineErrors` is not the complete, current truth
+    // about every peer: `wait_aggregate_task_events` can seal a batch on
+    // this machine's own urgent/full/quiet criteria while a listed peer's
+    // own retained leg is still pending in the registry (still running,
+    // simply hasn't completed in this call) — that peer then appears in
+    // neither `machineErrors` nor `confirmedMachines`. Treating that
+    // silence as recovery would clear stale coverage with zero evidence,
+    // and its eventual (still-failing) completion would then read as a
+    // *new* coverage change and mint another error-only wake for the same
+    // continuous outage. So this reconciles rather than replaces: start
+    // from the durable set, apply this call's fresh/updated faults, and
+    // clear only machines this call positively confirmed succeeded (see
+    // `confirmedMachines`/`apply_aggregate_completion`) — including a
+    // successful empty response whose checkpoint does not move. A machine
+    // in neither list is left exactly as it was.
+    let mut stale_machines = row.stale_machines.clone();
+    for error in &machine_errors {
+        let Some(machine_id) = error["machineId"].as_str() else {
+            continue;
+        };
+        if machine_id == local_machine_id {
+            continue;
+        }
+        stale_machines.insert(
+            machine_id.to_string(),
+            error["error"].as_str().unwrap_or_default().to_string(),
+        );
+    }
+    for machine_id in batch["confirmedMachines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        stale_machines.remove(machine_id);
+    }
+    let coverage_changed = !local_faulted && !stale_machines.keys().eq(row.stale_machines.keys());
     if batch.get("watchError").is_some()
         || batch["events"]
             .as_array()
@@ -245,7 +269,7 @@ fn accept_page(
     } else {
         row.cursor = batch["cursor"].as_str().map(str::to_owned);
     }
-    row.stale_machines = remote_errors;
+    row.stale_machines = stale_machines;
 }
 
 pub(super) async fn subscribe(
@@ -669,6 +693,13 @@ async fn step(
     // shrink each subsequent call's own limit by that count so the chain's
     // total never exceeds one page.
     let mut retained_events: Vec<Value> = Vec::new();
+    // Like `retained_events`, but for positive-recovery evidence: a peer's
+    // own leg can complete successfully (even with nothing relevant) in one
+    // chained call and then the chain moves on to a fresh one, whose own
+    // `confirmedMachines` starts empty again. Without accumulating here,
+    // that positive observation is silently discarded the moment the chain
+    // continues past it, and `accept_page` never learns it happened.
+    let mut confirmed_machines: HashSet<String> = HashSet::new();
     let batch = 'chain: loop {
         let native_timeout = {
             let guard = collection
@@ -736,6 +767,21 @@ async fn step(
                 let machine_errors_present = batch["machineErrors"]
                     .as_array()
                     .is_some_and(|errors| !errors.is_empty());
+                // A machine erroring this leg is the freshest signal for it —
+                // drop any earlier accumulated confirmation before folding in
+                // this leg's own confirmations, so a peer that succeeded in
+                // an earlier chained call and then failed in this one is
+                // never reported as both.
+                for error in batch["machineErrors"].as_array().into_iter().flatten() {
+                    if let Some(machine_id) = error["machineId"].as_str() {
+                        confirmed_machines.remove(machine_id);
+                    }
+                }
+                if let Some(confirmed) = batch["confirmedMachines"].as_array() {
+                    confirmed_machines.extend(
+                        confirmed.iter().filter_map(Value::as_str).map(str::to_owned),
+                    );
+                }
                 if batch["waitOutcome"] == "timeout" && !machine_errors_present {
                     // Whether this leg's own timeout also means the
                     // subscription is genuinely done cannot be decided from
@@ -755,13 +801,28 @@ async fn step(
                             .intrinsic_deadline()
                             .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
                     };
-                    if !live_deadline_reached {
+                    // A healthy peer succeeding with nothing new must not by
+                    // itself cut this chain short — that is the normal case
+                    // every cycle, and doing so would defeat honoring a
+                    // quiet/max-hold window larger than one native call.
+                    // Only a peer this subscription currently has recorded
+                    // as stale coming back confirmed is coverage-relevant
+                    // enough to stop and report now, exactly like a fresh
+                    // failure already does — otherwise that recovery signal
+                    // would sit accumulated but unreported for as long as
+                    // the chain keeps finding nothing else to say.
+                    let recovered_a_stale_machine = confirmed_machines
+                        .iter()
+                        .any(|machine_id| row.stale_machines.contains_key(machine_id));
+                    if !live_deadline_reached && !recovered_a_stale_machine {
                         #[cfg(test)]
                         subscription_timing::leg_timed_out(state);
                         continue 'chain;
                     }
                 }
                 batch["events"] = json!(std::mem::take(&mut retained_events));
+                batch["confirmedMachines"] =
+                    json!(confirmed_machines.iter().cloned().collect::<Vec<_>>());
                 break 'chain Ok(batch);
             }
             Err(error) => break 'chain Err(error),
@@ -937,15 +998,47 @@ mod outage_isolation_tests {
             "the stored reason still tracks the latest text for a status read"
         );
 
-        // The peer recovers: the key disappears from machineErrors. That is
-        // a real coverage change and must wake once, even with no events.
+        // The peer's own retained leg is still pending this call -- neither
+        // succeeded nor failed, so it appears in neither `machineErrors` nor
+        // `confirmedMachines`. That absence must never be read as recovery:
+        // `wait_aggregate_task_events` can seal a batch on this machine's
+        // own criteria while a listed peer's leg simply has not completed
+        // yet, and clearing stale coverage here would let its eventual
+        // (still-failing) completion mint a brand new coverage-change wake
+        // for the same continuous outage.
         accept_page(
             &mut row,
-            json!({"events": [], "cursor": "ks1.recovered", "machineErrors": []}),
+            json!({"events": [], "cursor": "ks1.next2", "machineErrors": []}),
             false,
             "desktop-local",
         );
-        assert!(row.pending.is_some(), "a peer's recovery must wake once");
+        assert!(
+            row.pending.is_none(),
+            "a still-pending leg, absent from both lists, must not be inferred as recovered"
+        );
+        assert_eq!(row.batch_id, 1);
+        assert_eq!(
+            row.stale_machines.get("desktop-peer").map(String::as_str),
+            Some("machine unreachable since unix:1300"),
+            "stale coverage must survive with no positive success evidence for that machine"
+        );
+
+        // The peer's leg finally completes successfully — explicit positive
+        // evidence via `confirmedMachines`, the only thing that may clear
+        // stale coverage. A real coverage change, so it wakes once, even
+        // with no events.
+        accept_page(
+            &mut row,
+            json!({
+                "events": [],
+                "cursor": "ks1.recovered",
+                "machineErrors": [],
+                "confirmedMachines": ["desktop-peer"],
+            }),
+            false,
+            "desktop-local",
+        );
+        assert!(row.pending.is_some(), "a peer's confirmed recovery must wake once");
         assert_eq!(row.batch_id, 2);
         assert!(row.stale_machines.is_empty());
     }

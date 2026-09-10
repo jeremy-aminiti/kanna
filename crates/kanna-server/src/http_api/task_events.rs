@@ -2023,12 +2023,22 @@ fn apply_aggregate_completion(
     events: &mut Vec<Value>,
     machine_errors: &mut Vec<Value>,
     failed_machines: &mut HashSet<String>,
+    confirmed_machines: &mut HashSet<String>,
     has_more: &mut bool,
     limit: i64,
 ) -> Result<bool, (axum::http::StatusCode, String)> {
     session.pending_machines.remove(&completion.machine_id);
     let response = match completion.result {
-        Ok(response) => response,
+        // A positive, successful completion of this machine's own leg in
+        // this call — including an empty/no-op one whose checkpoint does
+        // not move. This is the only evidence recovery may be inferred
+        // from; a machine simply absent from `machine_errors` because its
+        // retained leg has not completed at all yet is not evidence of
+        // anything and must not be read as one.
+        Ok(response) => {
+            confirmed_machines.insert(completion.machine_id.clone());
+            response
+        }
         Err(AggregateMachineWaitError::CursorRejected(error)) => {
             return Err((
                 axum::http::StatusCode::BAD_REQUEST,
@@ -2401,6 +2411,9 @@ async fn wait_aggregate_task_events(
     let mut events = Vec::new();
     let mut completed_machines = HashSet::new();
     let mut failed_machines = HashSet::new();
+    // Machines whose own leg completed successfully at least once in this
+    // call — the only positive recovery evidence the mailbox may act on.
+    let mut confirmed_machines = HashSet::new();
     let mut has_more =
         !query.orchestration_notifications && !session.cursor.machines_with_more.is_empty();
     // Batching is applied by the machine serving the wait, over the events of
@@ -2492,6 +2505,7 @@ async fn wait_aggregate_task_events(
             &mut events,
             &mut machine_errors,
             &mut failed_machines,
+            &mut confirmed_machines,
             &mut has_more,
             limit,
         )?;
@@ -2591,6 +2605,13 @@ async fn wait_aggregate_task_events(
         "events": events,
         "hasMore": has_more,
         "machineErrors": machine_errors,
+        // Machines positively observed to succeed (even with nothing new)
+        // at least once in this call — the subscription mailbox's only
+        // basis for clearing a machine's recorded stale coverage. A machine
+        // absent from both this and `machineErrors` had a leg that simply
+        // did not complete in this call (still retained/pending) and must
+        // not be inferred as recovered.
+        "confirmedMachines": confirmed_machines,
         "waitTimeoutSecs": timeout_secs,
         "waitHint": if wait_outcome == "events" {
             Value::Null

@@ -219,6 +219,102 @@ fn connect_repo_peers(
     }
 }
 
+/// One captured, not-yet-resolved long poll to the gated peer in
+/// `connect_gated_peer`: the test decides exactly when and how it resolves
+/// (a specific failure, a specific success, or simply not at all for as
+/// long as it needs), so recovery evidence is never inferred, only ever
+/// positively supplied. Holds its admission permit for as long as the test
+/// holds the request, mirroring a real outstanding long poll's lifetime.
+struct GatedInvoke {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    response: tokio::sync::oneshot::Sender<Result<HttpInvokeResponse, String>>,
+}
+
+/// Like `connect`, but every *long* (post-bootstrap) `Invoke` to `peer` is
+/// captured on the returned channel instead of being dispatched: the test
+/// resolves each one explicitly. The zero-timeout bootstrap call still
+/// dispatches for real, so the subscription starts with a genuine
+/// established checkpoint. `ListActive` always reports the peer present —
+/// this fixture is about a peer's own leg outcome, not discovery.
+fn connect_gated_peer(
+    source: &Arc<AppState>,
+    peer: Arc<AppState>,
+) -> (RelayFixture, tokio::sync::mpsc::UnboundedReceiver<GatedInvoke>) {
+    let mut requests = source.take_desktop_relay_requests().unwrap();
+    source.set_desktop_routing_available(true);
+    let permits = Arc::new(crate::relay::RelayHttpInvokePermits::new(1));
+    let budget = permits.for_path("/v1/task-events");
+    let counts = Arc::new(Counts::default());
+    let observed = counts.clone();
+    let (gate_tx, gate_rx) = tokio::sync::mpsc::unbounded_channel::<GatedInvoke>();
+    let task = tokio::spawn(async move {
+        let mut receivers = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                Some(result) = receivers.join_next(), if !receivers.is_empty() => {
+                    result.expect("peer receiver panicked");
+                }
+                request = requests.recv() => {
+                    let Some(request) = request else { break };
+                    match request {
+                        DesktopRelayRequest::PublishTaskSnapshot { response, .. } => {
+                            let _ = response.send(Ok(()));
+                        }
+                        DesktopRelayRequest::ListActive { response, .. } => {
+                            let _ = response.send(Ok(vec![peer.config().desktop_id.clone()]));
+                        }
+                        DesktopRelayRequest::Invoke { method, path, body, response, .. } => {
+                            assert!(path.starts_with("/v1/task-events?"));
+                            let long = !path.contains("timeoutSecs=0&");
+                            if !long {
+                                // Bootstrap: dispatch for real so the
+                                // subscription starts with a genuine
+                                // checkpoint, not a synthetic one.
+                                let peer = peer.clone();
+                                receivers.spawn(async move {
+                                    let result =
+                                        crate::http_api::dispatch_authenticated_http_invoke(
+                                            peer, &method, &path, body,
+                                        )
+                                        .await;
+                                    let _ = response.send(Ok(result));
+                                });
+                                continue;
+                            }
+                            observed.attempts.fetch_add(1, Ordering::SeqCst);
+                            let permit = match permits.for_path(&path).try_acquire_owned() {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    observed.busy.fetch_add(1, Ordering::SeqCst);
+                                    let _ = response.send(Ok(HttpInvokeResponse {
+                                        status: 503, body: None,
+                                        error: Some("desktop is busy; too many concurrent requests".into()),
+                                    }));
+                                    continue;
+                                }
+                            };
+                            observed.admitted.fetch_add(1, Ordering::SeqCst);
+                            let _ = gate_tx.send(GatedInvoke {
+                                _permit: permit,
+                                response,
+                            });
+                        }
+                        _ => panic!("unexpected subscription relay operation"),
+                    }
+                }
+            }
+        }
+    });
+    (
+        RelayFixture {
+            task,
+            budget,
+            counts,
+        },
+        gate_rx,
+    )
+}
+
 // Bounded scheduling with a paused Tokio clock. Advancing virtual time lets
 // peer handlers and observers settle without sleeping for 240 real seconds.
 async fn until(mut condition: impl FnMut() -> bool) {
@@ -609,6 +705,40 @@ fn decode_cursor(cursor: &str) -> Value {
     .unwrap()
 }
 
+/// A non-destructive read through the actual HTTP compact contract — no
+/// `acknowledgeBatchId`, `diagnostic` omitted — exactly what a manager
+/// consuming the response shape (not the DB struct) sees by default.
+/// Asserts the compact/durable-cursor-omission contract that must hold on
+/// every such response, so every call site gets that coverage for free
+/// rather than needing to repeat it.
+async fn compact_read(app: &Router, id: &str) -> Value {
+    let (status, body) = subscription_request(
+        app,
+        "POST",
+        &format!("/v1/event-subscriptions/{id}/read"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.get("cursor").is_none(),
+        "a compact response must omit the durable cursor: {body}"
+    );
+    if let Some(query) = body.get("query") {
+        assert!(
+            query.get("cursor").is_none(),
+            "a compact response's watched scope must omit any cursor-shaped key: {body}"
+        );
+    }
+    if let Some(pending) = body.get("pending").filter(|p| !p.is_null()) {
+        assert!(
+            pending.get("cursor").is_none(),
+            "a compact response's pending batch must omit the durable cursor: {body}"
+        );
+    }
+    body
+}
+
 #[tokio::test(start_paused = true)]
 async fn subscription_notifications_and_ack_retain_one_remote_wait() {
     let (watch, _) = WatchFixture::new(false).await;
@@ -762,6 +892,15 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
         peer_checkpoint,
         "the down peer's own checkpoint must not move while it cannot be observed"
     );
+    // The compact HTTP contract a manager actually consumes: while this
+    // batch is still pending, its own machineErrors reports the outage —
+    // not just the diagnostic-mode row read above.
+    let compact_pending = compact_read(&watch.app, &watch.id).await;
+    assert!(!compact_pending["pending"].is_null());
+    assert!(compact_pending["pending"]["machineErrors"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("too many concurrent requests"));
     let acked = watch.ack(&first).await;
     assert_eq!(
         acked["active"],
@@ -769,6 +908,14 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
         "a peer outage must not pause the whole subscription"
     );
     assert!(acked["error"].is_null());
+    // Compact staleMachines must be visible immediately after ack — with
+    // pending now null — not only through diagnostic:true.
+    let compact_after_first_ack = compact_read(&watch.app, &watch.id).await;
+    assert!(compact_after_first_ack["pending"].is_null());
+    assert!(compact_after_first_ack["staleMachines"]["desktop-pending-peer"]
+        .as_str()
+        .unwrap()
+        .contains("too many concurrent requests"));
 
     // A pure notification storm with the peer still down and nothing new
     // locally must not manufacture a fresh wake from the already-reported,
@@ -788,6 +935,10 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
             ["desktop-pending-peer"],
         peer_checkpoint
     );
+    // Still visible through the compact contract with nothing new pending.
+    let compact_idle = compact_read(&watch.app, &watch.id).await;
+    assert!(compact_idle["pending"].is_null());
+    assert!(compact_idle["staleMachines"]["desktop-pending-peer"].is_string());
 
     // A second local event, still with the peer down: the checkpoint keeps
     // surviving across repeated acknowledgements, not just the first one.
@@ -816,6 +967,11 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
     );
     let second_acked = watch.ack(&second).await;
     assert_eq!(second_acked["active"], json!(true));
+    // Stale coverage survives across a *second* real ack too, still through
+    // the compact contract, not just the first one.
+    let compact_after_second_ack = compact_read(&watch.app, &watch.id).await;
+    assert!(compact_after_second_ack["pending"].is_null());
+    assert!(compact_after_second_ack["staleMachines"]["desktop-pending-peer"].is_string());
     // Let the next call's own peer dispatch begin (and fail, held is still
     // exhausted) before jumping the clock, so its local-only deadline is
     // anchored to the current time rather than to whatever the worker has
@@ -857,6 +1013,11 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
     let recovered_acked = watch.ack(&recovered).await;
     assert_eq!(recovered_acked["active"], json!(true));
     assert!(recovered_acked["error"].is_null());
+    // Confirmed recovery clears staleMachines through the compact contract
+    // too, not only the durable row.
+    let compact_recovered = compact_read(&watch.app, &watch.id).await;
+    assert!(compact_recovered["pending"].is_null());
+    assert_eq!(compact_recovered["staleMachines"], json!({}));
 }
 
 /// A remote peer rejecting its own embedded cursor (a poisoned/expired
@@ -999,6 +1160,12 @@ async fn subscription_remote_outage_with_a_healthy_sibling_isolates_and_recovers
         missing_checkpoint
     );
     watch.ack(&second).await;
+    // The compact contract a manager actually consumes: stale coverage for
+    // the excluded peer survives across both real acks, with nothing
+    // pending, not only through the diagnostic-mode row.
+    let compact_after_second_ack = compact_read(&watch.app, &watch.id).await;
+    assert!(compact_after_second_ack["pending"].is_null());
+    assert!(compact_after_second_ack["staleMachines"][missing_id.as_str()].is_string());
 
     // The missing peer was never probed at all: excluded pre-spawn, not
     // admitted then rejected. The healthy sibling's own leg was admitted
@@ -1039,6 +1206,10 @@ async fn subscription_remote_outage_with_a_healthy_sibling_isolates_and_recovers
         "recovery must advance past the preserved checkpoint, not just deliver from a fresh one"
     );
     watch.ack(&recovered).await;
+    // Confirmed recovery clears staleMachines through the compact contract.
+    let compact_recovered = compact_read(&watch.app, &watch.id).await;
+    assert!(compact_recovered["pending"].is_null());
+    assert_eq!(compact_recovered["staleMachines"], json!({}));
 }
 
 /// A production restart mid-outage: the subscribing machine's own server
@@ -1096,6 +1267,11 @@ async fn subscription_remote_outage_survives_a_server_restart_and_recovers() {
         watch.row().stale_machines.contains_key(&missing_id),
         "the ongoing fault must be recorded before restart"
     );
+    // The same coverage through the actual compact HTTP contract, after
+    // several real acks, not only the durable row.
+    let compact_before_restart = compact_read(&watch.app, &watch.id).await;
+    assert!(compact_before_restart["pending"].is_null());
+    assert!(compact_before_restart["staleMachines"][missing_id.as_str()].is_string());
 
     // Restart: tear down the worker and relay, rebuild the subscribing
     // machine's AppState fresh from the same persisted DB path. The peer
@@ -1116,6 +1292,13 @@ async fn subscription_remote_outage_survives_a_server_restart_and_recovers() {
         restarted_row.stale_machines.contains_key(&missing_id),
         "stale coverage must be readable immediately after restart, from the durable row alone"
     );
+    // The fresh, post-restart AppState's own HTTP handler must serve the
+    // same coverage through the compact contract too — a manager reads the
+    // response shape, not the DB struct, and this is a genuinely new
+    // process with no in-memory carryover to lean on.
+    let compact_after_restart = compact_read(&watch.app, &watch.id).await;
+    assert!(compact_after_restart["pending"].is_null());
+    assert!(compact_after_restart["staleMachines"][missing_id.as_str()].is_string());
 
     // Several full, genuinely quiet collection cycles post-restart: the
     // peer stays excluded (its error text changes call to call — this
@@ -1162,6 +1345,256 @@ async fn subscription_remote_outage_survives_a_server_restart_and_recovers() {
         "recovery must replay from the preserved checkpoint, advancing past it"
     );
     watch.ack(&recovered).await;
+    // Confirmed recovery clears staleMachines through the compact contract,
+    // on the same post-restart AppState.
+    let compact_recovered = compact_read(&watch.app, &watch.id).await;
+    assert!(compact_recovered["pending"].is_null());
+    assert_eq!(compact_recovered["staleMachines"], json!({}));
+}
+
+fn native_cursor_of(wrapped: &Value) -> String {
+    let wrapped = wrapped.as_str().expect("wrapped cursor must be a string");
+    let encoded = wrapped
+        .strip_prefix("ke1.")
+        .expect("expected a machine cursor wrapped in the ke1. envelope");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .expect("valid base64");
+    String::from_utf8(bytes).expect("valid utf8 native cursor")
+}
+
+/// A minimal fixture for `connect_gated_peer`: unlike `WatchFixture`, it
+/// never auto-dispatches the peer's long polls, so the test controls each
+/// one's outcome explicitly.
+struct GatedPeerFixture {
+    source: Arc<AppState>,
+    relay: RelayFixture,
+    app: Router,
+    id: String,
+    service: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for GatedPeerFixture {
+    fn drop(&mut self) {
+        self.service.abort();
+    }
+}
+
+impl GatedPeerFixture {
+    fn row(&self) -> crate::db::EventSubscription {
+        Db::open(&self.source.config().db_path)
+            .unwrap()
+            .event_subscription(&self.id)
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn page(&self) -> crate::db::EventSubscription {
+        until(|| self.row().wake_state == "ready").await;
+        self.row()
+    }
+
+    async fn ack(&self, row: &crate::db::EventSubscription) -> Value {
+        let (status, body) = subscription_request(
+            &self.app,
+            "POST",
+            &format!("/v1/event-subscriptions/{}/read", self.id),
+            json!({"acknowledgeBatchId": row.batch_id}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+}
+
+/// A peer's own retained leg completing is the *only* thing that may clear
+/// its recorded stale coverage — never a page that merely happens not to
+/// mention it, which is exactly what a native call sealed on this machine's
+/// own urgent/full/quiet criteria produces while that peer's leg is still
+/// pending in the registry. Deterministically drives that exact sequence
+/// through `connect_gated_peer`: establish and ACK a fault, hold the next
+/// leg genuinely pending (never resolving it, positive or negative) while
+/// local batches/ACKs continue, release it as another failure, and only
+/// then release a positive (if empty) success — proving stale coverage
+/// survives the pending window and the second failure untouched, no
+/// fault-only batch is minted while nothing changed, the checkpoint never
+/// moves, no extra admission or cancellation touches the retained request,
+/// and confirmed recovery wakes exactly once.
+#[tokio::test(start_paused = true)]
+async fn subscription_remote_stale_coverage_survives_a_pending_leg_until_positive_recovery() {
+    let (source, peer) = aggregate_pending_leg_states();
+    for (state, repo) in [
+        (&source, "repo-pending-source"),
+        (&peer, "repo-pending-peer"),
+    ] {
+        Db::open(&state.config().db_path)
+            .unwrap()
+            .patch_repo(
+                repo,
+                crate::db::RepoPatch {
+                    remote_url_hash: Some(Some("sha256:subscription-fixture")),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    let db = Db::open(&source.config().db_path).unwrap();
+    db.insert_test_pipeline_item(
+        "manager",
+        "repo-pending-source",
+        "manage",
+        Some("Manager"),
+        "in progress",
+        "2026-09-09 00:00:00",
+    )
+    .unwrap();
+    start_run(&db, "manager-run", "manager", "in progress");
+    let peer_id = peer.config().desktop_id.clone();
+    let (relay, mut gate) = connect_gated_peer(&source, peer);
+    let app = router(source.clone());
+    let (status, initial) = subscription_request(
+        &app,
+        "POST",
+        "/v1/event-subscriptions",
+        WatchFixture::request(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    let checkpoint_wrapped =
+        decode_cursor(initial["cursor"].as_str().unwrap())["cursorsByMachine"][peer_id.as_str()]
+            .clone();
+    let checkpoint_native = native_cursor_of(&checkpoint_wrapped);
+    let fixture = GatedPeerFixture {
+        source: source.clone(),
+        relay,
+        app,
+        id: initial["id"].as_str().unwrap().to_string(),
+        service: tokio::spawn(super::super::super::event_subscriptions::run(source.clone())),
+    };
+
+    // Establish and ACK the peer's first fault.
+    let first_leg = gate.recv().await.expect("first long poll dispatched");
+    let _ = first_leg.response.send(Ok(HttpInvokeResponse {
+        status: 502,
+        body: None,
+        error: Some("peer connection reset".into()),
+    }));
+    let first = fixture.page().await;
+    let batch = first.pending.as_ref().unwrap();
+    assert!(batch.get("watchError").is_none(), "{batch}");
+    assert_eq!(batch["machineErrors"][0]["machineId"], json!(peer_id));
+    fixture.ack(&first).await;
+    assert_eq!(
+        fixture.row().stale_machines.get(&peer_id).map(String::as_str),
+        Some("peer connection reset")
+    );
+    assert_eq!(
+        decode_cursor(fixture.row().cursor.as_ref().unwrap())["cursorsByMachine"]
+            [peer_id.as_str()],
+        checkpoint_wrapped
+    );
+
+    // The retained-wait registry resumes with a fresh peer leg (the prior
+    // one already completed with a failure); hold this one genuinely
+    // pending — resolved neither way — while local batches and ACKs
+    // continue uninterrupted.
+    let second_leg = gate.recv().await.expect("second long poll dispatched");
+    for pr in [101, 102] {
+        Db::open(&fixture.source.config().db_path)
+            .unwrap()
+            .update_pipeline_item_pr(
+                "pending-local-child",
+                Some(pr),
+                &format!("https://example.test/pull/{pr}"),
+            )
+            .unwrap();
+        fixture
+            .source
+            .publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
+        let page = fixture.page().await;
+        let batch = page.pending.as_ref().unwrap();
+        assert!(batch.get("watchError").is_none(), "{batch}");
+        assert_eq!(
+            batch["machineErrors"].as_array().unwrap().len(),
+            0,
+            "a still-pending leg must not be reported as errored: {batch}"
+        );
+        fixture.ack(&page).await;
+        assert_eq!(
+            fixture.row().stale_machines.get(&peer_id).map(String::as_str),
+            Some("peer connection reset"),
+            "stale coverage must survive while the peer's own leg has not positively resolved"
+        );
+        assert_eq!(
+            decode_cursor(fixture.row().cursor.as_ref().unwrap())["cursorsByMachine"]
+                [peer_id.as_str()],
+            checkpoint_wrapped
+        );
+    }
+    assert_eq!(
+        fixture.relay.counts.attempts.load(Ordering::SeqCst),
+        2,
+        "the still-pending leg must not have been re-admitted while held"
+    );
+
+    // Release the held leg with another failure. The set of stale machines
+    // has not changed, so this must not mint a new fault-only batch either.
+    let batch_id_before = fixture.row().batch_id;
+    let _ = second_leg.response.send(Ok(HttpInvokeResponse {
+        status: 502,
+        body: None,
+        error: Some("peer connection reset again".into()),
+    }));
+    // The next call's own peer dispatch is the synchronization signal that
+    // this one settled — nothing local drives it, so it needs its own
+    // native leg's full, un-rushed conclusion.
+    until(|| fixture.relay.counts.attempts.load(Ordering::SeqCst) >= 3).await;
+    assert_eq!(
+        fixture.row().batch_id, batch_id_before,
+        "an unchanged (still-down) peer must not manufacture a new pending batch just because its error text changed"
+    );
+    assert_eq!(
+        fixture.row().stale_machines.get(&peer_id).map(String::as_str),
+        Some("peer connection reset again"),
+        "the stored reason still updates even though no wake was warranted"
+    );
+    assert_eq!(
+        decode_cursor(fixture.row().cursor.as_ref().unwrap())["cursorsByMachine"]
+            [peer_id.as_str()],
+        checkpoint_wrapped
+    );
+
+    // This leg's retained wait resumed a third time; release it with a
+    // genuine, positive success — an empty page, checkpoint unchanged. This
+    // is the only thing that may clear stale coverage.
+    let third_leg = gate.recv().await.expect("third long poll dispatched");
+    let _ = third_leg.response.send(Ok(HttpInvokeResponse {
+        status: 200,
+        body: Some(json!({
+            "waitOutcome": "timeout",
+            "cursor": checkpoint_native,
+            "events": [],
+            "hasMore": false,
+        })),
+        error: None,
+    }));
+    let recovered = fixture.page().await;
+    let recovered_batch = recovered.pending.as_ref().unwrap();
+    assert!(recovered_batch.get("watchError").is_none(), "{recovered_batch}");
+    assert_eq!(recovered_batch["machineErrors"], json!([]));
+    assert_eq!(event_pairs(recovered_batch), Vec::<(String, String)>::new());
+    assert!(
+        fixture.row().stale_machines.is_empty(),
+        "a positive successful observation, even an empty one, must clear stale coverage"
+    );
+    fixture.ack(&recovered).await;
+    assert_eq!(
+        fixture.relay.counts.attempts.load(Ordering::SeqCst),
+        3,
+        "no additional admission of the peer leg beyond the three real completions above"
+    );
+    assert_eq!(fixture.relay.counts.abandoned.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.relay.counts.busy.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test(start_paused = true)]
