@@ -658,7 +658,19 @@ pub(crate) async fn verify_persisted_task_bundle(
             )));
         }
     }
-    if item.pipeline_def.as_deref() != payload.task.workflow_definition.as_deref() {
+    let workflow_matches = match (
+        item.pipeline_def.as_deref(),
+        payload.task.workflow_definition.as_deref(),
+    ) {
+        (Some(stored), Some(expected)) if stored == expected => true,
+        (Some(stored), Some(expected)) => serde_json::from_str::<serde_json::Value>(stored)
+            .ok()
+            .zip(serde_json::from_str::<serde_json::Value>(expected).ok())
+            .is_some_and(|(a, b)| a == b),
+        (None, None) => true,
+        _ => false,
+    };
+    if !workflow_matches {
         return Err(ImportFailure::Terminal(format!(
             "transferred task {local_task_id} workflow definition does not match the source snapshot"
         )));
@@ -708,7 +720,11 @@ pub(crate) async fn verify_persisted_task_bundle(
                 .as_deref()
                 .ok_or_else(|| "transferred task has no persisted review base ref".to_string())?;
             let base_oid = super::git::commit_oid(std::path::Path::new(&repo_path), base)?;
-            if !super::git::commit_is_ancestor(&repo_path, &expected_head_owned, &tip.branch)? {
+            if !super::git::commit_is_ancestor(
+                std::path::Path::new(&repo_path),
+                &expected_head_owned,
+                &tip.branch,
+            )? {
                 return Err(format!(
                     "destination task branch {} does not contain transferred head {}",
                     tip.branch, expected_head_owned
@@ -716,7 +732,8 @@ pub(crate) async fn verify_persisted_task_bundle(
             }
             let private_head =
                 format!("refs/kanna/transfers/{transfer_id_owned}/{expected_head_owned}/head");
-            let imported_head = super::git::commit_oid(&repo_path, &private_head)?;
+            let imported_head =
+                super::git::commit_oid(std::path::Path::new(&repo_path), &private_head)?;
             Ok::<_, String>((imported_head, base_oid))
         })
         .await?;

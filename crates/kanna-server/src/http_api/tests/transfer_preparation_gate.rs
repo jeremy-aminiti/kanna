@@ -11,6 +11,7 @@
 //! socket standing in for `kanna-daemon`.
 
 use super::*;
+use crate::http_api::create_transferred_task_in_process;
 
 /// Builds an isolated `Config` + git repo + SQLite DB for one test, exactly as
 /// [`super::create_task::assert_created_task_overrides_reach_daemon_spawn`]
@@ -153,6 +154,10 @@ async fn create_transferred_task(
     .unwrap();
     body["transferImport"]["workflowDefinition"] =
         serde_json::Value::String(workflow_definition.clone());
+    body["transferImport"]["baseOid"] = serde_json::Value::String(base_oid.to_owned());
+    // The transfer's pinned definition is authoritative; do not let the
+    // ordinary workflow-name field overwrite pipeline_def with a name.
+    body["workflowName"] = serde_json::Value::Null;
     let request: crate::mobile_api::CreateTaskRequest = serde_json::from_value(body).unwrap();
     let source_payload =
         crate::transfer_engine::payload::parse_outgoing_transfer_payload(&serde_json::json!({
@@ -192,7 +197,7 @@ async fn create_transferred_task(
         }))
         .unwrap();
     let state = Arc::new(super::AppState::new(fixture.config.clone()));
-    match super::create_transferred_task_in_process(
+    match create_transferred_task_in_process(
         state,
         request,
         task_id.to_string(),

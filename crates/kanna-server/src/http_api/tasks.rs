@@ -1071,7 +1071,7 @@ async fn create_task_with_requested_id_and_inputs(
                             };
                             let owns_import = owner_manifest.as_ref().is_some_and(
                                 |(repo_id, _, _, local_task_id, manifest_state)| {
-                                    repo_id == payload.repo_id
+                                    *repo_id == payload.repo_id
                                         && local_task_id.as_deref() == Some(task_id)
                                         && manifest_state == "importing"
                                 },
