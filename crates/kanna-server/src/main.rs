@@ -11,6 +11,7 @@ mod http_api;
 mod human_control;
 mod internal_ports;
 mod ksp;
+mod lan_discovery;
 mod lan_tls;
 mod lan_tls_identity;
 mod logging;
@@ -233,6 +234,24 @@ async fn main() {
     })
     .ok();
 
+    // Sidecar-independent from the mobile advertisement above: its own
+    // service type, its own port, its own optionality - a failure here must
+    // not affect mobile pairing or vice versa.
+    let lan_routing_port = std::env::var("KANNA_LAN_ROUTING_PORT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .unwrap_or(4460);
+    let _lan_routing_bonjour = lan_discovery::LanRoutingAdvertisement::start(
+        &config.desktop_id,
+        &config.environment,
+        lan_routing_port,
+    )
+    .map_err(|error| {
+        log::warn!("LAN routing Bonjour advertisement unavailable: {}", error);
+        error
+    })
+    .ok();
+
     // Capture the login-shell PATH before the first stage action needs it —
     // loading zshrc costs seconds and must never sit on a request path.
     tokio::task::spawn_blocking(task_creator::warm_login_shell_path);
@@ -249,6 +268,12 @@ async fn main() {
     });
 
     let http_state = Arc::new(http_api::AppState::new(config.clone()));
+    // Discovery only ever populates AppState::lan_candidates - an address
+    // hint invoke_desktop's own pinned-TLS client independently
+    // authenticates before trusting anything; nothing here grants trust.
+    if let Err(error) = lan_discovery::start_discovery(Arc::clone(&http_state)) {
+        log::warn!("LAN routing discovery unavailable: {error}");
+    }
     let session_replacements = http_state.session_replacements();
     let detached_terminals = http_state
         .terminal_attachments()
