@@ -171,12 +171,16 @@ async function waitForOwnerAndRenderer(
 }
 
 async function focusTerminal(client: WebDriverClient, ownerTaskId: string): Promise<void> {
-  await client.executeAsync(`
+  const nativeFocus = await client.executeAsync<string>(`
     const done = arguments[arguments.length - 1];
     Promise.resolve(window.__TAURI_INTERNALS__?.invoke("plugin:window|set_focus", { label: "main" }))
-      .then(() => done("ok"), () => done("unavailable"));
+      .then(() => done("ok"), (error) => done("error:" + String(error)));
   `);
-  await client.executeSync(`
+  if (nativeFocus !== "ok") {
+    throw new Error(`native main-window focus failed: ${nativeFocus}`);
+  }
+  await sleep(500);
+  const focusState = await client.executeSync<{ documentHasFocus: boolean; terminalHasFocus: boolean }>(`
     window.focus();
     const remote = document.querySelector(
       ".cloud-terminal-shell[data-owner-task-id=" + JSON.stringify(${JSON.stringify(ownerTaskId)}) + "] .xterm-helper-textarea",
@@ -184,8 +188,14 @@ async function focusTerminal(client: WebDriverClient, ownerTaskId: string): Prom
     const local = document.querySelector(".main-panel .terminal-container .xterm-helper-textarea");
     const input = remote instanceof HTMLElement ? remote : local;
     if (input instanceof HTMLElement) input.focus();
+    return {
+      documentHasFocus: document.hasFocus(),
+      terminalHasFocus: document.activeElement === input,
+    };
   `);
-  await sleep(500);
+  if (!focusState.documentHasFocus || !focusState.terminalHasFocus) {
+    throw new Error(`foreground terminal focus was not established: ${JSON.stringify(focusState)}`);
+  }
 }
 
 async function waitForRemoteTask(taskId: string): Promise<string> {
@@ -287,6 +297,15 @@ async function capture(client: WebDriverClient, name: string): Promise<void> {
 
 describe("remote active-view restoration", () => {
   beforeAll(async () => {
+    if (process.env.KANNA_E2E_NO_ACTIVATE !== "0") {
+      throw new Error(
+        "remote active-view restoration requires foreground-capable desktop windows; " +
+        "the runner must set KANNA_E2E_NO_ACTIVATE=0 for this target",
+      );
+    }
+    expectedNativeWindowIdentity = await resolveExpectedNativeWindowIdentity(
+      resolve(process.cwd(), "../.."),
+    );
     await primary.createSession();
     await secondary.createSession();
     // Each WebDriver port must independently prove that it is bound to this

@@ -27,6 +27,7 @@ import {
   targetNeedsRelay,
   targetNeedsRelayControl,
   targetNeedsSecondaryInstance,
+  targetRequiresForegroundActivation,
   resolveRelayControlOperation,
 } from "./runPlan";
 import { assertPlaywrightChromiumAvailable } from "./playwrightPreflight";
@@ -545,6 +546,9 @@ async function main(): Promise<void> {
   function realE2eRuntimeEnvForTarget(testTarget: string): Record<string, string> {
     return {
       ...realE2eRuntimeEnv,
+      ...(targetRequiresForegroundActivation(testTarget)
+        ? { KANNA_E2E_NO_ACTIVATE: "0" }
+        : {}),
       ...(/real\/cloud-task-transfer\.test\.ts$/.test(testTarget)
         ? {
             KANNA_TRANSFER_REGISTRY_DIR: primaryCloudTransferRegistryDir,
@@ -560,6 +564,9 @@ async function main(): Promise<void> {
   function secondaryRealE2eRuntimeEnvForTarget(testTarget: string): Record<string, string> {
     return {
       ...realE2eRuntimeEnv,
+      ...(targetRequiresForegroundActivation(testTarget)
+        ? { KANNA_E2E_NO_ACTIVATE: "0" }
+        : {}),
       ...(/real\/cloud-task-transfer\.test\.ts$/.test(testTarget)
         ? { KANNA_TRANSFER_REGISTRY_DIR: secondaryCloudTransferRegistryDir }
         : {}),

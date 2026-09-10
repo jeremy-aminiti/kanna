@@ -156,3 +156,49 @@ The complete nested log and actual exit record are retained at
 `.tmp/desktop-active-view-restoration-c03c5d68d.exit`. The runner reported its
 tmux session, relay, and Firebase emulator stopped; no owned process remained
 after exit. No additional retry was run.
+
+## Initial local geometry investigation — foreground fixture correction
+
+The `140x50` daemon versus `102x27` rendered-local mismatch is explained by
+the intended active-view boundary, not a second geometry policy. The terminal
+lifecycle measures and registers the local viewer, marks it visible, and fits
+xterm, but registration, visibility, and resize are deliberately passive.
+`SessionSizeState::activate` is the only path that elects that viewer and
+applies its measured size. The lifecycle sends that active-view command only
+from terminal `focusin` after confirming an attached, visible, non-zero view
+and `document.hasFocus()`.
+
+The failed focused run launched both real apps with the runner's default
+`KANNA_E2E_NO_ACTIVATE=1`. On macOS that installs the `Prohibited` activation
+policy; the harness has an explicit app-launch assertion that such a window
+has `document.hasFocus() === false`. The fixture's old `focusTerminal` also
+discarded a native focus failure. Consequently the local DOM could render its
+measured `102x27` grid while the daemon correctly retained the fixture's spawn
+size (`140x50`): no eligible foreground activation reached the daemon.
+
+The scoped correction makes only
+`real/remote-active-view-restoration.test.ts` start its already-isolated,
+title-validated two desktop instances with `KANNA_E2E_NO_ACTIVATE=0` through
+the existing runner. It additionally fails before geometry assertions unless
+the native main-window focus succeeds and both the document and terminal input
+are focused. Production visibility/focus guards, passive registration and
+resize behavior, and hidden/background/zero-size exclusions are unchanged.
+
+Focused source evidence passed:
+
+```sh
+pnpm --dir apps/desktop exec vitest run tests/e2e/runPlan.test.ts
+# 1 file, 11 tests passed
+pnpm --dir apps/desktop exec vue-tsc --noEmit
+# exit 0
+```
+
+The required next native proof remains held. Its exact selection is:
+
+```sh
+CARGO_BUILD_JOBS=1 KANNA_E2E_SCREENSHOT_DIR="/Users/jeremyhale/.kanna/repos/kanna-7/.kanna-worktrees/task-5c82e022/docs/task-screenshots/5c82e022-screenshots" pnpm --dir apps/desktop test:e2e -- real/remote-active-view-restoration.test.ts
+```
+
+The runner supplies the target-specific foreground setting; do not add a
+manual geometry or ownership override. No native retry was run for this source
+correction.

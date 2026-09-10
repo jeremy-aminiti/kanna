@@ -7,6 +7,7 @@ import {
   targetNeedsRelay,
   targetNeedsRelayControl,
   targetNeedsSecondaryInstance,
+  targetRequiresForegroundActivation,
   resolveRelayControlOperation,
   shouldStartInitialInstances,
 } from "./runPlan";
@@ -103,5 +104,12 @@ describe("remote active-view restoration runner plan", () => {
   it("does not start companion-only relay controls or Chromium", () => {
     expect(targetNeedsRelayControl(target)).toBe(false);
     expect(targetNeedsPlaywrightChromium(target)).toBe(false);
+  });
+
+  it("is the only target that starts foreground-capable desktop windows", () => {
+    expect(targetRequiresForegroundActivation(target)).toBe(true);
+    expect(targetRequiresForegroundActivation(
+      "tests/e2e/real/remote-visual-companion.test.ts",
+    )).toBe(false);
   });
 });

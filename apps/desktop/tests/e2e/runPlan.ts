@@ -40,6 +40,15 @@ export function targetNeedsPlaywrightChromium(testTarget: string): boolean {
   return /real\/remote-visual-companion\.test\.ts$/.test(testTarget);
 }
 
+/**
+ * Active-view geometry is deliberately driven only by a foreground desktop.
+ * This isolated journey must therefore opt out of the harness's usual
+ * non-activating app policy; other E2E targets remain non-activating.
+ */
+export function targetRequiresForegroundActivation(testTarget: string): boolean {
+  return /real\/remote-active-view-restoration\.test\.ts$/.test(testTarget);
+}
+
 export function relayStartupReportedListening(
   output: string,
   port: number,
