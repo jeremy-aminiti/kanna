@@ -166,8 +166,8 @@ mixing a large generated lockfile with repository-rule and toolchain design.
 
 ## Foundation implementation checkpoint
 
-The bounded slice above is now present in source, still awaiting Bazel
-evaluation under the capacity hold:
+The bounded foundation is now present in source and has completed the focused
+Bazel verification recorded below:
 
 - `MODULE.bazel` imports the execution-platform repositories from the existing
   Zig 0.15.2 extension, instantiates the two Noble sysroot repositories and
@@ -193,38 +193,62 @@ evaluation under the capacity hold:
   executed on the macOS build host.
 
 The source checkpoint does not add Rust Linux triples, repin a universe, expose
-a Linux product target, package a `.deb`, change CI/release commands or claim
-that the unevaluated toolchains work. The later `-sys` annotation slice still
-owns `PKG_CONFIG_SYSROOT_DIR`, `PKG_CONFIG_LIBDIR` and execution-platform
-pkg-config plumbing; no host pkg-config path was added here.
+a Linux product target, package a `.deb`, or change CI/release commands. The
+later `-sys` annotation slice still owns `PKG_CONFIG_SYSROOT_DIR`,
+`PKG_CONFIG_LIBDIR` and execution-platform pkg-config plumbing; no host
+pkg-config path was added here.
 
-## Verification release needed for that slice
+## Bounded verification checkpoint
 
-No command below ran during this inventory. The current explicit heavy hold
-remains in force. At inventory time the Studio reported 49.5% CPU busy over a
-505 ms sample, 17.4 GB available memory, normal pressure, about 95 GB available
-storage, two Bazel processes, two Cargo processes, one rustc and four Vitest
-processes. A release should name the exact commands and provide a fresh capacity
-sample.
+The owner released only the focused sysroot test and two canary builds on the
+Studio, sequentially with `--jobs=1`. The coherent pre-verification source
+checkpoint was `a2da9561af41c7898646b3de8c3bd4c5aed53689`. Causal Bazel 9, repository
+extraction, wrapper and canary-link defects found by the released commands were
+fixed within this slice and committed before their retries. The exact final
+source head exercised successfully was
+`19281d092` (`19281d09285b87e316a2a5945a769f79b23fa3c6`).
 
-The proposed bounded command set is:
+On the Apple Silicon Studio:
 
-```text
-python3 packaging/linux/resolve_sysroot.py --check packaging/linux/sysroot-amd64.lock.json
-python3 packaging/linux/resolve_sysroot.py --check packaging/linux/sysroot-arm64.lock.json
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s packaging/linux/tests -p 'test_*.py'
-bazel build //tools/bazel:linux_toolchain_canary_x86_64 --platforms=//tools/bazel:linux_x86_64 --jobs=1
-bazel build //tools/bazel:linux_toolchain_canary_arm64 --platforms=//tools/bazel:linux_arm64 --jobs=1
-```
+- `bazel test //packaging/linux:resolve_sysroot_test --jobs=1` exited 0 at the
+  final source head. All eight tests passed in Bazel's `darwin-sandbox`.
+- `bazel build //tools/bazel:linux_toolchain_canary_x86_64
+  --platforms=//tools/bazel:linux_x86_64 --jobs=1` exited 0. Its first uncached
+  sysroot extraction fetched and merged the 400-package amd64 lock. The output
+  is an ELF64 x86-64 executable using `/lib64/ld-linux-x86-64.so.2`.
+- `bazel build //tools/bazel:linux_toolchain_canary_arm64
+  --platforms=//tools/bazel:linux_arm64 --jobs=1` exited 0 in 206.876 seconds.
+  Its first uncached sysroot extraction fetched and merged the 398-package
+  arm64 lock. The output is an ELF64 AArch64 executable using
+  `/lib/ld-linux-aarch64.so.1`.
 
-The two canary outputs must be inspected with `file`/`readelf` and their action
-logs checked for host `/usr`, Homebrew and inherited pkg-config paths. This is
-not authorization to run those commands now. The later eight-universe repin,
-full Linux targets, macOS regression build, hosted builds, `.deb` installation
-and two-version upgrade require separate explicit verification releases.
+Apple `/usr/bin/objdump -p` reports the same direct dynamic dependencies for
+both outputs: `libgtk-3.so.0`, `libwebkit2gtk-4.1.so.0` and `libc.so.6`. The
+emitted execution-host wrappers use
+`external/rules_zig++zig+zig_0.15.2_aarch64-macos/zig`, set `ZIG_LIB_DIR` to
+that declared SDK's exec-root-relative `lib` directory, select the matching
+content-addressed Noble sysroot, and invoke `zig cc` with respectively
+`-target x86_64-linux-gnu.2.39` and `-target aarch64-linux-gnu.2.39`. Zig cache
+state is per Bazel sandbox; no Homebrew compiler, host GTK, host pkg-config or
+second Zig is involved.
 
-The three permitted Python commands were executed after implementation. Eight
-unit tests passed; both snapshot-backed lock checks exited 0. Their canonical
-lock SHA-256 values are `edb2c6a0a65bdee0c39189f633045397834ba97352a830bc85b9a63f9a2d1604`
+The released commands initially exposed and boundedly corrected: Bazel 9's
+explicit `rules_cc` rule/config-provider imports, Python test runfiles,
+Starlark repository API differences, `/usr/bin/X11` symlink-loop traversal,
+private generated-Zig label use, generated tool-path resolution, wrapper shell
+quoting and cache setup, the Darwin wrapper's inappropriate SDK injection for
+Linux actions, Zig builtin-header declaration, and an unnecessary transitive
+GLib reference in the canary. Failed repository attempts did not produce an
+accepted artifact.
+
+The earlier source-only checks also remain passed: eight Python unit tests and
+both snapshot-backed lock checks exited 0. The canonical lock SHA-256 values
+are `edb2c6a0a65bdee0c39189f633045397834ba97352a830bc85b9a63f9a2d1604`
 (amd64) and `36cbfd261645a958dd926151e3b3dadcab46dba5d787f6b12d4d65f88498e9e5`
-(arm64). No Bazel command ran.
+(arm64).
+
+This checkpoint is only macOS-host cross-toolchain/sysroot/canary evidence. It
+does not prove the eight-universe Rust repin, any full product or `.deb`, static
+Ghostty C++ linkage, native/hosted parity, installed or two-version upgrade
+lanes, release integration, apt publication, or real-key custody. All of those
+remain held for later explicitly authorized slices and verification releases.
