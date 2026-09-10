@@ -110,9 +110,11 @@ async function renderedDimensions(
     const id = hook?.sessionIds?.().includes(remoteId) ? remoteId : ${JSON.stringify(taskId)};
     const cursor = hook?.cursor?.(id);
     const terminal = hook?.element?.(id);
-    const rect = terminal?.getBoundingClientRect();
-    const rows = terminal?.querySelector?.(".xterm-rows")
-      ?? terminal?.closest?.(".xterm")?.querySelector?.(".xterm-rows");
+    const host = terminal?.closest?.(".cloud-terminal-cache-entry, .terminal-container")
+      ?? terminal;
+    const screen = host?.querySelector?.(".xterm-screen");
+    const rect = screen?.getBoundingClientRect() ?? host?.getBoundingClientRect();
+    const rows = screen?.querySelector?.(".xterm-rows");
     const markerRendered = Array.from(rows?.children ?? []).some(
       (row) => row.textContent?.includes("ACTIVE_VIEW:"),
     );
@@ -124,27 +126,47 @@ async function renderedDimensions(
   return dimensions;
 }
 
+async function refreshRenderedTerminal(client: WebDriverClient, taskId: string): Promise<void> {
+  await client.executeSync(`
+    const hook = window.__KANNA_E2E__?.terminalBuffers;
+    const remoteId = "remote:" + ${JSON.stringify(taskId)};
+    const id = hook?.sessionIds?.().includes(remoteId) ? remoteId : ${JSON.stringify(taskId)};
+    hook?.refresh?.(id);
+  `);
+  // xterm's private synchronous refresh schedules DOM-row painting; let that
+  // paint land before reading the actual row cells or taking a screenshot.
+  await sleep(250);
+}
+
 async function waitForOwnerAndRenderer(
   client: WebDriverClient,
   taskId: string,
   expected?: Dimensions,
 ): Promise<Dimensions> {
   let latest: unknown = null;
-  await expect.poll(async () => {
-    try {
-      const [daemon, rendered] = await Promise.all([
-        ownerDimensions(taskId),
-        renderedDimensions(client, taskId),
-      ]);
-      latest = { daemon, rendered };
-      return daemon.cols === rendered.cols && daemon.rows === rendered.rows
-        && rendered.markerRendered
-        && (!expected || (daemon.cols === expected.cols && daemon.rows === expected.rows));
-    } catch (error) {
-      latest = error instanceof Error ? error.message : String(error);
-      return false;
-    }
-  }, { timeout: 30_000, interval: 150 }).toBe(true);
+  try {
+    await expect.poll(async () => {
+      try {
+        await refreshRenderedTerminal(client, taskId);
+        const [daemon, rendered] = await Promise.all([
+          ownerDimensions(taskId),
+          renderedDimensions(client, taskId),
+        ]);
+        latest = { daemon, rendered };
+        return daemon.cols === rendered.cols && daemon.rows === rendered.rows
+          && rendered.markerRendered
+          && (!expected || (daemon.cols === expected.cols && daemon.rows === expected.rows));
+      } catch (error) {
+        latest = error instanceof Error ? error.message : String(error);
+        return false;
+      }
+    }, { timeout: 30_000, interval: 150 }).toBe(true);
+  } catch (error) {
+    throw new Error(
+      `owner/rendered terminal did not converge for ${taskId}: ${JSON.stringify(latest)}`,
+      { cause: error },
+    );
+  }
   return (latest as { daemon: Dimensions }).daemon;
 }
 

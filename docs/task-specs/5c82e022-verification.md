@@ -103,3 +103,32 @@ and worktree, then the native Tauri title read through that same endpoint. The
 title must exactly equal `formatAppWindowTitle(buildInfo)` and therefore name
 this task worktree; an absent or mismatched identity stops the test before
 reset, sign-in, focus, or capture.
+
+## Reconciled dedicated desktop proof — renderer-precondition failure
+
+Command (exit 1):
+
+```sh
+CARGO_BUILD_JOBS=1 KANNA_E2E_SCREENSHOT_DIR="/Users/jeremyhale/.kanna/repos/kanna-7/.kanna-worktrees/task-5c82e022/docs/task-screenshots/5c82e022-screenshots" pnpm --dir apps/desktop test:e2e -- real/remote-active-view-restoration.test.ts
+```
+
+At reconciled head `743f4076c`, the canonical runner independently verified
+both bound native windows before reset: task `5c82e022`, worktree
+`task-5c82e022`, branch/commit `task-5c82e022` / `743f4076c`, and title
+`Kanna — task 5c82e022 (0.0.68 @ 743f4076c)`. The target then failed at its
+first owner renderer precondition (before remote selection, focus handback, or
+capture): daemon/buffer dimensions did not converge with a visible rendered
+`ACTIVE_VIEW:` row within 30 seconds. No new screenshot was written.
+
+The complete nested log and actual exit record are retained at
+`.tmp/desktop-active-view-restoration-743f4076c.log` and
+`.tmp/desktop-active-view-restoration-743f4076c.exit`. The runner reported its
+own tmux session, relay, and Firebase emulator stopped; no owned process
+remained afterward.
+
+The target previously read xterm rows without invoking the existing E2E
+terminal-buffer refresh used by the real visual-terminal helpers. It now
+refreshes the actual terminal before each rendered-cell read and reports the
+last daemon/rendered state on a failed convergence. That correction is
+source-checked but not yet native-verified; the desktop restoration behavior
+remains unproven.
