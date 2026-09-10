@@ -157,6 +157,16 @@ impl Db {
     ) -> Result<bool, rusqlite::Error> {
         Ok(self.conn.execute("UPDATE transferred_task_manifest SET state='prepared', prepared_at=datetime('now') WHERE transfer_id=? AND state='importing'", [transfer_id])? == 1)
     }
+
+    pub fn transferred_task_manifest_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<(String, String, String, Option<String>, String)>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT repo_id,head_oid,base_oid,local_task_id,state FROM transferred_task_manifest WHERE local_task_id=?",
+            [task_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).optional()
+    }
     /// Stores the source-pinned workflow/context before a transferred task's
     /// first agent spawn. Replays must carry the same transfer identity.
     pub fn upsert_transferred_task_context(
