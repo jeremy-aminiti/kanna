@@ -646,6 +646,7 @@ pub(crate) fn prepare_rerun_stage_for_api(
             task_prompt: source_task.prompt.as_deref(),
             prev_result: prev_result.as_deref(),
             prev_main_result: prev_main_result.as_deref(),
+            revision_feedback: None,
             branch: Some(branch),
             base_ref: source_task.base_ref.as_deref(),
             source_worktree: source_worktree.as_deref(),
@@ -2549,6 +2550,7 @@ pub(crate) fn prepare_start_dormant_task_for_api(
             task_prompt: item.prompt.as_deref(),
             prev_result: None,
             prev_main_result: None,
+            revision_feedback: None,
             branch: base_ref.as_deref(),
             base_ref: base_ref.as_deref(),
             source_worktree: None,
@@ -3238,11 +3240,9 @@ fn resolve_task_spawn(
                 stage.prompt.as_deref(),
                 &PromptContext {
                     task_prompt: Some(&request.task_prompt),
-                    prev_result: import
-                        .revision_feedback
-                        .as_deref()
-                        .or(import.previous_stage_result.as_deref()),
+                    prev_result: import.previous_stage_result.as_deref(),
                     prev_main_result: import.previous_main_result.as_deref(),
+                    revision_feedback: import.revision_feedback.as_deref(),
                     branch: destination_branch
                         .as_deref()
                         .or(request.base_ref.as_deref()),
@@ -3269,6 +3269,7 @@ fn resolve_task_spawn(
                 task_prompt: Some(&request.task_prompt),
                 prev_result: None,
                 prev_main_result: None,
+                revision_feedback: None,
                 branch: destination_branch
                     .as_deref()
                     .or(request.base_ref.as_deref()),
