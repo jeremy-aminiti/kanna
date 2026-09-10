@@ -429,10 +429,14 @@ async fn run_import(
     let local_task_id = local_task_id
         .ok_or_else(|| format!("incoming transfer has no local task: {transfer_id}"))?;
 
-    // Recovery is not an integrity shortcut. Re-prove the persisted task,
-    // exact committed head/base, pinned workflow, and complete input history
-    // before any acknowledgment can close the source.
-    verify_persisted_task_bundle(state, &payload, &local_task_id, transfer_id).await?;
+    // Once the destination server has durably recorded the complete proof,
+    // acknowledgment recovery must not depend on re-fetching artifacts.
+    let persisted_commitment = db
+        .transferred_task_manifest_content_commitment(transfer_id)
+        .map_err(|error| format!("db error: {error}"))?;
+    if persisted_commitment.is_none() {
+        verify_persisted_task_bundle(state, &payload, &local_task_id, transfer_id).await?;
+    }
     let destination_repo_id;
     if let Some((repo_id, _, _, bound_task, state_name)) = db
         .transferred_task_manifest(transfer_id)
