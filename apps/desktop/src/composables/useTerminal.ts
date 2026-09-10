@@ -2,6 +2,7 @@ import { ref, onUnmounted } from "vue"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import { openUrl } from "@tauri-apps/plugin-opener"
+import { getCurrentWindow } from "@tauri-apps/api/window"
 import { isTauri } from "../tauri-mock"
 import { useThemeRuntime } from "../theme/runtime"
 import { getSharedStreamClient } from "./desktopStreamClient"
@@ -101,6 +102,38 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     toast,
     getTerminalStreamClient,
   })
+  let stopNativeWindowFocusTracking: (() => void) | null = null
+  let nativeWindowFocusTrackingGeneration = 0
+
+  function startNativeWindowFocusTracking() {
+    if (!isTauri || stopNativeWindowFocusTracking) return
+    const generation = ++nativeWindowFocusTrackingGeneration
+    void getCurrentWindow().onFocusChanged((event) => {
+      // A window becoming key again does not necessarily re-fire xterm's
+      // focusin event: its helper textarea may still be document.activeElement.
+      // It is nevertheless a real foreground-view edge, so reuse the same
+      // lifecycle guard as terminal focus rather than inventing a second
+      // geometry policy.
+      if (!event.payload || generation !== nativeWindowFocusTrackingGeneration) return
+      void lifecycle.activateVisibleViewer().catch((error) => {
+        console.warn("[terminal] failed to activate native-focused viewer:", error)
+      })
+    }).then((unlisten) => {
+      if (generation !== nativeWindowFocusTrackingGeneration) {
+        unlisten()
+        return
+      }
+      stopNativeWindowFocusTracking = unlisten
+    }).catch((error) => {
+      console.warn("[terminal] failed to track native window focus:", error)
+    })
+  }
+
+  function stopNativeWindowFocusTrackingNow() {
+    nativeWindowFocusTrackingGeneration += 1
+    stopNativeWindowFocusTracking?.()
+    stopNativeWindowFocusTracking = null
+  }
 
   function init(el: HTMLElement) {
     state.container = el
@@ -144,11 +177,17 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     })
     state.cleanupContainerEvents = state.terminalView.cleanupContainerEvents
     state.stopThemeWatch = state.terminalView.stopThemeWatch
+    startNativeWindowFocusTracking()
   }
 
   onUnmounted(() => {
-    lifecycle.dispose()
+    dispose()
   })
+
+  function dispose() {
+    stopNativeWindowFocusTrackingNow()
+    lifecycle.dispose()
+  }
 
   return {
     terminal,
@@ -159,6 +198,6 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     redraw: lifecycle.redraw,
     ensureConnected: lifecycle.ensureConnected,
     pause: lifecycle.pause,
-    dispose: lifecycle.dispose,
+    dispose,
   }
 }
