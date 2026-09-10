@@ -11,6 +11,7 @@ mod http_api;
 mod human_control;
 mod internal_ports;
 mod ksp;
+mod lan_tls_identity;
 mod logging;
 pub(crate) use kanna_runtime_defaults::login_shell;
 mod machine_trust;

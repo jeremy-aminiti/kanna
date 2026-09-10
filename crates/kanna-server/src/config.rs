@@ -218,6 +218,23 @@ impl Config {
         )
     }
 
+    /// Where `lan_tls_identity` persists this desktop's stable LAN TLS
+    /// keypair/certificate. Same derivation rationale as
+    /// `machine_trust_store_path`: a new required config field would break
+    /// every literal `Config` test fixture in this crate for a value that
+    /// has no independent reason to be configured separately.
+    pub(crate) fn lan_tls_identity_path(&self) -> Option<PathBuf> {
+        if self.pairing_store_path.is_empty() {
+            return None;
+        }
+        Some(
+            Path::new(&self.pairing_store_path)
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("lan-tls-identity.json"),
+        )
+    }
+
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         let data_root = app_data_dir();
         let config_path = match std::env::var("KANNA_SERVER_CONFIG") {
