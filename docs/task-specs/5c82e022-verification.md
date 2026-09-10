@@ -259,3 +259,62 @@ guard is unhealthy (the window is hidden or minimized), the smallest correction
 is a harness window-state restoration;
 if both are healthy, the evidence instead requires a distinct app-activation
 observation before proposing any correction. No ownership behavior is changed.
+
+## Studio native handback proof — passed
+
+Command (exit 0):
+
+```sh
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+KANNA_E2E_SCREENSHOT_DIR="/Users/jeremyhale/.kanna/repos/kanna-2/.kanna-worktrees/task-6758f798/.tmp/active-view-screenshots" \
+pnpm --dir apps/desktop test:e2e -- real/remote-active-view-restoration.test.ts
+```
+
+At exact head `6598f840adae6548da6f44c617946e74a5a1b6ed`, the canonical
+two-instance target passed (one file, one test, `42.28s`). Both already-bound
+native windows proved the Studio task/worktree/commit identity and exact title
+before reset or interaction: task/worktree `6758f798` / `task-6758f798`,
+commit `6598f840a`, and `Kanna — task 6758f798 (0.0.68 @ 6598f840a)`.
+
+The test proved daemon and rendered terminal geometry at every ownership edge:
+
+```text
+owner 102x27 -> remote 67x18 -> owner 102x27
+```
+
+The final handback sent no terminal bytes. Root independently read the raw
+exit/log and visually inspected the populated restored screenshot, which ends
+in `ACTIVE_VIEW:102x27`. The remote screenshot is likewise a rendered-cell
+capture, not protocol-only evidence. The canonical runner reported `Stopped`,
+`No session running`, and `No Firebase emulator window is running`; an
+independent process/socket check found no owned stack. The Studio worktree
+remained clean.
+
+Studio artifacts are retained under the verifier worktree:
+
+- `.tmp/active-view-handback-6598f840a.log`
+- `.tmp/active-view-handback-6598f840a.exit`
+- `.tmp/active-view-screenshots/remote-active-view-controls-grid.png`
+- `.tmp/active-view-screenshots/owner-restored-without-terminal-input.png`
+
+## Current verification inventory
+
+Completed focused evidence:
+
+- Mobile relay/Appium journey at the recorded command above: exit 0; phone
+  `50x36` measured/daemon/rendered equality and visually inspected removal of
+  the Take/Release controls. Its separate protocol handback remains explicitly
+  distinct from desktop UI proof.
+- Focused daemon, stream, desktop, and mobile lightweight tests recorded in
+  the task run history, including the desktop lifecycle regression below.
+- `pnpm --dir apps/desktop exec vitest run src/composables/useTerminal.test.ts`
+  at `6598f840a`: exit 0, 50 tests passed.
+- `pnpm --dir apps/desktop exec vue-tsc --noEmit` at `6598f840a`: exit 0.
+- Studio canonical real desktop target at `6598f840a`: exit 0, as documented
+  above.
+
+The earlier broad remote-real failure matrix and focused precondition failures
+remain unclassified historical evidence; they are not rewritten as passes.
+`./kd test all`, workspace cargo/clippy/fmt, and any broader native or Appium
+reruns remain held pending final-gate allocation. The successful focused
+native proof is not rerun unchanged.
