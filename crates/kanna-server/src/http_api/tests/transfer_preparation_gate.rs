@@ -334,6 +334,240 @@ async fn existing_unprepared_transfer_task_is_refused_before_recovery_spawn() {
     fixture.cleanup();
 }
 
+/// Branches one task head and two independent candidate bases directly off
+/// the fixture repo's own `main`, so a test can bundle the head against
+/// either base and get a distinct base OID -- and so the transferred head's
+/// tree still carries `main`'s own `.kanna/config.json` and provider stubs
+/// (`init_test_git_repo` writes those onto `main` only; a task branch that
+/// does not descend from it forks a worktree with no agent provider the task
+/// spawn can find). Mirrors
+/// `transfer_engine::git::tests::source_repo_with_head_and_two_bases`'s
+/// shape, which this file cannot call directly (that helper closes over
+/// `git.rs`'s private `git()` runner). Leaves `repo_root` checked out back on
+/// `main` when it returns.
+fn add_task_head_and_two_bases(repo_root: &Path) {
+    let run = |args: &[&str]| {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(repo_root)
+            .status()
+            .unwrap()
+            .success());
+    };
+    run(&["branch", "base-a"]);
+    run(&["checkout", "-b", "base-b"]);
+    std::fs::write(repo_root.join("alt.txt"), b"alt").unwrap();
+    run(&["add", "alt.txt"]);
+    run(&["commit", "-m", "alt base"]);
+    run(&["checkout", "main"]);
+    run(&["checkout", "-b", "task-1"]);
+    std::fs::write(repo_root.join("task.txt"), b"task").unwrap();
+    run(&["add", "task.txt"]);
+    run(&["commit", "-m", "task work"]);
+    run(&["checkout", "main"]);
+}
+
+fn create_bundle(source: &Path, dest: &Path, refs: &[&str]) {
+    let mut args = vec!["bundle", "create", dest.to_str().unwrap()];
+    args.extend_from_slice(refs);
+    assert!(Command::new("git")
+        .args(&args)
+        .current_dir(source)
+        .status()
+        .unwrap()
+        .success());
+}
+
+fn transfer_import_body_with_refs(
+    transfer_id: &str,
+    head_oid: &str,
+    fork_ref: &str,
+    diff_base_ref: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "repoId": "repo-1",
+        "prompt": "resume the transferred agent",
+        "workflowName": TEST_PROVIDER_NEUTRAL_WORKFLOW,
+        "agentProvider": "claude",
+        "baseRef": fork_ref,
+        "diffBaseRef": diff_base_ref,
+        "transferImport": {
+            "transferId": transfer_id,
+            "headOid": head_oid,
+            "sourceMachine": "peer-source",
+        },
+    })
+}
+
+/// `pipeline_item.base_ref` is a straight pass-through of whatever
+/// `import_task_bundle_refs` returns as the private base ref
+/// (`import_verified_task_bundle` returns it unchanged;
+/// `build_create_request` maps it to `diffBaseRef` unchanged;
+/// `prepare_create_task_for_api`/`prepare_task_spawn` store `diffBaseRef` as
+/// `pipeline_item.base_ref` unchanged — see
+/// `docs/2026-09-10-transfer-ref-publication-pipeline-item-e2e-gap.md`). This
+/// test drives the real production `import_task_bundle_refs` against this
+/// fixture's actual repo to get that ref for real, feeds it through this
+/// gate's real router/SQLite/git-worktree/fake-daemon boundary exactly as
+/// `build_create_request` would wire it, and then proves the persisted column
+/// -- not just the git ref -- survives a conflicting and an identical replay
+/// of the same import.
+#[tokio::test]
+async fn a_persisted_base_ref_survives_a_conflicting_and_an_identical_replay() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncWriteExt, BufReader};
+
+    let fixture = build_gate_fixture("base-ref-binding");
+    // Branched directly off this repo's own `main` (rather than an unrelated
+    // fresh repo) so the transferred head's tree still carries `main`'s own
+    // `.kanna/config.json` and provider stubs: the destination repo doubles
+    // as its own "source" here, which is legitimate -- a bundle's objects are
+    // already present when its source and destination are the same repo, and
+    // `import_task_bundle_refs` still runs its full advertise/unbundle/verify
+    // sequence for real.
+    add_task_head_and_two_bases(&fixture.repo_root);
+    let head_oid = crate::transfer_engine::git::commit_oid(&fixture.repo_root, "task-1").unwrap();
+    let base_a_oid = crate::transfer_engine::git::commit_oid(&fixture.repo_root, "base-a").unwrap();
+    let base_b_oid = crate::transfer_engine::git::commit_oid(&fixture.repo_root, "base-b").unwrap();
+
+    let bundle_temp = tempfile::tempdir().unwrap();
+    let bundle_a = bundle_temp.path().join("bundle-a.bundle");
+    create_bundle(&fixture.repo_root, &bundle_a, &["task-1", "base-a"]);
+
+    // The real production entry point `import_verified_task_bundle` calls,
+    // run for real against this fixture's own repo -- the same repo the
+    // task's worktree below forks from.
+    let (head_ref, base_ref) = crate::transfer_engine::git::import_task_bundle_refs(
+        &fixture.repo_root,
+        &bundle_a,
+        "transfer-baseref",
+        "task-1",
+        &head_oid,
+        "base-a",
+        &base_a_oid,
+    )
+    .expect("real bundle import establishes the private pair");
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    db.upsert_transferred_task_manifest(
+        "transfer-baseref",
+        "repo-1",
+        Some("abad0006"),
+        &head_oid,
+        &base_a_oid,
+    )
+    .unwrap();
+    drop(db);
+
+    let listener = tokio::net::UnixListener::bind(&fixture.socket_path).unwrap();
+    let daemon = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+        let session_id = match command {
+            DaemonCommand::Spawn { session_id, .. } => session_id,
+            other => panic!("expected PTY Spawn command, got {other:?}"),
+        };
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let (status, body) = put_task(
+        &app,
+        "abad0006",
+        transfer_import_body_with_refs("transfer-baseref", &head_oid, &head_ref, &base_ref),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    daemon.await.unwrap();
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    let item = db.get_pipeline_item("abad0006").unwrap().unwrap();
+    assert_eq!(
+        item.base_ref.as_deref(),
+        Some(base_ref.as_str()),
+        "pipeline_item.base_ref must be exactly the private base ref import_task_bundle_refs returned"
+    );
+    assert_eq!(
+        crate::transfer_engine::git::commit_oid(
+            &fixture.repo_root,
+            item.base_ref.as_deref().unwrap()
+        )
+        .unwrap(),
+        base_a_oid,
+        "the persisted base ref must still resolve to the original transferred base OID"
+    );
+    drop(db);
+
+    // A later, conflicting import attempt for the *same* transfer and head
+    // but a *different* base must be refused at the git layer (proved on its
+    // own in git.rs's real-Git regressions) and must not disturb the pair the
+    // task above is already bound to.
+    let bundle_b = bundle_temp.path().join("bundle-b.bundle");
+    create_bundle(&fixture.repo_root, &bundle_b, &["task-1", "base-b"]);
+    crate::transfer_engine::git::import_task_bundle_refs(
+        &fixture.repo_root,
+        &bundle_b,
+        "transfer-baseref",
+        "task-1",
+        &head_oid,
+        "base-b",
+        &base_b_oid,
+    )
+    .expect_err("a conflicting base for the same transfer and head must be refused");
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    let item_after_conflict = db.get_pipeline_item("abad0006").unwrap().unwrap();
+    assert_eq!(
+        item_after_conflict.base_ref.as_deref(),
+        Some(base_ref.as_str()),
+        "a refused conflicting import must not move the persisted base ref"
+    );
+    assert_eq!(
+        crate::transfer_engine::git::commit_oid(
+            &fixture.repo_root,
+            item_after_conflict.base_ref.as_deref().unwrap()
+        )
+        .unwrap(),
+        base_a_oid,
+        "a refused conflicting import must not move what the persisted base ref resolves to"
+    );
+    drop(db);
+
+    // An identical retry of the original import must still converge on the
+    // exact same pair the task is bound to.
+    let retry = crate::transfer_engine::git::import_task_bundle_refs(
+        &fixture.repo_root,
+        &bundle_a,
+        "transfer-baseref",
+        "task-1",
+        &head_oid,
+        "base-a",
+        &base_a_oid,
+    )
+    .expect("an identical retry of the original import must succeed");
+    assert_eq!(retry, (head_ref, base_ref.clone()));
+
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    let item_after_retry = db.get_pipeline_item("abad0006").unwrap().unwrap();
+    assert_eq!(
+        item_after_retry.base_ref.as_deref(),
+        Some(base_ref.as_str())
+    );
+
+    fixture.cleanup();
+}
+
 #[tokio::test]
 async fn ordinary_put_resume_and_rerun_refuse_unprepared_bound_task() {
     let fixture = build_gate_fixture("ordinary-recovery");
