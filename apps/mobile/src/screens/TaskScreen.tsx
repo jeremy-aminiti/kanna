@@ -5,6 +5,7 @@ import {
   Alert,
   Image,
   Keyboard,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -82,7 +83,10 @@ import {
   TASK_COMPOSER_MIN_HEIGHT,
   TASK_COMPOSER_TEXT_INPUT_PROPS
 } from "./taskComposerInput";
-import { getComposerBottomOffset } from "./taskComposerKeyboard";
+import {
+  getComposerBottomOffset,
+  taskKeyboardEventNames
+} from "./taskComposerKeyboard";
 import { QuickReplySendControl } from "./QuickReplySendControl";
 import {
   TASK_TERMINAL_KEYS,
@@ -825,10 +829,11 @@ export function TaskScreen({
   }, [task.id]);
 
   useEffect(() => {
-    const showSubscription = Keyboard.addListener("keyboardWillShow", (event) => {
+    const keyboardEvents = taskKeyboardEventNames(Platform.OS);
+    const showSubscription = Keyboard.addListener(keyboardEvents.show, (event) => {
       setKeyboardHeight(event.endCoordinates.height);
     });
-    const hideSubscription = Keyboard.addListener("keyboardWillHide", () => {
+    const hideSubscription = Keyboard.addListener(keyboardEvents.hide, () => {
       setKeyboardHeight(0);
     });
 

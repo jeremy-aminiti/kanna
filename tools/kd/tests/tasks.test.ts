@@ -2118,4 +2118,51 @@ describe("task executors", () => {
     expect(result.message).toContain("Local Network");
     expect(calls).not.toContain("pnpm --dir /repo/apps/mobile ios");
   });
+
+  it("runs Android SDK and exact-AVD doctor checks without booting or building", async () => {
+    const sdkRoot = await kdTestScratchDir("kanna-android-sdk-");
+    await mkdir(join(sdkRoot, "platform-tools"), { recursive: true });
+    await mkdir(join(sdkRoot, "emulator"), { recursive: true });
+    await writeFile(join(sdkRoot, "platform-tools", "adb"), "fixture");
+    await writeFile(join(sdkRoot, "emulator", "emulator"), "fixture");
+    const calls: string[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (command === join(sdkRoot, "emulator", "emulator") && args[0] === "-list-avds") {
+          return { exitCode: 0, stdout: "Medium_Phone_API_36.1\n", stderr: "" };
+        }
+        if (command === join(sdkRoot, "platform-tools", "adb") && args[0] === "devices") {
+          return { exitCode: 0, stdout: "List of devices attached\n", stderr: "" };
+        }
+        if (args[0] === "version" || args[0] === "-version") {
+          return { exitCode: 0, stdout: "tool version\n", stderr: "" };
+        }
+        if (command === "java") {
+          return { exitCode: 0, stdout: "", stderr: "openjdk version 21\n" };
+        }
+        return { exitCode: 1, stdout: "", stderr: "unexpected" };
+      }
+    };
+
+    const result = await executeMobileDeviceDoctorWithContext(
+      { device: false, androidEmulator: "Medium_Phone_API_36.1" },
+      {
+        runner,
+        context: {
+          repoRoot: "/repo",
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: { KANNA_MOBILE_PORT: 1430 },
+          env: { ANDROID_HOME: sdkRoot, KANNA_MOBILE_PORT: "1430" }
+        }
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("Android emulator doctor for Medium_Phone_API_36.1");
+    expect(result.message).toContain("Kanna Dev (build.kanna.app.dev)");
+    expect(result.message).toContain("WARN sdkmanager");
+    expect(calls.some((call) => call.includes(" -avd "))).toBe(false);
+    expect(calls.some((call) => call.startsWith("pnpm "))).toBe(false);
+  });
 });

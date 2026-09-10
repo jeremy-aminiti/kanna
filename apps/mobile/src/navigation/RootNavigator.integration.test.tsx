@@ -147,6 +147,7 @@ vi.mock("react-native", () => {
         config
       })
     },
+    Platform: { OS: "ios" },
     Pressable: "Pressable",
     ScrollView: React.forwardRef(function ScrollView(
       props: { children?: React.ReactNode; testID?: string },

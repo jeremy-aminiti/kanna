@@ -132,23 +132,27 @@ interface MobileEnvironmentRecord {
   name: MobileAppEnv;
   displayName: string;
   iosBundleId: string;
+  androidPackageId: string;
 }
 
 const fallbackMobileEnvironmentRegistry = {
   dev: {
     name: "dev",
     displayName: "Kanna Dev",
-    iosBundleId: mobileBundleIds.dev
+    iosBundleId: mobileBundleIds.dev,
+    androidPackageId: mobileBundleIds.dev
   },
   staging: {
     name: "staging",
     displayName: "Kanna Staging",
-    iosBundleId: mobileBundleIds.staging
+    iosBundleId: mobileBundleIds.staging,
+    androidPackageId: mobileBundleIds.staging
   },
   prod: {
     name: "prod",
     displayName: "Kanna",
-    iosBundleId: mobileBundleIds.prod
+    iosBundleId: mobileBundleIds.prod,
+    androidPackageId: mobileBundleIds.prod
   }
 } satisfies Record<MobileAppEnv, MobileEnvironmentRecord>;
 
@@ -156,6 +160,12 @@ export interface MobileNativeIdentity {
   appEnv: MobileAppEnv;
   bundleId: string;
   devClientScheme: string;
+  displayName: string;
+}
+
+export interface MobileAndroidIdentity {
+  appEnv: MobileAppEnv;
+  packageId: string;
   displayName: string;
 }
 
@@ -623,6 +633,16 @@ export function resolveMobileNativeIdentity(env: NodeJS.ProcessEnv): MobileNativ
     appEnv,
     bundleId: explicitBundleId || environment.iosBundleId || mobileBundleIds[appEnv],
     devClientScheme: mobileDevClientScheme,
+    displayName: environment.displayName
+  };
+}
+
+export function resolveMobileAndroidIdentity(env: NodeJS.ProcessEnv): MobileAndroidIdentity {
+  const appEnv = resolveMobileAppEnv(env);
+  const environment = readMobileEnvironmentRegistry()[appEnv];
+  return {
+    appEnv,
+    packageId: environment.androidPackageId || mobileBundleIds[appEnv],
     displayName: environment.displayName
   };
 }

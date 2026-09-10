@@ -9,6 +9,10 @@ import {
   type BonjourBrowser
 } from "./lib/discovery/bonjour";
 import {
+  createExplicitDevelopmentServerBrowser,
+  resolveExplicitDevelopmentServerUrl
+} from "./lib/discovery/explicitDevelopmentServer";
+import {
   resolveTrustedBonjourEndpoint,
   resolveTrustedBonjourEndpoints
 } from "./lib/discovery/trustedBonjour";
@@ -71,6 +75,7 @@ const CLOUD_TASK_RECOVERY_MAX_RETRY_MS = 30_000;
 
 interface ExpoPublicEnv extends ExpoRelayEnv {
   EXPO_PUBLIC_KANNA_FORCE_CLOUD?: string;
+  EXPO_PUBLIC_KANNA_SERVER_URL?: string;
 }
 
 export { resolveRelayUrl } from "./relaySettings";
@@ -159,7 +164,18 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
   const persistence = input.persistence;
   const authSession = input.authSession ?? createConfiguredMobileAuthSession();
   const options = input.options ?? {};
-  const bonjourBrowser = options.bonjourBrowser ?? createBonjourBrowser();
+  const nativeBonjourBrowser = options.bonjourBrowser ?? createBonjourBrowser();
+  const explicitDevelopmentServerUrl = resolveExplicitDevelopmentServerUrl(
+    readExpoPublicEnv().EXPO_PUBLIC_KANNA_SERVER_URL,
+    isDevRuntime()
+  );
+  const bonjourBrowser = explicitDevelopmentServerUrl
+    ? createExplicitDevelopmentServerBrowser({
+        baseUrl: explicitDevelopmentServerUrl,
+        browser: nativeBonjourBrowser,
+        fetchImpl
+      })
+    : nativeBonjourBrowser;
   const sessionStore = createSessionStore();
   const anonymousPushBindingCoordinator = createAnonymousPushBindingCoordinator(
     (request, init) => fetchImpl(request, init)

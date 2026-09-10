@@ -18,6 +18,7 @@ interface BonjourRemovalEvent {
 
 export interface BonjourBrowser {
   getServices(): readonly BonjourService[];
+  refresh?(): Promise<void>;
   start(): void;
   stop(): void;
   subscribe(listener: () => void): () => void;
