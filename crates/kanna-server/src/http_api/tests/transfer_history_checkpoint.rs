@@ -126,6 +126,19 @@ async fn put_task(
     (status, String::from_utf8_lossy(&body).into_owned())
 }
 
+async fn get_task_path(app: &axum::Router, path: &str) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(Request::get(path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
 /// Adds a workflow with a `review` stage past `in progress`, so a transfer
 /// landing directly on `review` (as a resumed task does) exercises
 /// `$BRANCH`/`$PREV_RESULT` substitution, which `TEST_PROVIDER_NEUTRAL_WORKFLOW`'s
@@ -308,6 +321,28 @@ async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_bra
         .unwrap()
         .expect("scalar context also persisted");
     assert_eq!(context.2.as_deref(), Some("hop1 review result: looks good"));
+
+    // The actual consumer: a reviewer, a manager, or a later hop reads the
+    // full ordered history — not only the three latest scalars the prompt
+    // carried — through GET /v1/tasks/{id}/transfer-history, with each
+    // record's original provenance intact.
+    let (status, resp_body) = get_task_path(&app, "/v1/tasks/abcd0001/transfer-history").await;
+    assert_eq!(status, StatusCode::OK, "{resp_body}");
+    let fetched: serde_json::Value =
+        serde_json::from_str(&resp_body).expect("transfer history response");
+    assert_eq!(fetched["taskId"], "abcd0001");
+    let records = fetched["history"].as_array().expect("history array");
+    assert_eq!(records.len(), 2, "{resp_body}");
+    assert_eq!(records[0]["sequence"], 0);
+    assert_eq!(records[0]["originPeerId"], "peer-hop0");
+    assert_eq!(records[0]["originTaskId"], "task-hop0-original");
+    assert_eq!(records[0]["originRunId"], "run-hop0-implement");
+    assert_eq!(records[0]["stage"], "in progress");
+    assert_eq!(records[0]["kind"], "main");
+    assert_eq!(records[0]["agent"], "implement");
+    assert_eq!(records[1]["sequence"], 1);
+    assert_eq!(records[1]["originRunId"], "run-hop0-commit");
+    assert_eq!(records[1]["kind"], "post");
 
     fixture.cleanup();
 }

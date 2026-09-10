@@ -446,6 +446,34 @@ pub(super) async fn get_task_inputs(
     Ok(Json(inputs))
 }
 
+/// The full ordered foreign history a transfer carried in, with each
+/// record's original provenance — the durable place a reviewer, a manager,
+/// or a later hop re-exporting this task reads what a transferred task
+/// inherited, since the task's own prompt only ever carries the latest
+/// result of each kind.
+pub(super) async fn get_task_transfer_history(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskTransferHistory>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let api = MobileApi::new(state.config.clone(), db);
+    let history = api
+        .list_transfer_history(&task_id)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("task not found: {task_id}"),
+            )
+        })?;
+    Ok(Json(history))
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateTaskRequest {
