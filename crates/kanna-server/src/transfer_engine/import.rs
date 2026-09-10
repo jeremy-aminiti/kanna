@@ -580,8 +580,7 @@ async fn run_import(
             &local_task_id,
             ENGINE_CLAIM_TOKEN,
         )
-        .map_err(|error| format!("db error: {error}"))?
-    )?;
+        .map_err(|error| format!("db error: {error}"))?;
     let already_awaiting = db
         .get_task_transfer(transfer_id)
         .map_err(|error| format!("db error: {error}"))?
