@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { findCodexBinary } from "../../helpers/codex";
 import { codexBinaryOrNull, ptyBridgeAvailable } from "../../helpers/availability";
 import { makeRealTempDir, removeDir } from "../../helpers/background";
-import { startPtySession, type PtySession } from "../../helpers/pty";
+import { sleep, startPtySession, type PtySession } from "../../helpers/pty";
 
 // WHAT BREAKS IN KANNA IF THIS PIN FAILS: ordinary task input (mobile Send,
 // kanna_send_task_input, stage prompts) delivered into a Codex session that
@@ -49,28 +49,72 @@ import { startPtySession, type PtySession } from "../../helpers/pty";
 // tests/live/codex-model-ids.test.ts (`-m`) and
 // crates/kanna-agent-protocol/src/codex.rs (`-c model_reasoning_effort=`).
 //
-// TRUST_PROMPT and COMPOSER are carried from tests/live/codex-tui-quit.test.ts,
-// which has actually been run and passed. Everything else below (the
-// observed busy-phase boundary, the quota/auth-vs-harness-failure split, the
-// observed bracketed-paste check, both message-size cases) is new for this
-// file.
+// TRUST_PROMPT is carried from tests/live/codex-tui-quit.test.ts, which has
+// actually been run and passed. COMPOSER_READY/COMPOSER_BUSY_BOOTING and
+// waitForComposerReady below replaced that file's own COMPOSER regex after
+// two real runs each falsified it a different way (see the comment there).
+//
+// STATE AS OF THE LATEST REAL RUNS (4 total; docs/2026-09-10-mobile-
+// connection-flicker-e2e-note.md has the full evidence): the
+// composer-readiness fix reaches a real "ready" read now — reachComposer no
+// longer fails — but the busy-phase proof still fails: codex keeps printing
+// "Booting MCP server: codex_apps (0s • esc to interrupt)" well past the
+// point `waitForComposerReady` reports ready, and the submitted instruction
+// lands as "tab to queue message" rather than executing, so
+// .kanna-busy-phase-start never appears within the 30s wait.
+// `codex_apps` is not a user-configured server (`codex mcp list` against a
+// totally fresh CODEX_HOME reports none) — it is a built-in feature, and
+// `codex --help`/`codex mcp --help` both document `--disable <FEATURE>`
+// (`-c features.<name>=false`) for exactly this kind of thing, though the
+// feature's exact name was not confirmed live (that would be a further live
+// CLI turn, out of this pass's bounded budget). The concrete next fix is
+// either that flag (once the feature name is confirmed) or a materially
+// longer busy-phase-start wait; this was not attempted a third time in this
+// pass per the one-fix-then-report bound.
 
 const TRUST_PROMPT = /trustthecontentsofthisdirectory/i;
-// Not the same COMPOSER pattern codex-tui-quit.test.ts carries
-// (/\/modeltochange|Use\/skills/i), deliberately: this file's own first real
-// run showed "/model to change" is part of the static model-info header
-// panel, visible immediately at launch and still visible while codex prints
-// "Booting MCP server: codex_apps (0s • esc to interrupt)" — a genuinely
-// busy, not-yet-accepting-input state where a submitted message is queued
-// ("tab to queue message"), not acted on. Matching on it made reachComposer
-// return "ready" before codex actually was, which is exactly why the
-// observed-busy-phase check below never saw its start file appear — a
-// harness precondition gap, not evidence about submission. "Use /skills" is
-// the strictly narrower half of the same OR that codex-tui-quit.test.ts
-// already relies on; keeping only it does not weaken anything that test
-// proved, and was not re-verified live in this pass (its own live run
-// showed the busy-boot state, not a green composer-ready read either way).
-const COMPOSER = /Use\/skills/i;
+
+// Two real runs now falsified two different single-regex composer checks,
+// for the same underlying reason: `PtySession.output`/`waitForOutput` search
+// the *entire* accumulated byte history, never just the current screen (this
+// bridge is a byte concatenator, not a real terminal emulator that overwrites
+// a grid) — so any text codex ever printed, including a stale "still
+// booting" banner from seconds ago, stays matchable forever.
+//   - Run 2: `/\/modeltochange|Use\/skills/i` (carried from the already-
+//     passing codex-tui-quit.test.ts) matched "/model to change", part of
+//     the *static* model-info header shown immediately at launch — true
+//     throughout the whole "Booting MCP server: codex_apps" window, so
+//     reachComposer reported ready before codex actually was.
+//   - Run 3, after narrowing to `/Use\/skills/i` alone: never matched at
+//     all — that tip is one of several *rotating* placeholder hints codex
+//     cycles through, not a stable signal, confirming the "rotates" risk.
+//     The same tail *did* show "Booting MCP server: codex_apps (0s • esc to
+//     interrupt)" beside " Ask Codex to do anything" — the real composer's
+//     idle placeholder text — meaning by the time either was captured, both
+//     the stale boot banner and a genuinely-ready composer had, at various
+//     points, occupied the same accumulated buffer.
+// The fix below stops trying to find one string that only ever appears once
+// truly ready, and instead requires two facts about the *recent tail* of
+// output specifically (not the whole history): the ready placeholder is
+// present, and the busy-boot banner is not — see waitForComposerReady.
+const COMPOSER_READY = /Ask Codex to do anything/i;
+const COMPOSER_BUSY_BOOTING = /Booting MCP server/i;
+/** How much of the tail to treat as "the current screen" for readiness
+ * purposes — generous enough to span one full redraw of the boxed banner
+ * plus footer, per the ~1500-char TUI dumps captured in runs 2 and 3. */
+const COMPOSER_RECENCY_WINDOW = 3_000;
+
+async function waitForComposerReady(session: PtySession, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const recent = session.output.slice(-COMPOSER_RECENCY_WINDOW);
+    if (COMPOSER_READY.test(recent) && !COMPOSER_BUSY_BOOTING.test(recent)) {
+      return true;
+    }
+    if (Date.now() >= deadline || session.exited) return false;
+    await sleep(500);
+  }
+}
 
 // Substrings captured verbatim in
 // tests/cli-contract/fixtures/provider-quota-rejection.json (codex/notice/
@@ -132,7 +176,7 @@ async function reachComposer(
     // "1. Yes, continue" is preselected; Enter accepts it.
     session.write("\r");
   }
-  const reachedComposer = await session.waitForOutput(COMPOSER, 30_000);
+  const reachedComposer = await waitForComposerReady(session, 45_000);
   if (reachedComposer) return true;
 
   const rejection = detectQuotaOrAuthRejection(session.output);
