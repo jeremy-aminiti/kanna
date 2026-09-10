@@ -2679,7 +2679,17 @@ split); the 60s admission floor remains a manager-adopted engineering default,
 not measured tuning. Capacity remains 100, minimum one. Quiet resets only on
 relevant observations; the collection closes at the earliest of last
 observation + 300s, first observation + 300s, or the existing receiver
-deadline. Full pages seal early.
+deadline. Full pages seal early. The 300s figures now exceed the fixed 240s
+native receiver window (`kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS`), so that
+receiver deadline — not quiet/max-hold — is the one that actually binds an
+ordinary batch in practice whenever the subscription's scope sees other
+database activity in the meantime: any event append re-checks the collector's
+readiness immediately (even one filtered out as irrelevant, or belonging to a
+different relevant burst), and once past 240s that re-check completes the
+batch there. Only a subscription that stays genuinely silent after its last
+relevant observation reaches the full 300s. This is expected, not a defect —
+the receiver term already existed for exactly this purpose — but it means the
+practical ceiling on an active repository is closer to 240s than 300s.
 Failed run/main/post facts, lifecycle/teardown/merge-handoff failures, provider
 parking, confirmed input requests, watch/machine errors and unknown attention
 seal urgently. Urgency skips quiet debounce, never admission pacing, FIFO cursors,
@@ -2752,12 +2762,17 @@ baseline exclusion (`task.activity_changed`, `task.runtime_settled`,
 `min_admission_interval_ms` override that one subscription's collection
 window and admission floor (defaults 300000/300000/60000ms); each is
 rejected below a 1000ms floor, and `max_hold_ms` is rejected below
-`quiet_ms`. There is deliberately no policy ceiling — `subscribe` instead
-rejects a value too large to add to an `Instant` (checked once at
-registration via `subscription_timing::fits_instant`), the actual overflow
-class `Collection::deadline`/`Admission` would otherwise panic on; unlike
-`Duration::from_millis`, `Instant + Duration` does not accept every `u64`.
-Urgent-event handling is unaffected: an urgent batch still seals
+`quiet_ms`. There is deliberately no policy ceiling, and none is needed on
+correctness grounds either: `Duration::from_millis` accepts any `u64`, and so
+does the `Instant + Duration` arithmetic these values feed into
+(`Collection::deadline`, `Admission`) — a `u64` millisecond count can never
+exceed `Duration`'s own far larger capacity, confirmed empirically
+(`Instant::now().checked_add(Duration::from_millis(u64::MAX))` never returns
+`None`). An extreme `quiet_ms`/`max_hold_ms` is simply capped in practice by
+the existing 240s native receiver deadline via `Collection::deadline`'s own
+`.min(receiver)`; an extreme `min_admission_interval_ms` just delays that
+subscription's own future admissions. Urgent-event handling is unaffected: an
+urgent batch still seals
 its collection immediately regardless of these overrides, gated only by the
 (possibly overridden) minimum admission interval — no new urgency taxonomy,
 no runtime retry loop.

@@ -4934,7 +4934,11 @@ async fn subscription_mailbox_bootstraps_once_persists_unacked_work_and_follows_
     start_run(&db, "parked-run", "child-a", "in progress");
     settle_runtime_tasks(&db, &["child-a", "child-c"]);
     let app = router(state.clone());
-    let request = json!({"taskId":"child-c", "localOnly":true, "delivery":"poll"});
+    // Per-subscription quiet/max-hold overrides, not the 300000ms globals:
+    // this fixture's second (ordinary, non-urgent) settle event needs to
+    // seal within this test's real-time `await_subscription` budget.
+    let request = json!({"taskId":"child-c", "localOnly":true, "delivery":"poll",
+        "quietMs": 2_000, "maxHoldMs": 10_000});
     let (status, initial) =
         subscription_request(&app, "POST", "/v1/event-subscriptions", request.clone()).await;
     assert_eq!(status, StatusCode::OK, "{initial}");
@@ -4994,7 +4998,9 @@ async fn subscription_mailbox_bootstraps_once_persists_unacked_work_and_follows_
         .unwrap();
     assert_eq!(reopened.pending, next.pending);
     let service = tokio::spawn(super::super::event_subscriptions::run(state.clone()));
-    let (_, read) = subscription_request(&app, "POST", &read_path, json!({})).await;
+    // Diagnostic mode: comparing against the DB row's raw (unreshaped) pending.
+    let (_, read) =
+        subscription_request(&app, "POST", &read_path, json!({"diagnostic":true})).await;
     assert_eq!(read["pending"], json!(next.pending));
     db.update_pipeline_item_stage("child-c", "review").unwrap();
     state.publish_state_changed(kanna_agent_protocol::StateChangeScope::Tasks);
@@ -5014,7 +5020,9 @@ async fn subscription_restart_preserves_uncertain_delivery_and_ack_wins_a_late_r
         &app,
         "POST",
         "/v1/event-subscriptions",
-        json!({"taskId":"child-c", "localOnly":true, "delivery":"input"}),
+        // Diagnostic mode: this fixture compares the response against the
+        // DB row's raw (unreshaped) pending.
+        json!({"taskId":"child-c", "localOnly":true, "delivery":"input", "diagnostic":true}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);

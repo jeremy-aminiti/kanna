@@ -103,15 +103,19 @@ fn connect(source: &Arc<AppState>, peer: Arc<AppState>) -> RelayFixture {
     }
 }
 
-// Bounded scheduling with a paused Tokio clock. Advancing one millisecond
-// lets peer handlers and observers settle without sleeping for 240 real seconds.
+// Bounded scheduling with a paused Tokio clock. Advancing virtual time lets
+// peer handlers and observers settle without sleeping for 240 real seconds.
 async fn until(mut condition: impl FnMut() -> bool) {
-    // Includes the adopted 1s ordinary quiet window plus scheduler turns.
-    for _ in 0..2_000 {
+    // An ordinary (non-urgent) batch's collection window is bounded by the
+    // 240s receiver deadline (quiet/max_hold are both 300s, so the receiver
+    // wins). 400s of virtual time comfortably covers that plus scheduler
+    // turns; the 1s step is coarse because this is a readiness gate, not a
+    // timing measurement — precise elapsed time is asserted elsewhere.
+    for _ in 0..400 {
         if condition() {
             return;
         }
-        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
     }
     assert!(
@@ -148,7 +152,12 @@ impl WatchFixture {
     fn request() -> Value {
         // Diagnostic mode: these fixtures assert on the durable internal
         // cursor directly, which the default compact response omits.
-        json!({"taskId":"manager", "repoId":"repo-pending-source", "delivery":"poll", "diagnostic":true})
+        // Per-subscription quiet/max-hold overrides, not the 300000ms
+        // globals: these fixtures assert exact peer-attempt counts and
+        // ordinary-batch timing, which the fixed 240s native receiver window
+        // would otherwise dominate now that the defaults exceed it.
+        json!({"taskId":"manager", "repoId":"repo-pending-source", "delivery":"poll", "diagnostic":true,
+            "quietMs": 2_000, "maxHoldMs": 10_000})
     }
 
     async fn new(exhaust_budget: bool) -> (Self, Option<tokio::sync::OwnedSemaphorePermit>) {

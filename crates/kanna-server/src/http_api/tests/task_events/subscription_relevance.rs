@@ -377,7 +377,8 @@ async fn subscription_worker_publishes_only_attention_and_ack_resumes_after_filt
         &app,
         "POST",
         &format!("/v1/event-subscriptions/{id}/read"),
-        json!({}),
+        // Diagnostic mode: comparing against the DB row's raw (unreshaped) pending.
+        json!({"diagnostic":true}),
     )
     .await;
     assert_eq!(
@@ -462,7 +463,12 @@ async fn final_auto_completion_reaches_both_mailboxes_and_fresh_registration() {
                 &app,
                 "POST",
                 "/v1/event-subscriptions",
-                json!({"taskId":"child-c", "localOnly":true, "delivery":delivery}),
+                // Per-subscription quiet/max-hold overrides, not the
+                // 300000ms globals: the non-bootstrap branch's successful
+                // (non-urgent) run.finished event needs to seal within this
+                // test's real-time `await_subscription` budget.
+                json!({"taskId":"child-c", "localOnly":true, "delivery":delivery,
+                    "quietMs": 2_000, "maxHoldMs": 10_000}),
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{initial}");
