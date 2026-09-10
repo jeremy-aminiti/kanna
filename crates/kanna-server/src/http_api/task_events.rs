@@ -2017,6 +2017,9 @@ fn spawn_aggregate_wait(
     Ok(())
 }
 
+// Keep the collector's event, error, and confirmation accumulators explicit at
+// this completion boundary; they share the existing native-call lifetime.
+#[allow(clippy::too_many_arguments)]
 fn apply_aggregate_completion(
     session: &mut AggregateWaitSession,
     completion: AggregateWaitCompletion,
