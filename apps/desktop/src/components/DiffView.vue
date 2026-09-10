@@ -59,6 +59,7 @@ interface LoadDiffOptions {
   preserveCurrentScroll?: boolean;
   scrollAnchor?: DiffScrollAnchor | null;
   preserveViewStateIfUnchanged?: boolean;
+  restoreSavedScrollIfUnchanged?: boolean;
 }
 
 const workingFilterOrder: WorkingFilter[] = ["all", "unstaged", "staged"];
@@ -137,6 +138,7 @@ let activeDiffScrollAnchor: ActiveDiffScrollAnchor | null = null;
 let diffRenderIdentity = 0;
 let renderedDiffSnapshot: { identity: number; patch: string; truncated: boolean } | null = null;
 let branchRefreshPending = false;
+let branchRefreshQueuedWhileHidden = false;
 let applySearchHighlightsFromSearch = () => {};
 
 const {
@@ -522,6 +524,9 @@ async function loadDiff(options: LoadDiffOptions = {}) {
       diffTruncated.value = truncated;
       scrollRestorePendingLoadId = 0;
       clearScrollAnchorForLoad(loadId);
+      if (options.restoreSavedScrollIfUnchanged) {
+        restoreScrollPosition();
+      }
       logDiffPerf(loadId, "unchanged", {
         totalMs: roundDuration(performance.now() - loadStartedAt),
       });
@@ -652,10 +657,15 @@ function flushPendingBranchRefresh() {
     || scope.value !== "branch"
   ) return;
 
+  const restoreSavedScroll = branchRefreshQueuedWhileHidden;
   branchRefreshPending = false;
+  branchRefreshQueuedWhileHidden = false;
   void loadDiff({
-    preserveCurrentScroll: true,
+    // A hidden v-show scroller can report zero in native WebKit. Its emitted
+    // per-scope position remains authoritative until the view is visible.
+    preserveCurrentScroll: !restoreSavedScroll,
     preserveViewStateIfUnchanged: true,
+    restoreSavedScrollIfUnchanged: restoreSavedScroll,
   });
 }
 
@@ -665,6 +675,9 @@ function refreshBranchDiffOnWindowFocus() {
   // until the reader returns. The subsequent content comparison avoids a DOM
   // rebuild (and preserves search/scroll state) when Git returns the same patch.
   branchRefreshPending = true;
+  if (!(props.isForeground?.() ?? true)) {
+    branchRefreshQueuedWhileHidden = true;
+  }
   flushPendingBranchRefresh();
 }
 

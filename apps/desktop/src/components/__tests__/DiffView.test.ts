@@ -874,6 +874,9 @@ describe("DiffView", () => {
     renderedContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
 
     await wrapper.setProps({ active: false });
+    // Native WebKit reports a hidden v-show scroller at zero even though the
+    // last emitted per-scope position remains the reader's actual offset.
+    renderedContainer.scrollTop = 0;
     window.dispatchEvent(new Event("focus"));
     await waitForTimerTurn();
     expect(branchLoads()).toHaveLength(1);
