@@ -71,6 +71,50 @@ restart-durable the same way as `wake_admitted`) and the existing aggregate
 wait/mailbox worker; scheduling, admission pacing and relay long-poll
 lifecycle are unchanged.
 
+## Cursor rejection stays a hard, actionable pause
+
+A remote peer rejecting its own embedded checkpoint (an expired/invalid
+native cursor) is a distinct failure from peer unavailability, by
+construction rather than by an added check: `apply_aggregate_completion`
+classifies it as `AggregateMachineWaitError::CursorRejected` and returns a
+hard `Err` from `wait_aggregate_task_events` *before* it ever reaches
+`machineErrors`. That propagates through `wait_subscription_events` and
+`collect()` to `step()`'s pre-existing catch-all `Err` branch, which builds
+an explicit `batch["watchError"]` directly — a code path `accept_page`'s
+`local_faulted`/`coverage_changed` leniency never touches, since
+`machineErrors` is empty in that batch. A remote cursor rejection therefore
+still fails the whole subscription (`active` becomes `false`), the poisoned
+checkpoint is left exactly as-is (never reset to "now"), and the worker
+stops entirely — no retry loop, matching the pre-existing
+`an_aggregate_leg_with_a_rejected_cursor_is_asked_once_per_poll` guarantee at
+the raw-endpoint layer. This needed no source change; it is covered by
+`subscription_remote_cursor_rejection_remains_a_hard_pause_distinct_from_outage`.
+
+## Dedup is by machine id, not by error text
+
+The first cut of `accept_page`'s de-duplication compared the full
+`{machineId: error}` map for equality. Tracing the actual error-text
+producers found this unsafe for the most common real case:
+`AppState::desktop_routing_unreachable_error` (used whenever a peer is
+simply absent from `list_active_relay_desktops`'s result — i.e. this
+machine's own relay routing is healthy, only the peer isn't currently
+listed) embeds a `since` timestamp that is only pinned stable while *this*
+machine's own routing is the thing marked unavailable
+(`set_desktop_routing_unavailable`). For a peer that is merely absent while
+local routing stays healthy, `since` is never pinned, so every call mints a
+fresh `unix:<now>` string — comparing full text would have treated that
+natural churn as a new fault every mailbox cycle and reintroduced the exact
+wake flood this task exists to prevent, for what is likely the single most
+common manifestation of the fix's own target scenario. `coverage_changed` now
+compares only the `BTreeMap`'s key set (`remote_errors.keys().eq(...)`); the
+latest text is still stored unconditionally so a status read reports the
+current reason. Covered by
+`unchanged_remote_fault_does_not_rewake_even_as_its_text_churns` and
+`stale_machines_and_its_dedup_survive_a_reload_from_the_durable_row` (inline
+unit tests in `event_subscriptions.rs`, the latter also proving
+`stale_machines` and its dedup survive a fresh row reload from the same
+durable JSON storage `cursor`/`active`/`wake_admitted` already rely on).
+
 ## Coverage
 
 `crates/kanna-server/src/http_api/tests/task_events/subscription_remote.rs`:

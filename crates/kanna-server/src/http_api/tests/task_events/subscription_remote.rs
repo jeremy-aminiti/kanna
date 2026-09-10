@@ -246,6 +246,13 @@ impl WatchFixture {
     }
 }
 
+fn encode_cursor(payload: &Value) -> String {
+    format!(
+        "ks1.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+    )
+}
+
 fn decode_cursor(cursor: &str) -> Value {
     serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -499,6 +506,84 @@ async fn subscription_remote_outage_isolates_to_that_leg_and_recovers() {
     let recovered_acked = watch.ack(&recovered).await;
     assert_eq!(recovered_acked["active"], true);
     assert!(recovered_acked["error"].is_null());
+}
+
+/// A remote peer rejecting its own embedded cursor (a poisoned/expired
+/// checkpoint) is not peer unavailability: `apply_aggregate_completion`
+/// classifies it as `AggregateMachineWaitError::CursorRejected` and returns a
+/// hard `Err` *before* it ever reaches `machineErrors`, so none of the
+/// outage-isolation leniency in `accept_page` applies to it — by
+/// construction, not by an extra check. It must keep behaving exactly like
+/// the pre-existing local-cursor-corruption case: a durable pause requiring
+/// reconciliation, never silently reset or retried.
+#[tokio::test(start_paused = true)]
+async fn subscription_remote_cursor_rejection_remains_a_hard_pause_distinct_from_outage() {
+    let (watch, _held) = WatchFixture::new(false).await;
+    let checkpoint = watch.row().cursor.unwrap();
+    let mut poisoned = decode_cursor(&checkpoint);
+    // Same poisoned literal already proven (in task_events.rs) to decode
+    // locally as a pass-through legacy cursor and be rejected by the peer
+    // itself, never by this machine's own decode.
+    poisoned["cursorsByMachine"]["desktop-pending-peer"] = json!("ksh1.deadbeef");
+    let poisoned_cursor = encode_cursor(&poisoned);
+    {
+        let db = Db::open(&watch.source.config().db_path).unwrap();
+        let mut row = db.event_subscription(&watch.id).unwrap().unwrap();
+        row.cursor = Some(poisoned_cursor.clone());
+        assert!(db.save_event_subscription(&mut row).unwrap());
+    }
+    // The worker's already-admitted collect used the old, valid cursor; a
+    // notification is what makes it notice the row changed underneath it
+    // and restart with the poisoned one (see step()'s revalidation).
+    notifications(&watch.source).await;
+
+    let failed = watch.page().await;
+    let batch = failed.pending.as_ref().unwrap();
+    let watch_error = batch["watchError"]
+        .as_str()
+        .expect("a rejected remote cursor must surface as an explicit watchError, not a per-machine annotation");
+    assert!(
+        watch_error.contains("rejected its embedded task-event cursor"),
+        "a cursor rejection must be reported distinctly from peer unavailability: {watch_error}"
+    );
+    assert!(!watch_error.contains("too many concurrent requests"));
+    assert!(
+        batch["machineErrors"]
+            .as_array()
+            .map(|errors| errors.is_empty())
+            .unwrap_or(true),
+        "a cursor rejection is a hard failure of the whole wait, never a tolerated per-machine fault: {batch}"
+    );
+    assert_eq!(
+        batch["cursor"],
+        json!(poisoned_cursor),
+        "an error cannot silently reset or advance the poisoned checkpoint"
+    );
+
+    let paused = watch.ack(&failed).await;
+    assert_eq!(
+        paused["active"], false,
+        "a remote cursor rejection must remain a durable, actionable pause, unlike remote unavailability"
+    );
+    assert_eq!(paused["cursor"], json!(poisoned_cursor));
+
+    // Not silently retried: once paused the worker stops entirely, so no
+    // amount of notifications or elapsed time produces another peer attempt.
+    let attempts_at_pause = watch.relay.counts.attempts.load(Ordering::SeqCst);
+    notifications(&watch.source).await;
+    tokio::time::advance(Duration::from_secs(kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS)).await;
+    notifications(&watch.source).await;
+    assert_eq!(
+        watch.relay.counts.attempts.load(Ordering::SeqCst),
+        attempts_at_pause,
+        "a paused, cursor-rejected subscription must not keep retrying the peer"
+    );
+
+    // A plain retry (not an explicit unsubscribe) preserves the poisoned
+    // position for reconciliation rather than silently resetting it to now.
+    let resumed = watch.register().await;
+    assert_eq!(resumed["cursor"], json!(poisoned_cursor));
+    assert_eq!(resumed["active"], true);
 }
 
 #[tokio::test(start_paused = true)]

@@ -109,7 +109,16 @@ fn accept_page(
     // Remote-only faults: tracked for de-duplication, never fed into
     // watchError. A peer that is still down and was already reported stale
     // must not re-wake the subscriber on every observation cycle; a new
-    // fault or a recovery (the set changes) is worth one wake.
+    // fault or a recovery (the set of stale machine ids changes) is worth
+    // one wake. The comparison is by machine id only, never by the error
+    // text: `desktop_routing_unreachable_error` embeds a since-timestamp
+    // that is only pinned stable while *this* machine's own relay routing
+    // is the thing marked unavailable — for a peer merely absent from the
+    // active list (the common case; this machine's own routing is fine),
+    // every call mints a fresh "unix:<now>" string. Diffing on text would
+    // treat that natural churn as a new fault every cycle and reintroduce
+    // the exact wake flood this exists to prevent. The latest text is still
+    // stored below, so a status read reports the current reason.
     let remote_errors: BTreeMap<String, String> = machine_errors
         .iter()
         .filter_map(|error| {
@@ -123,7 +132,8 @@ fn accept_page(
             ))
         })
         .collect();
-    let coverage_changed = !local_faulted && remote_errors != row.stale_machines;
+    let coverage_changed =
+        !local_faulted && !remote_errors.keys().eq(row.stale_machines.keys());
     if batch.get("watchError").is_some()
         || batch["events"]
             .as_array()
@@ -587,5 +597,143 @@ pub(crate) async fn run(state: Arc<AppState>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod outage_isolation_tests {
+    use super::*;
+
+    fn base_row(id: &str) -> EventSubscription {
+        EventSubscription {
+            id: id.to_string(),
+            task_id: "manager".into(),
+            run_id: "manager-run".into(),
+            stage: Some("in progress".into()),
+            branch: Some("task-manager".into()),
+            query: json!({}),
+            delivery: "poll".into(),
+            revision: 0,
+            cursor: Some("ks1.start".into()),
+            pending: None,
+            batch_id: 0,
+            wake_state: "idle".into(),
+            error: None,
+            active: true,
+            wake_admitted: false,
+            stale_machines: BTreeMap::new(),
+        }
+    }
+
+    fn remote_fault_batch(machine_id: &str, error: &str) -> Value {
+        json!({
+            "events": [],
+            "cursor": "ks1.next",
+            "machineErrors": [{"machineId": machine_id, "error": error, "stale": true}],
+        })
+    }
+
+    /// The real producer for the common "peer absent from the active list"
+    /// case (`AppState::desktop_routing_unreachable_error`) mints a fresh
+    /// `unix:<now>` string on every call once this machine's own routing is
+    /// healthy (its `since` is never pinned, see the comment on
+    /// `accept_page`). Two of its outputs for a still-down, never-recovered
+    /// peer must still dedup by machine id, or every mailbox cycle would
+    /// wake the subscriber solely because the clock moved.
+    #[test]
+    fn unchanged_remote_fault_does_not_rewake_even_as_its_text_churns() {
+        let mut row = base_row("watch-dedup");
+        accept_page(
+            &mut row,
+            remote_fault_batch("desktop-peer", "machine unreachable since unix:1000"),
+            false,
+            "desktop-local",
+        );
+        assert!(row.pending.is_some(), "a newly observed fault must wake once");
+        assert_eq!(row.batch_id, 1);
+        assert_eq!(
+            row.stale_machines.get("desktop-peer").map(String::as_str),
+            Some("machine unreachable since unix:1000")
+        );
+
+        // Simulate the ack the subscriber performs before the mailbox
+        // collects again; accept_page itself never clears `pending`.
+        row.pending = None;
+
+        // Same peer, same continuous fault, but the embedded timestamp
+        // advanced — exactly what `desktop_routing_unreachable_error`
+        // produces call to call while this machine's own routing stays up.
+        accept_page(
+            &mut row,
+            remote_fault_batch("desktop-peer", "machine unreachable since unix:1300"),
+            false,
+            "desktop-local",
+        );
+        assert!(
+            row.pending.is_none(),
+            "error text churn for the same still-down peer must not manufacture a wake"
+        );
+        assert_eq!(row.batch_id, 1, "no new batch for an unchanged fault");
+        assert_eq!(
+            row.stale_machines.get("desktop-peer").map(String::as_str),
+            Some("machine unreachable since unix:1300"),
+            "the stored reason still tracks the latest text for a status read"
+        );
+
+        // The peer recovers: the key disappears from machineErrors. That is
+        // a real coverage change and must wake once, even with no events.
+        accept_page(
+            &mut row,
+            json!({"events": [], "cursor": "ks1.recovered", "machineErrors": []}),
+            false,
+            "desktop-local",
+        );
+        assert!(row.pending.is_some(), "a peer's recovery must wake once");
+        assert_eq!(row.batch_id, 2);
+        assert!(row.stale_machines.is_empty());
+    }
+
+    /// `stale_machines` is a plain field on the same durable JSON row as
+    /// `cursor`/`active`/`wake_admitted`; it survives a server restart the
+    /// same way they do, and the key-only dedup above still holds against a
+    /// row reloaded fresh rather than kept in memory.
+    #[test]
+    fn stale_machines_and_its_dedup_survive_a_reload_from_the_durable_row() {
+        let state = crate::http_api::test_support::test_state_with_seed(
+            "desktop-restart-local",
+            "Restart Local",
+            |_db| {},
+        );
+        let db = database(&state).unwrap();
+        let mut row = base_row("watch-restart");
+        accept_page(
+            &mut row,
+            remote_fault_batch("desktop-restart-peer", "machine unreachable since unix:1000"),
+            false,
+            "desktop-restart-local",
+        );
+        row.pending = None;
+        db.insert_event_subscription(&row).unwrap();
+
+        // Drop everything in-memory and reopen the row exactly as a fresh
+        // server process would: no carried-over Rust state, only the row.
+        drop(db);
+        let reloaded_db = database(&state).unwrap();
+        let mut reloaded = reloaded_db.event_subscription(&row.id).unwrap().unwrap();
+        assert_eq!(
+            reloaded.stale_machines.get("desktop-restart-peer").map(String::as_str),
+            Some("machine unreachable since unix:1000")
+        );
+
+        accept_page(
+            &mut reloaded,
+            remote_fault_batch("desktop-restart-peer", "machine unreachable since unix:9999"),
+            false,
+            "desktop-restart-local",
+        );
+        assert!(
+            reloaded.pending.is_none(),
+            "a reloaded row must keep deduping an unchanged, still-down peer by id after restart"
+        );
     }
 }

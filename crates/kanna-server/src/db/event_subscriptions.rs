@@ -28,11 +28,14 @@ pub(crate) struct EventSubscription {
     #[serde(default)]
     pub wake_admitted: bool,
     /// Non-local machines this aggregate scope currently believes are
-    /// unavailable, machine id -> last reported error. An unchanged entry
-    /// does not by itself re-wake the subscriber; it is compared against
-    /// each fresh page so only a new fault or a recovery re-wakes, while a
-    /// still-down peer keeps its retained checkpoint and healthy legs keep
-    /// delivering. Additive; absent on rows written before this tracking.
+    /// unavailable, machine id -> last reported error. De-duplication
+    /// compares only the machine id set against each fresh page, not the
+    /// error text (which can legitimately churn call to call for the same
+    /// continuous fault, e.g. an embedded timestamp) — so only a new fault
+    /// or a recovery re-wakes, a still-down peer keeps its retained
+    /// checkpoint and healthy legs keep delivering, and the stored text
+    /// stays current for a status read even between wakes. Additive; absent
+    /// on rows written before this tracking.
     #[serde(default)]
     pub stale_machines: BTreeMap<String, String>,
 }
