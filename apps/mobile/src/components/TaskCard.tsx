@@ -203,16 +203,6 @@ export function TaskCard({
               </Text>
             </View>
           ) : null}
-          {isRunning ? (
-            <View
-              style={[styles.stagePill, styles.runningPill]}
-              testID={MOBILE_E2E_IDS.taskRunningIndicator(uiId)}
-            >
-              <Text style={[styles.stageLabel, styles.runningLabel]}>
-                running
-              </Text>
-            </View>
-          ) : null}
         </View>
       </View>
       {model.waitingPromptSnippet ? (
@@ -312,12 +302,6 @@ const styles = StyleSheet.create({
   titleWorking: {
     fontStyle: "italic",
     fontWeight: "normal"
-  },
-  runningPill: {
-    backgroundColor: "#163D31"
-  },
-  runningLabel: {
-    color: "#8DE0BE"
   },
   /** Bounded metadata keeps both a long id and the title readable. */
   pillColumn: {
