@@ -620,6 +620,22 @@ selected task's terminal directly, since the trust/pair seeding already
 presets it. This worktree's own git state was not touched during any of
 it.
 
+**Independent confirmation from the coordinating manager session:** its own
+attempt at a supported native computer-use-agent call to control the
+Simulator app (`getApp Simulator`) also failed — `error -10005
+timeoutReached`, no successful control — a second, independent tool hitting
+the same underlying wall from a different angle, not just this session's
+`osascript`/System Events path. It also attempted a push notification to
+the owner about this blocker; the relay call returned no result before its
+session stopped, so delivery is **unknown, not confirmed** — recorded here
+as such rather than assumed sent, and this session is not sending a
+duplicate blind notification on top of an unconfirmed one. Net: the blocker
+is durable and doubly independently confirmed — owner can grant `Kanna
+Staging.app` Accessibility access, or arrange the three manual taps on the
+next DEV launch, whichever is preferred. No permission changes have been
+made by either session. Current stack remains shut down, so there is
+nothing running to click right now regardless.
+
 ## Missing-Enter symptom — correction: the drain-aware fence is gone, not current
 
 An earlier draft of this note claimed task `ed5bce3f`'s drain-aware
