@@ -126,6 +126,13 @@ pub struct HandoffSession {
     pub rows: u16,
     pub cols: u16,
     pub snapshot: Option<TerminalSnapshot>,
+    /// Same-PTY notice projection, separate from display/history. Some(empty)
+    /// is meaningful: this PTY has not produced notice evidence yet. Absent or
+    /// unusable on adoption falls back to the primary snapshot for compatibility
+    /// and can reintroduce historical notices. Even a present field can retain
+    /// that ambiguity if an earlier adoption used the compatibility fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice_snapshot: Option<TerminalSnapshot>,
     #[serde(default)]
     pub agent_provider: Option<AgentProvider>,
     /// The provider CLI release this session is running, as the sending daemon
@@ -1123,6 +1130,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 snapshot: None,
+                notice_snapshot: None,
                 agent_provider: None,
                 cli_version: None,
                 status: SessionStatus::Idle,

@@ -116,11 +116,25 @@ impl HeadlessTerminal {
     }
 
     pub fn new(cols: u16, rows: u16, scrollback: usize) -> HeadlessTerminalResult<Self> {
+        Self::with_scrollback_bytes(cols, rows, scrollback_byte_limit(cols, rows, scrollback))
+    }
+
+    /// A screen-only projection for notices. It never receives new-PTY history
+    /// seeds, and its terminal replies must be discarded by its owner.
+    pub fn new_notice_projection(cols: u16, rows: u16) -> HeadlessTerminalResult<Self> {
+        Self::with_scrollback_bytes(cols, rows, 0)
+    }
+
+    fn with_scrollback_bytes(
+        cols: u16,
+        rows: u16,
+        max_scrollback: usize,
+    ) -> HeadlessTerminalResult<Self> {
         let pty_writes = Rc::new(RefCell::new(Vec::new()));
         let mut terminal = Box::new(Terminal::new(TerminalOptions {
             cols,
             rows,
-            max_scrollback: scrollback_byte_limit(cols, rows, scrollback),
+            max_scrollback,
         })?);
         let render_state = RenderState::new()?;
         let row_iterator = RowIterator::new()?;
@@ -163,6 +177,11 @@ impl HeadlessTerminal {
         self.cols = cols;
         self.rows = rows;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn dimensions(&self) -> (u16, u16) {
+        (self.cols, self.rows)
     }
 
     pub fn snapshot(&mut self) -> HeadlessTerminalResult<TerminalSnapshot> {
@@ -361,7 +380,7 @@ impl HeadlessTerminal {
             return Ok(None);
         }
         let rows = classifier.notice_rows();
-        let lines = self.visible_footer_lines(rows)?;
+        let lines = self.notice_lines(rows)?;
         let title = self.title();
         let progress = self.progress_state();
         Ok(classifier.notice(&Evidence {
@@ -369,6 +388,77 @@ impl HeadlessTerminal {
             title: &title,
             progress,
         }))
+    }
+
+    /// Keep logical row starts for notice matching. A quoted glyph moved to
+    /// column zero by soft wrapping still belongs to its prefixed source row.
+    /// This is a shape constraint: a glyph-led quotation on a new logical row
+    /// remains indistinguishable from the measured refusal.
+    fn notice_lines(&mut self, limit: usize) -> HeadlessTerminalResult<Vec<String>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let snapshot = self.render_state.update(&self.terminal)?;
+        let cols = usize::from(snapshot.cols()?);
+        let mut physical = Vec::new();
+        let mut rows = self.row_iterator.update(&snapshot)?;
+        while let Some(row) = rows.next() {
+            let continuation = row.raw_row()?.is_wrap_continuation()?;
+            let mut text = String::with_capacity(cols);
+            let mut cells = self.cell_iterator.update(row)?;
+            for x in 0..cols {
+                cells.select(x as u16)?;
+                match cells.raw_cell()?.wide()? {
+                    CellWide::SpacerHead | CellWide::SpacerTail => {}
+                    CellWide::Narrow | CellWide::Wide => {
+                        let graphemes = cells.graphemes()?;
+                        if graphemes.is_empty() {
+                            text.push(' ');
+                        } else {
+                            text.extend(graphemes);
+                        }
+                    }
+                }
+            }
+            physical.push((text, continuation));
+        }
+        // Preserve the existing last-N-nonblank-physical-rows window. Retain
+        // intervening blank boundaries, and never promote an orphaned wrap
+        // continuation whose leading row fell outside that window.
+        let start = physical
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, (text, _))| !text.trim().is_empty())
+            .nth(limit - 1)
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        let mut lines = Vec::new();
+        let mut logical: Option<String> = None;
+        for (text, continuation) in &physical[start..] {
+            if !continuation {
+                if let Some(previous) = logical.take() {
+                    lines.push(normalize_row_text(&previous));
+                }
+                logical = Some(text.clone());
+            } else if let Some(logical) = logical.as_mut() {
+                logical.push_str(text);
+            }
+        }
+        if let Some(logical) = logical {
+            lines.push(normalize_row_text(&logical));
+        }
+        Ok(lines)
+    }
+
+    /// Only for same-PTY handoff, never for a fresh session's display seed.
+    pub fn notice_projection_from_snapshot(
+        snapshot: &TerminalSnapshot,
+    ) -> HeadlessTerminalResult<Self> {
+        let mut terminal = Self::new_notice_projection(snapshot.cols, snapshot.rows)?;
+        terminal.write(Self::restore_vt(snapshot).as_bytes());
+        terminal.drain_pty_writes();
+        Ok(terminal)
     }
 
     pub fn visible_status(
@@ -753,6 +843,33 @@ fn is_uuid_like(value: &str) -> bool {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn notice_projection_empty_snapshot_is_lossless() {
+        for text in ["", "\x1b[0m", "\x1b[2J\x1b[H", "x", "\r\n"] {
+            let mut terminal = super::HeadlessTerminal::new_notice_projection(120, 40).unwrap();
+            terminal.write(text.as_bytes());
+            let snapshot = terminal.snapshot_with_metadata().unwrap();
+            assert!(!snapshot.used_visible_text_fallback, "input={text:?}");
+            let mut restored =
+                super::HeadlessTerminal::notice_projection_from_snapshot(&snapshot.snapshot)
+                    .unwrap();
+            let restored_snapshot = restored.snapshot_with_metadata().unwrap();
+            assert!(!restored_snapshot.used_visible_text_fallback);
+            assert_eq!(
+                restored_snapshot.snapshot.cursor_row,
+                snapshot.snapshot.cursor_row
+            );
+            assert_eq!(
+                restored_snapshot.snapshot.cursor_col,
+                snapshot.snapshot.cursor_col
+            );
+            assert_eq!(
+                restored.debug_lines(40).unwrap(),
+                terminal.debug_lines(40).unwrap()
+            );
+        }
+    }
+
     use std::collections::HashMap;
 
     use crate::protocol::{AgentProvider, SessionStatus};

@@ -188,6 +188,7 @@ impl StreamControl {
 pub struct SessionRecord {
     pub pty: PtySession,
     pub headless_terminal: HeadlessTerminal,
+    pub notice_terminal: HeadlessTerminal,
     pub stream_control: Option<StreamControl>,
     pub agent_provider: Option<AgentProvider>,
     /// The provider CLI release this session is running, when a probe has
@@ -213,6 +214,10 @@ pub struct SessionRecord {
 
 pub struct SessionRuntimeState {
     pub headless_terminal: HeadlessTerminal,
+    /// Live PTY output only on fresh spawn. Same-PTY adoption can restore this
+    /// projection; legacy/degraded primary-snapshot fallback retains its old
+    /// provenance ambiguity, including through subsequent handoffs.
+    notice_terminal: HeadlessTerminal,
     /// This session's view of the detection rules: its provider, its CLI
     /// version, and the rule set those resolve to. Re-resolves itself when a
     /// hot-reloaded rule file changes.
@@ -502,6 +507,7 @@ impl SessionHandle {
             teardown_claimed: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(SessionRuntimeState {
                 headless_terminal: record.headless_terminal,
+                notice_terminal: record.notice_terminal,
                 classifier: Classifier::with_version(record.agent_provider, record.cli_version),
                 published_composer: None,
                 stream_control: record.stream_control,
@@ -824,6 +830,9 @@ impl SessionHandle {
     ) -> Result<MirrorResult, Box<dyn std::error::Error + Send + Sync>> {
         let mut state = self.state.lock().await;
         state.headless_terminal.write(data);
+        state.notice_terminal.write(data);
+        // Only the authoritative display terminal may answer the PTY.
+        state.notice_terminal.drain_pty_writes();
         state.last_output_at = Some(now);
         self.bracketed_paste_mode.store(
             state.headless_terminal.bracketed_paste_mode(),
@@ -1022,7 +1031,33 @@ impl SessionHandle {
             (pty.cols(), pty.rows())
         };
         self.pty.lock().await.resize(cols, rows)?;
-        let headless_result = self.state.lock().await.headless_terminal.resize(cols, rows);
+        let headless_result = {
+            let mut state = self.state.lock().await;
+            // A shrink can discard rows from the screen-only projection.
+            // Resizing it back after a primary failure would not restore that
+            // evidence, so preserve its snapshot before changing either grid.
+            let result = state.notice_terminal.snapshot_with_metadata().and_then(|before| {
+                if before.used_visible_text_fallback {
+                    return Err("cannot preserve notice projection for resize rollback".into());
+                }
+                let resized = state.notice_terminal.resize(cols, rows)
+                    .and_then(|()| state.headless_terminal.resize(cols, rows));
+                match resized {
+                    Ok(()) => Ok(()),
+                    Err(error) => match HeadlessTerminal::notice_projection_from_snapshot(&before.snapshot) {
+                        Ok(previous_notice) => {
+                            state.notice_terminal = previous_notice;
+                            Err(error)
+                        }
+                        Err(rollback_error) => Err(format!(
+                            "terminal resize failed ({error}); notice projection rollback failed ({rollback_error})"
+                        ).into()),
+                    },
+                }
+            });
+            state.notice_terminal.drain_pty_writes();
+            result
+        };
         if let Err(error) = headless_result {
             // Do not leave the kernel PTY and the authoritative headless
             // interpreter on different grids. A failed resize is invisible
@@ -1260,6 +1295,18 @@ impl SessionHandle {
 
         let mut state = self.state.lock().await;
         let snapshot = state.headless_terminal.snapshot().ok();
+        let notice_snapshot = match state.notice_terminal.snapshot_with_metadata() {
+            Ok(snapshot) if !snapshot.used_visible_text_fallback => Some(snapshot.snapshot),
+            Ok(_) => {
+                log::warn!("[notice] handoff projection serialization degraded; successor will use primary fallback");
+                None
+            }
+            Err(error) => {
+                log::warn!("[notice] failed to snapshot handoff projection: {error}");
+                None
+            }
+        };
+        state.notice_terminal.drain_pty_writes();
         let input_coordination = self
             .input_coordination
             .lock()
@@ -1271,6 +1318,7 @@ impl SessionHandle {
             rows,
             cols,
             snapshot,
+            notice_snapshot,
             agent_provider: state.agent_provider,
             cli_version: state.classifier.version().cloned(),
             status: state.status,
@@ -1294,6 +1342,7 @@ pub struct SessionHandoffParts {
     pub rows: u16,
     pub cols: u16,
     pub snapshot: Option<crate::protocol::TerminalSnapshot>,
+    pub notice_snapshot: Option<crate::protocol::TerminalSnapshot>,
     pub agent_provider: Option<AgentProvider>,
     pub cli_version: Option<CliVersion>,
     pub status: SessionStatus,
@@ -1625,6 +1674,7 @@ pub mod test_support {
         Ok(SessionRecord {
             pty,
             headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
+            notice_terminal: HeadlessTerminal::new_notice_projection(80, 24)?,
             stream_control: Some(stream_control.clone()),
             agent_provider: None,
             cli_version: None,
@@ -1654,6 +1704,7 @@ pub mod test_support {
         Ok(SessionRecord {
             pty,
             headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
+            notice_terminal: HeadlessTerminal::new_notice_projection(80, 24)?,
             stream_control: None,
             agent_provider: None,
             cli_version: None,
@@ -1804,11 +1855,11 @@ fn read_new_notice_if_frame_was_read(
         return None;
     }
     let SessionRuntimeState {
-        headless_terminal,
+        notice_terminal,
         classifier,
         ..
     } = &mut *state;
-    let notice = match headless_terminal.visible_notice(classifier) {
+    let notice = match notice_terminal.visible_notice(classifier) {
         Ok(notice) => notice?,
         Err(error) => {
             log::warn!("[notice] could not read this session's notice window: {error}");
@@ -1853,11 +1904,128 @@ mod tests {
         PtyMasterAttribution, PtyOccupancySnapshot, RawInputKind, SessionHandle, SessionManager,
         SessionRecord, StreamControl,
     };
+
     use crate::bench::transcript::{BenchmarkMode, BenchmarkProvider, TranscriptSpec};
     use crate::detection::Classifier;
     use crate::headless_terminal::{initial_session_status, ComposerState, HeadlessTerminal};
     use crate::protocol::{AgentProvider, SessionStatus};
     use crate::pty::PtySession;
+
+    #[tokio::test]
+    async fn notice_projection_never_supplies_a_second_terminal_reply() {
+        let record = spawn_test_record(
+            crate::protocol::AgentProvider::Claude,
+            crate::protocol::SessionStatus::Busy,
+        )
+        .unwrap();
+        let handle = SessionHandle::new(record);
+        let result = handle.mirror_output(b"\x1b[6n", true).await.unwrap();
+        assert_eq!(result.replies, vec![b"\x1b[1;1R".to_vec()]);
+        {
+            let mut state = handle.state.lock().await;
+            assert!(state.notice_terminal.drain_pty_writes().is_empty());
+        }
+        handle.resize(48, 30).await.unwrap();
+        {
+            let mut state = handle.state.lock().await;
+            assert_eq!(state.notice_terminal.dimensions(), (48, 30));
+            assert_eq!(state.headless_terminal.dimensions(), (48, 30));
+            assert!(state.notice_terminal.drain_pty_writes().is_empty());
+        }
+        handle.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn notice_projection_keeps_synchronized_byte_chunks_and_attempt_latch_boundaries() {
+        let captures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/cli-contract/fixtures/provider-quota-rejection.json"
+        ))
+        .unwrap();
+        let capture = captures
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["provider"] == "codex" && entry["frame"].is_array())
+            .unwrap();
+        let frame = capture["frame"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let mut record = spawn_test_record(AgentProvider::Codex, SessionStatus::Busy).unwrap();
+        record.cli_version =
+            crate::detection::CliVersion::parse(capture["cliVersion"].as_str().unwrap());
+        let handle = SessionHandle::new(record);
+        let mut now = Instant::now();
+        // Exercise the production session owner with every UTF-8 and escape
+        // sequence boundary split, while the provider's frame is unfinished.
+        for byte in format!("\x1b[?2026h\x1b[2J\x1b[H{frame}").as_bytes() {
+            now += Duration::from_millis(1);
+            let result = handle
+                .mirror_output_at(&[*byte], false, now, Duration::ZERO)
+                .await
+                .unwrap();
+            assert!(
+                result.notice.is_none(),
+                "notice escaped an unfinished synchronized frame"
+            );
+        }
+        now += Duration::from_secs(1);
+        assert!(handle
+            .refresh_quiet_status_at(Duration::ZERO, now)
+            .await
+            .unwrap()
+            .notice
+            .is_none());
+        now += Duration::from_millis(1);
+        let closed = handle
+            .mirror_output_at(b"\x1b[?2026l", false, now, Duration::ZERO)
+            .await
+            .unwrap();
+        now += Duration::from_secs(1);
+        let settled = handle
+            .refresh_quiet_status_at(Duration::ZERO, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            usize::from(closed.notice.is_some()) + usize::from(settled.notice.is_some()),
+            1
+        );
+        assert!(handle.update_status(SessionStatus::Idle).await);
+        now += Duration::from_secs(1);
+        assert!(handle
+            .refresh_quiet_status_at(Duration::ZERO, now)
+            .await
+            .unwrap()
+            .notice
+            .is_none());
+
+        // This is the same update_status boundary called by the output owner,
+        // not a test mutation of the notice latch. A new attempt may refuse.
+        assert!(handle.update_status(SessionStatus::Busy).await);
+        now += Duration::from_secs(1);
+        let next = handle
+            .mirror_output_at(
+                format!("\x1b[2J\x1b[H{frame}").as_bytes(),
+                false,
+                now,
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+        now += Duration::from_secs(1);
+        let settled = handle
+            .refresh_quiet_status_at(Duration::ZERO, now)
+            .await
+            .unwrap();
+        assert_eq!(
+            usize::from(next.notice.is_some()) + usize::from(settled.notice.is_some()),
+            1
+        );
+        handle.kill().await.unwrap();
+    }
 
     fn spawn_test_record(
         provider: AgentProvider,
@@ -1875,6 +2043,7 @@ mod tests {
         Ok(SessionRecord {
             pty,
             headless_terminal: HeadlessTerminal::new(80, 24, 10_000)?,
+            notice_terminal: HeadlessTerminal::new_notice_projection(80, 24)?,
             stream_control: None,
             agent_provider: Some(provider),
             cli_version: None,

@@ -49,6 +49,44 @@ fn adopted_runtime_status(
     Ok((detected_status.unwrap_or(inherited_status), status_observed))
 }
 
+fn adopted_notice_terminal(
+    handoff: &crate::protocol::HandoffSession,
+) -> Result<headless_terminal::HeadlessTerminal, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(snapshot) = handoff.notice_snapshot.as_ref() {
+        match headless_terminal::HeadlessTerminal::notice_projection_from_snapshot(snapshot) {
+            Ok(terminal) => return Ok(terminal),
+            Err(error) => log::warn!(
+                "[notice] session={} could not restore handed-off projection: {error}",
+                handoff.session_id,
+            ),
+        }
+    }
+    // An older/degraded sender cannot distinguish primary history from this
+    // PTY's output. Preserve its old behavior instead of dropping a pending
+    // refusal, but do not claim this compatibility path protects provenance.
+    log::warn!(
+        "[notice] session={} missing usable handoff projection; primary-snapshot fallback may contain historical notices",
+        handoff.session_id,
+    );
+    if let Some(snapshot) = handoff.snapshot.as_ref() {
+        match headless_terminal::HeadlessTerminal::notice_projection_from_snapshot(snapshot) {
+            Ok(terminal) => return Ok(terminal),
+            Err(error) => log::warn!(
+                "[notice] session={} could not restore primary fallback: {error}",
+                handoff.session_id,
+            ),
+        }
+    }
+    log::warn!(
+        "[notice] session={} no usable handoff evidence; only future PTY output can produce notices",
+        handoff.session_id,
+    );
+    headless_terminal::HeadlessTerminal::new_notice_projection(
+        if handoff.cols == 0 { 80 } else { handoff.cols },
+        if handoff.rows == 0 { 24 } else { handoff.rows },
+    )
+}
+
 /// Wait for the replaced daemon to actually exit before this daemon adopts
 /// sessions or publishes itself. Liveness is identity-checked (start time),
 /// so a zombie or a recycled pid counts as exited. If the old daemon
@@ -391,9 +429,12 @@ pub(crate) async fn run_daemon() {
                 .await
                 .insert(session_id.clone(), SessionSizeState::new((cols, rows)));
             let stream_control = StreamControl::new();
+            let notice_terminal = adopted_notice_terminal(&handoff)
+                .expect("failed to create notice projection for adopted session");
             let handle = Arc::new(SessionHandle::new(SessionRecord {
                 pty: pty_session,
                 headless_terminal,
+                notice_terminal,
                 stream_control: None,
                 agent_provider: handoff.agent_provider,
                 cli_version: inherited_cli_version,
@@ -628,6 +669,134 @@ pub(crate) async fn run_daemon() {
             Err(e) => {
                 log::error!("accept error: {}", e);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod notice_projection_handoff_tests {
+    use crate::detection::{Classifier, CliVersion};
+    use crate::headless_terminal::HeadlessTerminal;
+    use crate::protocol::{AgentProvider, HandoffSession, TerminalSnapshot};
+
+    fn classifier() -> Classifier {
+        Classifier::with_version(Some(AgentProvider::Claude), CliVersion::parse("2.1.266"))
+    }
+
+    fn refusal() -> String {
+        let captures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/cli-contract/fixtures/provider-quota-rejection.json"
+        ))
+        .unwrap();
+        captures[0]["frame"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\r\n")
+    }
+
+    fn snapshot(text: &str) -> TerminalSnapshot {
+        let mut terminal = HeadlessTerminal::new(120, 40, 10_000).unwrap();
+        terminal.write(text.as_bytes());
+        terminal.snapshot().unwrap()
+    }
+
+    fn handoff(primary: Option<TerminalSnapshot>) -> HandoffSession {
+        serde_json::from_value(serde_json::json!({
+            "session_id": "notice-handoff", "pid": 42, "cwd": ".",
+            "cols": 120, "rows": 40, "snapshot": primary,
+            "agent_provider": "claude", "cli_version": "2.1.266",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn present_empty_projection_does_not_fall_back_to_historical_primary() {
+        let mut handoff = handoff(Some(snapshot(&refusal())));
+        handoff.notice_snapshot = Some(snapshot(""));
+        let wire = serde_json::to_value(&handoff).unwrap();
+        assert!(wire["notice_snapshot"].is_object());
+        let handoff = serde_json::from_value(wire).unwrap();
+        let mut projection = super::adopted_notice_terminal(&handoff).unwrap();
+        assert!(projection
+            .visible_notice(&mut classifier())
+            .unwrap()
+            .is_none());
+        projection.write(refusal().as_bytes());
+        assert!(projection
+            .visible_notice(&mut classifier())
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn current_handoff_retains_a_pending_genuine_refusal_and_discards_replies() {
+        let mut handoff = handoff(Some(snapshot("primary display history")));
+        let mut notice = snapshot(&refusal());
+        notice.vt.push_str("\x1b[6n");
+        handoff.notice_snapshot = Some(notice);
+        let mut projection = super::adopted_notice_terminal(&handoff).unwrap();
+        assert!(projection.drain_pty_writes().is_empty());
+        assert!(projection
+            .visible_notice(&mut classifier())
+            .unwrap()
+            .is_some());
+        assert!(handoff
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .vt
+            .contains("primary display history"));
+    }
+
+    #[test]
+    fn legacy_and_degraded_primary_fallback_keep_the_documented_ambiguity() {
+        for broken_projection in [false, true] {
+            let mut handoff = handoff(Some(snapshot(&refusal())));
+            assert!(handoff.notice_snapshot.is_none());
+            assert!(serde_json::to_value(&handoff)
+                .unwrap()
+                .get("notice_snapshot")
+                .is_none());
+            if broken_projection {
+                let mut broken = snapshot("");
+                broken.cols = 0;
+                handoff.notice_snapshot = Some(broken);
+            }
+            let mut projection = super::adopted_notice_terminal(&handoff).unwrap();
+            // The legacy primary may contain either a real pending refusal
+            // or copied history. This compatibility path cannot distinguish them.
+            assert!(projection
+                .visible_notice(&mut classifier())
+                .unwrap()
+                .is_some());
+            // Once an old/degraded peer supplied ambiguous primary content,
+            // a later current-to-current transfer cannot recover its origin.
+            // A present optional field must not be advertised as proof of a
+            // clean lineage.
+            handoff.notice_snapshot = Some(projection.snapshot().unwrap());
+            let mut next = super::adopted_notice_terminal(&handoff).unwrap();
+            assert!(next.visible_notice(&mut classifier()).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn unavailable_snapshots_lose_old_evidence_but_allow_future_refusals() {
+        let mut broken_primary = snapshot(&refusal());
+        broken_primary.cols = 0;
+        for primary in [None, Some(broken_primary)] {
+            let mut projection = super::adopted_notice_terminal(&handoff(primary)).unwrap();
+            assert!(projection
+                .visible_notice(&mut classifier())
+                .unwrap()
+                .is_none());
+            projection.write(refusal().as_bytes());
+            assert!(projection
+                .visible_notice(&mut classifier())
+                .unwrap()
+                .is_some());
         }
     }
 }

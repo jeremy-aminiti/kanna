@@ -1510,6 +1510,53 @@ mod quota_notice_tests {
     }
 
     #[test]
+    fn refusal_anchors_belong_to_the_first_logical_row_of_a_wrapped_match() {
+        for capture in captures()
+            .iter()
+            .filter(|capture| !capture.frame.is_empty())
+        {
+            let refusal = capture
+                .frame
+                .iter()
+                .find(|line| line.contains("limit"))
+                .unwrap();
+            let mut classifier = classifier(capture);
+            for prefix in ["Earlier result: ", "{\"matchedText\":\"", "│ tool_result: "] {
+                assert!(notice(&mut classifier, &[format!("{prefix}{refusal}")]).is_none());
+            }
+            assert!(
+                notice(
+                    &mut classifier,
+                    &["Earlier result:".to_string(), refusal.clone(),]
+                )
+                .is_some(),
+                "a glyph-led logical row remains an indistinguishable shape"
+            );
+        }
+        let capture = captures()
+            .into_iter()
+            .find(|capture| capture.provider == AgentProvider::Claude)
+            .unwrap();
+        let mut classifier = classifier(&capture);
+        assert!(notice(
+            &mut classifier,
+            &[
+                "⎿ You've reached your Fable".to_string(),
+                "limit. Run /usage-credits to continue".to_string(),
+            ]
+        )
+        .is_some());
+        assert!(notice(
+            &mut classifier,
+            &[
+                "Earlier result: ⎿ You've reached your Fable".to_string(),
+                "limit. Run /usage-credits to continue".to_string(),
+            ]
+        )
+        .is_none());
+    }
+
+    #[test]
     fn never_classifies_prose_or_the_banner_that_means_the_opposite() {
         let captures = captures();
         let negatives = captures

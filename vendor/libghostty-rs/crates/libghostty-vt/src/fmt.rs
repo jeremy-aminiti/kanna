@@ -173,11 +173,12 @@ impl<'t, 'alloc: 'cb, 'cb: 't> Formatter<'t, 'alloc, 'cb> {
                 std::ptr::from_mut(&mut len),
             )
         };
-        // This should always fail with OutOfSpace.
+        // Nonempty output needs space, but empty output fits the zero-byte
+        // query buffer and succeeds. Its required length is still valid.
         match from_result(result) {
             Err(Error::OutOfSpace { .. }) => Ok(len),
             Err(e) => Err(e),
-            Ok(()) => Err(Error::InvalidValue),
+            Ok(()) => Ok(len),
         }
     }
 }
