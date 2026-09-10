@@ -333,3 +333,55 @@ async fn existing_unprepared_transfer_task_is_refused_before_recovery_spawn() {
     daemon.abort();
     fixture.cleanup();
 }
+
+#[tokio::test]
+async fn ordinary_put_resume_and_rerun_refuse_unprepared_bound_task() {
+    let fixture = build_gate_fixture("ordinary-recovery");
+    let head = repo_head_oid(&fixture.repo_root);
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    db.insert_test_pipeline_item(
+        "abad0005",
+        "repo-1",
+        "resume",
+        None,
+        "in progress",
+        "2026-09-09T00:00:00Z",
+    )
+    .unwrap();
+    db.upsert_transferred_task_manifest(
+        "transfer-ordinary",
+        "repo-1",
+        Some("abad0005"),
+        &head,
+        &head,
+    )
+    .unwrap();
+    drop(db);
+    let listener = tokio::net::UnixListener::bind(&fixture.socket_path).unwrap();
+    let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = connected.clone();
+    let daemon = tokio::spawn(async move {
+        if listener.accept().await.is_ok() {
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let (status, _) = put_task(
+        &app,
+        "abad0005",
+        serde_json::json!({"repoId":"repo-1","prompt":"ordinary retry"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    for path in ["/v1/tasks/abad0005/resume", "/v1/tasks/abad0005/rerun"] {
+        let response = app
+            .clone()
+            .oneshot(Request::post(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{path}");
+    }
+    assert!(!connected.load(std::sync::atomic::Ordering::SeqCst));
+    daemon.abort();
+    fixture.cleanup();
+}

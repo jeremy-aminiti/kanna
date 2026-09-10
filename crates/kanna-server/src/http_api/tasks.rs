@@ -961,6 +961,17 @@ async fn create_task_with_requested_id_and_inputs(
                 if let Some(existing) =
                     existing_create_task_response(&db, task_id, &payload.repo_id, &payload.prompt)?
                 {
+                    if let Some((_, _, _, bound_task, state)) = db
+                        .transferred_task_manifest_for_task(task_id)
+                        .map_err(|error| db_write_error("db error", error))?
+                    {
+                        if bound_task.as_deref() == Some(task_id) && state != "prepared" {
+                            return Err((
+                                axum::http::StatusCode::CONFLICT,
+                                format!("transferred task {task_id} has no durable prepared proof"),
+                            ));
+                        }
+                    }
                     if payload.transfer_import.is_some() {
                         let transfer_id = payload
                             .transfer_import
