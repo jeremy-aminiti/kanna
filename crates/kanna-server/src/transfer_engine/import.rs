@@ -1491,4 +1491,546 @@ mod tests {
             "the abandoned marker leaked out as a session id",
         );
     }
+
+    // -----------------------------------------------------------------
+    // Item 4: retry/replay against the durable destination-server proof.
+    //
+    // These exercise the real `run_import`, a real destination SQLite DB,
+    // and a real `kanna-task-transfer` sidecar *subprocess* — not a helper
+    // predicate standing in for either. They intentionally do not spin up a
+    // second, real source-side sidecar/peer (that full two-node harness is
+    // the same out-of-checkpoint-bound gap item 3's own
+    // `docs/2026-09-09-transfer-admission-proof-e2e-gap.md` names for
+    // `run_push`; see `docs/2026-09-10-item4-ack-replay-two-peer-e2e-gap.md`
+    // for what remains uncovered here and why). What they *do* prove for
+    // real: whether `verify_persisted_task_bundle` — and therefore any
+    // artifact/ledger fetch — runs at all is directly observable, because a
+    // fetch attempted against a real sidecar that was never told about this
+    // transfer, or whose in-memory artifact cache was just emptied by a
+    // restart, is guaranteed to fail with a distinct, fetch-shaped error
+    // *before* the ack call is ever reached. The skip-path's ack replay is
+    // then genuinely driven through `control::acknowledge_import_committed`
+    // against that same real subprocess; without a paired source peer it
+    // cannot complete, but it fails with the sidecar's *own*, specific
+    // "missing source peer" answer — which is only reachable after the
+    // artifact-fetch step was skipped, and never the fetch-shaped error a
+    // wrongly-unskipped verification would produce instead.
+    //
+    // Requires the sidecar binary to actually be built first:
+    //   cargo build -p kanna-task-transfer
+    // (add --release for a release-profile binary). Left as a clear panic
+    // naming this command, per this task's instructions, rather than a
+    // silent skip.
+
+    fn real_sidecar_binary_for_test() -> PathBuf {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir
+            .parent()
+            .and_then(Path::parent)
+            .expect("kanna-server crate sits two path segments under the workspace root")
+            .to_path_buf();
+        let build_root = workspace_root.join(".build");
+        for candidate in [
+            build_root.join("debug").join("kanna-task-transfer"),
+            build_root.join("release").join("kanna-task-transfer"),
+        ] {
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        panic!(
+            "kanna-task-transfer sidecar binary not found under {}; build it first with \
+             `cargo build -p kanna-task-transfer` (or add --release) from the repo root, \
+             then re-run this test",
+            build_root.display(),
+        );
+    }
+
+    /// Spawns (lazily, on first `.control()` call) a real sidecar subprocess
+    /// rooted at a fresh, unique `KANNA_TRANSFER_ROOT`. Each call with a new
+    /// `label` is a distinct process identity; the same `label` reused after
+    /// dropping the previous supervisor represents that same machine's
+    /// sidecar restarting, since it reuses the same durable root.
+    ///
+    /// Mutates process-global identity env vars, exactly as
+    /// `transfer_sidecar`'s own `a_dead_sidecar_is_replaced_rather_than_left_wedged`
+    /// test does — callers must hold `crate::test_sidecar_guard()` for the
+    /// whole test.
+    fn spawn_test_destination_sidecar(
+        root: &Path,
+        peer_id: &str,
+        config: &crate::config::Config,
+        work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
+    ) -> crate::transfer_sidecar::TransferSidecarSupervisor {
+        std::env::remove_var("KANNA_TRANSFER_REGISTRY_DIR");
+        std::env::set_var("KANNA_TRANSFER_ROOT", root);
+        std::env::set_var("KANNA_TRANSFER_PEER_ID", peer_id);
+        std::env::set_var("KANNA_TRANSFER_DISPLAY_NAME", "Item4 Destination");
+        crate::transfer_sidecar::TransferSidecarSupervisor::with_binary_for_test(
+            config.clone(),
+            work,
+            real_sidecar_binary_for_test(),
+        )
+    }
+
+    fn item4_test_config(label: &str, transfer_port: u16) -> crate::config::Config {
+        crate::config::Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: crate::test_paths::unique_test_path_string(&format!(
+                "kanna-daemon-item4-{label}"
+            )),
+            db_path: crate::db::Db::test_db_path(&format!("item4-{label}")),
+            kanna_cli_path: None,
+            desktop_id: format!("desktop-item4-{label}"),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Item4 Destination".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: crate::test_paths::unique_test_file(
+                &format!("kanna-pairings-item4-{label}"),
+                "json",
+            ),
+        }
+    }
+
+    /// A minimal, valid `task-bundle` payload — the only mode `run_import`
+    /// accepts — for a transfer whose `local_task_id` is already known (the
+    /// retry/re-entry shape every test below exercises). `stage` is the one
+    /// field the tests vary, to route `verify_persisted_task_bundle` into an
+    /// early, git-free, deterministic failure when they need it exercised
+    /// without a real repository fixture.
+    fn item4_task_bundle_payload_json(stage: &str) -> serde_json::Value {
+        serde_json::json!({
+            "target_peer_id": "peer-item4-dest",
+            "task": {
+                "source_peer_id": "peer-item4-source",
+                "source_task_id": "task-item4-source",
+                "resume_session_id": null,
+                "stage": stage,
+                "pipeline": "single-reviewer",
+                "agent_type": "pty",
+                "agent_provider": "claude",
+                "workflow_definition": "{\"stages\":[{\"name\":\"in progress\"}]}",
+                "head_oid": "a".repeat(40),
+                "base_oid": "b".repeat(40),
+            },
+            "repo": {
+                "mode": "task-bundle",
+                "bundle": {
+                    "artifact_id": "transfer-repo-bundle",
+                    "filename": "transfer.bundle",
+                    "ref_name": "refs/heads/task-item4-source",
+                    "base_ref_name": "refs/heads/main",
+                },
+            },
+            "input_ledger": {
+                "artifact_id": "transfer-inputs",
+                "filename": payload::TASK_INPUT_LEDGER_FILENAME,
+                "sha256": "c".repeat(64),
+                "count": 0,
+            },
+            "artifacts": [],
+        })
+    }
+
+    fn item4_new_task_transfer(
+        transfer_id: &str,
+        local_task_id: &str,
+        payload_stage: &str,
+    ) -> crate::db::NewTaskTransfer {
+        crate::db::NewTaskTransfer {
+            id: transfer_id.to_string(),
+            direction: "incoming".to_string(),
+            status: "importing".to_string(),
+            source_peer_id: Some("peer-item4-source".to_string()),
+            target_peer_id: None,
+            source_desktop_id: None,
+            target_desktop_id: None,
+            source_task_id: Some("task-item4-source".to_string()),
+            local_task_id: Some(local_task_id.to_string()),
+            error: None,
+            payload_json: Some(item4_task_bundle_payload_json(payload_stage).to_string()),
+        }
+    }
+
+    /// The decisive positive case: once `verify_persisted_task_bundle` has
+    /// already persisted a content commitment for this transfer, a retry
+    /// must skip it entirely — no artifact or input-ledger fetch — and go
+    /// straight to replaying the acknowledgment. The destination "server" is
+    /// represented as durably as this repo's other transfer fixtures
+    /// represent it (a fresh `AppState`/`Db` built from the same persisted
+    /// `db_path`, matching `transfer_sidecar`'s own restart tests) rather
+    /// than actually forking a `kanna-server` binary, since `run_import` is
+    /// not an HTTP entry point — it is the queue-drain unit these very
+    /// `import.rs` tests already call directly.
+    #[tokio::test]
+    async fn retry_with_persisted_commitment_skips_reverification_and_reaches_real_ack_replay() {
+        let _guard = crate::test_sidecar_guard().await;
+        let transfer_id = "transfer-item4-persisted";
+        let local_task_id = "task-item4-persisted";
+        let config = item4_test_config("persisted", 47_101);
+
+        {
+            let db = crate::db::Db::open_for_tests(&config.db_path).expect("open test db");
+            db.insert_test_repo("repo-item4-persisted", "Item4 Repo")
+                .expect("insert repo");
+            db.insert_test_pipeline_item(
+                local_task_id,
+                "repo-item4-persisted",
+                "resume the transferred agent",
+                None,
+                "in progress",
+                "2026-09-09T00:00:00Z",
+            )
+            .expect("insert pipeline item");
+            db.upsert_transferred_task_manifest(
+                transfer_id,
+                "repo-item4-persisted",
+                Some(local_task_id),
+                &"a".repeat(40),
+                &"b".repeat(40),
+            )
+            .expect("upsert manifest");
+            assert!(db
+                .mark_transferred_task_manifest_prepared(transfer_id)
+                .expect("mark prepared"));
+            assert!(db
+                .set_transferred_task_manifest_content_commitment(
+                    transfer_id,
+                    "persisted-commitment-value",
+                )
+                .expect("persist commitment"));
+            db.insert_task_transfer(&item4_new_task_transfer(
+                transfer_id,
+                local_task_id,
+                "in progress",
+            ))
+            .expect("insert task transfer");
+        }
+
+        // Destination "server restart": the AppState below is a fresh
+        // process-analog built only from the durable db_path above, and it
+        // is handed a *never-before-used* real sidecar process that has
+        // never seen this transfer_id — representing both "destination
+        // server restarted" and "source artifact long gone" identically,
+        // since this retry's whole point is that neither may matter once
+        // the commitment is persisted.
+        let root = crate::test_paths::unique_test_dir("kanna-transfer-item4-persisted");
+        std::fs::create_dir_all(&root).expect("create transfer root");
+        let config_for_sidecar = config.clone();
+        let state = Arc::new(AppState::with_transfer_sidecar_for_test(
+            config.clone(),
+            move |work| {
+                spawn_test_destination_sidecar(
+                    &root,
+                    "peer-item4-dest-persisted",
+                    &config_for_sidecar,
+                    work,
+                )
+            },
+        ));
+
+        let work = work_item("import:transfer-item4-persisted");
+        let failure = run_import(&state, &work, transfer_id)
+            .await
+            .expect_err(
+                "an unpaired real sidecar cannot complete the ack replay, but the retry must \
+                 still reach it rather than fail earlier on a fetch",
+            );
+        let ImportFailure::Retry(reason) = failure else {
+            panic!("expected a retryable failure reaching the sidecar's ack replay: {failure:?}");
+        };
+        assert!(
+            reason.contains("missing source peer for import acknowledgment"),
+            "expected the real sidecar's own ack-replay error, proving the skip-path reached \
+             `acknowledge_import_committed`; got: {reason}"
+        );
+        let lowered = reason.to_lowercase();
+        assert!(
+            !lowered.contains("artifact") && !lowered.contains("ledger"),
+            "a persisted commitment must never let the retry attempt an artifact/ledger fetch: \
+             {reason}"
+        );
+
+        // Immutability: the persisted proof survived the whole real retry
+        // attempt, including its failed ack replay, unchanged.
+        let commitment = state
+            .transfer_work()
+            .open_db()
+            .expect("db")
+            .transferred_task_manifest_content_commitment(transfer_id)
+            .expect("read commitment");
+        assert_eq!(
+            commitment.as_deref(),
+            Some("persisted-commitment-value"),
+            "a retry must never recompute or clear an already-persisted content commitment"
+        );
+    }
+
+    /// Same skip-path, but the destination's sidecar *process* — not just
+    /// the kanna-server process — restarts between the manifest being
+    /// proven and this retry, so its in-memory `transfer_artifacts` cache
+    /// (which is never reindexed from disk on startup) is genuinely empty.
+    /// The retry must still never touch it.
+    #[tokio::test]
+    async fn retry_with_persisted_commitment_survives_a_real_sidecar_process_restart() {
+        let _guard = crate::test_sidecar_guard().await;
+        let transfer_id = "transfer-item4-sidecar-restart";
+        let local_task_id = "task-item4-sidecar-restart";
+        let config = item4_test_config("sidecar-restart", 47_102);
+
+        {
+            let db = crate::db::Db::open_for_tests(&config.db_path).expect("open test db");
+            db.insert_test_repo("repo-item4-sidecar-restart", "Item4 Repo")
+                .expect("insert repo");
+            db.insert_test_pipeline_item(
+                local_task_id,
+                "repo-item4-sidecar-restart",
+                "resume the transferred agent",
+                None,
+                "in progress",
+                "2026-09-09T00:00:00Z",
+            )
+            .expect("insert pipeline item");
+            db.upsert_transferred_task_manifest(
+                transfer_id,
+                "repo-item4-sidecar-restart",
+                Some(local_task_id),
+                &"a".repeat(40),
+                &"b".repeat(40),
+            )
+            .expect("upsert manifest");
+            assert!(db
+                .mark_transferred_task_manifest_prepared(transfer_id)
+                .expect("mark prepared"));
+            assert!(db
+                .set_transferred_task_manifest_content_commitment(
+                    transfer_id,
+                    "persisted-commitment-value",
+                )
+                .expect("persist commitment"));
+            db.insert_task_transfer(&item4_new_task_transfer(
+                transfer_id,
+                local_task_id,
+                "in progress",
+            ))
+            .expect("insert task transfer");
+        }
+
+        let root = crate::test_paths::unique_test_dir("kanna-transfer-item4-sidecar-restart");
+        std::fs::create_dir_all(&root).expect("create transfer root");
+        let peer_id = "peer-item4-dest-sidecar-restart";
+
+        // First incarnation: spawn it (on its own port, so its release on
+        // drop can never race the second incarnation's bind) and force it to
+        // actually come up and persist its identity under the shared root,
+        // then let it be killed on drop.
+        {
+            let first_config = item4_test_config("sidecar-restart-incarnation-1", 47_198);
+            let throwaway_work = crate::transfer_engine::queue::TransferWorkQueue::new(
+                crate::test_paths::unique_test_path_string("kanna-transfer-item4-throwaway-work"),
+            );
+            let first =
+                spawn_test_destination_sidecar(&root, peer_id, &first_config, throwaway_work);
+            first
+                .control("identity", serde_json::json!({}))
+                .await
+                .expect("first sidecar incarnation must come up and answer");
+        }
+
+        // Second incarnation, same durable root: this is the one `run_import`
+        // actually talks to, standing in for the sidecar having restarted.
+        let config_for_sidecar = config.clone();
+        let root_for_sidecar = root.clone();
+        let state = Arc::new(AppState::with_transfer_sidecar_for_test(
+            config.clone(),
+            move |work| {
+                spawn_test_destination_sidecar(
+                    &root_for_sidecar,
+                    peer_id,
+                    &config_for_sidecar,
+                    work,
+                )
+            },
+        ));
+
+        let work = work_item("import:transfer-item4-sidecar-restart");
+        let failure = run_import(&state, &work, transfer_id)
+            .await
+            .expect_err("an unpaired real sidecar cannot complete the ack replay");
+        let ImportFailure::Retry(reason) = failure else {
+            panic!("expected a retryable failure reaching the sidecar's ack replay: {failure:?}");
+        };
+        assert!(
+            reason.contains("missing source peer for import acknowledgment"),
+            "the restarted sidecar's empty artifact cache must not force a fetch attempt; \
+             expected the ack-replay error, got: {reason}"
+        );
+        let lowered = reason.to_lowercase();
+        assert!(
+            !lowered.contains("artifact") && !lowered.contains("ledger"),
+            "a persisted commitment must never let the retry attempt an artifact/ledger fetch \
+             after a sidecar restart: {reason}"
+        );
+    }
+
+    /// Negative control: with no persisted content commitment, a retry must
+    /// still take the full `verify_persisted_task_bundle` path — proven
+    /// here, git-free and deterministically, by a deliberate stage mismatch
+    /// that path's very first check catches. This is the gate's other
+    /// failure mode: skip only when genuinely proven, never by default.
+    #[tokio::test]
+    async fn retry_with_no_persisted_commitment_still_takes_the_verification_path() {
+        let transfer_id = "transfer-item4-unverified";
+        let local_task_id = "task-item4-unverified";
+        let state = crate::http_api::test_state_with_seed(
+            "desktop-item4-unverified",
+            "Item4 Unverified",
+            |db| {
+                db.insert_test_repo("repo-item4-unverified", "Item4 Repo")
+                    .expect("insert repo");
+                db.insert_test_pipeline_item(
+                    local_task_id,
+                    "repo-item4-unverified",
+                    "resume the transferred agent",
+                    None,
+                    "in progress",
+                    "2026-09-09T00:00:00Z",
+                )
+                .expect("insert pipeline item");
+                db.upsert_transferred_task_manifest(
+                    transfer_id,
+                    "repo-item4-unverified",
+                    Some(local_task_id),
+                    &"a".repeat(40),
+                    &"b".repeat(40),
+                )
+                .expect("upsert manifest");
+                assert!(db
+                    .mark_transferred_task_manifest_prepared(transfer_id)
+                    .expect("mark prepared"));
+                // Deliberately no content commitment persisted.
+                db.insert_task_transfer(&item4_new_task_transfer(
+                    transfer_id,
+                    local_task_id,
+                    // The payload's stage disagrees with the pipeline_item's
+                    // seeded "in progress" stage above.
+                    "review",
+                ))
+                .expect("insert task transfer");
+            },
+        );
+
+        let work = work_item("import:transfer-item4-unverified");
+        let failure = run_import(&state, &work, transfer_id)
+            .await
+            .expect_err("a stage mismatch must refuse the import");
+        let ImportFailure::Terminal(reason) = failure else {
+            panic!("expected a terminal verification failure: {failure:?}");
+        };
+        assert!(
+            reason.contains("stage does not match the source context"),
+            "an absent content commitment must still route through \
+             verify_persisted_task_bundle: {reason}"
+        );
+
+        let db = state.transfer_work().open_db().expect("db");
+        assert!(
+            db.transferred_task_manifest_content_commitment(transfer_id)
+                .expect("read commitment")
+                .is_none(),
+            "a failed verification must not fabricate a commitment"
+        );
+    }
+
+    /// Negative control: a content commitment durably proven for a
+    /// *different* local task must not authorize this task's ack replay.
+    /// This is the existing task-binding guard (`import.rs`'s own
+    /// `bound_task != local_task_id` check), exercised specifically through
+    /// the skip-path this task adds: the persisted-commitment gate answers
+    /// `Some` for the transfer_id alone, before the binding is checked, so
+    /// this proves that ordering still ends in a refusal rather than an
+    /// authorized ack.
+    #[tokio::test]
+    async fn a_commitment_proven_for_another_task_cannot_authorize_this_tasks_ack() {
+        let transfer_id = "transfer-item4-mismatch";
+        let proven_task_id = "task-item4-mismatch-a";
+        let retrying_task_id = "task-item4-mismatch-b";
+        let state = crate::http_api::test_state_with_seed(
+            "desktop-item4-mismatch",
+            "Item4 Mismatch",
+            |db| {
+                db.insert_test_repo("repo-item4-mismatch", "Item4 Repo")
+                    .expect("insert repo");
+                for task_id in [proven_task_id, retrying_task_id] {
+                    db.insert_test_pipeline_item(
+                        task_id,
+                        "repo-item4-mismatch",
+                        "resume the transferred agent",
+                        None,
+                        "in progress",
+                        "2026-09-09T00:00:00Z",
+                    )
+                    .expect("insert pipeline item");
+                }
+                // The manifest is genuinely proven, but bound to task A.
+                db.upsert_transferred_task_manifest(
+                    transfer_id,
+                    "repo-item4-mismatch",
+                    Some(proven_task_id),
+                    &"a".repeat(40),
+                    &"b".repeat(40),
+                )
+                .expect("upsert manifest");
+                assert!(db
+                    .mark_transferred_task_manifest_prepared(transfer_id)
+                    .expect("mark prepared"));
+                assert!(db
+                    .set_transferred_task_manifest_content_commitment(
+                        transfer_id,
+                        "commitment-for-task-a",
+                    )
+                    .expect("persist commitment"));
+                // But this retry's transfer row now names task B.
+                db.insert_task_transfer(&item4_new_task_transfer(
+                    transfer_id,
+                    retrying_task_id,
+                    "in progress",
+                ))
+                .expect("insert task transfer");
+            },
+        );
+
+        let work = work_item("import:transfer-item4-mismatch");
+        let failure = run_import(&state, &work, transfer_id)
+            .await
+            .expect_err("a manifest proven for a different task must refuse this retry");
+        let ImportFailure::Retry(reason) = failure else {
+            panic!("expected the existing binding-mismatch guard: {failure:?}");
+        };
+        assert!(
+            reason.contains("transfer manifest task binding mismatch"),
+            "{reason}"
+        );
+
+        let commitment = state
+            .transfer_work()
+            .open_db()
+            .expect("db")
+            .transferred_task_manifest_content_commitment(transfer_id)
+            .expect("read commitment");
+        assert_eq!(
+            commitment.as_deref(),
+            Some("commitment-for-task-a"),
+            "task A's proof must be untouched by task B's rejected attempt"
+        );
+    }
 }

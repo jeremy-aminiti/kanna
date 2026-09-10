@@ -4628,3 +4628,77 @@ fn recording_delivery_leaves_the_decision_itself_untouched() {
     drop(db);
     let _ = std::fs::remove_file(path);
 }
+
+/// The invariant item 4's retry gate (`transfer_engine::import::run_import`)
+/// depends on: once `verify_persisted_task_bundle` has proven a transfer and
+/// recorded its content commitment, nothing may recompute or clear it — a
+/// later call, even with a genuinely different (attacker- or bug-produced)
+/// value, must be a no-op, and the original value must survive.
+#[test]
+fn a_persisted_content_commitment_is_set_once_and_never_overwritten() {
+    let path = temp_db_path();
+    let path_string = path.to_string_lossy().to_string();
+    let db = Db::open_for_tests(&path_string).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One")
+        .expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "resume the transferred agent",
+        None,
+        "in progress",
+        "2026-09-09T00:00:00Z",
+    )
+    .expect("insert pipeline item");
+
+    // Not settable before the manifest is genuinely `prepared`.
+    db.upsert_transferred_task_manifest(
+        "transfer-1",
+        "repo-1",
+        Some("task-1"),
+        &"a".repeat(40),
+        &"b".repeat(40),
+    )
+    .expect("upsert manifest");
+    assert!(
+        !db.set_transferred_task_manifest_content_commitment("transfer-1", "too-early")
+            .expect("attempt commitment before prepared"),
+        "an `importing` manifest must not accept a content commitment"
+    );
+    assert_eq!(
+        db.transferred_task_manifest_content_commitment("transfer-1")
+            .expect("read commitment"),
+        None,
+    );
+
+    assert!(db
+        .mark_transferred_task_manifest_prepared("transfer-1")
+        .expect("mark prepared"));
+
+    assert!(
+        db.set_transferred_task_manifest_content_commitment("transfer-1", "first-proof")
+            .expect("first commitment write"),
+        "the first write against a prepared, unset manifest must succeed"
+    );
+    assert_eq!(
+        db.transferred_task_manifest_content_commitment("transfer-1")
+            .expect("read commitment"),
+        Some("first-proof".to_string()),
+    );
+
+    // A second call — whether a genuine re-verification recomputing the same
+    // digest, or a different value entirely — must be a no-op. This is the
+    // guard a retry's skip-path relies on never being loosened: the recorded
+    // proof is what makes it safe to skip re-fetching artifacts at all.
+    assert!(
+        !db.set_transferred_task_manifest_content_commitment("transfer-1", "second-proof")
+            .expect("second commitment write attempt"),
+        "a manifest with an already-persisted commitment must refuse to overwrite it"
+    );
+    assert_eq!(
+        db.transferred_task_manifest_content_commitment("transfer-1")
+            .expect("read commitment"),
+        Some("first-proof".to_string()),
+        "the original proof must survive an attempted overwrite unchanged"
+    );
+}
