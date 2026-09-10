@@ -434,7 +434,7 @@ function parseRemoteE2eInput(rest: string[]): ParsedCliCommand {
     )
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("remote-e2e only accepts --dev, --staging, --mobile-relay, --desktop-pairing, or --if-changed");
+    throw new Error("remote-e2e only accepts --dev, --staging, --mobile-relay, --mobile-relay-terminal-control, --desktop-pairing, or --if-changed");
   }
   if (input.dev === true && input.staging === true) {
     throw new Error("remote-e2e accepts only one of --dev or --staging");
@@ -1196,7 +1196,7 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]",
+    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--mobile-relay-terminal-control] [--desktop-pairing] [--if-changed]",
     "  test staging-smoke",
     "  doctor [--remote] [--staging]",
     "",
@@ -1753,7 +1753,7 @@ const helpTopics: Record<string, string[]> = {
     "  test cloud-staging",
     "  test cloud-prod-smoke",
     "  test lan-lab --hosts <path>",
-    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]",
+    "  test remote-e2e [--dev|--staging] [--mobile-relay] [--mobile-relay-terminal-control] [--desktop-pairing] [--if-changed]",
     "  test staging-smoke"
   ],
   "test all": [
@@ -1826,11 +1826,12 @@ const helpTopics: Record<string, string[]> = {
     "Run LAN sync tests against physical Macs over SSH."
   ],
   "test remote-e2e": [
-    "Usage: kd test remote-e2e [--dev|--staging] [--mobile-relay] [--desktop-pairing] [--if-changed]",
+    "Usage: kd test remote-e2e [--dev|--staging] [--mobile-relay] [--mobile-relay-terminal-control] [--desktop-pairing] [--if-changed]",
     "",
     "Run remote task interaction E2E tests.",
     "",
     "  --mobile-relay     Run Layer C mobile Appium over relay.",
+    "  --mobile-relay-terminal-control  Run the Layer C terminal-control mobile relay lane.",
     "  --desktop-pairing  Run Layer D desktop pairing UI WebDriver test.",
     "  --if-changed       Run the dev lane only when this branch changes a remote",
     "                     E2E surface (relay, kanna-server, firebase-functions,",

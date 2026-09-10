@@ -9,6 +9,7 @@ describe("kd remote-e2e test command", () => {
         dev: true,
         staging: false,
         mobileRelay: false,
+        mobileRelayTerminalControl: false,
         desktopPairing: false,
         ifChanged: false
       }
@@ -22,6 +23,7 @@ describe("kd remote-e2e test command", () => {
         dev: true,
         staging: false,
         mobileRelay: true,
+        mobileRelayTerminalControl: false,
         desktopPairing: false,
         ifChanged: false
       }
@@ -32,7 +34,19 @@ describe("kd remote-e2e test command", () => {
         dev: true,
         staging: false,
         mobileRelay: false,
+        mobileRelayTerminalControl: false,
         desktopPairing: true,
+        ifChanged: false
+      }
+    });
+    expect(parseCliArgs(["test", "remote-e2e", "--mobile-relay-terminal-control"])).toEqual({
+      taskId: "test.remote-e2e",
+      input: {
+        dev: true,
+        staging: false,
+        mobileRelay: false,
+        mobileRelayTerminalControl: true,
+        desktopPairing: false,
         ifChanged: false
       }
     });
@@ -45,12 +59,16 @@ describe("kd remote-e2e test command", () => {
         dev: true,
         staging: false,
         mobileRelay: false,
+        mobileRelayTerminalControl: false,
         desktopPairing: false,
         ifChanged: true
       }
     });
     expect(() => parseCliArgs(["test", "remote-e2e", "--staging", "--if-changed"])).toThrow(
       "remote-e2e --if-changed applies to the dev lane only"
+    );
+    expect(() => parseCliArgs(["test", "remote-e2e", "--mobile"])).toThrow(
+      "remote-e2e only accepts --dev, --staging, --mobile-relay, --mobile-relay-terminal-control, --desktop-pairing, or --if-changed"
     );
   });
 });
