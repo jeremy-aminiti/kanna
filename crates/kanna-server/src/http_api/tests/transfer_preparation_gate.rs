@@ -1,18 +1,14 @@
 //! The first preparation checkpoint a transferred task must clear before its
 //! daemon session is ever contacted: `create_task_with_requested_id_and_inputs`
 //! (`crates/kanna-server/src/http_api/tasks.rs`) creates the pipeline_item row
-//! and git worktree synchronously, then — while still on the blocking pool,
-//! before `DaemonClient::connect` is ever called — verifies the freshly
-//! prepared worktree's committed head against `transfer_import.headOid` and
-//! requires a durable `transferred_task_manifest` row in state `importing`
-//! bound to exactly this task id, flipping it to `prepared` only on success.
+//! and git worktree synchronously, installs context/history/inputs, then —
+//! before `DaemonClient::connect` is ever called — invokes the transfer
+//! engine's full Git/SQLite read-back proof. That proof atomically records the
+//! content commitment and flips the correctly bound manifest to `prepared`.
 //!
-//! The `#[cfg(test)]` fake-`task_creator` shortcut
-//! (`crates/kanna-server/src/http_api/tasks.rs:549`) now only intercepts
-//! non-transfer requests, so a transferred create genuinely exercises this
-//! gate end to end: real SQLite, a real git worktree, and a real (fake) daemon
-//! on a Unix socket standing in for `kanna-daemon`. These are the only two
-//! regression tests for it.
+//! The transfer-only in-process entry genuinely exercises this gate end to
+//! end: real SQLite, a real git worktree, and a real (fake) daemon on a Unix
+//! socket standing in for `kanna-daemon`.
 
 use super::*;
 
@@ -131,6 +127,85 @@ async fn put_task(
     (status, String::from_utf8_lossy(&body).into_owned())
 }
 
+async fn create_transferred_task(
+    fixture: &GateFixture,
+    task_id: &str,
+    transfer_id: &str,
+    head_oid: &str,
+    base_oid: &str,
+    mut body: serde_json::Value,
+) -> (StatusCode, String) {
+    for (suffix, oid) in [("head", head_oid), ("base", base_oid)] {
+        let reference = format!("refs/kanna/transfers/{transfer_id}/{head_oid}/{suffix}");
+        let output = Command::new("git")
+            .args(["update-ref", &reference, oid])
+            .current_dir(&fixture.repo_root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    let workflow_definition = std::fs::read_to_string(
+        fixture
+            .repo_root
+            .join(".kanna/workflows")
+            .join(format!("{TEST_PROVIDER_NEUTRAL_WORKFLOW}.json")),
+    )
+    .unwrap();
+    body["transferImport"]["workflowDefinition"] =
+        serde_json::Value::String(workflow_definition.clone());
+    let request: crate::mobile_api::CreateTaskRequest = serde_json::from_value(body).unwrap();
+    let source_payload =
+        crate::transfer_engine::payload::parse_outgoing_transfer_payload(&serde_json::json!({
+            "target_peer_id": "peer-destination",
+            "task": {
+                "cloud_task_id": format!("cloud-{transfer_id}"),
+                "source_peer_id": "peer-source",
+                "source_task_id": "source-task",
+                "local_task_id": task_id,
+                "resume_session_id": null,
+                "prompt": "resume the transferred agent",
+                "stage": "in progress",
+                "branch": "refs/heads/source-task",
+                "head_oid": head_oid,
+                "base_oid": base_oid,
+                "workflow_definition": workflow_definition,
+                "pipeline": TEST_PROVIDER_NEUTRAL_WORKFLOW,
+                "agent_type": "pty",
+                "agent_provider": "claude"
+            },
+            "repo": {
+                "mode": "task-bundle",
+                "bundle": {
+                    "artifact_id": "unused-repository-artifact",
+                    "filename": "transfer.bundle",
+                    "ref_name": "refs/heads/source-task",
+                    "base_ref_name": "refs/heads/main"
+                }
+            },
+            "input_ledger": {
+                "artifact_id": "unused-input-artifact",
+                "filename": crate::transfer_engine::payload::TASK_INPUT_LEDGER_FILENAME,
+                "sha256": "c".repeat(64),
+                "count": 0
+            },
+            "artifacts": []
+        }))
+        .unwrap();
+    let state = Arc::new(super::AppState::new(fixture.config.clone()));
+    match super::create_transferred_task_in_process(
+        state,
+        request,
+        task_id.to_string(),
+        Vec::new(),
+        source_payload,
+    )
+    .await
+    {
+        Ok(response) => (StatusCode::OK, serde_json::to_string(&response).unwrap()),
+        Err(error) => error,
+    }
+}
+
 /// A transferred create whose durable manifest is bound to a *different*
 /// local task id — the shape a stale or mismatched import leaves behind, and
 /// the "seeded local_task_id" case the checkpoint exists to catch — is
@@ -169,10 +244,12 @@ async fn transfer_import_bound_to_another_task_is_refused_before_any_daemon_cont
         }
     });
 
-    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
-    let (status, body) = put_task(
-        &app,
+    let (status, body) = create_transferred_task(
+        &fixture,
         "abad0001",
+        "transfer-mismatch",
+        &expected_head,
+        &expected_head,
         transfer_import_body("transfer-mismatch", &expected_head),
     )
     .await;
@@ -217,11 +294,10 @@ async fn transfer_import_bound_to_another_task_is_refused_before_any_daemon_cont
 }
 
 /// The matching valid path: a manifest durably `importing` and bound to
-/// exactly the task id being created, with a head that matches what the
-/// worktree actually produced, is admitted — the daemon is spawned and the
-/// manifest is flipped to `prepared`.
+/// exactly the task id being created is fully proved — including context and
+/// the empty ordered ledger — before the daemon is spawned.
 #[tokio::test]
-async fn transfer_import_with_a_prepared_manifest_reaches_the_daemon_spawn() {
+async fn transfer_import_records_complete_proof_before_daemon_spawn() {
     use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
     use tokio::io::{AsyncWriteExt, BufReader};
 
@@ -240,6 +316,7 @@ async fn transfer_import_with_a_prepared_manifest_reaches_the_daemon_spawn() {
     drop(db);
 
     let listener = tokio::net::UnixListener::bind(&fixture.socket_path).unwrap();
+    let daemon_db_path = fixture.config.db_path.clone();
     let daemon = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let (read_half, mut write_half) = stream.into_split();
@@ -249,6 +326,13 @@ async fn transfer_import_with_a_prepared_manifest_reaches_the_daemon_spawn() {
             DaemonCommand::Spawn { session_id, .. } => session_id,
             other => panic!("expected PTY Spawn command, got {other:?}"),
         };
+        let db = Db::open(&daemon_db_path).unwrap();
+        assert!(
+            db.transferred_task_manifest_content_commitment("transfer-admitted")
+                .unwrap()
+                .is_some(),
+            "daemon observed Spawn before the complete transfer proof"
+        );
         write_half
             .write_all(
                 format!(
@@ -261,10 +345,12 @@ async fn transfer_import_with_a_prepared_manifest_reaches_the_daemon_spawn() {
             .unwrap();
     });
 
-    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
-    let (status, body) = put_task(
-        &app,
+    let (status, body) = create_transferred_task(
+        &fixture,
         "abad0003",
+        "transfer-admitted",
+        &expected_head,
+        &expected_head,
         transfer_import_body("transfer-admitted", &expected_head),
     )
     .await;
@@ -290,19 +376,13 @@ async fn transfer_import_with_a_prepared_manifest_reaches_the_daemon_spawn() {
 }
 
 #[tokio::test]
-async fn existing_unprepared_transfer_task_is_refused_before_recovery_spawn() {
+async fn interrupted_transfer_preparation_is_completed_before_one_recovery_spawn() {
+    use kanna_daemon::protocol::{Command as DaemonCommand, Event as DaemonEvent};
+    use tokio::io::{AsyncWriteExt, BufReader};
+
     let fixture = build_gate_fixture("recovery-unprepared");
     let expected_head = repo_head_oid(&fixture.repo_root);
     let db = Db::open(&fixture.config.db_path).unwrap();
-    db.insert_test_pipeline_item(
-        "abad0004",
-        "repo-1",
-        "resume",
-        None,
-        "in progress",
-        "2026-09-09T00:00:00Z",
-    )
-    .unwrap();
     db.upsert_transferred_task_manifest(
         "transfer-recovery",
         "repo-1",
@@ -311,26 +391,87 @@ async fn existing_unprepared_transfer_task_is_refused_before_recovery_spawn() {
         &expected_head,
     )
     .unwrap();
+    let mut interrupted_body = transfer_import_body("transfer-recovery", &expected_head);
+    interrupted_body["transferImport"]["workflowDefinition"] = serde_json::Value::String(
+        std::fs::read_to_string(
+            fixture
+                .repo_root
+                .join(".kanna/workflows")
+                .join(format!("{TEST_PROVIDER_NEUTRAL_WORKFLOW}.json")),
+        )
+        .unwrap(),
+    );
+    let interrupted_request: crate::mobile_api::CreateTaskRequest =
+        serde_json::from_value(interrupted_body).unwrap();
+    let prepared = crate::task_creator::prepare_task_for_api_with_error(
+        &db,
+        &fixture.config,
+        interrupted_request,
+        Some("abad0004".to_string()),
+    )
+    .expect("simulate crash after task/create-intent persistence");
+    assert_eq!(crate::task_creator::prepared_task_id(&prepared), "abad0004");
+    assert!(
+        db.transferred_task_context("abad0004").unwrap().is_none(),
+        "the simulated crash must precede transfer context persistence"
+    );
     drop(db);
 
     let listener = tokio::net::UnixListener::bind(&fixture.socket_path).unwrap();
-    let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let seen = connected.clone();
+    let daemon_db_path = fixture.config.db_path.clone();
     let daemon = tokio::spawn(async move {
-        if listener.accept().await.is_ok() {
-            seen.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let command = read_test_daemon_command(&mut reader, &mut write_half).await;
+        let session_id = match command {
+            DaemonCommand::Spawn { session_id, .. } => session_id,
+            other => panic!("expected one recovery Spawn, got {other:?}"),
+        };
+        let db = Db::open(&daemon_db_path).unwrap();
+        assert!(
+            db.transferred_task_manifest_content_commitment("transfer-recovery")
+                .unwrap()
+                .is_some(),
+            "daemon observed Spawn before the complete transfer proof was durable"
+        );
+        assert!(db.transferred_task_context("abad0004").unwrap().is_some());
+        write_half
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&DaemonEvent::SessionCreated { session_id }).unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
     });
-    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
-    let (status, body) = put_task(
-        &app,
+    let (status, body) = create_transferred_task(
+        &fixture,
         "abad0004",
+        "transfer-recovery",
+        &expected_head,
+        &expected_head,
         transfer_import_body("transfer-recovery", &expected_head),
     )
     .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert!(!connected.load(std::sync::atomic::Ordering::SeqCst));
-    daemon.abort();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    daemon.await.unwrap();
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    let (_, _, _, task, state) = db
+        .transferred_task_manifest("transfer-recovery")
+        .unwrap()
+        .unwrap();
+    assert_eq!(task.as_deref(), Some("abad0004"));
+    assert_eq!(state, "prepared");
+    assert!(
+        db.transferred_task_manifest_content_commitment("transfer-recovery")
+            .unwrap()
+            .is_some(),
+        "the complete Git/SQLite proof must be durable before recovery Spawn"
+    );
+    assert!(db.transferred_task_context("abad0004").unwrap().is_some());
     fixture.cleanup();
 }
 
@@ -481,10 +622,12 @@ async fn a_persisted_base_ref_survives_a_conflicting_and_an_identical_replay() {
             .unwrap();
     });
 
-    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
-    let (status, body) = put_task(
-        &app,
+    let (status, body) = create_transferred_task(
+        &fixture,
         "abad0006",
+        "transfer-baseref",
+        &head_oid,
+        &base_a_oid,
         transfer_import_body_with_refs("transfer-baseref", &head_oid, &head_ref, &base_ref),
     )
     .await;

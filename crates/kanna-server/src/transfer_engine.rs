@@ -21,7 +21,7 @@ pub mod queue;
 pub mod session;
 
 mod finalize;
-mod import;
+pub(crate) mod import;
 mod push;
 
 use crate::db::TransferWorkItem;

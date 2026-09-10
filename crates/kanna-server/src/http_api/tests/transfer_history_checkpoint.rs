@@ -104,26 +104,92 @@ fn transfer_import_body(transfer_id: &str, head_oid: &str) -> serde_json::Value 
     })
 }
 
-async fn put_task(
-    app: &axum::Router,
+async fn create_transferred_task(
+    fixture: &GateFixture,
     task_id: &str,
-    body: serde_json::Value,
+    transfer_id: &str,
+    head_oid: &str,
+    mut body: serde_json::Value,
 ) -> (StatusCode, String) {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::put(format!("/v1/tasks/{task_id}"))
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
-        .await
+    for suffix in ["head", "base"] {
+        let reference = format!("refs/kanna/transfers/{transfer_id}/{head_oid}/{suffix}");
+        let output = Command::new("git")
+            .args(["update-ref", &reference, head_oid])
+            .current_dir(&fixture.repo_root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    let workflow_definition = body["transferImport"]["workflowDefinition"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            std::fs::read_to_string(
+                fixture
+                    .repo_root
+                    .join(".kanna/workflows")
+                    .join(format!("{TEST_PROVIDER_NEUTRAL_WORKFLOW}.json")),
+            )
+            .unwrap()
+        });
+    body["transferImport"]["workflowDefinition"] =
+        serde_json::Value::String(workflow_definition.clone());
+    let history = body["transferImport"]["history"].clone();
+    let previous_stage_result = body["transferImport"]["previousStageResult"].clone();
+    let stage = body["stage"].as_str().unwrap_or("in progress").to_string();
+    let request: crate::mobile_api::CreateTaskRequest = serde_json::from_value(body).unwrap();
+    let source_payload =
+        crate::transfer_engine::payload::parse_outgoing_transfer_payload(&serde_json::json!({
+            "target_peer_id": "peer-destination",
+            "task": {
+                "cloud_task_id": format!("cloud-{transfer_id}"),
+                "source_peer_id": "peer-source",
+                "source_task_id": "source-task",
+                "local_task_id": task_id,
+                "resume_session_id": null,
+                "prompt": request.prompt.clone(),
+                "stage": stage,
+                "branch": "refs/heads/source-task",
+                "head_oid": head_oid,
+                "base_oid": head_oid,
+                "workflow_definition": workflow_definition,
+                "previous_stage_result": previous_stage_result,
+                "history": history,
+                "pipeline": request.workflow_name.clone(),
+                "agent_type": "pty",
+                "agent_provider": "claude"
+            },
+            "repo": {
+                "mode": "task-bundle",
+                "bundle": {
+                    "artifact_id": "unused-repository-artifact",
+                    "filename": "transfer.bundle",
+                    "ref_name": "refs/heads/source-task",
+                    "base_ref_name": "refs/heads/main"
+                }
+            },
+            "input_ledger": {
+                "artifact_id": "unused-input-artifact",
+                "filename": crate::transfer_engine::payload::TASK_INPUT_LEDGER_FILENAME,
+                "sha256": "c".repeat(64),
+                "count": 0
+            },
+            "artifacts": []
+        }))
         .unwrap();
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    (status, String::from_utf8_lossy(&body).into_owned())
+    let state = Arc::new(super::AppState::new(fixture.config.clone()));
+    match super::create_transferred_task_in_process(
+        state,
+        request,
+        task_id.to_string(),
+        Vec::new(),
+        source_payload,
+    )
+    .await
+    {
+        Ok(response) => (StatusCode::OK, serde_json::to_string(&response).unwrap()),
+        Err(error) => error,
+    }
 }
 
 async fn get_task_path(app: &axum::Router, path: &str) -> (StatusCode, String) {
@@ -288,7 +354,14 @@ async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_bra
     });
 
     let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
-    let (status, resp_body) = put_task(&app, "abcd0001", body).await;
+    let (status, resp_body) = create_transferred_task(
+        &fixture,
+        "abcd0001",
+        "transfer-history",
+        &expected_head,
+        body,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{resp_body}");
 
     let args = daemon.await.unwrap();
@@ -391,10 +464,11 @@ async fn a_transfer_with_no_history_field_is_unaffected() {
             .unwrap();
     });
 
-    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
-    let (status, resp_body) = put_task(
-        &app,
+    let (status, resp_body) = create_transferred_task(
+        &fixture,
         "abcd0002",
+        "transfer-compat",
+        &expected_head,
         transfer_import_body("transfer-compat", &expected_head),
     )
     .await;

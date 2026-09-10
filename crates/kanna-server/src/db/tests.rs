@@ -4702,3 +4702,56 @@ fn a_persisted_content_commitment_is_set_once_and_never_overwritten() {
         "the original proof must survive an attempted overwrite unchanged"
     );
 }
+
+#[test]
+fn transferred_manifest_acquisition_and_task_bindings_are_immutable() {
+    let path = temp_db_path();
+    let db = Db::open_for_tests(&path.to_string_lossy()).expect("open test db");
+    for repo_id in ["repo-a", "repo-b"] {
+        db.insert_test_repo(repo_id, repo_id).expect("insert repo");
+    }
+    let head = "a".repeat(40);
+    let base = "b".repeat(40);
+    db.upsert_transferred_task_manifest("transfer-binding", "repo-a", Some("task-a"), &head, &base)
+        .expect("establish binding");
+    db.upsert_transferred_task_manifest("transfer-binding", "repo-a", Some("task-a"), &head, &base)
+        .expect("identical retry");
+
+    for (repo_id, task_id) in [("repo-b", "task-a"), ("repo-a", "task-b")] {
+        let error = db
+            .upsert_transferred_task_manifest(
+                "transfer-binding",
+                repo_id,
+                Some(task_id),
+                &head,
+                &base,
+            )
+            .expect_err("a transfer must not rebind repository or task identity");
+        assert!(error
+            .to_string()
+            .contains("conflicting transferred task manifest"));
+    }
+
+    let (repo_id, _, _, task_id, state) = db
+        .transferred_task_manifest("transfer-binding")
+        .expect("read manifest")
+        .expect("manifest exists");
+    assert_eq!(repo_id, "repo-a");
+    assert_eq!(task_id.as_deref(), Some("task-a"));
+    assert_eq!(state, "importing");
+
+    assert!(db
+        .complete_transferred_task_manifest_preparation("transfer-binding", "atomic-proof")
+        .expect("complete preparation"));
+    let (_, _, _, _, state) = db
+        .transferred_task_manifest("transfer-binding")
+        .expect("read prepared manifest")
+        .expect("manifest exists");
+    assert_eq!(state, "prepared");
+    assert_eq!(
+        db.transferred_task_manifest_content_commitment("transfer-binding")
+            .expect("read proof")
+            .as_deref(),
+        Some("atomic-proof")
+    );
+}

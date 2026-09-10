@@ -837,7 +837,11 @@ async fn build_payload(
             source_peer_id: preflight.source_peer_id.clone(),
             source_desktop_id: source_desktop_id.map(str::to_string),
             source_task_id: source.item.id.clone(),
-            local_task_id: Some(source.item.id.clone()),
+            // The destination task id is derived from the transfer identity;
+            // it is not the source task id. The source persists this expected
+            // value so the eventual proof-bearing receipt cannot name some
+            // other destination task.
+            local_task_id: Some(session::destination_task_id(&preflight.transfer_id)),
             // The staged plan wins: it is the only thing that knows an
             // OpenCode session id, and for every other provider it is the same
             // id the task's latest run carries.
@@ -1290,31 +1294,19 @@ fn verify_outgoing_committed_proof(
         ));
     }
 
-    let expected_destination_task_id = transfer
-        .payload_json
-        .as_deref()
-        .and_then(|json| serde_json::from_str::<Value>(json).ok())
-        .and_then(|payload| {
-            payload
-                .get("task")?
-                .get("local_task_id")?
-                .as_str()
-                .map(str::to_string)
-        });
-    if let Some(expected) = expected_destination_task_id {
-        let reported = string_field(event, "destination_local_task_id").ok_or_else(|| {
-            format!(
-                "outgoing transfer {} acknowledgment carries no destination task id",
-                transfer.id
-            )
-        })?;
-        if reported != expected {
-            return Err(format!(
-                "outgoing transfer {} acknowledgment reports destination task {reported}, \
-                 expected {expected}; refusing to close",
-                transfer.id
-            ));
-        }
+    let expected = session::destination_task_id(&transfer.id);
+    let reported = string_field(event, "destination_local_task_id").ok_or_else(|| {
+        format!(
+            "outgoing transfer {} acknowledgment carries no destination task id",
+            transfer.id
+        )
+    })?;
+    if reported != expected {
+        return Err(format!(
+            "outgoing transfer {} acknowledgment reports destination task {reported}, \
+             expected {expected}; refusing to close",
+            transfer.id
+        ));
     }
 
     Ok(())
@@ -2014,12 +2006,12 @@ mod tests {
         assert!(error.contains("destination repo id"), "{error}");
     }
 
-    /// The pull/repair case: the source itself named the destination task id
-    /// it expected when it built the payload it shipped.
+    /// The destination task identity comes from the transfer id on both
+    /// machines, never from the source task id carried by older payloads.
     #[test]
     fn a_destination_task_id_mismatch_against_a_requested_repair_refuses_to_close() {
         let transfer =
-            outgoing_transfer_with_payload(&signed_payload_json("digest-1", Some("task-expected")));
+            outgoing_transfer_with_payload(&signed_payload_json("digest-1", Some("task-source")));
         let event = serde_json::json!({
             "transfer_id": "transfer-proof",
             "source_task_id": "task-source",
@@ -2030,8 +2022,9 @@ mod tests {
         let error = verify_outgoing_committed_proof(&event, &transfer).expect_err(
             "a destination task id that does not match the one this source requested must refuse",
         );
+        let expected = session::destination_task_id("transfer-proof");
         assert!(
-            error.contains("task-different") && error.contains("task-expected"),
+            error.contains("task-different") && error.contains(&expected),
             "{error}"
         );
     }
@@ -2039,11 +2032,12 @@ mod tests {
     #[test]
     fn a_fully_proven_acknowledgment_is_authorized() {
         let transfer =
-            outgoing_transfer_with_payload(&signed_payload_json("digest-1", Some("task-expected")));
+            outgoing_transfer_with_payload(&signed_payload_json("digest-1", Some("task-source")));
+        let destination_task_id = session::destination_task_id("transfer-proof");
         let event = serde_json::json!({
             "transfer_id": "transfer-proof",
             "source_task_id": "task-source",
-            "destination_local_task_id": "task-expected",
+            "destination_local_task_id": destination_task_id,
             "content_commitment": "digest-1",
             "destination_repo_id": "repo-dest",
         });

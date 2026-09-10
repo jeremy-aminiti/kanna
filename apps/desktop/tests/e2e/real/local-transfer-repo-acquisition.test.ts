@@ -330,15 +330,19 @@ describe("local transfer repo acquisition", () => {
     const outgoingTransfer = await waitForLatestTransfer(primary, "outgoing", sourceTaskId, "completed");
     expect(outgoingTransfer.status).toBe("completed");
     const outgoingPayload = JSON.parse(outgoingTransfer.payload_json ?? "{}") as {
-      task?: { head_oid?: string };
+      task?: { head_oid?: string; local_task_id?: string };
       repo?: { mode?: string };
       input_ledger?: { count?: number };
     };
     expect(outgoingPayload).toMatchObject({
-      task: { head_oid: sourceHead },
+      task: {
+        head_oid: sourceHead,
+        local_task_id: incomingTransfer.local_task_id,
+      },
       repo: { mode: "task-bundle" },
       input_ledger: { count: 2 },
     });
+    expect(outgoingPayload.task?.local_task_id).not.toBe(sourceTaskId);
 
     await waitForPrimaryTaskClosed(sourceTaskId);
     const { stdout: retainedBranchHead } = await execFileAsync(
