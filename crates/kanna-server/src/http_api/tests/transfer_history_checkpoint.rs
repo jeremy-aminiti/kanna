@@ -6,7 +6,9 @@
 //!
 //! Same harness as `transfer_preparation_gate` (real HTTP creation path, real
 //! SQLite, a real (fake) daemon on a Unix socket), extended with a second
-//! workflow stage whose prompt substitutes `$BRANCH` and `$PREV_RESULT`, so
+//! production-shaped workflow stage whose prompt substitutes the carried task
+//! and both result bindings but deliberately does not opt into imported
+//! revision feedback, so
 //! this drives the actual production prompt-building and persistence paths
 //! rather than asserting only against hand-written helpers.
 
@@ -124,6 +126,9 @@ async fn create_transferred_task(
     body["diffBaseRef"] = serde_json::Value::String(format!(
         "refs/kanna/transfers/{transfer_id}/{head_oid}/base"
     ));
+    let workflow_name = body["workflowName"]
+        .as_str()
+        .unwrap_or(TEST_PROVIDER_NEUTRAL_WORKFLOW);
     let workflow_definition = body["transferImport"]["workflowDefinition"]
         .as_str()
         .map(str::to_string)
@@ -132,7 +137,7 @@ async fn create_transferred_task(
                 fixture
                     .repo_root
                     .join(".kanna/workflows")
-                    .join(format!("{TEST_PROVIDER_NEUTRAL_WORKFLOW}.json")),
+                    .join(format!("{workflow_name}.json")),
             )
             .unwrap()
         });
@@ -213,11 +218,11 @@ async fn get_task_path(app: &axum::Router, path: &str) -> (StatusCode, String) {
     (status, String::from_utf8_lossy(&body).into_owned())
 }
 
-/// Adds a workflow with a `review` stage past `in progress`, so a transfer
-/// landing directly on `review` (as a resumed task does) exercises
-/// `$BRANCH`/`$PREV_RESULT` substitution, which `TEST_PROVIDER_NEUTRAL_WORKFLOW`'s
-/// single stage never does. Committed and published to `origin/main` exactly
-/// like `init_test_git_repo` does for its own workflow.
+/// Adds the production `single-reviewer` shape under an isolated test name.
+/// Its review prompt exercises all independently carried prompt bindings and
+/// deliberately predates `$REVISION_FEEDBACK`, as shipped workflows do.
+/// Committed and published to `origin/main` exactly like
+/// `init_test_git_repo` does for its own workflow.
 fn write_history_checkpoint_workflow(repo_root: &Path) {
     std::fs::write(
         repo_root.join(".kanna/workflows/history-checkpoint.json"),
@@ -226,13 +231,31 @@ fn write_history_checkpoint_workflow(repo_root: &Path) {
             "stages": [
                 {
                     "name": "in progress",
+                    "agent": "implement",
                     "prompt": "$TASK_PROMPT",
-                    "policy": { "transition": "manual" }
+                    "policy": { "transition": "manual", "revision_transition": "auto" },
+                    "post": {
+                        "name": "commit",
+                        "agent": "commit",
+                        "prompt": "Commit the relevant work for this task before review. Original task: $TASK_PROMPT. Previous implementation result: $PREV_MAIN_RESULT"
+                    }
                 },
                 {
                     "name": "review",
-                    "prompt": "Review branch $BRANCH against $BASE_REF. Previous: $PREV_RESULT",
-                    "policy": { "transition": "manual" }
+                    "agent": "review",
+                    "prompt": "Review branch $BRANCH for task quality and test coverage against base $BASE_REF. Original task: $TASK_PROMPT. Previous stage result: $PREV_RESULT. Previous implementation result: $PREV_MAIN_RESULT",
+                    "policy": { "transition": "auto" }
+                },
+                {
+                    "name": "pr",
+                    "agent": "pr",
+                    "prompt": "Create a PR for the reviewed work on branch $BRANCH.",
+                    "policy": { "transition": "manual" },
+                    "post": {
+                        "name": "approve",
+                        "agent": "approve",
+                        "prompt": "Approve the PR for branch $BRANCH after PR creation and signal the merge master. Previous result: $PREV_RESULT"
+                    }
                 }
             ]
         })
@@ -295,21 +318,6 @@ async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_bra
             // — the shape a real TaskBundle transfer always carries — so a
             // fixture that omits it would silently skip the very path this
             // test exists to exercise.
-            "workflowDefinition": serde_json::to_string_pretty(&serde_json::json!({
-                "name": "history-checkpoint",
-                "stages": [
-                    {
-                        "name": "in progress",
-                        "prompt": "$TASK_PROMPT",
-                        "policy": { "transition": "manual" }
-                    },
-                    {
-                        "name": "review",
-                        "prompt": "Review branch $BRANCH against $BASE_REF. Previous: $PREV_RESULT Main: $PREV_MAIN_RESULT Feedback: $REVISION_FEEDBACK",
-                        "policy": { "transition": "manual" }
-                    }
-                ]
-            })).unwrap(),
             "previousStageResult": serde_json::json!({"status":"succeeded","summary":"s".repeat(300)}).to_string(),
             "previousMainResult": serde_json::json!({"status":"succeeded","summary":"m".repeat(300)}).to_string(),
             "revisionFeedback": "first review directive\nsecond review directive",
@@ -377,8 +385,12 @@ async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_bra
     let args = daemon.await.unwrap();
     let command = args.last().expect("PTY command").clone();
     assert!(
-        command.contains("Review branch task-abcd0001 against"),
+        command.contains("Review branch task-abcd0001 for task quality and test coverage against"),
         "$BRANCH must resolve to this task's own branch, not the imported fork ref: {command}"
+    );
+    assert!(
+        command.contains("Original task prompt"),
+        "$TASK_PROMPT must carry the original transferred task: {command}"
     );
     assert!(
         command.contains(&"s".repeat(300)),
@@ -391,6 +403,10 @@ async fn a_transferred_task_persists_ordered_history_and_substitutes_its_own_bra
     assert!(
         command.contains("first review directive") && command.contains("second review directive"),
         "multiline revision feedback was not visible to the agent: {command}"
+    );
+    assert!(
+        command.contains("## Revision Feedback\n\nfirst review directive\nsecond review directive"),
+        "revision feedback must be independently labelled without workflow token opt-in: {command}"
     );
 
     // The full ordered history persists with each record's original

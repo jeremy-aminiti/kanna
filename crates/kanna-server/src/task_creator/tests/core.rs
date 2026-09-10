@@ -4049,6 +4049,54 @@ fn build_stage_prompt_labels_agent_instructions_and_the_actual_task() {
 }
 
 #[test]
+fn build_stage_prompt_appends_imported_revision_feedback_without_template_opt_in() {
+    let prompt = build_stage_prompt(
+        "Generic agent guidance.",
+        Some("Original: $TASK_PROMPT\nPrevious: $PREV_RESULT\nPrevious main: $PREV_MAIN_RESULT"),
+        &PromptContext {
+            task_prompt: Some("Fix the transferred task."),
+            prev_result: Some("commit completed"),
+            prev_main_result: Some("implementation completed"),
+            revision_feedback: Some("Keep the imported reviewer directive distinct."),
+            branch: None,
+            base_ref: None,
+            source_worktree: None,
+            stage_trigger: "transfer",
+            vars: None,
+        },
+    );
+
+    assert_eq!(
+        prompt,
+        "## Agent Instructions\n\nGeneric agent guidance.\n\n## Your Task\n\nOriginal: Fix the transferred task.\nPrevious: commit completed\nPrevious main: implementation completed\n\n## Revision Feedback\n\nKeep the imported reviewer directive distinct."
+    );
+}
+
+#[test]
+fn build_stage_prompt_keeps_explicit_revision_feedback_placement_compatible() {
+    let prompt = build_stage_prompt(
+        "Generic agent guidance.",
+        Some("Review feedback in place: ${REVISION_FEEDBACK}"),
+        &PromptContext {
+            task_prompt: None,
+            prev_result: None,
+            prev_main_result: None,
+            revision_feedback: Some("An explicitly placed directive."),
+            branch: None,
+            base_ref: None,
+            source_worktree: None,
+            stage_trigger: "transfer",
+            vars: None,
+        },
+    );
+
+    assert_eq!(
+        prompt,
+        "## Agent Instructions\n\nGeneric agent guidance.\n\n## Your Task\n\nReview feedback in place: An explicitly placed directive."
+    );
+}
+
+#[test]
 fn build_stage_prompt_omits_empty_prompt_sections() {
     let context = PromptContext {
         task_prompt: Some("Ship it."),
