@@ -77,6 +77,7 @@ impl LanRoutingAdvertisement {
         // resolving this service would then try (and hang on) an address it
         // can never actually reach.
         let addresses = routable_lan_addresses();
+        let auto_addr = addresses.is_empty();
         let mut service = ServiceInfo::new(
             LAN_ROUTING_SERVICE_TYPE,
             desktop_id,
@@ -86,10 +87,20 @@ impl LanRoutingAdvertisement {
             &txt[..],
         )
         .map_err(|error| format!("failed to build LAN routing Bonjour service: {error}"))?;
-        if addresses.is_empty() {
+        if auto_addr {
             service = service.enable_addr_auto();
         }
         let fullname = service.get_fullname().to_string();
+        // Diagnostic: the exact identity/addressing this instance registers
+        // under - name/type/domain via `fullname`, explicit addresses (or
+        // "auto" when none were routable) via `addresses`/`auto_addr` - so a
+        // registration that silently never reaches the wire is at least
+        // observable as "registered under X, at Y" rather than only "some
+        // registration happened."
+        log::debug!(
+            "registering LAN routing Bonjour service: fullname={fullname} port={port} \
+             addresses={addresses:?} addr_auto={auto_addr}"
+        );
         daemon.register(service).map_err(|error| {
             let _ = daemon.shutdown();
             format!("failed to register LAN routing Bonjour service: {error}")
@@ -438,5 +449,209 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+    }
+
+    /// `_kanna-lan._tcp.local.` sans the trailing labels `dns-sd`'s
+    /// type/domain arguments take separately.
+    fn service_type_without_domain() -> &'static str {
+        LAN_ROUTING_SERVICE_TYPE
+            .strip_suffix(".local.")
+            .expect("LAN_ROUTING_SERVICE_TYPE ends in .local.")
+    }
+
+    /// Positive-control comparison isolating which side of the real
+    /// advertise/browse round trip actually fails on this host: this
+    /// module's own `mdns-sd`-based [`LanRoutingAdvertisement`], observed by
+    /// the OS's *native* resolver (`dns-sd -B`, going through macOS's
+    /// `mDNSResponder`, an entirely separate code path from `mdns-sd`'s own
+    /// userspace socket implementation). If this fails too, the defect is
+    /// on the *advertise* side (the announcement never reaches the wire at
+    /// all) rather than in this crate's own `start_discovery` browse logic
+    /// specifically - `advertising_and_discovering_populate_the_real_candidate_map`
+    /// alone cannot tell the two apart, because both its advertiser and its
+    /// browser are `mdns-sd`.
+    #[tokio::test]
+    async fn a_native_observer_sees_an_mdns_sd_advertised_service() {
+        let unique_instance = format!("diag-mdnssd-adv-{}", std::process::id());
+        let _advertisement =
+            LanRoutingAdvertisement::start(&unique_instance, "development", 4460)
+                .expect("start advertisement");
+
+        let mut native_browse = std::process::Command::new("/usr/bin/dns-sd")
+            .arg("-B")
+            .arg(service_type_without_domain())
+            .arg("local")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn native dns-sd -B");
+
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        let _ = native_browse.kill();
+        let output = native_browse
+            .wait_with_output()
+            .expect("wait for native dns-sd -B");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            stdout.contains(&unique_instance),
+            "native dns-sd -B never observed the mdns-sd-advertised instance {unique_instance} \
+             - the advertisement itself may not be reaching the wire:\n{stdout}"
+        );
+    }
+
+    /// One more bounded, low-risk hypothesis on the same defect: does
+    /// `mdns-sd`'s own auto-detected address path (`enable_addr_auto`,
+    /// which `LanRoutingAdvertisement::start` only takes when
+    /// `routable_lan_addresses()` is empty) behave differently on this host
+    /// than its explicit-address path (which is what actually runs when a
+    /// real routable interface exists, confirmed present via `ifconfig`)?
+    /// Deliberately bypasses `LanRoutingAdvertisement::start` to force the
+    /// auto path regardless of what addresses are routable - production
+    /// code is unchanged by this test.
+    #[tokio::test]
+    async fn a_native_observer_sees_an_mdns_sd_advertised_service_using_auto_addr() {
+        let unique_instance = format!("diag-mdnssd-adv-auto-{}", std::process::id());
+        let daemon = ServiceDaemon::new().expect("start mDNS daemon");
+        let txt = lan_routing_txt(&unique_instance, "development");
+        let no_addresses: &[IpAddr] = &[];
+        let service = ServiceInfo::new(
+            LAN_ROUTING_SERVICE_TYPE,
+            &unique_instance,
+            &format!("{unique_instance}.local."),
+            no_addresses,
+            4462,
+            &txt[..],
+        )
+        .expect("build service info")
+        .enable_addr_auto();
+        daemon.register(service).expect("register auto-addr service");
+
+        let mut native_browse = std::process::Command::new("/usr/bin/dns-sd")
+            .arg("-B")
+            .arg(service_type_without_domain())
+            .arg("local")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn native dns-sd -B");
+
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        let _ = native_browse.kill();
+        let output = native_browse
+            .wait_with_output()
+            .expect("wait for native dns-sd -B");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _ = daemon.shutdown();
+
+        assert!(
+            stdout.contains(&unique_instance),
+            "native dns-sd -B never observed the auto-addr mdns-sd-advertised instance \
+             {unique_instance} either:\n{stdout}"
+        );
+    }
+
+    /// Narrows the same hypothesis further: this host's
+    /// `routable_lan_addresses()` returns *two* simultaneously-active
+    /// addresses (confirmed separately: `[172.31.32.111, 172.20.10.5]`, a
+    /// multi-homed VPN/hotspot setup, not a typical single-NIC LAN). Does
+    /// explicit publish work with exactly *one* address, or does it fail
+    /// even then? This is the difference between "any explicit address
+    /// fails here" (would affect ordinary single-NIC users too) and
+    /// "explicit *multiple* addresses fails here" (a much narrower,
+    /// multi-homed-specific case).
+    #[tokio::test]
+    async fn a_native_observer_sees_an_mdns_sd_advertised_service_with_exactly_one_explicit_address(
+    ) {
+        let unique_instance = format!("diag-mdnssd-adv-one-{}", std::process::id());
+        let daemon = ServiceDaemon::new().expect("start mDNS daemon");
+        let txt = lan_routing_txt(&unique_instance, "development");
+        let one_address = [routable_lan_addresses()
+            .into_iter()
+            .next()
+            .expect("at least one routable address on this host")];
+        let service = ServiceInfo::new(
+            LAN_ROUTING_SERVICE_TYPE,
+            &unique_instance,
+            &format!("{unique_instance}.local."),
+            &one_address[..],
+            4463,
+            &txt[..],
+        )
+        .expect("build service info");
+        daemon.register(service).expect("register one-address service");
+
+        let mut native_browse = std::process::Command::new("/usr/bin/dns-sd")
+            .arg("-B")
+            .arg(service_type_without_domain())
+            .arg("local")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn native dns-sd -B");
+
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        let _ = native_browse.kill();
+        let output = native_browse
+            .wait_with_output()
+            .expect("wait for native dns-sd -B");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _ = daemon.shutdown();
+
+        assert!(
+            stdout.contains(&unique_instance),
+            "native dns-sd -B never observed the single-explicit-address mdns-sd-advertised \
+             instance {unique_instance} at {one_address:?} either:\n{stdout}"
+        );
+    }
+
+    /// The other half of the same comparison: a *natively*-advertised
+    /// instance (`dns-sd -R`, real mDNSResponder announcement, matching TXT
+    /// shape this module's own filter expects), observed by this module's
+    /// own `mdns-sd`-based [`start_discovery`]. If the native advertiser
+    /// above succeeds (proving native advertise/browse both work on this
+    /// host) but this one still fails, the defect is isolated to `mdns-sd`'s
+    /// *browse* side specifically, not the network or the platform's mDNS
+    /// stack in general.
+    #[tokio::test]
+    async fn an_mdns_sd_browser_sees_a_natively_advertised_service() {
+        let unique_instance = format!("diag-native-adv-{}", std::process::id());
+        let mut native_advertise = std::process::Command::new("/usr/bin/dns-sd")
+            .arg("-R")
+            .arg(&unique_instance)
+            .arg(service_type_without_domain())
+            .arg("local")
+            .arg("4461")
+            .arg(format!("desktopId={unique_instance}"))
+            .arg("environment=development")
+            .arg(format!("protocolVersion={LAN_ROUTING_PROTOCOL_VERSION}"))
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn native dns-sd -R");
+        // Give the native announcement a moment to land before browsing -
+        // mirrors the real feature's own advertise-then-discover ordering.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let state = crate::http_api::test_state_with_seed(
+            "desktop-diag-native-observer",
+            "Diag Native Mac",
+            |_db| {},
+        );
+        let _discovery = start_discovery(Arc::clone(&state)).expect("start discovery");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut observed = false;
+        while std::time::Instant::now() < deadline {
+            if state.lan_candidate_for(&unique_instance).is_some() {
+                observed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let _ = native_advertise.kill();
+        let _ = native_advertise.wait();
+
+        assert!(
+            observed,
+            "mdns-sd browse never observed the natively-advertised instance {unique_instance} \
+             - the defect is isolated to this module's own browse side"
+        );
     }
 }
