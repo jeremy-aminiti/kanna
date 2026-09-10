@@ -1,5 +1,8 @@
 import importlib.util
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -122,6 +125,102 @@ class ResolveSysrootTest(unittest.TestCase):
         self.assertNotIn("@rules_z//", build)
         for forbidden in ("/opt/homebrew", "/usr/bin", "PKG_CONFIG_PATH"):
             self.assertNotIn(forbidden, toolchain)
+
+
+class SysrootOverlayTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if "TEST_SRCDIR" not in os.environ:
+            raise unittest.SkipTest("overlay integration fixtures run under Bazel")
+        runfiles = Path(os.environ["TEST_SRCDIR"])
+        matches = list(runfiles.rglob("sysroot_overlay_test_tool"))
+        if len(matches) != 1:
+            raise AssertionError(f"expected one overlay test tool, found {matches}")
+        cls.overlay = matches[0]
+
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory(
+            dir=os.environ.get("TEST_TMPDIR")
+        )
+        self.root = Path(self.temporary_directory.name)
+        self.sysroot = self.root / "sysroot"
+        self.sysroot.mkdir()
+        self.report = self.sysroot / ".kanna-sysroot-overlay-report"
+        self.report.write_text("", encoding="utf-8")
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def overlay_package(self, name, entries):
+        staging = self.root / name
+        staging.mkdir()
+        for path, kind, value in entries:
+            destination = staging / path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if kind == "file":
+                destination.write_text(value, encoding="utf-8")
+            elif kind == "symlink":
+                destination.symlink_to(value)
+            else:
+                raise AssertionError(f"unknown fixture kind {kind}")
+        return subprocess.run(
+            [self.overlay, staging, self.sysroot, name, self.report],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_absolute_symlink_is_remapped_inside_sysroot(self):
+        result = self.overlay_package(
+            "absolute",
+            [("usr/lib/python/sitecustomize.py", "symlink", "/etc/python/sitecustomize.py")],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        link = self.sysroot / "usr/lib/python/sitecustomize.py"
+        self.assertEqual(os.readlink(link), "../../../etc/python/sitecustomize.py")
+
+    def test_relative_symlink_escaping_sysroot_is_rejected(self):
+        result = self.overlay_package(
+            "escape",
+            [("usr/lib/escape", "symlink", "../../../outside")],
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("relative symlink escapes sysroot", result.stderr)
+        self.assertFalse((self.sysroot / "usr/lib/escape").exists())
+
+    def test_in_root_relative_symlink_is_preserved_canonically(self):
+        result = self.overlay_package(
+            "inside",
+            [("usr/lib/link", "symlink", "../share/data")],
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(os.readlink(self.sysroot / "usr/lib/link"), "../share/data")
+
+    def test_identical_duplicate_file_is_accepted_deterministically(self):
+        first = self.overlay_package("first", [("usr/include/shared.h", "file", "same\n")])
+        second = self.overlay_package("second", [("usr/include/shared.h", "file", "same\n")])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual((self.sysroot / "usr/include/shared.h").read_text(), "same\n")
+        self.assertIn("identical-file second usr/include/shared.h", self.report.read_text())
+
+    def test_conflicting_duplicate_file_is_rejected(self):
+        first = self.overlay_package("first", [("usr/include/shared.h", "file", "one\n")])
+        second = self.overlay_package("second", [("usr/include/shared.h", "file", "two\n")])
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("conflicting duplicate path usr/include/shared.h", second.stderr)
+        self.assertEqual((self.sysroot / "usr/include/shared.h").read_text(), "one\n")
+
+    def test_bazel_repository_output_records_real_archive_normalization(self):
+        reports = list(Path(os.environ["TEST_SRCDIR"]).rglob(".kanna-sysroot-overlay-report"))
+        self.assertEqual(len(reports), 1, reports)
+        contents = reports[0].read_text(encoding="utf-8")
+        self.assertIn(
+            "usr/lib/python3.12/sitecustomize.py /etc/python3.12/sitecustomize.py "
+            "-> ../../../etc/python3.12/sitecustomize.py",
+            contents,
+        )
 
 
 if __name__ == "__main__":

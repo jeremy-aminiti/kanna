@@ -8,6 +8,7 @@ exports_files([
     "runtime-policy.schema.json",
     "sysroot-amd64.lock.json",
     "sysroot-arm64.lock.json",
+    "sysroot_overlay.c",
     "sysroot_repository.bzl",
 ])
 
@@ -18,13 +19,21 @@ py_test(
         "tests/test_resolve_sysroot.py",
     ],
     data = [
+        ":sysroot_overlay_test_tool",
         "runtime-policy.json",
         "sysroot-amd64.lock.json",
         "sysroot-arm64.lock.json",
         "//:MODULE.bazel",
         "//tools/bazel:BUILD.bazel",
         "//tools/bazel:linux_cc_toolchain_config.bzl",
+        "@ubuntu_sysroot_amd64//:sysroot_overlay_report",
     ],
     main = "tests/test_resolve_sysroot.py",
     python_version = "PY3",
+)
+
+cc_binary(
+    name = "sysroot_overlay_test_tool",
+    srcs = ["sysroot_overlay.c"],
+    testonly = True,
 )
