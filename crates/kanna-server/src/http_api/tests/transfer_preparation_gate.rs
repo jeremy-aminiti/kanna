@@ -288,3 +288,48 @@ async fn transfer_import_with_a_prepared_manifest_reaches_the_daemon_spawn() {
 
     fixture.cleanup();
 }
+
+#[tokio::test]
+async fn existing_unprepared_transfer_task_is_refused_before_recovery_spawn() {
+    let fixture = build_gate_fixture("recovery-unprepared");
+    let expected_head = repo_head_oid(&fixture.repo_root);
+    let db = Db::open(&fixture.config.db_path).unwrap();
+    db.insert_test_pipeline_item(
+        "abad0004",
+        "repo-1",
+        "resume",
+        None,
+        "in progress",
+        "2026-09-09T00:00:00Z",
+    )
+    .unwrap();
+    db.upsert_transferred_task_manifest(
+        "transfer-recovery",
+        "repo-1",
+        Some("abad0004"),
+        &expected_head,
+        &expected_head,
+    )
+    .unwrap();
+    drop(db);
+
+    let listener = tokio::net::UnixListener::bind(&fixture.socket_path).unwrap();
+    let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = connected.clone();
+    let daemon = tokio::spawn(async move {
+        if listener.accept().await.is_ok() {
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let app = super::router(Arc::new(super::AppState::new(fixture.config.clone())));
+    let (status, body) = put_task(
+        &app,
+        "abad0004",
+        transfer_import_body("transfer-recovery", &expected_head),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(!connected.load(std::sync::atomic::Ordering::SeqCst));
+    daemon.abort();
+    fixture.cleanup();
+}
