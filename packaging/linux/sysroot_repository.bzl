@@ -1,5 +1,24 @@
 """Fetch a hash-locked Ubuntu .deb set into a compile sysroot."""
 
+_HEX_DIGITS = {
+    "0": True,
+    "1": True,
+    "2": True,
+    "3": True,
+    "4": True,
+    "5": True,
+    "6": True,
+    "7": True,
+    "8": True,
+    "9": True,
+    "a": True,
+    "b": True,
+    "c": True,
+    "d": True,
+    "e": True,
+    "f": True,
+}
+
 def _host_zig(repository_ctx):
     name = repository_ctx.os.name.lower()
     arch = repository_ctx.os.arch.lower()
@@ -39,7 +58,7 @@ def _validate_lock(repository_ctx, lock):
             fail("{}: duplicate or empty package {}".format(repository_ctx.attr.lock, name))
         if architecture not in (repository_ctx.attr.architecture, "all"):
             fail("{}: {} has architecture {}".format(repository_ctx.attr.lock, name, architecture))
-        if not sha256 or len(sha256) != 64 or any([c not in "0123456789abcdef" for c in sha256]):
+        if not sha256 or len(sha256) != 64 or any([sha256[i] not in _HEX_DIGITS for i in range(len(sha256))]):
             fail("{}: {} has no SHA-256".format(repository_ctx.attr.lock, name))
         if type(size) != "int" or size <= 0:
             fail("{}: {} has invalid size".format(repository_ctx.attr.lock, name))
