@@ -202,3 +202,37 @@ CARGO_BUILD_JOBS=1 KANNA_E2E_SCREENSHOT_DIR="/Users/jeremyhale/.kanna/repos/kann
 The runner supplies the target-specific foreground setting; do not add a
 manual geometry or ownership override. No native retry was run for this source
 correction.
+
+## Foreground geometry proof — native focus boundary failure
+
+Command (exit 1):
+
+```sh
+CARGO_BUILD_JOBS=1 KANNA_E2E_SCREENSHOT_DIR="/Users/jeremyhale/.kanna/repos/kanna-7/.kanna-worktrees/task-5c82e022/docs/task-screenshots/5c82e022-screenshots" pnpm --dir apps/desktop test:e2e -- real/remote-active-view-restoration.test.ts
+```
+
+At `a86712221`, the canonical runner started this target with
+`KANNA_E2E_NO_ACTIVATE=0` and independently verified both native windows before
+reset or interaction: task `5c82e022`, worktree `task-5c82e022`, commit
+`a86712221`, and exact title `Kanna — task 5c82e022 (0.0.68 @ a86712221)`.
+The single test then failed at the initial local focus precondition, before
+initial geometry convergence, remote selection, or any capture. The existing
+native `plugin:window|set_focus` call returned successfully and xterm's helper
+textarea became `document.activeElement`, but the WebView reported
+`document.hasFocus() === false`:
+
+```text
+foreground terminal focus was not established:
+{"documentHasFocus":false,"terminalHasFocus":true}
+```
+
+This proves that enabling the normal app activation policy plus the existing
+native window-focus command does not yet establish the browser foreground
+signal the production active-view guard correctly requires. It is not a
+geometry result and does not justify changing viewer ownership, forcing a
+resize, or relaxing the test assertion. The full log and actual exit file are
+`.tmp/desktop-active-view-restoration-a86712221.log` and
+`.tmp/desktop-active-view-restoration-a86712221.exit`; Vitest recorded one
+failed test. No new screenshot was produced because the failure occurred before
+the target's capture points. The runner stopped both tmux sessions, relay, and
+Firebase emulator; direct checks found no owned session remaining.
