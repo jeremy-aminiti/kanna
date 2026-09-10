@@ -143,7 +143,6 @@ zig_cc_toolchain_config = rule(
         "target_cpu": attr.string(mandatory = True),
         "toolchain_identifier": attr.string(mandatory = True),
     },
-    provides = [CcToolchainConfigInfo],
 )
 
 def zig_linux_cc_toolchain(name, zig, zig_files, target, target_cpu, multiarch, sysroot, sysroot_marker, exec_compatible_with, target_compatible_with):
