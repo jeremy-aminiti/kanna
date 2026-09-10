@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
 const workflowsDir = resolve(repoRoot, ".github/workflows");
@@ -49,6 +50,21 @@ describe("GitHub Actions workflow set", () => {
 describe("the Linux release check", () => {
   const workflow = readFileSync(resolve(workflowsDir, LINUX_RELEASE_CHECK), "utf8");
   const pages = readFileSync(resolve(workflowsDir, CONFIG_SCHEMA_DEPLOYMENT), "utf8");
+
+  it("can dispatch only apt interoperability without launching native builds", () => {
+    const parsed = parse(workflow);
+    expect(parsed.on.workflow_dispatch.inputs.apt_interop_only.type).toBe("boolean");
+    expect(parsed.jobs.build.if).toBe("${{ !inputs.apt_interop_only }}");
+    expect(parsed.jobs["installed-check-prerequisites"].if).toBe("${{ !inputs.apt_interop_only }}");
+    expect(parsed.jobs["installed-check"].needs).toBe("build");
+    const interop = parsed.jobs["apt-interop"];
+    expect(interop.needs).toBeUndefined();
+    expect(interop.strategy.matrix.runner).toEqual(["ubuntu-24.04", "ubuntu-24.04-arm"]);
+    const commands = interop.steps.map((step: { run?: string }) => step.run ?? "").join("\n");
+    expect(commands).toContain("tsx tests/linux-apt-interop.ts");
+    expect(commands).not.toContain("--prepare-only");
+    expect(commands).not.toMatch(/sudo|cargo|bazel|linux-package|release ship/);
+  });
 
   it("builds both required architectures natively", () => {
     expect(workflow).toContain("runner: ubuntu-24.04\n");
