@@ -17,6 +17,14 @@ py_test(
         "resolve_sysroot.py",
         "tests/test_resolve_sysroot.py",
     ],
+    data = [
+        "runtime-policy.json",
+        "sysroot-amd64.lock.json",
+        "sysroot-arm64.lock.json",
+        "//:MODULE.bazel",
+        "//tools/bazel:BUILD.bazel",
+        "//tools/bazel:linux_cc_toolchain_config.bzl",
+    ],
     main = "tests/test_resolve_sysroot.py",
     python_version = "PY3",
 )
