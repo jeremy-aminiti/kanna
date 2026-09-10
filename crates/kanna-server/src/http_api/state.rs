@@ -1096,6 +1096,25 @@ impl AppState {
         })
     }
 
+    /// Replaces the default (dead-by-construction) sidecar supervisor with one
+    /// built by `build_supervisor`, which receives this state's own durable
+    /// work queue so a real subprocess sidecar's lifecycle events land in the
+    /// same queue `state.transfer_work()` reads — exactly as production wires
+    /// them. For tests that need `run_import`'s real destination-DB / sidecar
+    /// control boundary (not the queue-drain path) rather than a fake or a
+    /// dead client. See `transfer_sidecar::TransferSidecarSupervisor::with_binary_for_test`.
+    #[cfg(test)]
+    pub(crate) fn with_transfer_sidecar_for_test(
+        config: Config,
+        build_supervisor: impl FnOnce(
+            Arc<crate::transfer_engine::queue::TransferWorkQueue>,
+        ) -> crate::transfer_sidecar::TransferSidecarSupervisor,
+    ) -> Self {
+        let mut state = Self::new(config);
+        state.transfer_sidecar = Arc::new(build_supervisor(Arc::clone(&state.transfer_work)));
+        state
+    }
+
     #[cfg(test)]
     pub(super) fn with_task_creator(config: Config, task_creator: TestTaskCreator) -> Self {
         let mut state = Self::new(config);

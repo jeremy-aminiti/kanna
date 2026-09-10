@@ -911,8 +911,15 @@ impl TransferSidecarSupervisor {
         }
     }
 
+    /// Points the supervisor at a stub or real sidecar binary instead of the
+    /// bundled resource, so a test can exercise the real request/response and
+    /// respawn-on-death machinery against a process it is allowed to kill.
+    /// Crate-visible so other modules' test fixtures (e.g. the destination-
+    /// side `run_import` retry/replay tests in `transfer_engine::import`) can
+    /// attach a real subprocess sidecar to a test `AppState` without
+    /// duplicating this supervisor's spawn/respawn logic.
     #[cfg(test)]
-    fn with_binary_for_test(
+    pub(crate) fn with_binary_for_test(
         config: crate::config::Config,
         work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
         binary: PathBuf,
