@@ -11,6 +11,7 @@
 //! rather than asserting only against hand-written helpers.
 
 use super::*;
+use crate::http_api::create_transferred_task_in_process;
 
 /// Isolated `Config` + git repo + SQLite DB for one test. A local copy of
 /// `transfer_preparation_gate`'s `GateFixture`/`build_gate_fixture`: the two
@@ -178,7 +179,7 @@ async fn create_transferred_task(
         }))
         .unwrap();
     let state = Arc::new(super::AppState::new(fixture.config.clone()));
-    match super::create_transferred_task_in_process(
+    match create_transferred_task_in_process(
         state,
         request,
         task_id.to_string(),
