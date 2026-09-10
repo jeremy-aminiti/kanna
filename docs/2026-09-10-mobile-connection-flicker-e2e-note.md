@@ -62,9 +62,10 @@ wait window"), never on anything resembling the submission question itself;
 the missing-Enter symptom is not fixed, not reproduced, and not ruled out
 by any of them.** Composer-readiness detection is now solid (each of runs 2
 and 3 independently falsified a different single-regex approach); the
-remaining gap and its concrete next fix (a `--disable` feature flag, name
-unconfirmed, or a longer wait) are documented in the test file itself. The
-simulator first-attach lane has since run for real (attempt 2, below): the
+remaining gap's fix — `--disable apps`, confirmed via `codex features list`
+(non-agentic, zero-cost) and now applied to the test's spawn args, not yet
+run live — is documented in the test file itself. The simulator
+first-attach lane has since run for real (attempt 2, below): the
 `6fee7e01c` scheme fix is now live-confirmed against an actual OS-level
 open, and the real disposable-pairing sequence (`POST /v1/pairing/sessions`
 → `e2e-trust` → `e2e-pair`) works end to end — but the redraw capture itself
@@ -848,12 +849,16 @@ harness can currently drive interactively at all.
    (non-agentic, zero-cost `codex --help` / `codex mcp --help` / `codex mcp
    list` against a bare-fresh `CODEX_HOME` — not a live turn): `codex_apps`
    is not a user-configured MCP server (`codex mcp list` reports none for a
-   fresh home) — it is a built-in feature, and `--disable <FEATURE>` (`-c
-   features.<name>=false`) is documented for exactly this, though the exact
-   feature name was not confirmed live. Documented as the concrete next fix
-   in the test file's own header comment; **not attempted a third time this
-   pass** — the one-fix-then-report bound, now spent twice over two lane
-   authorizations. Net across all four runs: composer-readiness detection is
+   fresh home) — it is a built-in feature. **Follow-up, source-only, no live
+   turn:** `codex features list` (a local, instant, non-agentic
+   introspection command — zero API cost) confirmed the exact name:
+   `apps    stable    true`, on by default — the feature backing the
+   `codex_apps` MCP server. `--disable apps` is now in the test's spawn
+   args, **not yet run live this pass**; ready for the next authorized
+   Codex lane. **Not attempted a third *live run* this pass** — the
+   one-fix-then-report bound on live turns, now spent twice over two lane
+   authorizations, is unaffected by this purely local follow-up check. Net
+   across all four runs: composer-readiness detection is
    now solid (two real runs each falsified a different single-regex
    approach, which is itself real, evidenced progress) — but the underlying
    question ("does codex's parser treat this CR as submit mid-turn") is
