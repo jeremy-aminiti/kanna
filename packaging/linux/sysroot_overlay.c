@@ -84,6 +84,19 @@ static void report(const char *format, ...) {
     if (fclose(file)) die("cannot close overlay report: %s", strerror(errno));
 }
 
+/* Bazel contains archive-absolute links by prefixing the extraction root. */
+static const char *archive_link_target(
+    const char *source_root,
+    const char *extracted_target
+) {
+    size_t root_length = strlen(source_root);
+    if (!strncmp(extracted_target, source_root, root_length) &&
+        extracted_target[root_length] == '/') {
+        return extracted_target + root_length;
+    }
+    return extracted_target;
+}
+
 /*
  * Convert every target to a canonical path relative to the link's parent.
  * Debian absolute links name locations inside the future target root, so `/x`
@@ -251,7 +264,8 @@ static void merge_entry(const char *source_root, const char *destination_root, c
         char source_target[PATH_MAX];
         char normalized_source[PATH_MAX];
         read_link(source, source_target, sizeof(source_target));
-        normalize_link(relative_path, source_target, normalized_source, sizeof(normalized_source));
+        const char *logical_source_target = archive_link_target(source_root, source_target);
+        normalize_link(relative_path, logical_source_target, normalized_source, sizeof(normalized_source));
         if (destination_exists) {
             char destination_target[PATH_MAX];
             char normalized_destination[PATH_MAX];
@@ -267,8 +281,8 @@ static void merge_entry(const char *source_root, const char *destination_root, c
         if (symlink(normalized_source, destination)) {
             die("cannot create symlink %s -> %s: %s", relative_path, normalized_source, strerror(errno));
         }
-        if (strcmp(source_target, normalized_source)) {
-            report("normalized-symlink %s %s %s -> %s", package_name, relative_path, source_target, normalized_source);
+        if (strcmp(logical_source_target, normalized_source)) {
+            report("normalized-symlink %s %s %s -> %s", package_name, relative_path, logical_source_target, normalized_source);
         }
         return;
     }
