@@ -116,7 +116,13 @@ exports_files(["sysroot/.kanna-sysroot"])
 
 filegroup(
     name = "files",
-    srcs = glob(["sysroot/**"]),
+    srcs = glob([
+        "sysroot/lib/**",
+        "sysroot/lib64/**",
+        "sysroot/usr/include/**",
+        "sysroot/usr/lib/**",
+        "sysroot/usr/share/pkgconfig/**",
+    ]) + ["sysroot/.kanna-sysroot"],
 )
 """)
 
