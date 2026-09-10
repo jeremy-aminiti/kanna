@@ -602,24 +602,52 @@ async fn step(
     // ran out, so the chain continues with the advanced cursor.
     let collection = fresh_collection(&row);
     let mut working_cursor = row.cursor.clone();
+    // Each native call's own `events`/page-capacity accounting starts fresh
+    // (its `collected` local is empty and its own `limit` is the full page
+    // size), so a chain of calls that each return fewer than a page would
+    // otherwise both drop every timed-out call's already-observed events (the
+    // native cursor already advanced past them) and let each call fill up to
+    // a full page of its own, overrunning the subscription's real capacity.
+    // Retain every relevant event this chain has actually observed here, and
+    // shrink each subsequent call's own limit by that count so the chain's
+    // total never exceeds one page.
+    let mut retained_events: Vec<Value> = Vec::new();
     let batch = 'chain: loop {
-        let native_timeout = {
+        // `capped_by_deadline` is true when this call's own timeout was sized
+        // to the subscription's remaining window rather than the fixed 240s
+        // ceiling. A call sized that way that still comes back "timeout"
+        // (rather than "events") means its own receiver — which we set equal
+        // to the remaining time — expired exactly at the intrinsic deadline:
+        // that is genuine completion (whatever accumulated is everything
+        // there is to get), not "this call's unrelated budget ran out, ask
+        // again". Only a "timeout" from a call capped at the 240s ceiling
+        // (nothing observed yet, or more than 240s still remaining) means the
+        // chain must re-issue.
+        let (native_timeout, capped_by_deadline) = {
             let guard = collection
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             match guard.intrinsic_deadline() {
                 Some(deadline) => {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    remaining
+                    let secs = remaining
                         .as_secs()
-                        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
-                        .clamp(1, kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS)
+                        .saturating_add(u64::from(remaining.subsec_nanos() > 0));
+                    (
+                        secs.clamp(1, kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS),
+                        secs <= kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS,
+                    )
                 }
-                None => kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS,
+                None => (kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS, false),
             }
         };
         let mut call_row = row.clone();
         call_row.cursor = working_cursor.clone();
+        if !retained_events.is_empty() {
+            if let Some(limit) = call_row.query.get("limit").and_then(Value::as_i64) {
+                call_row.query["limit"] = json!((limit - retained_events.len() as i64).max(1));
+            }
+        }
         let native_batch = {
             let collection_call =
                 collect(state.clone(), &call_row, native_timeout, collection.clone());
@@ -656,14 +684,23 @@ async fn step(
             }
         };
         match native_batch {
-            Ok(batch) => {
+            Ok(mut batch) => {
                 working_cursor = batch["cursor"].as_str().map(str::to_owned);
+                if let Some(events) = batch["events"].as_array() {
+                    retained_events.extend(events.iter().cloned());
+                }
                 let machine_errors_present = batch["machineErrors"]
                     .as_array()
                     .is_some_and(|errors| !errors.is_empty());
-                if batch["waitOutcome"] == "timeout" && !machine_errors_present {
+                if batch["waitOutcome"] == "timeout"
+                    && !machine_errors_present
+                    && !capped_by_deadline
+                {
+                    #[cfg(test)]
+                    subscription_timing::leg_timed_out(state);
                     continue 'chain;
                 }
+                batch["events"] = json!(std::mem::take(&mut retained_events));
                 break 'chain Ok(batch);
             }
             Err(error) => break 'chain Err(error),

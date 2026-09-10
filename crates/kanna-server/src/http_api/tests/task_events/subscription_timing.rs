@@ -215,6 +215,34 @@ for line in sys.stdin:
         .await;
         admitted.unwrap()
     }
+    /// Advances the paused clock in small steps until a chained native call
+    /// has actually returned via its own receiver timing out (not the
+    /// subscription's intrinsic deadline) and the worker re-issued another
+    /// call — the causal proof that a native receiver boundary was crossed
+    /// mid-collection, as opposed to inferring it from a single large
+    /// `advance()` that happens to also land past the eventual admission.
+    /// Self-paced (rather than a fixed pre-computed offset) because exactly
+    /// when the in-flight native call dispatched — and hence exactly when
+    /// its own 240s receiver lands — depends on scheduler turns this test
+    /// does not control. Returns the instant the timeout was observed, so a
+    /// caller can size its remaining advance against a deadline it computed
+    /// independently (e.g. from its own `observed()` instant) rather than
+    /// assuming this step landed exactly on a round boundary.
+    async fn leg_timed_out(&mut self) -> Instant {
+        for _ in 0..280 {
+            while let Ok(event) = self.events.try_recv() {
+                if matches!(event, TestEvent::LegTimedOut) {
+                    return Instant::now();
+                }
+                assert!(
+                    !matches!(event, TestEvent::Admitted(..)),
+                    "admission overtook the expected native-leg-timeout barrier"
+                );
+            }
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        panic!("native leg did not time out within the expected window");
+    }
     fn no_admission(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             assert!(!matches!(event, TestEvent::Admitted(..)), "{event:?}");
@@ -603,27 +631,106 @@ async fn restart_during_actual_delivery_parks_uncertainty_without_repeated_wake(
     }
 }
 
+/// Advances to just before `deadline`, asserts nothing has been admitted yet,
+/// then steps across it and returns the admission. Computed relative to
+/// `tokio::time::Instant::now()` rather than a fixed literal, since prior
+/// self-paced barriers (`leg_timed_out`) do not land on a predictable offset.
+async fn advance_to_deadline_and_admit(watch: &mut Watch, deadline: Instant) -> (i64, Instant) {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining > Duration::from_millis(1) {
+        tokio::time::advance(remaining - Duration::from_millis(1)).await;
+        watch.no_admission();
+    }
+    tokio::time::advance(Duration::from_millis(1)).await;
+    watch.admitted().await
+}
+
 #[tokio::test(start_paused = true)]
-async fn a_relevant_event_late_in_a_native_receiver_leg_still_gets_its_full_window() {
+async fn a_relevant_event_observed_near_a_native_leg_start_survives_its_timeout() {
     let mut watch = Watch::new("input").await;
-    // The background worker's first native call has been running (silent)
-    // for nearly the whole of its own 240s receiver window before anything
-    // relevant arrives. The fixed 240s-native/300s-subscription split must
-    // chain a second (and, here, third) native call rather than truncating
-    // the ordinary collection window to whatever remained of this one.
+    // Reproduces the finding's own example: an ordinary event observed near
+    // the start of the first native call. That call must still expire at its
+    // own 240s receiver — well before the subscription's 300s intrinsic
+    // deadline — and re-issue a second call rather than losing the event it
+    // already has. The leg timeout is a self-paced barrier (the worker
+    // actually reporting a `"waitOutcome": "timeout"` re-issue), not an
+    // assumption from a single large `advance()`.
     tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(239_500)).await;
     watch.emit(TaskEventKind::PrCreated);
     let observed = watch.observed().await;
-    tokio::time::advance(Duration::from_millis(299_999)).await;
+    watch.leg_timed_out().await;
     watch.no_admission();
-    tokio::time::advance(Duration::from_millis(1)).await;
-    let (_, admitted) = watch.admitted().await;
+    let (_, admitted) =
+        advance_to_deadline_and_admit(&mut watch, observed + Duration::from_secs(300)).await;
     assert_eq!(admitted - observed, Duration::from_secs(300));
     watch.delivered().await;
     assert_eq!(
         event_pairs(watch.row().pending.as_ref().unwrap()),
         vec![("child-a".into(), "task.pr_created".into())]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn events_straddling_a_native_leg_boundary_are_all_retained_and_acked_together() {
+    let mut watch = Watch::new("input").await;
+    // One event lands inside leg 1; a second, different event lands only
+    // after leg 1's own receiver has timed out and leg 2 has started. Both
+    // must reach the eventual pending batch — a native "timeout" outcome is
+    // call-local, so the first event exists only in leg 1's own (discarded)
+    // response unless the chain retains it explicitly.
+    tokio::task::yield_now().await;
+    watch.emit(TaskEventKind::PrCreated);
+    let first_observed = watch.observed().await;
+    watch.leg_timed_out().await;
+    watch.emit(TaskEventKind::TaskClosed);
+    watch.observed().await;
+    watch.no_admission();
+    // max_hold is anchored to the first event, so the intrinsic deadline is
+    // first_observed + 300s regardless of the second (later) event's own
+    // quiet window.
+    let (_, admitted) =
+        advance_to_deadline_and_admit(&mut watch, first_observed + Duration::from_secs(300)).await;
+    assert_eq!(admitted - first_observed, Duration::from_secs(300));
+    watch.delivered().await;
+    assert_eq!(
+        event_pairs(watch.row().pending.as_ref().unwrap()),
+        vec![
+            ("child-a".into(), "task.pr_created".into()),
+            ("child-a".into(), "task.closed".into()),
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn page_capacity_accounting_survives_a_native_leg_boundary_and_seals_on_the_combined_total() {
+    let mut watch = Watch::new("input").await;
+    // 60 events (well short of the 100-event page) fill leg 1; it can only
+    // end on its own 240s receiver, since neither capacity nor quiet/max-hold
+    // (anchored 300s out) are reached yet.
+    for _ in 0..60 {
+        watch.emit(TaskEventKind::PrCreated);
+    }
+    let observed = watch.observed().await;
+    watch.leg_timed_out().await;
+    watch.no_admission();
+    // 40 more events land in leg 2, completing the page at exactly 100. If
+    // leg 2's own capacity accounting were not reduced by leg 1's retained
+    // 60, it would need another 100 of its own (or, before this fix, silently
+    // drop leg 1's 60 and need 100 more just to notice a full page).
+    for _ in 0..40 {
+        watch.emit(TaskEventKind::PrCreated);
+    }
+    let (_, admitted) = watch.admitted().await;
+    // Sealed by the combined page reaching capacity, far short of the 300s
+    // quiet/max-hold deadline.
+    assert!(admitted - observed < Duration::from_secs(300));
+    watch.delivered().await;
+    assert_eq!(
+        watch.row().pending.unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .len(),
+        100
     );
 }
 
