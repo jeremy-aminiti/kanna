@@ -83,7 +83,38 @@ loses its result is not evidence of a pass.
 
 The refreshed focused two-instance native WebDriver captures rendered the expected viewer UI: `remote-graph.png` shows the remote marker and the owner-created `remote graph visual proof` commit; `remote-local-action-refusal.png` shows the translated “This action is not available for a task on another machine.” warning. The test settles the WebDriver-only toast enter transition before capture; it does not alter production behavior. The current captures have the canonical native identity preflight described above.
 
-## Deferred focused controls (do not run before `RESUME GRAPH FOCUSED VERIFICATION`)
+## Focused paired controls (run 2026-09-10)
+
+The controls were run sequentially with `CARGO_BUILD_JOBS=1`, with each owned
+stack stopped before the next. The canonical runner verified the bound native
+task/worktree/commit/title before each target:
+
+- Default main `90fd52ee4`, `task-3726e419-14`: `mock/modal-tear-off.test.ts`
+  exited 0, **1 file / 2 tests passed**; log and exit are
+  `.tmp/3726e419-main-modal-tear-off-control.log` and `.exit`.
+- Published PR head `9d834b3c9`, `task-3726e419-15`: the same modal target
+  exited 0, **1 file / 2 tests passed**; artifacts are
+  `.tmp/3726e419-pr-head-modal-tear-off-cache-retry.log` and `.exit`.
+- Default main: `mock/terminal-output-performance.test.ts` exited 0,
+  **1 file / 3 tests passed**; artifacts are
+  `.tmp/3726e419-main-terminal-output-performance-control.log` and `.exit`.
+- Published PR head: the same terminal target exited 0, **1 file / 3 tests
+  passed**; artifacts are `.tmp/3726e419-pr-head-terminal-output-performance-control.log`
+  and `.exit`.
+
+The first PR-head modal launch failed before a native window (Ghostty clone,
+DNS failure, exit 128); its runner failed to return and was stopped by its
+tracked process group. That raw log and status note remain at
+`.tmp/3726e419-pr-head-modal-tear-off-control.log` and `.status`. A completed
+default-main Ghostty checkout at the pinned `665a03f...` revision was then
+explicitly supplied through `GHOSTTY_SOURCE_DIR` for the successful PR-head
+retry. This is infrastructure history, not a test result. The optional
+keyboard-native lane was not started: pressure was normal but only about 699 MB
+was available after the paired controls. These paired passes resolve neither
+the historical full-gate failure's root cause nor merge approval; approval
+remains held.
+
+## Original focused-control procedure
 
 The unresolved full-gate failures require paired controls on the default branch
 and the published PR head. Use fresh, isolated worktrees and retain one log and
@@ -101,7 +132,7 @@ for CONTROL in "$MAIN_CONTROL" "$PWD"; do
   (
     cd "$CONTROL/apps/desktop"
     CARGO_BUILD_JOBS=1 pnpm exec tsx tests/e2e/run.ts \
-      tests/e2e/mock/modal-tear-off.test.ts
+      mock/modal-tear-off.test.ts
   ) 2>&1 | tee "$PWD/.tmp/3726e419-${LABEL}-modal-tear-off.log"
   printf '%s\n' "${pipestatus[1]}" > "$PWD/.tmp/3726e419-${LABEL}-modal-tear-off.exit"
 done
