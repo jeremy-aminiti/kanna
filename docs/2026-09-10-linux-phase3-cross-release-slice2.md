@@ -59,10 +59,47 @@ below exited 0:
   passed on this same Studio/Node version, including actual encrypted-key
   signing, verification and dependency closure with packages blocked.
 
-The actual Ubuntu apt/GnuPG fixture has **not run yet**. No hosted result or
-Node 22 execution is claimed by the Studio checks. Dispatching the new
-workflow requires making this branch available to GitHub first. No branch
-push or release publication has been performed by this task.
+## Hosted apt/GnuPG proof — 2026-09-10
+
+The owner explicitly authorized pushing clean `task-e43677ab` at
+`e1b42f9e067805db05a3e2e9ea3d1363051f58a6` and dispatching only the prepared
+interop job. Push and dispatch exited 0.
+[Run 34520900452, attempt 1](https://github.com/tampopogk/kanna/actions/runs/34520900452)
+tested that exact SHA and concluded **success**. `gh run watch --exit-status`
+exited 0. The native build, installed prerequisite and installed-check jobs
+were all **skipped**, as requested by `apt_interop_only=true`.
+
+| Hosted runner | Architecture | Job | Result |
+| --- | --- | --- | --- |
+| `ubuntu-24.04` | amd64 (`linux/x64`) | [103017870013](https://github.com/tampopogk/kanna/actions/runs/34520900452/job/103017870013) | success, 24 seconds |
+| `ubuntu-24.04-arm` | arm64 (`linux/arm64`) | [103017870291](https://github.com/tampopogk/kanna/actions/runs/34520900452/job/103017870291) | success, 25 seconds |
+
+Both hosts reported Node **22.23.2**, apt **2.8.3** and GnuPG/gpgv **2.4.4**.
+On each host, tsup, the guarded `apt-bundle-smoke.mjs` and
+`tsx tests/linux-apt-interop.ts` exited **0**. Both architecture candidates and
+SHA256 by-hash requests were asserted on each host. The actual negative-case
+exit codes, identical on both hosts, were:
+
+| Case | gpgv exit | apt-get update exit |
+| --- | --- | --- |
+| Valid | 0, full `VALIDSIG` fingerprint matched | 0 |
+| Tampered signed text | 1 (`BADSIG`) | 100 (`BADSIG`) |
+| Wrong verification key | 2 (`NO_PUBKEY`) | 100 (`NO_PUBKEY`) |
+| Expired metadata, cryptographically valid | 0 | 100 (expired Release) |
+
+Logs included Node's temporary-output module-type warning and apt's warning
+that the intentionally disabled `/etc/apt/-/` config directory does not exist.
+Neither was suppressed or interpreted as a failure. No real keys, package
+installation, apt publication or release command was used. This proves the
+test-key signature/metadata boundary and actual Node 22 bundle closure, not
+release-graph package acceptance or the two-version upgrade lane.
+
+Before the dispatch, `origin/main` was fetched at Recovery merge
+`0a758b63d31bb94d0005a5b9adbd3fd1ffcbee4d`. Its merge base with the dispatched
+head is `bcc52f9916`; there are no intervening main changes in
+`tools/kd`, `tests/linux-installed`, `pnpm-lock.yaml` or
+`.github/workflows/linux-release-check.yml`. The tested SHA was preserved.
+Reconcile newer main again before later integration.
 
 ## Remaining obligations and holds
 
