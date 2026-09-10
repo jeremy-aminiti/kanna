@@ -8,7 +8,6 @@ import {
   packagesIndexPath,
   planPublish,
   poolPath,
-  signInReleaseCommand,
   sourcesListEntry,
   verifyBeforeCommit,
   type AptArtifact,
@@ -219,23 +218,6 @@ describe("verifyBeforeCommit", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.problems.join(" ")).toMatch(/disagree on version/);
-  });
-});
-
-describe("signing", () => {
-  /** Signing with whatever key is first in a keyring is how a staging key ends
-   *  up on a production archive. */
-  it("names the key explicitly", () => {
-    const [command, args] = signInReleaseCommand({
-      releasePath: "/tmp/Release",
-      outputPath: "/tmp/InRelease",
-      keyFingerprint: "DEADBEEF",
-    });
-    expect(command).toBe("gpg");
-    expect(args).toContain("--local-user");
-    expect(args[args.indexOf("--local-user") + 1]).toBe("DEADBEEF");
-    expect(args).toContain("--clearsign");
-    expect(args).toContain("--batch");
   });
 });
 

@@ -169,33 +169,6 @@ export function buildReleaseIndex(input: ReleaseIndexInput): string {
   return lines.join("\n") + "\n";
 }
 
-/** The `gpg` invocation that turns a `Release` into a clearsigned `InRelease`.
- *  The key is named, never defaulted: signing with whatever key happens to be
- *  first in a keyring is how a staging key ends up on a production archive. */
-export function signInReleaseCommand(input: {
-  releasePath: string;
-  outputPath: string;
-  keyFingerprint: string;
-  homeDir?: string;
-}): [string, string[]] {
-  return [
-    "gpg",
-    [
-      ...(input.homeDir ? ["--homedir", input.homeDir] : []),
-      "--batch",
-      "--yes",
-      "--local-user",
-      input.keyFingerprint,
-      "--clearsign",
-      "--digest-algo",
-      "SHA512",
-      "--output",
-      input.outputPath,
-      input.releasePath,
-    ],
-  ];
-}
-
 export interface PublishStep {
   /** `data` steps are safe to repeat and safe to interrupt: nothing points at
    *  what they write until the commit step. `commit` is the single write that
