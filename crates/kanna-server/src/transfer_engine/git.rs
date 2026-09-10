@@ -218,42 +218,71 @@ pub fn import_task_bundle_refs(
     let transfer_root = format!("refs/kanna/transfers/{transfer_id}/{expected_head_oid}");
     let head_ref = format!("{transfer_root}/head");
     let base_ref = format!("{transfer_root}/base");
-    let staging_root = format!("{transfer_root}/staging");
-    let staging_head = format!("{staging_root}/head");
-    let staging_base = format!("{staging_root}/base");
     let bundle_path = bundle_path
         .to_str()
         .ok_or_else(|| "bundle path is not valid unicode".to_string())?;
-    let head_refspec = format!("{source_head_ref}:{staging_head}");
-    let base_refspec = format!("{source_base_ref}:{staging_base}");
-    git(
-        repo_path,
-        &["fetch", bundle_path, &head_refspec, &base_refspec],
-    )?;
-    for (label, reference, expected) in [
-        ("head", staging_head.as_str(), expected_head_oid),
-        ("base", staging_base.as_str(), expected_base_oid),
+    let advertised = git(repo_path, &["bundle", "list-heads", bundle_path])?;
+    for (reference, expected) in [
+        (&source_head_ref, expected_head_oid),
+        (&source_base_ref, expected_base_oid),
     ] {
-        let imported = git(
-            repo_path,
-            &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-        )?;
-        if imported != expected {
+        let found = advertised.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next() == Some(expected) && fields.next() == Some(reference.as_str())
+        });
+        if !found {
             return Err(format!(
-                "transferred task {label} mismatch: expected {expected}, imported {imported}"
+                "bundle does not advertise {reference} at expected OID {expected}"
             ));
         }
     }
-    for (reference, staging) in [(&head_ref, &staging_head), (&base_ref, &staging_base)] {
-        let old = git(
+    git(repo_path, &["bundle", "unbundle", bundle_path])?;
+    for (label, expected) in [("head", expected_head_oid), ("base", expected_base_oid)] {
+        let imported = git(
+            repo_path,
+            &["cat-file", "-e", &format!("{expected}^{{commit}}")],
+        )?;
+        let _ = imported;
+    }
+    let mut tx = format!("start\n");
+    for (reference, expected) in [
+        (&head_ref, expected_head_oid),
+        (&base_ref, expected_base_oid),
+    ] {
+        let current = git(
             repo_path,
             &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-        )
-        .ok()
-        .unwrap_or_else(|| "0".into());
-        git(repo_path, &["update-ref", reference, staging, &old]).map_err(|error| {
-            format!("transfer ref publication refused for {reference}: {error}")
-        })?;
+        );
+        match current {
+            Ok(existing) if existing != expected => {
+                return Err(format!("transfer ref rebinding refused for {reference}"))
+            }
+            Ok(existing) => tx.push_str(&format!("verify {reference} {existing}\n")),
+            Err(_) => tx.push_str(&format!("create {reference} {expected}\n")),
+        }
+    }
+    tx.push_str("prepare\ncommit\n");
+    let mut child = Command::new("git")
+        .args(["update-ref", "--stdin"])
+        .current_dir(repo_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(tx.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "atomic transfer ref publication failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
     Ok((head_ref, base_ref))
 }
