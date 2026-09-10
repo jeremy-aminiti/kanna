@@ -37,6 +37,7 @@ vi.mock("react-native", () => ({
     addListener: () => ({ remove: () => {} }),
     dismiss: () => {}
   },
+  Platform: { OS: "ios" },
   Pressable: "Pressable",
   ScrollView: "ScrollView",
   StyleSheet: {

@@ -16,6 +16,8 @@ describe("mobile app config", () => {
     expect(config.name).toBe("Kanna");
     expect(config.scheme).toBe("kanna");
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app");
+    expect(config.android.package).toBe("build.kanna.app");
+    expect(config.android.usesCleartextTraffic).toBeUndefined();
     expect(config.ios?.supportsTablet).toBe(false);
     expect(config.ios?.googleServicesFile).toBe(
       "./firebase/GoogleService-Info.production.plist"
@@ -33,9 +35,9 @@ describe("mobile app config", () => {
         channel: "production",
         manifestUrl: "https://relay.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.2.3"
+      runtimeVersion: "2.2.4"
     });
-    expect(config.runtimeVersion).toBe("2.2.3");
+    expect(config.runtimeVersion).toBe("2.2.4");
     expect(config.icon).toBe("./assets/icon.png");
     expect(config.android.adaptiveIcon).toEqual({
       foregroundImage: "./assets/adaptive-icon-foreground.png",
@@ -84,6 +86,8 @@ describe("mobile app config", () => {
       "./plugins/withKannaFirebaseMessaging"
     );
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app.dev");
+    expect(config.android.package).toBe("build.kanna.app.dev");
+    expect(config.android.usesCleartextTraffic).toBe(true);
     expect(config.ios?.supportsTablet).toBe(true);
     expect(config.ios?.googleServicesFile).toBeUndefined();
     expect(config.ios?.entitlements).toEqual({
@@ -97,9 +101,9 @@ describe("mobile app config", () => {
         channel: null,
         manifestUrl: null
       },
-      runtimeVersion: "2.2.4"
+      runtimeVersion: "2.2.5"
     });
-    expect(config.runtimeVersion).toBe("2.2.4");
+    expect(config.runtimeVersion).toBe("2.2.5");
     expect(config.updates).toBeUndefined();
   });
 
@@ -155,6 +159,8 @@ describe("mobile app config", () => {
     expect(config.name).toBe("Kanna Staging");
     expect(config.scheme).toBe("kanna-staging");
     expect(config.ios?.bundleIdentifier).toBe("build.kanna.app.staging");
+    expect(config.android.package).toBe("build.kanna.app.staging");
+    expect(config.android.usesCleartextTraffic).toBeUndefined();
     expect(config.plugins).toContainEqual([
       "./plugins/withKannaNativeIdentity",
       {
@@ -178,9 +184,9 @@ describe("mobile app config", () => {
         channel: "staging",
         manifestUrl: "https://relay-staging.kanna.build/ota/manifest"
       },
-      runtimeVersion: "2.2.3"
+      runtimeVersion: "2.2.4"
     });
-    expect(config.runtimeVersion).toBe("2.2.3");
+    expect(config.runtimeVersion).toBe("2.2.4");
     expect(config.updates).toMatchObject({
       url: "https://relay-staging.kanna.build/ota/manifest",
       requestHeaders: { "expo-channel-name": "staging" }
@@ -338,7 +344,7 @@ describe("mobile app config", () => {
         recordAudioAndroid: false
       }
     ]);
-    expect(config.runtimeVersion).toBe("2.2.4");
+    expect(config.runtimeVersion).toBe("2.2.5");
   });
 
   it("declares the composer attachment permissions and captures no audio", () => {

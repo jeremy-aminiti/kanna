@@ -163,10 +163,13 @@ pnpm test                    # JS/TS suite only
 ./kd mobile run --simulator  # dev stack + boot/install/launch on the default Simulator
 ./kd mobile run --simulator "iPhone 17 Pro"
                              # select a Simulator by name (a UDID also works)
+./kd mobile run --android-emulator Medium_Phone_API_36.1
+                             # dev stack + Android AVD build/install/launch
 ./kd mobile run --device     # dev stack + install/launch on a physical iPhone
 ./kd mobile run --device --build dev --owner staging
                              # dev iPhone app + installed staging owner/cloud
 ./kd mobile doctor --device  # on-device preflight without building
+./kd mobile doctor --android-emulator Medium_Phone_API_36.1
 ./kd mobile uninstall --device --staging --confirm-bundle build.kanna.app.staging
 ./kd mobile up --staging     # staging Metro against installed Kanna Staging
 ./kd mobile up --production  # mobile against installed /Applications/Kanna.app
@@ -174,7 +177,8 @@ pnpm test                    # JS/TS suite only
 ```
 
 Always start end-to-end mobile runs from `./kd mobile run --simulator`,
-`./kd mobile run --device`, `./kd dev up --mobile`, or `./kd mobile up` —
+`./kd mobile run --android-emulator`, `./kd mobile run --device`,
+`./kd dev up --mobile`, or `./kd mobile up` —
 launching Expo directly from `apps/mobile` does not start
 the desktop-side `kanna-server`, so the app boots but can't reach desktop
 data. Physical-device flows, staging installs, and the Buffy staging test
@@ -746,6 +750,24 @@ the caller's shell.
 The first `./kd dev up` in a fresh worktree compiles ~523 Rust crates. With a
 warm store most of those are restored rather than compiled; with a cold store
 the daemon builds quickly but the full Tauri app takes several minutes.
+
+## Android emulator development
+
+For the bounded Android emulator lane, run
+`./kd mobile doctor --android-emulator Medium_Phone_API_36.1` first, then
+`./kd mobile run --android-emulator Medium_Phone_API_36.1`. kd resolves the SDK
+from `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or `~/Library/Android/sdk`; resolves an
+exact AVD (or the sole running/installed AVD); and reports missing command-line
+tools without installing anything. The run command supports only the
+`dev/worktree/emulators` profile, boots the AVD when needed, starts the canonical
+task-scoped dev stack, runs Expo CNG for Android, and installs/launches
+`build.kanna.app.dev` (`Kanna Dev`). Inside the emulator, Metro, Firebase
+emulators, relay, and `kanna-server` use Android's host alias `10.0.2.2`.
+`EXPO_PUBLIC_KANNA_SERVER_URL` is consumed only in a development runtime: the
+app probes `/v1/status`, derives the real desktop identity from that response,
+and then uses the unchanged pairing-code claim and device-secret-authenticated
+LAN transport. This lane does not provide physical-device NSD, Firebase push,
+Android OTA publication, signing, or Play distribution.
 
 ## iOS development targets
 

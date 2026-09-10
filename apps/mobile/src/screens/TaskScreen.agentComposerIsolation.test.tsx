@@ -28,6 +28,7 @@ vi.mock("react-native", async () => {
       addListener: () => ({ remove: () => {} }),
       dismiss: () => {}
     },
+    Platform: { OS: "ios" },
     Pressable: "Pressable",
     // The transcript list is the agent view's own ScrollView, so it renders
     // exactly when AgentMessageView does — the property under test. Other

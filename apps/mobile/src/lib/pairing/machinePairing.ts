@@ -96,9 +96,18 @@ export function createMachinePairingService(input: {
   return {
     async claimPayload(rawPayload) {
       const payload = parseMachinePairingPayload(rawPayload);
+      let refreshFailed = false;
+      try {
+        await input.bonjourBrowser.refresh?.();
+      } catch {
+        refreshFailed = true;
+      }
       const candidates = input.bonjourBrowser.getServices().filter(
         (service) => desktopIdsEqual(service.txt.desktopId, payload.desktopId)
       );
+      if (candidates.length === 0 && refreshFailed) {
+        throw pairingError("unreachable");
+      }
       return claimCandidates(payload.code, candidates, "payload");
     },
 
@@ -107,9 +116,18 @@ export function createMachinePairingService(input: {
       if (!/^[0-9A-F]{6}$/.test(code)) {
         throw pairingError("invalid-code");
       }
+      let refreshFailed = false;
+      try {
+        await input.bonjourBrowser.refresh?.();
+      } catch {
+        refreshFailed = true;
+      }
       const candidates = input.bonjourBrowser.getServices().filter(
         (service) => typeof service.txt.desktopId === "string" && service.txt.desktopId.trim()
       );
+      if (candidates.length === 0 && refreshFailed) {
+        throw pairingError("unreachable");
+      }
       return claimCandidates(code, candidates, "code");
     }
   };

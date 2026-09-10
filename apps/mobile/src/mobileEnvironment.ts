@@ -23,6 +23,7 @@ export interface MobileAppEnvironment {
   displayName: string;
   scheme: string;
   iosBundleId: string;
+  androidPackageId: string;
   iosGoogleServicesFile: string;
   firebase: MobileFirebaseExtraConfig;
   relayUrl: string;

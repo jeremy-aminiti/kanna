@@ -62,8 +62,20 @@ fn direct_stream_auth_mode(
         // browser stops a hostile page from opening this stream. It cannot
         // attach a header to the handshake either, so the credential the
         // header middleware would have demanded is proved in the first `auth`
-        // frame instead.
-        crate::ksp::AuthMode::RequireLocalControlToken
+        // frame instead. Android emulator NAT also presents the paired mobile
+        // app as a loopback peer, though, and React Native supplies an Origin.
+        // A verified paired-device header at upgrade is authority to ask for
+        // the same paired secret in-band; it must not be reclassified as a
+        // desktop webview that could possess the local control token.
+        if paired_at_upgrade {
+            if legacy_v1 {
+                crate::ksp::AuthMode::LegacyReadOnlyOrPaired
+            } else {
+                crate::ksp::AuthMode::RequirePairedDevice
+            }
+        } else {
+            crate::ksp::AuthMode::RequireLocalControlToken
+        }
     } else if peer_is_loopback {
         crate::ksp::AuthMode::AllowEmpty
     } else if legacy_v1 && paired_at_upgrade {
@@ -87,4 +99,52 @@ fn direct_stream_companion_access(
     _auth_mode: crate::ksp::AuthMode,
 ) -> bool {
     trusted_lan_device.is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::direct_stream_auth_mode;
+    use crate::ksp::AuthMode;
+    use axum::extract::ConnectInfo;
+    use axum::Extension;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn loopback_peer() -> Option<Extension<ConnectInfo<SocketAddr>>> {
+        Some(Extension(ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            49152,
+        ))))
+    }
+
+    #[test]
+    fn paired_browser_originated_loopback_v2_still_requires_the_paired_secret() {
+        assert_eq!(
+            direct_stream_auth_mode(loopback_peer(), false, true, true, false),
+            AuthMode::RequirePairedDevice
+        );
+    }
+
+    #[test]
+    fn paired_browser_originated_loopback_v1_preserves_legacy_paired_access() {
+        assert_eq!(
+            direct_stream_auth_mode(loopback_peer(), true, true, true, false),
+            AuthMode::LegacyReadOnlyOrPaired
+        );
+    }
+
+    #[test]
+    fn unpaired_browser_originated_loopback_still_requires_local_control() {
+        assert_eq!(
+            direct_stream_auth_mode(loopback_peer(), false, false, true, false),
+            AuthMode::RequireLocalControlToken
+        );
+    }
+
+    #[test]
+    fn native_loopback_client_keeps_local_process_authority() {
+        assert_eq!(
+            direct_stream_auth_mode(loopback_peer(), false, false, false, false),
+            AuthMode::AllowEmpty
+        );
+    }
 }

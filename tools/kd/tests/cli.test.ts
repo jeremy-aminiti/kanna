@@ -566,7 +566,7 @@ describe("kd CLI", () => {
 
     await expect(runCli(["mobile", "run", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(
-      expect.stringContaining("Usage: kd mobile run (--simulator [<udid|name>] | --device)")
+      expect.stringContaining("--android-emulator [<avd>]")
     );
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("defaults to apps/mobile/VERSION"));
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("KANNA_APP_VERSION is an explicit"));
@@ -1061,7 +1061,7 @@ describe("kd CLI", () => {
     expect(() => parseCliArgs(["dev", "up", "--install"])).toThrow("Unknown flag: --install");
     expect(() => parseCliArgs(["--install"])).toThrow("Unknown flag: --install");
     expect(() => parseCliArgs(["mobile", "doctor", "--device", "--install"])).toThrow(
-      "mobile doctor only accepts --device, --production, or --staging"
+      "mobile doctor only accepts --device, --android-emulator"
     );
     expect(() =>
       parseCliArgs([
@@ -1087,7 +1087,7 @@ describe("kd CLI", () => {
       input: { device: true, production: true, staging: false }
     });
     expect(() => parseCliArgs(["mobile", "run", "--staging", "--install"])).toThrow(
-      "mobile run requires a target: use --simulator [<udid|name>] for an iOS Simulator or --device for a physical iPhone"
+      "mobile run requires a target: use --simulator [<udid|name>], --device, or --android-emulator [<avd>]"
     );
     expect(() => parseCliArgs(["mobile", "run", "--device", "--production", "--staging"])).toThrow(
       "mobile run accepts only one of --production or --staging"
@@ -1131,6 +1131,58 @@ describe("kd CLI", () => {
     expect(() =>
       parseCliArgs(["mobile", "run", "--simulator", "--install"])
     ).toThrow("mobile run --install is only supported with the physical-iPhone --device target");
+  });
+
+  it("parses Android emulator run and doctor targets", () => {
+    expect(parseCliArgs(["mobile", "run", "--android-emulator"])).toEqual({
+      taskId: "mobile.run",
+      input: {
+        device: false,
+        androidEmulator: true,
+        production: false,
+        staging: false
+      }
+    });
+    expect(parseCliArgs([
+      "mobile",
+      "run",
+      "--android-emulator",
+      "Medium_Phone_API_36.1"
+    ])).toEqual({
+      taskId: "mobile.run",
+      input: {
+        device: false,
+        androidEmulator: "Medium_Phone_API_36.1",
+        production: false,
+        staging: false
+      }
+    });
+    expect(parseCliArgs([
+      "mobile",
+      "doctor",
+      "--android-emulator",
+      "Medium_Phone_API_36.1"
+    ])).toEqual({
+      taskId: "mobile.doctor",
+      input: {
+        device: false,
+        androidEmulator: "Medium_Phone_API_36.1",
+        production: false,
+        staging: false
+      }
+    });
+    expect(() => parseCliArgs([
+      "mobile",
+      "run",
+      "--simulator",
+      "--android-emulator"
+    ])).toThrow("mobile run accepts exactly one target");
+    expect(() => parseCliArgs([
+      "mobile",
+      "doctor",
+      "--device",
+      "--android-emulator"
+    ])).toThrow("mobile doctor requires exactly one");
   });
 
   it("parses desktop staging cloud as an explicit cloud axis", () => {

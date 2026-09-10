@@ -62,12 +62,19 @@ function isPhysicalDeviceTarget(env: NodeJS.ProcessEnv): boolean {
   return Boolean(env.KANNA_IOS_DEVICE_UDID?.trim() || env.KANNA_IOS_PHYSICAL_DEVICE_NAME?.trim());
 }
 
+function isAndroidEmulatorTarget(env: NodeJS.ProcessEnv): boolean {
+  return Boolean(env.KANNA_ANDROID_AVD?.trim());
+}
+
 function isLoopbackHostname(hostname: string): boolean {
   return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
 }
 
 function resolveMobileHost(input: BuildDevPlanInput): string {
   const host = resolveHostFromUrl(input.mobileServerUrl);
+  if (isAndroidEmulatorTarget(input.env) && isLoopbackHostname(host)) {
+    return "10.0.2.2";
+  }
   if (!isPhysicalDeviceTarget(input.env) || !isLoopbackHostname(host)) {
     return host;
   }
@@ -92,11 +99,13 @@ function resolveMobileServerUrlEnv(input: BuildDevPlanInput): string | undefined
   if (input.env.EXPO_PUBLIC_KANNA_SERVER_URL?.trim()) {
     return input.env.EXPO_PUBLIC_KANNA_SERVER_URL;
   }
-  return isPhysicalDeviceTarget(input.env) ? resolveMobileServerUrl(input) : undefined;
+  return isPhysicalDeviceTarget(input.env) || isAndroidEmulatorTarget(input.env)
+    ? resolveMobileServerUrl(input)
+    : undefined;
 }
 
 function resolveReactNativePackagerHostname(input: BuildDevPlanInput): string | undefined {
-  if (!isPhysicalDeviceTarget(input.env)) {
+  if (!isPhysicalDeviceTarget(input.env) && !isAndroidEmulatorTarget(input.env)) {
     return undefined;
   }
   return resolveMobileHost(input);
@@ -307,7 +316,7 @@ export function buildDevPlan(input: BuildDevPlanInput): DevPlan {
       ...mobileFirebaseEnv(input)
     });
     const startCommand = `${mobileEnv} pnpm run dev -- --port ${input.env.KANNA_MOBILE_PORT ?? "8081"} --dev-client`;
-    const resilientStartCommand = isPhysicalDeviceTarget(input.env)
+    const resilientStartCommand = isPhysicalDeviceTarget(input.env) || isAndroidEmulatorTarget(input.env)
       ? `while true; do ${startCommand}; echo 'Metro exited; restarting in 2s'; sleep 2; done`
       : startCommand;
     windows.push({
