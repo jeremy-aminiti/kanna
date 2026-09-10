@@ -90,9 +90,13 @@ describe("the Linux release check", () => {
   });
 
   /**
-   * The lane builds and audits; it does not run installed acceptance. That
+   * The lane builds and audits; it does not run installed *acceptance*. That
    * needs a second package from another source revision to upgrade between,
-   * which is not wired here — follow-up item 2 in §7 of the evidence doc.
+   * which is not wired here — follow-up item 2 in §7 of the evidence doc. It
+   * does, separately, probe whether the host prerequisites that lane needs
+   * are even present (`installed-check-prerequisites`, below) — a fact-finding
+   * job, not the lane itself, and the one place `loginctl enable-linger` is
+   * expected to appear.
    *
    * Asserted rather than left implicit because the previous shape was worse
    * than absent: a job gated on an input that is empty on `pull_request` and
@@ -110,7 +114,8 @@ describe("the Linux release check", () => {
       .filter((line) => !/^\s*#/.test(line))
       .join("\n");
     expect(steps).not.toContain("kd test linux-installed");
-    expect(steps).not.toContain("loginctl enable-linger");
+    expect(steps).not.toContain("install-unit");
+    expect(steps).not.toContain("apt-get install ./");
     // And it does not describe a second build it never does.
     expect(workflow).not.toMatch(/^\s*#.*merge base/im);
   });
@@ -175,5 +180,31 @@ describe("the Linux release check", () => {
     expect(workflow.indexOf("- name: Install build and packaging dependencies")).toBeLessThan(
       workflow.indexOf("- name: Build the candidate package")
     );
+  });
+
+  /**
+   * `tests/linux-installed`'s own host check (`installedWorker.ts`'s
+   * `inspectHost`) treats `systemctl --user is-system-running` as usable
+   * whenever the command merely ran (its Node `child_process` exit code is
+   * non-null), which is true even for "Failed to connect to bus" — it cannot
+   * actually distinguish a working user manager from an absent one. This
+   * probe checks the real facts on both hosted runners directly, so that
+   * distinction doesn't rest on the harness's own unreliable check.
+   */
+  it("probes systemd/session prerequisites on both architectures before any install is attempted", () => {
+    const probeStep = workflow
+      .split(/\n(?=\s*- name:)/)
+      .find((step) => step.includes("- name: Probe systemd, session and sudo prerequisites"));
+    expect(probeStep).toBeDefined();
+    for (const check of [
+      "systemctl is-system-running",
+      "systemctl --user is-system-running",
+      "loginctl enable-linger",
+      "sudo -n true",
+    ]) {
+      expect(probeStep).toContain(check);
+    }
+    const architectures = workflow.match(/architecture: (x86_64|arm64)/g);
+    expect(architectures?.length).toBeGreaterThanOrEqual(4); // build + prerequisites, both archs
   });
 });
