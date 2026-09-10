@@ -108,6 +108,19 @@ pub struct AppState {
     /// usable between an account transition and the next reconciliation
     /// pass.
     authenticated_account_uid: Arc<StdMutex<Option<String>>>,
+    /// Bumped by every call that changes `authenticated_account_uid` -
+    /// a fresh relay `AuthOk`, an authoritative rejection, or an explicit
+    /// local sign-out. `machine_trust` reconciliation is decided by whoever
+    /// changed the account state, but the persistence write is racy against
+    /// a concurrent decision from the other path; a caller captures the
+    /// generation `set_authenticated_account_uid` returns at the moment it
+    /// decided the target account, and the write is skipped if the current
+    /// generation has since moved past it - the most recent decision always
+    /// wins the actual file, so a stale in-flight reconnect can never
+    /// resurrect trust an explicit sign-out just cleared, and a stale
+    /// sign-out can never undo a legitimate re-authentication that raced
+    /// ahead of it. See `relay::reconcile_machine_trust_for_account`.
+    account_state_generation: Arc<AtomicU64>,
     /// The last LAN address observed for a same-account sibling's secure
     /// machine-invoke listener, by desktop_id. Discovery-owned (Bonjour), a
     /// candidate here is only ever a hint of where to *attempt* a
@@ -503,6 +516,7 @@ impl AppState {
             known_singleton_owners: Arc::new(StdMutex::new(HashMap::new())),
             relay_reconnect: Arc::new(Notify::new()),
             authenticated_account_uid: Arc::new(StdMutex::new(None)),
+            account_state_generation: Arc::new(AtomicU64::new(0)),
             lan_candidates: Arc::new(StdMutex::new(HashMap::new())),
             lan_bootstrap_in_flight: Arc::new(StdMutex::new(HashSet::new())),
             anonymous_push_revocations_changed: Arc::new(Notify::new()),
@@ -761,12 +775,25 @@ impl AppState {
 
     /// Sets the account UID this desktop's relay connection currently
     /// authenticates as. `None` on sign-out, an authoritative rejection, or
-    /// before the first successful authentication.
-    pub(crate) fn set_authenticated_account_uid(&self, account_uid: Option<String>) {
+    /// before the first successful authentication. Returns the new
+    /// `account_state_generation` - see that field's own doc comment for why
+    /// a reconciliation caller must capture and pass this along.
+    pub(crate) fn set_authenticated_account_uid(&self, account_uid: Option<String>) -> u64 {
         *self
             .authenticated_account_uid
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = account_uid;
+        self.account_state_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    }
+
+    /// The current `account_state_generation` - see that field's own doc
+    /// comment. Read this immediately before deciding to reconcile machine
+    /// trust for account state that was NOT just set by this same caller
+    /// (i.e. a retry at startup, where nothing else could have raced yet).
+    pub(crate) fn account_state_generation(&self) -> u64 {
+        self.account_state_generation.load(Ordering::Acquire)
     }
 
     /// The account UID every automatic same-account LAN trust lookup must

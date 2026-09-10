@@ -562,6 +562,20 @@ export async function reconnectDesktopCloudRelay(): Promise<void> {
   });
 }
 
+/**
+ * The actual desktop-to-server explicit sign-out producer: disables this
+ * desktop's in-memory LAN authority immediately and atomically clears its
+ * automatic same-account trust, independent of whether the caller's own
+ * cloud credential revoke succeeded and without depending on reconnecting
+ * with the same credential. See `signOut` in desktopAuthSdk.ts, the one
+ * caller, and `cloud_relay::sign_out_desktop_cloud_account` server-side.
+ */
+export async function signOutDesktopCloudAccount(): Promise<void> {
+  await requestJson<void>("/v1/cloud/relay/actions/sign-out", {
+    method: "POST",
+  });
+}
+
 export interface DesktopWorkspaceWindowState {
   windowId: string;
   selectedRepoId: string | null;

@@ -120,8 +120,11 @@ fn apply_relay_authentication(
     // request during reconciliation must already see the *new* account
     // rather than briefly still seeing the old one while the store is mid
     // purge - see this account's own module doc comment.
-    http_state.set_authenticated_account_uid(Some(user_id.clone()));
-    reconcile_machine_trust_for_account(http_state, Some(&user_id));
+    let generation = http_state.set_authenticated_account_uid(Some(user_id.clone()));
+    if let Err(error) = reconcile_machine_trust_for_account(http_state, Some(&user_id), generation)
+    {
+        log::warn!("Failed to persist machine trust store after account reconciliation: {error}");
+    }
     *authenticated_user_id = Some(user_id);
     *desktop_routing_version = capabilities
         .desktop_routing
@@ -151,37 +154,59 @@ fn apply_relay_authentication(
 /// own account identity is established or confirmed lost: a fresh
 /// `auth_ok` (covering a UID change *and* the first reconciliation after a
 /// restart, since nothing here depends on remembering a previous value),
-/// and falling back to anonymous-push-only mode (covering both an
-/// authoritative account-auth rejection and an explicit local sign-out,
-/// which collapse to the same "not signed into any account" state here).
-/// `current_account_uid: None` clears every record; `Some(uid)` keeps only
-/// what already matches it. A missing machine trust store path (no
-/// configured pairing store - true for `kanna-worker`, which has no
-/// account relay identity to begin with) is a silent no-op, not an error:
-/// there is nothing to reconcile.
-fn reconcile_machine_trust_for_account(
+/// falling back to anonymous-push-only mode (covering an authoritative
+/// account-auth rejection), and an explicit local sign-out
+/// (`cloud_relay::sign_out_desktop_cloud_account`) - all of which collapse to
+/// the same "not signed into any account" state here when
+/// `current_account_uid` is `None`. `Some(uid)` keeps only what already
+/// matches it.
+///
+/// `observed_generation` must be the value `AppState::set_authenticated_account_uid`
+/// returned for *this* `current_account_uid` decision. Two reconciliation
+/// calls can run concurrently against each other (a relay auth event and an
+/// explicit sign-out, or a startup retry racing a fresh connection), and each
+/// call's own load-retain-save can take long enough for the other's setter to
+/// have already moved the account state on before this one gets to persist
+/// its now-stale decision. Checking the current generation against the one
+/// this call observed, while still holding the persistence lock, ensures the
+/// *last* setter's decision always wins the actual file: a stale reconcile
+/// can never resurrect trust an explicit sign-out already cleared, and a
+/// stale sign-out can never undo a legitimate re-authentication that raced
+/// ahead of it.
+///
+/// A missing machine trust store path (no configured pairing store - true
+/// for `kanna-worker`, which has no account relay identity to begin with) is
+/// a silent `Ok(())`, not an error: there is nothing to reconcile. Any other
+/// error is the caller's to report - see `sign_out_desktop_cloud_account`,
+/// which surfaces persistence failure and leaves its retry marker in place
+/// so the next signed-out startup retries this same decision.
+pub(crate) fn reconcile_machine_trust_for_account(
     http_state: &http_api::AppState,
     current_account_uid: Option<&str>,
-) {
+    observed_generation: u64,
+) -> Result<(), String> {
     let Some(store_path) = http_state.config().machine_trust_store_path() else {
-        return;
+        return Ok(());
     };
     let _guard = crate::machine_trust::persistence_mutex()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut store = match crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path) {
-        Ok(store) => store,
-        Err(error) => {
-            log::warn!("Failed to load machine trust store for account reconciliation: {error}");
-            return;
-        }
-    };
+    if http_state.account_state_generation() != observed_generation {
+        // Superseded by a later account-state change while this call was
+        // waiting on the lock or deciding what to write - that newer
+        // decision owns reconciliation now, and writing this stale one would
+        // either resurrect trust that decision already cleared, or clear
+        // trust it just legitimately re-established.
+        return Ok(());
+    }
+    let mut store = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+        .map_err(|error| format!("failed to load machine trust store: {error}"))?;
     if !store.retain_account(current_account_uid) {
-        return;
+        return Ok(());
     }
-    if let Err(error) = store.save(&store_path) {
-        log::warn!("Failed to persist machine trust store after account reconciliation: {error}");
-    }
+    store
+        .save(&store_path)
+        .map_err(|error| format!("failed to persist machine trust store: {error}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,6 +281,12 @@ async fn run_relay_loop_with_timing(
         .collect::<Result<Vec<_>, _>>()?
         .join("");
 
+    // An explicit sign-out's machine-trust cleanup may not have durably
+    // landed before this desktop last shut down; retry it now, before this
+    // loop's own account reconciliation ever runs - see
+    // `http_api::cloud_relay::retry_pending_account_sign_out`.
+    http_api::cloud_relay::retry_pending_account_sign_out(&http_state, &db).await;
+
     // Reconnection loop
     loop {
         let anonymous_identity_available =
@@ -291,8 +322,13 @@ async fn run_relay_loop_with_timing(
         let signed_out_or_rejected = config.desktop_secret.is_none()
             || account_auth == relay_client::AccountAuthProbe::Rejected;
         if signed_out_or_rejected {
-            http_state.set_authenticated_account_uid(None);
-            reconcile_machine_trust_for_account(&http_state, None);
+            let generation = http_state.set_authenticated_account_uid(None);
+            if let Err(error) = reconcile_machine_trust_for_account(&http_state, None, generation)
+            {
+                log::warn!(
+                    "Failed to persist machine trust store after account reconciliation: {error}"
+                );
+            }
         }
         let use_anonymous_push = anonymous_identity_available && signed_out_or_rejected;
         if use_anonymous_push {
@@ -1901,12 +1937,55 @@ mod tests {
         );
         store.save(&store_path).expect("seed machine trust store");
 
-        reconcile_machine_trust_for_account(&state, Some("uid-1"));
+        let generation = state.account_state_generation();
+        reconcile_machine_trust_for_account(&state, Some("uid-1"), generation)
+            .expect("reconcile succeeds");
 
         let reloaded = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
             .expect("reload after reconcile");
         assert_eq!(reloaded.inbound.len(), 1);
         assert_eq!(reloaded.inbound[0].account_uid, "uid-1");
+    }
+
+    /// A reconcile call whose observed generation the account state has
+    /// since moved past must not touch the file at all - a superseded
+    /// decision must never resurrect trust a later, legitimate one cleared
+    /// (or vice versa).
+    #[test]
+    fn reconcile_machine_trust_for_account_skips_a_superseded_generation() {
+        let config = account_reconcile_test_config("superseded");
+        let state = http_api::AppState::new(config.clone());
+        let store_path = config
+            .machine_trust_store_path()
+            .expect("machine trust store path");
+
+        let now_ms = crate::machine_trust::unix_time_ms().expect("clock");
+        let mut store = crate::machine_trust::MachineTrustStore::default();
+        store.accept_inbound(
+            "desktop-a",
+            "hash-a",
+            "uid-1",
+            "development",
+            &config.desktop_id,
+            now_ms,
+        );
+        store.save(&store_path).expect("seed machine trust store");
+
+        let stale_generation = state.account_state_generation();
+        // A newer decision (e.g. a legitimate re-authentication) advances the
+        // generation before the stale call gets to persist anything.
+        state.set_authenticated_account_uid(Some("uid-1".to_string()));
+
+        reconcile_machine_trust_for_account(&state, None, stale_generation)
+            .expect("a superseded call is a no-op, not an error");
+
+        let reloaded = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+            .expect("reload after reconcile");
+        assert_eq!(
+            reloaded.inbound.len(),
+            1,
+            "the superseded None decision must not have cleared the store"
+        );
     }
 
     /// Falling back to anonymous-push-only mode - an authoritative rejection
@@ -1933,7 +2012,9 @@ mod tests {
         );
         store.save(&store_path).expect("seed machine trust store");
 
-        reconcile_machine_trust_for_account(&state, None);
+        let generation = state.account_state_generation();
+        reconcile_machine_trust_for_account(&state, None, generation)
+            .expect("reconcile succeeds");
 
         let reloaded = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
             .expect("reload after reconcile");

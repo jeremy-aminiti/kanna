@@ -1,7 +1,7 @@
 use super::analytics::get_repo_analytics;
 use super::backup::create_backup;
 use super::cloud_desktops::{invoke_cloud_desktop, list_cloud_desktops};
-use super::cloud_relay::reconnect_cloud_relay;
+use super::cloud_relay::{reconnect_cloud_relay, sign_out_desktop_cloud_account};
 use super::desktop::list_desktops;
 use super::desktop_views::{
     acknowledge_desktop_view, open_desktop_view, wait_desktop_view_commands,
@@ -94,6 +94,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/cloud/relay/actions/reconnect",
             post(reconnect_cloud_relay),
+        )
+        .route(
+            "/v1/cloud/relay/actions/sign-out",
+            post(sign_out_desktop_cloud_account),
         )
         .route("/v1/cloud/desktops", get(list_cloud_desktops))
         .route(

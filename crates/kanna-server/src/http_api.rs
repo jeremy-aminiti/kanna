@@ -2,7 +2,7 @@ mod analytics;
 mod backup;
 mod blocking;
 mod cloud_desktops;
-mod cloud_relay;
+pub(crate) mod cloud_relay;
 mod desktop;
 mod desktop_views;
 #[cfg(debug_assertions)]
