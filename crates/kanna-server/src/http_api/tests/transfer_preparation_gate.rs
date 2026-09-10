@@ -373,7 +373,10 @@ async fn ordinary_put_resume_and_rerun_refuse_unprepared_bound_task() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    for path in ["/v1/tasks/abad0005/resume", "/v1/tasks/abad0005/rerun"] {
+    for path in [
+        "/v1/tasks/abad0005/actions/resume",
+        "/v1/tasks/abad0005/actions/rerun-stage",
+    ] {
         let response = app
             .clone()
             .oneshot(Request::post(path).body(Body::empty()).unwrap())
