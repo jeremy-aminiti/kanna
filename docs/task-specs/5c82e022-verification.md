@@ -132,3 +132,27 @@ refreshes the actual terminal before each rendered-cell read and reports the
 last daemon/rendered state on a failed convergence. That correction is
 source-checked but not yet native-verified; the desktop restoration behavior
 remains unproven.
+
+## Reconciled renderer retry — initial local geometry mismatch
+
+Command (exit 1):
+
+```sh
+CARGO_BUILD_JOBS=1 KANNA_E2E_SCREENSHOT_DIR="/Users/jeremyhale/.kanna/repos/kanna-7/.kanna-worktrees/task-5c82e022/docs/task-screenshots/5c82e022-screenshots" pnpm --dir apps/desktop test:e2e -- real/remote-active-view-restoration.test.ts
+```
+
+At `c03c5d68d`, both independently bound desktop windows again passed the
+canonical task/worktree/commit/native-title identity check before reset. The
+refresh correction produced a populated rendered `ACTIVE_VIEW:` marker, but
+the first local owner convergence still failed: the daemon measured `140x50`
+while the rendered local terminal measured `102x27`. This occurred before
+remote-task selection, remote focus, no-input local handback, or screenshot
+capture. Thus it demonstrates neither remote ownership nor desktop
+restoration; it only rejects the earlier blank-render hypothesis as the sole
+precondition failure.
+
+The complete nested log and actual exit record are retained at
+`.tmp/desktop-active-view-restoration-c03c5d68d.log` and
+`.tmp/desktop-active-view-restoration-c03c5d68d.exit`. The runner reported its
+tmux session, relay, and Firebase emulator stopped; no owned process remained
+after exit. No additional retry was run.
