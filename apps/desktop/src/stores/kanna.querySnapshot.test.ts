@@ -773,6 +773,76 @@ describe("kanna query snapshot regressions", () => {
     expect(queries.snapshot.error.value).toBeNull();
   });
 
+  it("resolves an authoritative snapshot barrier only when a matching reload lands", async () => {
+    const repo = mockState.makeRepo();
+    let item = mockState.makeItem({ stage: "plan" });
+    const fetchSnapshot = vi.fn(async (): Promise<KannaSnapshot> => ({
+      entries: [{ repo, items: [item] }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
+    const state = createStoreState();
+    const context = createStoreContext(state, { error: vi.fn(), warning: vi.fn() } as never, {
+      fetchSnapshot,
+    });
+    const queries = createQueriesApi(context);
+    await queries.reloadSnapshot();
+
+    let resolved = false;
+    const barrier = queries.waitForAuthoritativeSnapshot((snapshot) =>
+      snapshot.entries[0]?.items[0]?.stage === "in progress"
+    ).then((snapshot) => {
+      resolved = true;
+      return snapshot;
+    });
+
+    await queries.reloadSnapshot();
+    expect(resolved).toBe(false);
+
+    item = { ...item, stage: "in progress", branch: "task-item-1-2" };
+    await queries.reloadSnapshot();
+    const settled = await barrier;
+
+    expect(settled.entries[0]?.items[0]).toMatchObject({
+      stage: "in progress",
+      branch: "task-item-1-2",
+    });
+  });
+
+  it("releases a cancelled authoritative snapshot barrier", async () => {
+    const repo = mockState.makeRepo();
+    const item = mockState.makeItem({ stage: "plan" });
+    const fetchSnapshot = vi.fn(async (): Promise<KannaSnapshot> => ({
+      entries: [{ repo, items: [item] }],
+      taskBlockers: [],
+      worktreePaths: {},
+      settings: {},
+    }));
+    const state = createStoreState();
+    const context = createStoreContext(state, { error: vi.fn(), warning: vi.fn() } as never, {
+      fetchSnapshot,
+    });
+    const queries = createQueriesApi(context);
+    await queries.reloadSnapshot();
+
+    const controller = new AbortController();
+    const predicate = vi.fn((snapshot: KannaSnapshot) =>
+      snapshot.entries[0]?.items[0]?.stage === "in progress"
+    );
+    const barrier = queries.waitForAuthoritativeSnapshot(predicate, {
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+    expect(predicate).toHaveBeenCalledTimes(1);
+
+    controller.abort(new Error("test cancellation"));
+    await expect(barrier).rejects.toThrow("test cancellation");
+
+    await queries.reloadSnapshot();
+    expect(predicate).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a stale snapshot unpublished while the newer reload remains pending", async () => {
     const older = deferred<KannaSnapshot>();
     const newer = deferred<KannaSnapshot>();

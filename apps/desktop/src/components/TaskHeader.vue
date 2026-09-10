@@ -11,6 +11,8 @@ interface TaskHeaderPresentation {
   issue_title: string | null;
   prompt: string | null;
   stage: string;
+  stage_advance_pending?: boolean;
+  stage_advance_from?: string | null;
   branch: string | null;
   port_env: string | null;
   issue_number: number | null;
@@ -21,6 +23,14 @@ interface TaskHeaderPresentation {
 const props = defineProps<{
   item: TaskHeaderPresentation;
 }>();
+
+const stageBadgeLabel = computed(() => {
+  const from = props.item.stage_advance_from;
+  if (props.item.stage_advance_pending && from && from !== props.item.stage) {
+    return `${from} → ${props.item.stage}…`;
+  }
+  return props.item.stage;
+});
 
 function title(item: TaskHeaderPresentation): string {
   return item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
@@ -70,7 +80,11 @@ function openLocalhostPort(port: number) {
 <template>
   <div class="task-header" @mousedown.prevent>
     <div class="header-top">
-      <span class="stage-badge">{{ item.stage }}</span>
+      <span
+        class="stage-badge"
+        :class="{ 'stage-badge-pending': item.stage_advance_pending }"
+        :title="item.stage_advance_pending ? $t('taskHeader.stageAdvancePending') : undefined"
+      >{{ stageBadgeLabel }}</span>
       <h2 class="task-title" :title="taskPromptTooltip(item)" @mousedown.stop>{{ title(item) }}</h2>
     </div>
     <div class="header-meta">
@@ -131,6 +145,10 @@ function openLocalhostPort(port: number) {
   line-height: 1.4;
   background: var(--kn-bg-accent-subtle);
   flex-shrink: 0;
+}
+
+.stage-badge-pending {
+  color: var(--kn-warning);
 }
 
 .task-title {

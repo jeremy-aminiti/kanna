@@ -26,7 +26,7 @@ import {
   type MarkdownPreviewMode,
 } from "./markdownPreviewMode";
 import type { AdvanceStageResult, RequestRevisionOptions } from "./workflow";
-import type { ReloadSnapshotOptions } from "./queries";
+import type { AuthoritativeSnapshotWaitOptions, ReloadSnapshotOptions } from "./queries";
 import type { TaskUiSlot } from "../types/taskUi";
 import type { TaskStateChange } from "@kanna/agent-protocol";
 
@@ -193,6 +193,10 @@ export interface StoreServices {
   windowWorkspace?: WindowWorkspaceController;
   loadInitialData?: () => Promise<void>;
   reloadSnapshot?: (options?: ReloadSnapshotOptions) => Promise<void>;
+  waitForAuthoritativeSnapshot?: (
+    predicate: (snapshot: KannaSnapshot) => boolean | Promise<boolean>,
+    options?: AuthoritativeSnapshotWaitOptions,
+  ) => Promise<KannaSnapshot>;
   applyTaskStateChange?: (change: TaskStateChange) => boolean;
   fetchSnapshot?: () => Promise<KannaSnapshot>;
   withOptimisticItemOverlay?: <T>(input: {

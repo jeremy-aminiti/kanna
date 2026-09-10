@@ -60,6 +60,9 @@ export interface PipelineItem {
   read_state?: "read" | "unread";
   blocker_revision?: number;
   transition_revision?: string | null;
+  /** Client-only projection while an accepted stage advance awaits a durable snapshot. */
+  stage_advance_pending?: boolean;
+  stage_advance_from?: string | null;
   activity_changed_at: string | null;
   unread_at: string | null;
   port_offset: number | null;

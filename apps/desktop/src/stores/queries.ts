@@ -13,6 +13,14 @@ interface OptimisticItemOverlay {
   apply: (snapshot: KannaSnapshot) => KannaSnapshot;
 }
 
+interface AuthoritativeSnapshotWaiter {
+  predicate: (snapshot: KannaSnapshot) => boolean | Promise<boolean>;
+  resolve: (snapshot: KannaSnapshot) => void;
+  reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  abort?: () => void;
+}
+
 export interface QueryState<T> {
   data: Ref<T> | ComputedRef<T>;
   pending: Ref<boolean>;
@@ -30,12 +38,20 @@ export interface ReloadSnapshotOptions {
   refreshDefinitions?: boolean;
 }
 
+export interface AuthoritativeSnapshotWaitOptions {
+  signal?: AbortSignal;
+}
+
 export interface QueriesApi {
   snapshot: QueryState<KannaSnapshot>;
   repos: QueryState<Repo[]>;
   items: QueryState<PipelineItem[]>;
   loadInitialData: () => Promise<void>;
   reloadSnapshot: (options?: ReloadSnapshotOptions) => Promise<void>;
+  waitForAuthoritativeSnapshot: (
+    predicate: (snapshot: KannaSnapshot) => boolean | Promise<boolean>,
+    options?: AuthoritativeSnapshotWaitOptions,
+  ) => Promise<KannaSnapshot>;
   applyTaskStateChange: (change: TaskStateChange) => boolean;
   withOptimisticItemOverlay: <T>(input: {
     key: string;
@@ -63,6 +79,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
   const optimisticItems = ref<OptimisticItemOverlay[]>([]);
   const refreshRunId = ref(0);
   let taskStateGeneration = 0;
+  const authoritativeSnapshotWaiters = new Set<AuthoritativeSnapshotWaiter>();
   const recentTaskStateChanges = new Map<
     string,
     { generation: number; change: TaskStateChange }
@@ -105,6 +122,57 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       context.state.items.value,
       options,
     );
+  }
+
+  async function evaluateAuthoritativeSnapshotWaiter(
+    waiter: AuthoritativeSnapshotWaiter,
+    snapshot: KannaSnapshot,
+  ): Promise<void> {
+    try {
+      if (!await waiter.predicate(snapshot)) return;
+      if (!authoritativeSnapshotWaiters.delete(waiter)) return;
+      if (waiter.signal && waiter.abort) {
+        waiter.signal.removeEventListener("abort", waiter.abort);
+      }
+      waiter.resolve(snapshot);
+    } catch (error) {
+      if (!authoritativeSnapshotWaiters.delete(waiter)) return;
+      if (waiter.signal && waiter.abort) {
+        waiter.signal.removeEventListener("abort", waiter.abort);
+      }
+      waiter.reject(error);
+    }
+  }
+
+  function settleAuthoritativeSnapshotWaiters(snapshot: KannaSnapshot): void {
+    for (const waiter of [...authoritativeSnapshotWaiters]) {
+      void evaluateAuthoritativeSnapshotWaiter(waiter, snapshot);
+    }
+  }
+
+  function waitForAuthoritativeSnapshot(
+    predicate: (snapshot: KannaSnapshot) => boolean | Promise<boolean>,
+    options: AuthoritativeSnapshotWaitOptions = {},
+  ): Promise<KannaSnapshot> {
+    return new Promise((resolve, reject) => {
+      if (options.signal?.aborted) {
+        reject(options.signal.reason ?? new Error("Authoritative snapshot wait cancelled."));
+        return;
+      }
+      const waiter: AuthoritativeSnapshotWaiter = {
+        predicate,
+        resolve,
+        reject,
+        signal: options.signal,
+      };
+      waiter.abort = () => {
+        if (!authoritativeSnapshotWaiters.delete(waiter)) return;
+        reject(options.signal?.reason ?? new Error("Authoritative snapshot wait cancelled."));
+      };
+      authoritativeSnapshotWaiters.add(waiter);
+      options.signal?.addEventListener("abort", waiter.abort, { once: true });
+      void evaluateAuthoritativeSnapshotWaiter(waiter, baseSnapshot.value);
+    });
   }
 
   async function reconcileMissingRepoState(
@@ -246,6 +314,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
       baseSnapshot.value = snapshot;
       applySnapshotSettingsToState(context.state, snapshot.settings);
       syncSnapshot({ authoritative: true });
+      settleAuthoritativeSnapshotWaiters(snapshot);
       for (const [taskId, recent] of recentTaskStateChanges) {
         if (recent.generation <= taskStateGeneration) recentTaskStateChanges.delete(taskId);
       }
@@ -392,6 +461,7 @@ export function createQueriesApi(context: StoreContext): QueriesApi {
     },
     loadInitialData,
     reloadSnapshot,
+    waitForAuthoritativeSnapshot,
     applyTaskStateChange,
     withOptimisticItemOverlay,
   };

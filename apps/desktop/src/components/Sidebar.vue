@@ -213,9 +213,9 @@ function repoCountLabel(repoId: string): string {
 
 function itemTitle(item: SidebarTaskItem): string {
   const raw = item.display_name || item.issue_title || item.prompt || t('tasks.untitled');
-  // A running post (e.g. commit) executes inside the live session while the
-  // stage stays put; the "..." prefix is the transition-in-flight signal.
-  return item.has_running_post ? `... ${raw}` : raw;
+  // A running post or an accepted stage advance is still in flight; the
+  // "..." prefix keeps its projected destination from reading as durable.
+  return item.has_running_post || item.stage_advance_pending ? `... ${raw}` : raw;
 }
 
 function itemTooltip(item: SidebarTaskItem): string | undefined {

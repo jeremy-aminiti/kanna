@@ -390,7 +390,8 @@
   },
   "taskHeader": {
     "branchLabel": "ブランチ:",
-    "prPrefix": "PR #"
+    "prPrefix": "PR #",
+    "stageAdvancePending": "ステージ変更を処理中"
   },
   "app": {
     "selectRepoFirst": "リポジトリを先に選択してください",

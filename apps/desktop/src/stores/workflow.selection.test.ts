@@ -8,7 +8,7 @@ import {
 } from "../services/desktopServerClient";
 import type { PipelineItem, Repo } from "../types/kanna";
 import { createWorkflowApi } from "./workflow";
-import { createStoreContext, createStoreState } from "./state";
+import { createStoreContext, createStoreState, type KannaSnapshot } from "./state";
 
 const { invokeMock, resolveBaseUrlMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(async () => null),
@@ -49,6 +49,15 @@ function mockDefaultWorkflow() {
   return fetchRepoWorkflowDefinition;
 }
 
+function snapshotFor(state: ReturnType<typeof createStoreState>): KannaSnapshot {
+  return {
+    entries: [{ repo: state.repos.value[0]!, items: state.items.value }],
+    taskBlockers: [],
+    worktreePaths: {},
+    settings: {},
+  };
+}
+
 describe("advanceStage durable selection", () => {
   beforeEach(() => {
     invokeMock.mockResolvedValue(null);
@@ -75,9 +84,26 @@ describe("advanceStage durable selection", () => {
       expect(taskId).toBe("task-next");
       state.selectedItemId.value = "create:next-stable";
     });
+    let authoritativeSnapshotPredicate:
+      | ((snapshot: KannaSnapshot) => boolean | Promise<boolean>)
+      | undefined;
+    let resolveAuthoritativeSnapshot: ((snapshot: KannaSnapshot) => void) | undefined;
+    const waitForAuthoritativeSnapshot = vi.fn((predicate: (
+      snapshot: KannaSnapshot,
+    ) => boolean | Promise<boolean>) => {
+      authoritativeSnapshotPredicate = predicate;
+      return new Promise<KannaSnapshot>((resolve) => {
+        resolveAuthoritativeSnapshot = resolve;
+      });
+    });
     const reloadSnapshot = vi.fn(async () => {
+      expect(waitForAuthoritativeSnapshot).toHaveBeenCalledOnce();
+      expect(state.selectedItemId.value).toBe("create:stable");
       source.closed_at = "2026-07-11T00:00:00Z";
       state.items.value = [source, next];
+      const snapshot = snapshotFor(state);
+      expect(await authoritativeSnapshotPredicate!(snapshot)).toBe(true);
+      resolveAuthoritativeSnapshot!(snapshot);
     });
     const context = createStoreContext(state, {
       warning: vi.fn(),
@@ -88,6 +114,7 @@ describe("advanceStage durable selection", () => {
       isItemHidden: (item) => item.closed_at != null,
       selectItem,
       reloadSnapshot,
+      waitForAuthoritativeSnapshot,
     });
     vi.stubGlobal("fetch", vi.fn(async () => new Response(
       JSON.stringify({ taskId: "task-source" }),
@@ -118,9 +145,26 @@ describe("advanceStage durable selection", () => {
     const persistSelection = vi.fn(async () => {
       persistedSlotIds.push(state.selectedItemId.value);
     });
+    let authoritativeSnapshotPredicate:
+      | ((snapshot: KannaSnapshot) => boolean | Promise<boolean>)
+      | undefined;
+    let resolveAuthoritativeSnapshot: ((snapshot: KannaSnapshot) => void) | undefined;
+    const waitForAuthoritativeSnapshot = vi.fn((predicate: (
+      snapshot: KannaSnapshot,
+    ) => boolean | Promise<boolean>) => {
+      authoritativeSnapshotPredicate = predicate;
+      return new Promise<KannaSnapshot>((resolve) => {
+        resolveAuthoritativeSnapshot = resolve;
+      });
+    });
     const reloadSnapshot = vi.fn(async () => {
+      expect(waitForAuthoritativeSnapshot).toHaveBeenCalledOnce();
+      expect(state.selectedItemId.value).toBe("create:stable");
       source.closed_at = "2026-07-11T00:00:00Z";
       state.items.value = [source];
+      const snapshot = snapshotFor(state);
+      expect(await authoritativeSnapshotPredicate!(snapshot)).toBe(true);
+      resolveAuthoritativeSnapshot!(snapshot);
     });
     const context = createStoreContext(state, {
       warning: vi.fn(),
@@ -130,6 +174,7 @@ describe("advanceStage durable selection", () => {
       sortedItemsForCurrentRepo: computed(() => [source]),
       persistSelection,
       reloadSnapshot,
+      waitForAuthoritativeSnapshot,
     });
     vi.stubGlobal("fetch", vi.fn(async () => new Response(
       JSON.stringify({ taskId: "task-source" }),
