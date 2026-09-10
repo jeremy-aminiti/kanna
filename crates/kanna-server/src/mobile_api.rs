@@ -123,6 +123,8 @@ pub struct TaskSummary {
     #[serde(default)]
     pub machine_id: Option<String>,
     pub created_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
     /// Derived display value blending both dimensions below: `working` |
     /// `idle` | `unread`. Kept for every existing consumer; read
     /// `runtimeState`/`readState` when you need one dimension on its own.
@@ -779,6 +781,33 @@ impl MobileApi {
         self.map_task_summaries(items, &repo_names)
     }
 
+    pub fn get_tasks(
+        &self,
+        include_closed: bool,
+        repo_id: Option<&str>,
+        runtime_state: Option<&str>,
+        sort: crate::db::TaskListSort,
+        order: crate::db::TaskListOrder,
+        limit: u32,
+    ) -> Result<(Vec<TaskSummary>, bool), String> {
+        record_orphaned_initialized_tasks(&self._db)?;
+        let repo_names = self.repo_names_by_id()?;
+        let mut items = self
+            ._db
+            .list_pipeline_items_query(
+                include_closed,
+                repo_id,
+                runtime_state,
+                sort,
+                order,
+                limit.saturating_add(1),
+            )
+            .map_err(|e| format!("db error: {e}"))?;
+        let truncated = items.len() > limit as usize;
+        items.truncate(limit as usize);
+        Ok((self.map_task_summaries(items, &repo_names)?, truncated))
+    }
+
     pub fn search_tasks(&self, query: &str) -> Result<Vec<TaskSummary>, String> {
         self.search_tasks_including_closed(query, false, None)
     }
@@ -1161,6 +1190,7 @@ fn map_task_summary(
         closed_at: item.closed_at,
         machine_id: Some(machine_id.to_string()),
         created_at: item.created_at,
+        updated_at: item.updated_at,
         runtime_state: item.runtime_status,
         read_state: Some(read_state_for_activity(item.activity.as_deref()).to_string()),
         activity: item.activity,

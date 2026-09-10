@@ -2221,6 +2221,50 @@ fn serve_confirms_a_transient_stop_on_every_task_list_route() {
 }
 
 #[test]
+fn get_tasks_routes_filtered_sort_arguments_and_returns_completeness_envelope() {
+    let path = "/v1/tasks?runtimeState=idle&sortBy=createdAt&order=asc&limit=5";
+    let response = json!({
+        "tasks": [summary_with_activity("idle-1", "working")],
+        "scope": { "kind": "machine", "machineIds": ["desktop-1"] },
+        "runtimeState": "idle",
+        "includeClosed": false,
+        "sortBy": "createdAt",
+        "order": "asc",
+        "limit": 5,
+        "truncated": false,
+        "machineErrors": []
+    });
+    let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
+        method: "GET",
+        path,
+        body: None,
+        response_status: "200 OK",
+        response_body: response.clone(),
+    }]);
+
+    let responses = run_kanna_mcp(
+        &base_url,
+        &[json!({
+            "jsonrpc": "2.0",
+            "id": 24,
+            "method": "tools/call",
+            "params": {
+                "name": "kanna_get_tasks",
+                "arguments": {
+                    "runtime_state": "idle",
+                    "sort_by": "createdAt",
+                    "order": "asc",
+                    "limit": 5
+                }
+            }
+        })],
+    );
+
+    server.join().expect("fixture server");
+    assert_eq!(tool_text(&responses[0]), response);
+}
+
+#[test]
 fn serve_reports_a_held_stop_on_a_task_list_route_within_the_confirmation_delay() {
     let held = json!([
         summary_with_activity("child-1", "working"),

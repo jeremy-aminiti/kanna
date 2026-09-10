@@ -191,6 +191,24 @@
       ]
     },
     {
+      "name": "kanna_get_tasks",
+      "description": "Get a bounded, explicitly ordered task snapshot without fetching per-task detail. Inside a task session this defaults to open tasks in that task's repository, ordered by updatedAt descending, with a limit of 50. Filter runtime_state only by the daemon runtimeState vocabulary; a missing runtimeState is unknown and never matches idle. The response always reports the effective filter, sort, order, limit, scope, truncation, and machineErrors, so tasks must not be treated as a complete set when truncated is true or machineErrors is non-empty. all_machines asks each reachable peer to apply the same filter before its limit; independently deployed older peers that do not support this filtered route are reported in machineErrors and are never substituted with unfiltered older pages. Rows are compact summaries, not task detail.",
+      "method": "GET",
+      "path": "/v1/tasks",
+      "response": "json",
+      "params": [
+        { "name": "machine_id", "description": "Machine id from kanna_list_machines. Omit it to use the connected machine, unless all_machines is true.", "type": "string", "required": false, "location": "routing" },
+        { "name": "repo_id", "description": "Repository id to query on one machine. Inside a task session this defaults to the caller task's repository unless all_repos or all_machines is true. Cannot be combined with all_machines because repository ids are machine-local.", "type": "string", "required": false, "location": "query", "key": "repoId" },
+        { "name": "all_repos", "description": "Query across repositories on the selected machine instead of applying the caller task's repository default. Cannot be combined with repo_id.", "type": "boolean", "required": false, "location": "query", "key": "allRepos" },
+        { "name": "runtime_state", "description": "Return only tasks whose daemon runtimeState exactly matches. Missing runtimeState is unknown and matches no value, including idle.", "type": "string", "required": false, "location": "query", "key": "runtimeState", "enum": ["busy", "waiting", "idle", "exited"] },
+        { "name": "sort_by", "description": "Timestamp field used for ordering. Defaults to updatedAt.", "type": "string", "required": false, "location": "query", "key": "sortBy", "enum": ["updatedAt", "createdAt"], "default": "updatedAt" },
+        { "name": "order", "description": "Sort direction. Defaults to desc.", "type": "string", "required": false, "location": "query", "enum": ["asc", "desc"], "default": "desc" },
+        { "name": "limit", "description": "Maximum rows in the final response, clamped to 200. Defaults to 50. Check truncated before treating the result as complete.", "type": "integer", "required": false, "location": "query", "min": 1, "max": 200, "default": 50 },
+        { "name": "all_machines", "description": "Aggregate the same filtered query across the connected machine and every currently reachable account peer. Cannot be combined with repo_id. Check scope.machineIds and machineErrors; an older or unreachable peer makes the account snapshot incomplete.", "type": "boolean", "required": false, "location": "query", "key": "allMachines" },
+        { "name": "include_closed", "description": "Include closed tasks as well as open tasks. Defaults to false.", "type": "boolean", "required": false, "location": "query", "key": "includeClosed" }
+      ]
+    },
+    {
       "name": "kanna_list_recent_tasks",
       "description": "List recent Kanna tasks, newest first by update time. Inside a task session this defaults to that task's repository; pass all_repos for the rare cross-repository view. Set all_machines to discover tasks on every currently reachable account machine; that preserves the account-wide aggregation and returns tasks plus explicit machineErrors. Rows carry a prompt bounded to 500 characters, the latest durable agent name in agent, and the session transport in agentType.",
       "method": "GET",

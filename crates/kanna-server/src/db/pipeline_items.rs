@@ -1,6 +1,7 @@
 use super::{
     CloudTaskIdentityWrite, Db, NewPipelineItem, OpenAgentTask, PipelineItem, PipelineItemChild,
-    ReopenPipelineItemError, TaskEventKind, TaskStageSource, TaskStateSummary,
+    ReopenPipelineItemError, TaskEventKind, TaskListOrder, TaskListSort, TaskStageSource,
+    TaskStateSummary,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
@@ -174,52 +175,86 @@ impl Db {
         repo_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<PipelineItem>, rusqlite::Error> {
-        let mut stmt = self.conn.prepare(
+        self.list_pipeline_items_query(
+            include_closed,
+            repo_id,
+            None,
+            TaskListSort::UpdatedAt,
+            TaskListOrder::Desc,
+            limit,
+        )
+    }
+
+    pub fn list_pipeline_items_query(
+        &self,
+        include_closed: bool,
+        repo_id: Option<&str>,
+        runtime_state: Option<&str>,
+        sort: TaskListSort,
+        order: TaskListOrder,
+        limit: u32,
+    ) -> Result<Vec<PipelineItem>, rusqlite::Error> {
+        let direction = match order {
+            TaskListOrder::Asc => "ASC",
+            TaskListOrder::Desc => "DESC",
+        };
+        let order_clause = match sort {
+            TaskListSort::UpdatedAt => {
+                format!("updated_at {direction}, created_at {direction}, id {direction}")
+            }
+            TaskListSort::CreatedAt => format!("created_at {direction}, id {direction}"),
+        };
+        let sql = format!(
             "SELECT id, repo_id, issue_number, issue_title, prompt, pipeline, stage,
              pr_number, pr_url, branch, agent_type, agent_provider, activity, activity_changed_at,
              closed_at, pinned, pin_order, display_name, last_output_preview, created_at, updated_at, base_ref, notify_task_id, notified_at, parent_task_id, pipeline_def, activity_revision, cloud_task_id, revision_rounds, runtime_status, composer_text, composer_attestation
              FROM pipeline_item
              WHERE (?1 OR closed_at IS NULL)
                AND (?2 IS NULL OR repo_id = ?2)
-             ORDER BY updated_at DESC, created_at DESC
-             LIMIT ?3",
+               AND (?3 IS NULL OR runtime_status = ?3)
+             ORDER BY {order_clause}
+             LIMIT ?4"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params![include_closed, repo_id, runtime_state, limit],
+            |row| {
+                Ok(PipelineItem {
+                    id: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    issue_number: row.get(2)?,
+                    issue_title: row.get(3)?,
+                    prompt: row.get(4)?,
+                    pipeline: row.get(5)?,
+                    stage: row.get(6)?,
+                    pr_number: row.get(7)?,
+                    pr_url: row.get(8)?,
+                    branch: row.get(9)?,
+                    agent_type: row.get(10)?,
+                    agent_provider: row.get(11)?,
+                    activity: row.get(12)?,
+                    activity_changed_at: row.get(13)?,
+                    closed_at: row.get(14)?,
+                    pinned: row.get(15)?,
+                    pin_order: row.get(16)?,
+                    display_name: row.get(17)?,
+                    last_output_preview: row.get(18)?,
+                    created_at: row.get(19)?,
+                    updated_at: row.get(20)?,
+                    base_ref: row.get(21)?,
+                    notify_task_id: row.get(22)?,
+                    notified_at: row.get(23)?,
+                    parent_task_id: row.get(24)?,
+                    pipeline_def: row.get(25)?,
+                    activity_revision: row.get(26)?,
+                    cloud_task_id: row.get(27)?,
+                    revision_rounds: row.get(28)?,
+                    runtime_status: row.get(29)?,
+                    composer_text: row.get(30)?,
+                    composer_attestation: row.get(31)?,
+                })
+            },
         )?;
-        let rows = stmt.query_map(rusqlite::params![include_closed, repo_id, limit], |row| {
-            Ok(PipelineItem {
-                id: row.get(0)?,
-                repo_id: row.get(1)?,
-                issue_number: row.get(2)?,
-                issue_title: row.get(3)?,
-                prompt: row.get(4)?,
-                pipeline: row.get(5)?,
-                stage: row.get(6)?,
-                pr_number: row.get(7)?,
-                pr_url: row.get(8)?,
-                branch: row.get(9)?,
-                agent_type: row.get(10)?,
-                agent_provider: row.get(11)?,
-                activity: row.get(12)?,
-                activity_changed_at: row.get(13)?,
-                closed_at: row.get(14)?,
-                pinned: row.get(15)?,
-                pin_order: row.get(16)?,
-                display_name: row.get(17)?,
-                last_output_preview: row.get(18)?,
-                created_at: row.get(19)?,
-                updated_at: row.get(20)?,
-                base_ref: row.get(21)?,
-                notify_task_id: row.get(22)?,
-                notified_at: row.get(23)?,
-                parent_task_id: row.get(24)?,
-                pipeline_def: row.get(25)?,
-                activity_revision: row.get(26)?,
-                cloud_task_id: row.get(27)?,
-                revision_rounds: row.get(28)?,
-                runtime_status: row.get(29)?,
-                composer_text: row.get(30)?,
-                composer_attestation: row.get(31)?,
-            })
-        })?;
         rows.collect()
     }
 

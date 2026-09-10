@@ -14,6 +14,180 @@ use std::sync::Arc;
 const DEFAULT_RECENT_TASK_LIMIT: u32 = 50;
 const MAX_RECENT_TASK_LIMIT: u32 = 200;
 
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum TaskRuntimeState {
+    Busy,
+    Waiting,
+    Idle,
+    Exited,
+}
+
+impl TaskRuntimeState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Busy => "busy",
+            Self::Waiting => "waiting",
+            Self::Idle => "idle",
+            Self::Exited => "exited",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum TaskSort {
+    #[default]
+    UpdatedAt,
+    CreatedAt,
+}
+
+impl TaskSort {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::UpdatedAt => "updatedAt",
+            Self::CreatedAt => "createdAt",
+        }
+    }
+
+    fn db_sort(self) -> crate::db::TaskListSort {
+        match self {
+            Self::UpdatedAt => crate::db::TaskListSort::UpdatedAt,
+            Self::CreatedAt => crate::db::TaskListSort::CreatedAt,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum TaskSortOrder {
+    Asc,
+    #[default]
+    Desc,
+}
+
+impl TaskSortOrder {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+
+    fn db_order(self) -> crate::db::TaskListOrder {
+        match self {
+            Self::Asc => crate::db::TaskListOrder::Asc,
+            Self::Desc => crate::db::TaskListOrder::Desc,
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskListScope {
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo_id: Option<String>,
+    machine_ids: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GetTasksResponse {
+    tasks: Vec<crate::mobile_api::TaskSummary>,
+    scope: TaskListScope,
+    runtime_state: Option<String>,
+    include_closed: bool,
+    sort_by: String,
+    order: String,
+    limit: u32,
+    truncated: bool,
+    machine_errors: Vec<serde_json::Value>,
+}
+
+pub(super) async fn get_tasks(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<GetTasksQuery>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {e}"),
+        )
+    })?;
+    if crate::mobile_api::record_orphaned_initialized_tasks(&db)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+    {
+        state.publish_state_changed(StateChangeScope::Tasks);
+    }
+    let repo_id = task_listing_repo_filter(
+        query.repo_id.as_deref(),
+        query.all_repos,
+        query.all_machines,
+    )?;
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_RECENT_TASK_LIMIT)
+        .clamp(1, MAX_RECENT_TASK_LIMIT);
+    let runtime_state = query.runtime_state.map(TaskRuntimeState::as_str);
+    let api = MobileApi::new(state.config.clone(), db);
+    let (tasks, truncated) = api
+        .get_tasks(
+            query.include_closed,
+            repo_id,
+            runtime_state,
+            query.sort_by.db_sort(),
+            query.order.db_order(),
+            limit,
+        )
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let response = GetTasksResponse {
+        tasks,
+        scope: TaskListScope {
+            kind: if repo_id.is_some() {
+                "repository"
+            } else {
+                "machine"
+            }
+            .to_string(),
+            repo_id: repo_id.map(str::to_string),
+            machine_ids: vec![state.config.desktop_id.clone()],
+        },
+        runtime_state: runtime_state.map(str::to_string),
+        include_closed: query.include_closed,
+        sort_by: query.sort_by.as_str().to_string(),
+        order: query.order.as_str().to_string(),
+        limit,
+        truncated,
+        machine_errors: Vec::new(),
+    };
+    if !query.all_machines {
+        return Ok(Json(
+            serde_json::to_value(response).expect("serialize task list"),
+        ));
+    }
+
+    aggregate_get_tasks(
+        &state,
+        response,
+        task_listing_remote_path(
+            "/v1/tasks",
+            &[
+                ("includeClosed", query.include_closed.to_string()),
+                ("allMachines", "false".to_string()),
+                ("allRepos", "true".to_string()),
+                ("sortBy", query.sort_by.as_str().to_string()),
+                ("order", query.order.as_str().to_string()),
+                ("limit", limit.to_string()),
+            ],
+            runtime_state.map(|state| ("runtimeState", state)),
+        ),
+        query.sort_by,
+        query.order,
+    )
+    .await
+}
+
 pub(super) async fn list_recent_tasks(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<ListTasksQuery>,
@@ -56,7 +230,7 @@ pub(super) async fn list_recent_tasks(
                 ("allRepos", query.all_repos.to_string()),
                 ("limit", limit.to_string()),
             ],
-            repo_id,
+            repo_id.map(|repo_id| ("repoId", repo_id)),
         ),
     )
     .await
@@ -362,6 +536,24 @@ pub(super) struct ListTasksQuery {
     all_machines: bool,
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct GetTasksQuery {
+    repo_id: Option<String>,
+    limit: Option<u32>,
+    #[serde(default)]
+    all_repos: bool,
+    #[serde(default)]
+    include_closed: bool,
+    #[serde(default)]
+    all_machines: bool,
+    runtime_state: Option<TaskRuntimeState>,
+    #[serde(default)]
+    sort_by: TaskSort,
+    #[serde(default)]
+    order: TaskSortOrder,
+}
+
 pub(super) async fn search_tasks(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<SearchTasksQuery>,
@@ -400,7 +592,7 @@ pub(super) async fn search_tasks(
                 ("allMachines", "false".to_string()),
                 ("allRepos", query.all_repos.to_string()),
             ],
-            repo_id,
+            repo_id.map(|repo_id| ("repoId", repo_id)),
         ),
     )
     .await
@@ -430,16 +622,110 @@ fn task_listing_repo_filter(
 fn task_listing_remote_path(
     base: &str,
     params: &[(&str, String)],
-    repo_id: Option<&str>,
+    extra: Option<(&str, &str)>,
 ) -> String {
     let mut query = params
         .iter()
         .map(|(key, value)| format!("{key}={}", encode_path_segment(value)))
         .collect::<Vec<_>>();
-    if let Some(repo_id) = repo_id {
-        query.push(format!("repoId={}", encode_path_segment(repo_id)));
+    if let Some((key, value)) = extra {
+        query.push(format!("{key}={}", encode_path_segment(value)));
     }
     format!("{base}?{}", query.join("&"))
+}
+
+async fn aggregate_get_tasks(
+    state: &Arc<AppState>,
+    mut response: GetTasksResponse,
+    remote_path: String,
+    sort: TaskSort,
+    order: TaskSortOrder,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    response.scope.kind = "account".to_string();
+    match state.list_active_relay_desktops().await {
+        Ok(machine_ids) => {
+            for machine_id in machine_ids {
+                if machine_id == state.config.desktop_id {
+                    continue;
+                }
+                response.scope.machine_ids.push(machine_id.clone());
+                match state
+                    .invoke_relay_desktop(
+                        machine_id.clone(),
+                        "GET".to_string(),
+                        remote_path.clone(),
+                        serde_json::Value::Null,
+                    )
+                    .await
+                {
+                    Ok(remote) if remote.status == 200 => match remote.body {
+                        Some(body) => match serde_json::from_value::<GetTasksResponse>(body) {
+                            Ok(mut peer) => {
+                                response.truncated |= peer.truncated;
+                                for task in &mut peer.tasks {
+                                    task.machine_id = Some(machine_id.clone());
+                                    if task.waiting_prompt_snippet.is_none() {
+                                        task.waiting_prompt_snippet = task.snippet.take();
+                                    }
+                                }
+                                response.tasks.append(&mut peer.tasks);
+                            }
+                            Err(error) => response.machine_errors.push(serde_json::json!({
+                                "machineId": machine_id,
+                                "error": format!("invalid filtered task-list response: {error}"),
+                            })),
+                        },
+                        None => response.machine_errors.push(serde_json::json!({
+                            "machineId": machine_id,
+                            "error": "filtered task-list response had no body",
+                        })),
+                    },
+                    Ok(remote) => response.machine_errors.push(serde_json::json!({
+                        "machineId": machine_id,
+                        "error": remote.error.unwrap_or_else(|| format!("HTTP {} (peer may not support kanna_get_tasks)", remote.status)),
+                    })),
+                    Err(error) => response.machine_errors.push(serde_json::json!({
+                        "machineId": machine_id,
+                        "error": error,
+                    })),
+                }
+            }
+        }
+        Err(error) => response.machine_errors.push(serde_json::json!({
+            "machineId": serde_json::Value::Null,
+            "error": error,
+        })),
+    }
+
+    response.tasks.sort_by(|left, right| {
+        let left_time = match sort {
+            TaskSort::UpdatedAt => &left.updated_at,
+            TaskSort::CreatedAt => &left.created_at,
+        };
+        let right_time = match sort {
+            TaskSort::UpdatedAt => &right.updated_at,
+            TaskSort::CreatedAt => &right.created_at,
+        };
+        let ascending = left_time
+            .cmp(right_time)
+            .then_with(|| match sort {
+                TaskSort::UpdatedAt => left.created_at.cmp(&right.created_at),
+                TaskSort::CreatedAt => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| left.machine_id.cmp(&right.machine_id))
+            .then_with(|| left.id.cmp(&right.id));
+        match order {
+            TaskSortOrder::Asc => ascending,
+            TaskSortOrder::Desc => ascending.reverse(),
+        }
+    });
+    if response.tasks.len() > response.limit as usize {
+        response.truncated = true;
+        response.tasks.truncate(response.limit as usize);
+    }
+    Ok(Json(
+        serde_json::to_value(response).expect("serialize aggregated task list"),
+    ))
 }
 
 async fn aggregate_task_summaries(

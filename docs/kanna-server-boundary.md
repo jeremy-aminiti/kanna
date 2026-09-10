@@ -558,6 +558,7 @@ in `docs/task-specs/c9f5721b.md` and enforced by the router authorization tests.
 - `GET /v1/repos/{repo_id}/recent-workflows` (workflow names the repo's tasks were most recently created with, newest first)
 - `POST /v1/tasks/{task_id}/actions/set-workflow` (re-pin an open task to a compatible workflow definition)
 - `POST /v1/tasks/{task_id}/actions/replace-workflow` (validate and replace one task's complete pinned definition, fenced by its previous snapshot)
+- `GET /v1/tasks?repoId=...&runtimeState=busy|waiting|idle|exited&sortBy=updatedAt|createdAt&order=asc|desc&limit=...` (generic bounded task snapshot; defaults to open tasks, `updatedAt desc`, and 50 rows; its response reports effective scope, query, truncation, and peer errors)
 - `GET /v1/tasks/recent`
 - `GET /v1/tasks/search?query=...`
 - `GET /v1/tasks/{task_id}/children` (durable direct-child fan-out history; includes closed children)
@@ -2022,6 +2023,18 @@ agent indistinguishable from a finished one:
 `GET /v1/tasks/{task_id}` and the task-listing routes report both, alongside
 the pre-existing `activity`.
 
+`GET /v1/tasks` filters on `runtimeState` in SQLite before applying its limit;
+it never derives an idle match from `activity` or `readState`, and a missing
+runtime state is unknown rather than idle. `updatedAt` ties use `createdAt` as
+a secondary key; remaining ties use task id (and machine id before task id
+after account-wide aggregation). The
+response envelope always includes `limit`, `truncated`, `scope.machineIds`, and
+`machineErrors`. An account-wide caller therefore has positive evidence when a
+bounded result or an unavailable/older peer makes the answer incomplete. A
+peer that does not implement the filtered route is an error; the aggregator
+does not fetch an unfiltered `/v1/tasks/recent` page and present it as a
+complete filtered result.
+
 `activity` (`working` \| `idle` \| `unread`) is **kept, unchanged in meaning**:
 it is the desktop's derived display value, blending both dimensions, and every
 existing consumer — the sidebar, mobile, the event feed, external supervisors —
@@ -2156,7 +2169,7 @@ route plus 1s, never one request per task:
 |---|---|
 | `kanna_get_task` | Only when that task already looked stopped. |
 | `kanna_wait_task` | Never. Its predicate reads recorded terminations, not `activity`, so there is no frame classification to confirm. |
-| `kanna_list_recent_tasks`, `kanna_search_tasks`, `kanna_list_repo_tasks` | Whenever **any** task in the response looks stopped. For a repo listing that is the common case, so budget these at roughly +1s per call regardless of how many tasks come back. |
+| `kanna_get_tasks`, `kanna_list_recent_tasks`, `kanna_search_tasks`, `kanna_list_repo_tasks` | Whenever **any** task in the response looks stopped. For a repo listing that is the common case, so budget these at roughly +1s per call regardless of how many tasks come back. |
 
 The current task row is not debounced: it always stores the daemon's latest
 complete-frame verdict. `task.activity_changed` events use the server debounce

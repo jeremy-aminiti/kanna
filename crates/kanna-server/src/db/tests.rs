@@ -1,7 +1,8 @@
 use super::NewStageRun;
 use super::{
     add_column, database_open_flags, run_migration, Db, NewPipelineItem, NewRepo, NewTaskTransfer,
-    NewTaskTransferProvenance, ReplaceTaskBlockersError, CURRENT_SCHEMA_MIGRATIONS,
+    NewTaskTransferProvenance, ReplaceTaskBlockersError, TaskListOrder, TaskListSort,
+    CURRENT_SCHEMA_MIGRATIONS,
 };
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
@@ -2966,6 +2967,71 @@ fn recent_task_listing_applies_repo_filter_and_limit_before_returning_rows() {
         searched.into_iter().map(|task| task.id).collect::<Vec<_>>(),
         vec!["repo-1-new", "repo-1-old"]
     );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn generic_task_listing_filters_runtime_before_limit_and_sorts_stably() {
+    let path = Db::test_db_path("generic-task-filter-sort");
+    let db = Db::open_for_tests(&path).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    for (id, created_at) in [
+        ("unknown-but-activity-idle", "2026-08-24 07:00:00"),
+        ("busy-but-unread", "2026-08-24 08:00:00"),
+        ("idle-b", "2026-08-24 09:00:00"),
+        ("idle-a", "2026-08-24 09:00:00"),
+    ] {
+        db.insert_test_pipeline_item(id, "repo-1", id, Some(id), "in progress", created_at)
+            .expect("insert task");
+    }
+    db.update_pipeline_item_runtime_status("busy-but-unread", "busy", None)
+        .expect("busy runtime");
+    db.update_pipeline_item_activity("busy-but-unread", "unread")
+        .expect("unread display state");
+    for id in ["idle-a", "idle-b"] {
+        db.update_pipeline_item_runtime_status(id, "idle", None)
+            .expect("idle runtime");
+    }
+
+    let first = db
+        .list_pipeline_items_query(
+            false,
+            Some("repo-1"),
+            Some("idle"),
+            TaskListSort::CreatedAt,
+            TaskListOrder::Asc,
+            1,
+        )
+        .expect("filtered task list");
+    assert_eq!(
+        first
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["idle-a"]
+    );
+
+    let descending = db
+        .list_pipeline_items_query(
+            false,
+            Some("repo-1"),
+            Some("idle"),
+            TaskListSort::CreatedAt,
+            TaskListOrder::Desc,
+            10,
+        )
+        .expect("descending task list");
+    assert_eq!(
+        descending
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["idle-b", "idle-a"]
+    );
+    assert!(descending
+        .iter()
+        .all(|task| task.runtime_status.as_deref() == Some("idle")));
 
     let _ = std::fs::remove_file(path);
 }

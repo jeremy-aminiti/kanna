@@ -1113,7 +1113,10 @@ pub fn repo_context_task_id(
     remote_machine_id: Option<&str>,
 ) -> Result<Option<String>, String> {
     let create_task = tool_name == "kanna_create_task";
-    let task_listing = matches!(tool_name, "kanna_list_recent_tasks" | "kanna_search_tasks");
+    let task_listing = matches!(
+        tool_name,
+        "kanna_get_tasks" | "kanna_list_recent_tasks" | "kanna_search_tasks"
+    );
     let task_watch = tool_name == "kanna_wait_events";
     if !create_task && !task_listing && !task_watch {
         return Ok(None);
