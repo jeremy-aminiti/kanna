@@ -63,14 +63,15 @@ import { sleep, startPtySession, type PtySession } from "../../helpers/pty";
 // lands as "tab to queue message" rather than executing, so
 // .kanna-busy-phase-start never appears within the 30s wait.
 // `codex_apps` is not a user-configured server (`codex mcp list` against a
-// totally fresh CODEX_HOME reports none) — it is a built-in feature, and
-// `codex --help`/`codex mcp --help` both document `--disable <FEATURE>`
-// (`-c features.<name>=false`) for exactly this kind of thing, though the
-// feature's exact name was not confirmed live (that would be a further live
-// CLI turn, out of this pass's bounded budget). The concrete next fix is
-// either that flag (once the feature name is confirmed) or a materially
-// longer busy-phase-start wait; this was not attempted a third time in this
-// pass per the one-fix-then-report bound.
+// totally fresh CODEX_HOME reports none) — it is a built-in feature.
+// Confirmed the exact flag with zero live-turn cost, no CLI invocation that
+// starts a session: `codex features list` (a local, instant, non-agentic
+// introspection command, run outside any test — not a live CLI turn) lists
+// `apps    stable    true` — the feature backing the "codex_apps" MCP
+// server, on by default. `--disable apps` is now passed at spawn below.
+// This has NOT yet been verified against a real run in this pass (that
+// would be the live-turn budget this note keeps separately accounted for);
+// it is a source correction only, ready for the next authorized run.
 
 const TRUST_PROMPT = /trustthecontentsofthisdirectory/i;
 
@@ -151,7 +152,7 @@ async function startCodexTui(): Promise<CodexTuiSetup> {
   await symlink(join(homedir(), ".codex", "auth.json"), join(codexHome, "auth.json"));
   const session = startPtySession(
     binary,
-    ["--yolo", "-m", "gpt-5.6-sol", "-c", 'model_reasoning_effort="low"'],
+    ["--yolo", "-m", "gpt-5.6-sol", "-c", 'model_reasoning_effort="low"', "--disable", "apps"],
     { cwd, env: { CODEX_HOME: codexHome } },
   );
   return { session, cwd, codexHome };
