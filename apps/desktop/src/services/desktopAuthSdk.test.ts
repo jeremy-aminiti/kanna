@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   verifyFirebaseAuthIndexedDbStorage: vi.fn(),
   invoke: vi.fn(),
   revokeDesktopCloudCredential: vi.fn(),
+  reconnectDesktopCloudRelay: vi.fn(),
 }));
 
 const MockDesktopPersistence = vi.hoisted(() => class {
@@ -55,6 +56,10 @@ vi.mock("./desktopCloudAssociation", () => ({
   revokeDesktopCloudCredential: mocks.revokeDesktopCloudCredential,
 }));
 
+vi.mock("./desktopServerClient", () => ({
+  reconnectDesktopCloudRelay: mocks.reconnectDesktopCloudRelay,
+}));
+
 describe("getConfiguredDesktopAuthSession", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -71,6 +76,7 @@ describe("getConfiguredDesktopAuthSession", () => {
     mocks.firebaseSignOut.mockReset().mockResolvedValue(undefined);
     mocks.invoke.mockReset();
     mocks.revokeDesktopCloudCredential.mockReset().mockResolvedValue(undefined);
+    mocks.reconnectDesktopCloudRelay.mockReset().mockResolvedValue(undefined);
     mocks.resolveDesktopFirebaseConfig.mockReset().mockResolvedValue({
       app: {
         apiKey: "kanna-local",
@@ -137,7 +143,7 @@ describe("getConfiguredDesktopAuthSession", () => {
     expect(mocks.getAuth).not.toHaveBeenCalled();
   });
 
-  it("revokes the desktop cloud credential before ending the local session", async () => {
+  it("revokes the desktop cloud credential and requests a relay reconnect before ending the local session", async () => {
     const { getConfiguredDesktopAuthSession } = await import("./desktopAuthSdk");
     const session = await getConfiguredDesktopAuthSession();
     await session.initialize();
@@ -145,8 +151,12 @@ describe("getConfiguredDesktopAuthSession", () => {
     await expect(session.signOut()).resolves.toEqual({ desktopCredentialError: null });
 
     expect(mocks.revokeDesktopCloudCredential).toHaveBeenCalledOnce();
+    expect(mocks.reconnectDesktopCloudRelay).toHaveBeenCalledOnce();
     expect(mocks.firebaseSignOut).toHaveBeenCalledOnce();
     expect(mocks.revokeDesktopCloudCredential.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.firebaseSignOut.mock.invocationCallOrder[0]!,
+    );
+    expect(mocks.reconnectDesktopCloudRelay.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.firebaseSignOut.mock.invocationCallOrder[0]!,
     );
   });
@@ -172,6 +182,52 @@ describe("getConfiguredDesktopAuthSession", () => {
     expect(warnSpy).toHaveBeenCalledWith(
       "[cloud] failed to release desktop credential during sign-out:",
       expect.objectContaining({ code: "permission-denied" }),
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  // Regression: a failed Firestore credential release used to short-circuit
+  // the whole sign-out flow before the relay reconnect request, so
+  // kanna-server never re-probed and its own account-bound LAN trust
+  // (machine_trust) was never reconciled for this sign-out at all - it kept
+  // believing the outgoing account was still authenticated until some later,
+  // unrelated relay hiccup.
+  it("still requests a relay reconnect when revoking the desktop cloud credential fails", async () => {
+    mocks.revokeDesktopCloudCredential.mockRejectedValue(
+      Object.assign(new Error("Missing or insufficient permissions."), {
+        code: "permission-denied",
+      }),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const { getConfiguredDesktopAuthSession } = await import("./desktopAuthSdk");
+    const session = await getConfiguredDesktopAuthSession();
+    await session.initialize();
+
+    await session.signOut();
+
+    expect(mocks.reconnectDesktopCloudRelay).toHaveBeenCalledOnce();
+    expect(mocks.reconnectDesktopCloudRelay.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.firebaseSignOut.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("signs out locally even when the relay reconnect request itself fails", async () => {
+    mocks.reconnectDesktopCloudRelay.mockRejectedValue(new Error("kanna-server unreachable"));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const { getConfiguredDesktopAuthSession } = await import("./desktopAuthSdk");
+    const session = await getConfiguredDesktopAuthSession();
+    await session.initialize();
+
+    await expect(session.signOut()).resolves.toEqual({ desktopCredentialError: null });
+
+    expect(mocks.firebaseSignOut).toHaveBeenCalledOnce();
+    expect(session.getState()).toEqual({ status: "signedOut" });
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[cloud] failed to request relay reconnect during sign-out:",
+      expect.any(Error),
     );
 
     warnSpy.mockRestore();

@@ -137,6 +137,19 @@ export function createFirebaseDesktopAuthSdk(auth: Auth, _app: FirebaseApp): Des
         desktopCredentialError = error instanceof Error ? error.message : String(error);
         console.warn("[cloud] failed to release desktop credential during sign-out:", error);
       }
+      // kanna-server's own account-bound LAN trust (machine_trust) is only
+      // reconciled when its relay loop re-probes and observes this desktop is
+      // no longer authenticated - it never reads this sign-out directly. That
+      // reconnect request must fire regardless of whether the Firestore
+      // credential release above succeeded: a failed cloud write must not
+      // also leave kanna-server believing the outgoing account is still
+      // signed in until its next unrelated relay hiccup.
+      try {
+        const { reconnectDesktopCloudRelay } = await import("./desktopServerClient");
+        await reconnectDesktopCloudRelay();
+      } catch (error) {
+        console.warn("[cloud] failed to request relay reconnect during sign-out:", error);
+      }
       await firebaseSignOut(auth);
       return { desktopCredentialError };
     },

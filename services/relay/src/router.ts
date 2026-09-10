@@ -16,6 +16,21 @@ interface ConnectionPair {
   pendingTunnels: Map<string, PendingTunnel>;
   pendingResponses: Map<string, WebSocket>;
   pendingResponseClasses: Map<string, RelayByteClass>;
+  /**
+   * Which exact socket is authorized to answer a pending desktop-to-desktop
+   * "invoke" - the `target` this router forwarded the request to, at the
+   * moment it forwarded it. Absent for a phone-originated request, which has
+   * no "wrong desktop answered" concern in the same sense (its target is
+   * that same, single addressed socket).
+   *
+   * Binding to the WebSocket object itself, not merely the desktop id
+   * string, is what makes this survive a reconnect for free: if the
+   * addressed desktop drops and reconnects before answering, `desktops` now
+   * maps that id to a *new* object, so the old expectation simply never
+   * matches again - a stale connection cannot answer on behalf of its
+   * replacement, and neither can any other desktop of the account.
+   */
+  pendingResponseExpectedSockets: Map<string, WebSocket>;
   terminalObservers: Map<string, Set<WebSocket>>;
 }
 
@@ -221,6 +236,34 @@ export function sendDataResponse(
   );
 }
 
+/**
+ * Removes any `sourceDesktopId` a non-desktop sender embedded in its own raw
+ * frame before that frame is ever forwarded to a desktop. Only this router's
+ * own "invoke" branch (`routeMessage`'s `from === "server"` desktop-to-desktop
+ * path) may ever write that field, from the sending connection's own
+ * relay-verified identity - see `RelayMessage.sourceDesktopId`'s own doc
+ * comment. A phone (or any future non-desktop sender) has no such identity to
+ * attest, so forwarding its frame *verbatim*, as every other message type
+ * here does, would let it plant an arbitrary claim a v2 receiver trusts
+ * unconditionally. Stripping it here, rather than only refusing to *write* it
+ * in the desktop path, closes the forgery regardless of which field name a
+ * future wire change might route it under similarly - anything already named
+ * `sourceDesktopId` in an inbound frame this router did not itself stamp is
+ * untrusted by construction.
+ */
+function stripUntrustedSourceDesktopId(
+  parsed: RelayMessage | null,
+  data: string,
+  dataByteLength: number,
+): { data: string; byteLength: number } {
+  if (!parsed || !("sourceDesktopId" in parsed)) {
+    return { data, byteLength: dataByteLength };
+  }
+  const { sourceDesktopId: _untrusted, ...rest } = parsed;
+  const stripped = JSON.stringify(rest);
+  return { data: stripped, byteLength: Buffer.byteLength(stripped) };
+}
+
 function messageIdKey(id: unknown): string | null {
   if (typeof id === "string" && id.length > 0) return id;
   if (typeof id === "number" && Number.isFinite(id)) return String(id);
@@ -299,6 +342,7 @@ function removeClient(pair: ConnectionPair, ws: WebSocket): void {
     if (client === ws) {
       pair.pendingResponses.delete(id);
       pair.pendingResponseClasses.delete(id);
+      pair.pendingResponseExpectedSockets.delete(id);
     }
   }
   for (const [key, clients] of pair.terminalObservers.entries()) {
@@ -421,6 +465,7 @@ function newConnectionPair(): ConnectionPair {
     pendingTunnels: new Map(),
     pendingResponses: new Map(),
     pendingResponseClasses: new Map(),
+    pendingResponseExpectedSockets: new Map(),
     terminalObservers: new Map(),
   };
 }
@@ -514,6 +559,7 @@ export function setServerConnection(
       if (requester === ws) {
         current.pendingResponses.delete(id);
         current.pendingResponseClasses.delete(id);
+        current.pendingResponseExpectedSockets.delete(id);
       }
     }
 
@@ -824,7 +870,14 @@ export function routeMessage(
           pair.terminalObservers.delete(key);
         }
       }
-      sendControlFrame(target, data, dataByteLength, byteClass);
+      // A phone has no relay-verified desktop identity to stamp; forward its
+      // frame with any `sourceDesktopId` it embedded itself stripped, so a
+      // v2 receiver never mistakes a phone-forged claim for this router's
+      // own attestation. This also refuses a phone-forwarded LAN bootstrap
+      // request: the target's `RelayAttestedSource` extractor requires a
+      // present source desktop id, which a phone can now never supply.
+      const forwarded = stripUntrustedSourceDesktopId(parsed, data, dataByteLength);
+      sendControlFrame(target, forwarded.data, forwarded.byteLength, byteClass);
     } else {
       if (target && target.readyState !== 1) {
         error = "Desktop offline";
@@ -842,11 +895,22 @@ export function routeMessage(
   } else {
     const idKey = messageIdKey(parsed?.id);
     if (parsed?.type === "response" && idKey) {
+      const expectedResponder = pair.pendingResponseExpectedSockets.get(idKey);
+      if (expectedResponder !== undefined && source !== expectedResponder) {
+        // A desktop-to-desktop invoke's pending entry is bound to the exact
+        // socket it was addressed to. This response came from a different
+        // one - guessed/observed the id, or answering on behalf of a desktop
+        // that has since reconnected as a new socket - so it is refused
+        // *without* touching the pending entry: the legitimately addressed
+        // desktop's own later response must still be able to consume it.
+        return;
+      }
       const hadPendingResponse = pair.pendingResponses.has(idKey);
       const target = pair.pendingResponses.get(idKey);
       pair.pendingResponses.delete(idKey);
       const responseClass = pair.pendingResponseClasses.get(idKey) ?? byteClass;
       pair.pendingResponseClasses.delete(idKey);
+      pair.pendingResponseExpectedSockets.delete(idKey);
       if (target && target.readyState === 1) {
         sendControlFrame(target, data, dataByteLength, responseClass);
       }
@@ -895,6 +959,10 @@ export function routeMessage(
       if (idKey && source) {
         pair.pendingResponses.set(idKey, source);
         pair.pendingResponseClasses.set(idKey, byteClass);
+        // Only the exact desktop this request was just addressed to may
+        // answer it - see `pendingResponseExpectedSockets`'s own doc comment
+        // and the check on the "response" branch above.
+        pair.pendingResponseExpectedSockets.set(idKey, target);
       }
       // Unlike every other frame this function forwards verbatim, an
       // "invoke" frame must carry provenance the target can act on: which
