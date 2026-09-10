@@ -326,6 +326,16 @@ async fn run_import(
         let destination_task_id = session::destination_task_id(transfer_id);
         let destination_worktree =
             session::destination_worktree_path(&repo_path, &destination_task_id);
+        db.upsert_transferred_task_manifest(
+            transfer_id,
+            &repo_id,
+            Some(&destination_task_id),
+            payload.task.head_oid.as_deref().unwrap_or_default(),
+            payload.task.base_oid.as_deref().unwrap_or_default(),
+        )
+        .map_err(|error| {
+            ImportFailure::Terminal(format!("transfer manifest admission failed: {error}"))
+        })?;
         let resume_session_id =
             materialize_resume_state(state, work, transfer_id, &payload, &destination_worktree)
                 .await?;
