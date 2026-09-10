@@ -90,6 +90,87 @@ async fn read_fake_daemon_command_optional(
     }
 }
 
+/// A daemon that reports no live session and then records what it is asked to
+/// spawn, without running it.
+///
+/// `spawn_recovery_fake_daemon` executes the provider command line, which
+/// needs a fake provider binary on the workspace path. Tests that only care
+/// about the prompt a replacement is spawned with — and tests on fixtures that
+/// have no provider binary — want the record, not the execution.
+///
+/// `refuse_spawn` makes the daemon answer `Spawn` with an error instead, which
+/// is what drives the real `fail_bound_stage_run` producer.
+async fn spawn_recording_fake_daemon(
+    daemon_dir: String,
+    refuse_spawn: bool,
+) -> tokio::task::JoinHandle<Vec<kanna_daemon::protocol::Command>> {
+    let socket_path = test_daemon_socket_path(&daemon_dir);
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    tokio::spawn(async move {
+        // Presence probe: no live session, so recovery may proceed.
+        let (presence_stream, _) = listener.accept().await.unwrap();
+        let (presence_read, mut presence_write) = presence_stream.into_split();
+        let mut presence_reader = BufReader::new(presence_read);
+        let mut presence_line = String::new();
+        presence_reader.read_line(&mut presence_line).await.unwrap();
+        presence_write
+            .write_all(
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&kanna_daemon::protocol::Event::SessionList {
+                        sessions: Vec::new(),
+                    })
+                    .unwrap()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        drop(presence_write);
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut commands = Vec::new();
+        while let Some(command) =
+            read_fake_daemon_command_optional(&mut reader, &mut write_half).await
+        {
+            if answer_terminal_carryover_probe(&command, &mut write_half).await {
+                continue;
+            }
+            let response = match &command {
+                kanna_daemon::protocol::Command::Kill { .. } => {
+                    kanna_daemon::protocol::Event::Error {
+                        code: Some(kanna_daemon::protocol::ErrorCode::SessionNotFound),
+                        message: "session not found".to_string(),
+                    }
+                }
+                kanna_daemon::protocol::Command::Spawn { session_id, .. }
+                | kanna_daemon::protocol::Command::SpawnAgent { session_id, .. } => {
+                    if refuse_spawn {
+                        kanna_daemon::protocol::Event::Error {
+                            code: None,
+                            message: "failed to spawn PTY: Device not configured".to_string(),
+                        }
+                    } else {
+                        kanna_daemon::protocol::Event::SessionCreated {
+                            session_id: session_id.clone(),
+                        }
+                    }
+                }
+                _ => kanna_daemon::protocol::Event::Ok,
+            };
+            write_half
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+            commands.push(command);
+        }
+        commands
+    })
+}
+
 /// Answer a stage-transition terminal-carryover probe the way a daemon with
 /// no terminal to carry would: `Snapshot` (sent before the kill) gets
 /// session-not-found, so the transition proceeds without a seed, and a

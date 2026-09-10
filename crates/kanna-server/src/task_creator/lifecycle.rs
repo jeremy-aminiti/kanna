@@ -612,6 +612,7 @@ fn record_stage_transition_run(
             true,
             Some(prepared.trigger),
             prepared.provider_override.as_ref(),
+            prepared.replaces_run_id.as_deref(),
         )?;
         if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
             db.set_stage_run_resume_fallback_reason(run_id, reason)?;
@@ -631,7 +632,13 @@ fn record_stage_transition_run(
 fn fail_bound_stage_run(db_path: &str, task_id: &str, run_id: &str, error: &str) {
     let result = format!("failed to start stage run: {error}");
     let record = Db::open(db_path).and_then(|db| {
-        db.finish_stage_run(run_id, "failed", Some(&result), Some("stage spawn failed"))?;
+        db.finish_stage_run_without_work(
+            run_id,
+            "failed",
+            Some(&result),
+            Some("stage spawn failed"),
+            crate::db::no_work_termination::STAGE_SPAWN_FAILED,
+        )?;
         db.update_pipeline_item_activity(task_id, "unread")?;
         db.update_pipeline_item_agent_session_id(task_id, None)
     });
@@ -673,6 +680,7 @@ fn record_stage_transition_failure(
             false,
             Some(prepared.trigger),
             prepared.provider_override.as_ref(),
+            prepared.replaces_run_id.as_deref(),
         )
         .map_err(|db_error| format!("db error: {db_error}"))?;
         if let Some(reason) = prepared.resume_fallback_reason.as_deref() {
@@ -1570,11 +1578,12 @@ fn fail_lifecycle_operation(
             .stage_run(&payload.run_id)?
             .is_some_and(|run| run.status == "running")
         {
-            db.finish_stage_run(
+            db.finish_stage_run_without_work(
                 &payload.run_id,
                 "failed",
                 Some(&result),
                 Some("stage spawn failed"),
+                crate::db::no_work_termination::LIFECYCLE_OPERATION_FAILED,
             )?;
         }
         db.update_pipeline_item_activity(&payload.task_id, "unread")?;
@@ -2082,7 +2091,13 @@ fn record_prepared_task_spawn_failure(
         }
         if matches!(run.status.as_str(), "running" | "cancelled") {
             return db
-                .finish_stage_run(&run.id, "failed", Some(&result), Some("task spawn failed"))
+                .finish_stage_run_without_work(
+                    &run.id,
+                    "failed",
+                    Some(&result),
+                    Some("task spawn failed"),
+                    crate::db::no_work_termination::TASK_SPAWN_FAILED,
+                )
                 .map_err(|e| format!("db error: {e}"));
         }
     }
@@ -2151,6 +2166,9 @@ fn record_rerun_stage_run(
             true,
             None,
             provider_override,
+            // A rerun is a deliberate redo, not a recovery: it must stay
+            // lineage-free so no-redo semantics are never inherited.
+            None,
         )?;
         db.delete_create_task_intent(task_id)
     })
@@ -2204,6 +2222,7 @@ fn record_rerun_stage_failure(
         false,
         None,
         provider_override,
+        None,
     )
     .map_err(|e| format!("db error: {}", e))
 }

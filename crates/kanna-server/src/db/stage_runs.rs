@@ -192,6 +192,7 @@ impl Db {
             completion_bound,
             trigger,
             None,
+            None,
         )
     }
 
@@ -205,13 +206,14 @@ impl Db {
         completion_bound: bool,
         trigger: Option<StageTrigger>,
         provider_override: Option<&StageProviderOverride>,
+        replaces_run_id: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO stage_run
              (id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
               session_id, provider_session_id, cwd, resumed_from_run_id, completion_transition,
-              completion_bound, trigger, provider_override)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              completion_bound, trigger, provider_override, replaces_run_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 run.id,
                 run.task_id,
@@ -232,6 +234,7 @@ impl Db {
                 completion_bound,
                 trigger.map(StageTrigger::as_str),
                 provider_override.and_then(StageProviderOverride::to_column),
+                replaces_run_id,
             ],
         )?;
         // A pending run has not started anything yet; the watcher wants the
@@ -295,7 +298,7 @@ impl Db {
             "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
                     session_id, provider_session_id, cwd, resumed_from_run_id,
                     resume_fallback_reason, completion_transition,
-                    COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                    COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id, no_work_termination
              FROM stage_run
              WHERE task_id = ?
              ORDER BY rowid ASC",
@@ -312,7 +315,7 @@ impl Db {
             "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result, feedback,
                     session_id, provider_session_id, cwd, resumed_from_run_id,
                     resume_fallback_reason, completion_transition,
-                    COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                    COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id, no_work_termination
              FROM stage_run WHERE task_id = ? AND status = 'running' ORDER BY rowid ASC",
         )?;
         let rows = stmt.query_map([task_id], stage_run_from_row)?;
@@ -347,7 +350,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id, no_work_termination
                  FROM stage_run
                  WHERE task_id = ?
                  ORDER BY rowid DESC
@@ -378,7 +381,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id, no_work_termination
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = ?
                  ORDER BY rowid DESC
@@ -400,7 +403,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id, no_work_termination
                  FROM stage_run WHERE id = ?",
                 [run_id],
                 stage_run_from_row,
@@ -423,7 +426,7 @@ impl Db {
                 "SELECT id, task_id, stage, kind, agent, agent_provider, model, effort, status, result,
                         feedback, session_id, provider_session_id, cwd, resumed_from_run_id,
                         resume_fallback_reason, completion_transition,
-                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at
+                        COALESCE(trigger, 'unspecified'), provider_override, started_at, finished_at, replaces_run_id, no_work_termination
                  FROM stage_run
                  WHERE task_id = ? AND stage = ? AND kind = 'main'
                    AND provider_session_id IS NOT NULL AND cwd IS NOT NULL
@@ -485,12 +488,41 @@ impl Db {
         })
     }
 
+    /// Close a run on a genuine agent or task verdict.
     pub fn finish_stage_run(
         &self,
         id: &str,
         status: &str,
         result: Option<&str>,
         feedback: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.finish_stage_run_inner(id, status, result, feedback, None)
+    }
+
+    /// Close a run that recorded no agent or task verdict, declaring why.
+    ///
+    /// `kind` comes from [`super::no_work_termination`]. It is written to its
+    /// own column rather than to `feedback`, which the rejected-resume and
+    /// quota producers must leave carrying a resumed revision's requested
+    /// changes.
+    pub fn finish_stage_run_without_work(
+        &self,
+        id: &str,
+        status: &str,
+        result: Option<&str>,
+        feedback: Option<&str>,
+        kind: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.finish_stage_run_inner(id, status, result, feedback, Some(kind))
+    }
+
+    fn finish_stage_run_inner(
+        &self,
+        id: &str,
+        status: &str,
+        result: Option<&str>,
+        feedback: Option<&str>,
+        no_work_termination: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
         let identity = self
             .conn
@@ -508,9 +540,10 @@ impl Db {
             .optional()?;
         let rows_affected = self.conn.execute(
             "UPDATE stage_run
-             SET status = ?, result = ?, feedback = ?, finished_at = datetime('now')
+             SET status = ?, result = ?, feedback = ?, no_work_termination = ?,
+                 finished_at = datetime('now')
              WHERE id = ?",
-            (status, result, feedback, id),
+            (status, result, feedback, no_work_termination, id),
         )?;
         if rows_affected == 0 {
             return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -722,12 +755,38 @@ impl Db {
         let Some((run_id, kind, completion_transition, trigger)) = run else {
             return Ok(None);
         };
-        self.finish_stage_run(&run_id, status, result, feedback)?;
+        // The session died mid-turn: no verdict was recorded here. The
+        // feedback marker stays exactly as it was so
+        // `restore_latest_interrupted_stage_run` still finds its undo, and the
+        // column carries the same fact in the form the walk reads.
+        self.finish_stage_run_without_work(
+            &run_id,
+            status,
+            result,
+            feedback,
+            super::no_work_termination::SESSION_INTERRUPTED,
+        )?;
         Ok(Some(FinishedStageRun {
             kind,
             completion_transition,
             trigger,
         }))
+    }
+
+    /// Set a run's replacement lineage directly. Tests need to build the
+    /// shapes production writes across several runs without driving every
+    /// producer that would have written them.
+    #[cfg(test)]
+    pub fn set_test_stage_run_replaces_run_id(
+        &self,
+        run_id: &str,
+        replaces_run_id: &str,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE stage_run SET replaces_run_id = ? WHERE id = ?",
+            (replaces_run_id, run_id),
+        )?;
+        Ok(())
     }
 
     pub fn cancel_running_stage_runs(&self, task_id: &str) -> Result<(), rusqlite::Error> {
@@ -822,5 +881,7 @@ fn stage_run_from_row(row: &rusqlite::Row<'_>) -> Result<StageRun, rusqlite::Err
         provider_override: StageProviderOverride::from_column(row.get(18)?),
         started_at: row.get(19)?,
         finished_at: row.get(20)?,
+        replaces_run_id: row.get(21)?,
+        no_work_termination: row.get(22)?,
     })
 }

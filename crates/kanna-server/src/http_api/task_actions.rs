@@ -1341,11 +1341,23 @@ pub(super) async fn resume_task(
                         format!("task has no stage run to resume: {task_id}"),
                     )
                 })?;
-            if !matches!(run.status.as_str(), "running" | "cancelled" | "failed") {
+            // `succeeded` belongs here because a recorded verdict does not keep
+            // a session alive. A manual stage's agent finishes its turn, parks
+            // at its composer, and waits — and when the machine reboots, that
+            // PTY dies with a `succeeded` run behind it. Refusing those was how
+            // restart recovery stopped working for every singleton and every
+            // manual stage: the desktop's attach-failure path calls this route,
+            // so a task nobody could resume was a task whose terminal never
+            // came back. The live-session case is still rejected below, after
+            // the daemon has been asked; this only decides what is eligible.
+            if !matches!(
+                run.status.as_str(),
+                "running" | "cancelled" | "failed" | "succeeded"
+            ) {
                 return Err((
                     axum::http::StatusCode::CONFLICT,
                     format!(
-                        "latest run is {}, not running, cancelled or failed: {}",
+                        "latest run is {}, not running, cancelled, failed or succeeded: {}",
                         run.status, task_id
                     ),
                 ));

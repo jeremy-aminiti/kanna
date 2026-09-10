@@ -995,6 +995,8 @@ mod tests {
             provider_session_id: provider_session_id.map(str::to_string),
             cwd: Some("/repo/.kanna-worktrees/task-1".into()),
             resumed_from_run_id: None,
+            replaces_run_id: None,
+            no_work_termination: None,
             resume_fallback_reason: None,
             completion_transition: None,
             trigger: "unspecified".into(),

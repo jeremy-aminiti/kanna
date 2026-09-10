@@ -375,13 +375,15 @@ async fn start_fallback(
          stage's next authorized candidate ({}) in the same workspace.",
         notice.provider, notice.text, replacement_provider,
     );
-    db.finish_stage_run(
+    db.finish_stage_run_without_work(
         &attempt.run_id,
         "failed",
         Some(&refused_result),
         // A resumed revision's requested changes are part of its record and
         // survive the replacement.
         attempt.feedback.as_deref(),
+        // The provider refused the turn outright: no work was recorded here.
+        crate::db::no_work_termination::QUOTA_REPLACEMENT,
     )
     .map_err(|error| format!("db error: {error}"))?;
     drop(db);

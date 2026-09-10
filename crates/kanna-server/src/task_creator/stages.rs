@@ -7,7 +7,8 @@ use super::definitions::{
 };
 use super::prepare_stage_run_spawn;
 use super::prompt::{
-    build_revision_resume_message, build_revision_task_prompt, build_target_stage_prompt,
+    build_completed_stage_recovery_prompt, build_revision_resume_message,
+    build_revision_task_prompt, build_target_stage_prompt,
     build_target_stage_prompt_with_instructions, RevisionRound,
 };
 use super::resume::{prepare_resume_workspace, same_cwd};
@@ -975,6 +976,90 @@ pub(crate) fn prepare_provider_fallback_for_api(
     )
 }
 
+/// How far back a completed-stage lookup will walk before giving up.
+///
+/// Lineage is data, and data can be wrong: a cycle or a pathological chain
+/// must end the walk rather than the process.
+const COMPLETED_STAGE_WALK_LIMIT: usize = 32;
+
+/// Does this restart follow a stage that already recorded its verdict, and if
+/// so what did it record?
+///
+/// Recovery is not one hop. A succeeded run can be followed by a recovery run
+/// that itself dies, and by a fresh fallback that dies after that; every
+/// replacement is a new row, and only walking back through them reaches the
+/// verdict. A second reboot used to stop at the first hop, find a `failed`
+/// bookkeeping row, and conclude the stage had never succeeded — then hand a
+/// finished agent the stage instructions again.
+///
+/// Runs that recorded no verdict of their own are transparent: still running,
+/// or terminated with the session-interruption bookkeeping the resume route
+/// writes. The walk stops at the first *genuine* verdict. A real success is
+/// the answer; a real failure or cancellation means this stage is being redone
+/// deliberately, and no-redo must not apply to it.
+///
+/// `replaces_run_id` is the lineage every restart writes. `resumed_from_run_id`
+/// is followed only as a fallback for rows written before that column existed,
+/// and keeps its own narrower meaning — "this spawn carried `--resume`" —
+/// which the rejected-resume observer still gates its one-shot retry on.
+fn resolve_completed_stage(
+    db: &Db,
+    run: &crate::db::StageRun,
+) -> Result<(bool, Option<String>), String> {
+    let mut status = run.status.clone();
+    let mut result = run.result.clone();
+    let mut feedback = run.feedback.clone();
+    let mut no_work_termination = run.no_work_termination.clone();
+    let mut previous = run
+        .replaces_run_id
+        .clone()
+        .or_else(|| run.resumed_from_run_id.clone());
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(run.id.clone());
+
+    for _ in 0..COMPLETED_STAGE_WALK_LIMIT {
+        if status == "succeeded" {
+            return Ok((true, result));
+        }
+        // Producer-declared, never inferred. The legacy feedback marker is
+        // still honoured so rows written before the column existed keep
+        // working; new rows are classified at the write by all six
+        // bookkeeping producers.
+        let recorded_no_verdict = matches!(status.as_str(), "running" | "pending")
+            || no_work_termination.is_some()
+            || feedback.as_deref() == Some(crate::http_api::SESSION_INTERRUPTION_FEEDBACK);
+        if !recorded_no_verdict {
+            return Ok((false, None));
+        }
+        let Some(previous_id) = previous else {
+            return Ok((false, None));
+        };
+        if !seen.insert(previous_id.clone()) {
+            log::warn!(
+                "completed-stage lineage for run {} cycles at {previous_id}",
+                run.id
+            );
+            return Ok((false, None));
+        }
+        let Some(row) = db
+            .stage_run(&previous_id)
+            .map_err(|error| format!("db error: {error}"))?
+        else {
+            return Ok((false, None));
+        };
+        status = row.status;
+        result = row.result;
+        feedback = row.feedback;
+        no_work_termination = row.no_work_termination;
+        previous = row.replaces_run_id.or(row.resumed_from_run_id);
+    }
+    log::warn!(
+        "completed-stage lineage for run {} exceeded {COMPLETED_STAGE_WALK_LIMIT} hops",
+        run.id
+    );
+    Ok((false, None))
+}
+
 fn prepare_stage_restart(
     db: &Db,
     config: &Config,
@@ -993,9 +1078,17 @@ fn prepare_stage_restart(
         .ok_or_else(|| format!("task has no stage run to resume: {task_id}"))?;
     match &intent {
         StageRestartIntent::ResumeProviderSession => {
-            if !matches!(run.status.as_str(), "cancelled" | "failed") {
+            // A `succeeded` run is resumable for the same reason a failed one
+            // is: the verdict describes the turn that ended, not the session
+            // that carried it. A manual stage parks its agent at the composer
+            // after recording success, so a daemon death there leaves a task
+            // whose conversation is still worth reopening. The caller has
+            // already proven the session absent, and the succeeded run keeps
+            // its own verdict — the resume records a new run beside it rather
+            // than rewriting history as an interruption.
+            if !matches!(run.status.as_str(), "cancelled" | "failed" | "succeeded") {
                 return Err(format!(
-                    "latest run is {}, not cancelled or failed: {}",
+                    "latest run is {}, not cancelled, failed or succeeded: {}",
                     run.status, task_id
                 ));
             }
@@ -1067,6 +1160,10 @@ fn prepare_stage_restart(
         | StageRestartIntent::NextProviderAfterQuotaRejection { .. } => run.feedback.clone(),
         StageRestartIntent::ResumeProviderSession => None,
     };
+    // Does this restart follow a stage whose verdict is already recorded? One
+    // walk answers it for all three intents, because the answer is a property
+    // of the stage's history, not of which intent is asking.
+    let (stage_already_succeeded, completed_stage_result) = resolve_completed_stage(db, &run)?;
     let superseded = db
         .stage_run_workflow_superseded(task_id, &run.id)
         .map_err(|error| format!("db error: {error}"))?;
@@ -1106,16 +1203,49 @@ fn prepare_stage_restart(
     let (workspace_spec, final_prompt, resume_fallback_reason) = match resume {
         Ok((_provider, workspace)) => (
             RunWorkspaceSpec::Resume(workspace),
-            format!(
-                "Kanna recovered this task after its previous terminal session ended before a \
-                 stage verdict was recorded. Continue the existing task from the preserved \
-                 conversation and worktree context. Review the current state, finish the \
-                 interrupted work, and follow the stage completion instructions. \
-                 Do not restart the task from scratch.\n\nTask reminder:\n{}",
-                source_task.prompt.as_deref().unwrap_or("")
-            ),
+            // What the agent is told must match what actually happened to it.
+            // A run that recorded success and then lost its PTY has no
+            // interrupted work to finish, and telling it otherwise is how a
+            // recovered manual stage redoes a stage it already completed.
+            if stage_already_succeeded {
+                format!(
+                    "Kanna recovered this task after its previous terminal session ended. \
+                     The last run already recorded its stage verdict, so there is no \
+                     interrupted work to finish and nothing to redo. Continue the existing \
+                     task from the preserved conversation and worktree context, and pick up \
+                     from wherever that conversation left off. Do not restart the task from \
+                     scratch and do not re-record a verdict you have already \
+                     recorded.\n\nTask reminder:\n{}",
+                    source_task.prompt.as_deref().unwrap_or("")
+                )
+            } else {
+                format!(
+                    "Kanna recovered this task after its previous terminal session ended before a \
+                     stage verdict was recorded. Continue the existing task from the preserved \
+                     conversation and worktree context. Review the current state, finish the \
+                     interrupted work, and follow the stage completion instructions. \
+                     Do not restart the task from scratch.\n\nTask reminder:\n{}",
+                    source_task.prompt.as_deref().unwrap_or("")
+                )
+            },
             None,
         ),
+        Err(reason) if stage_already_succeeded => {
+            // Both fallbacks land here: a transcript that failed preflight, and
+            // a resume the provider rejected at runtime. Neither may replay a
+            // stage whose verdict is already recorded.
+            log::info!(
+                "task resume unavailable for {task_id}: {reason}; \
+                 spawning fresh after a recorded success"
+            );
+            let prompt = build_completed_stage_recovery_prompt(
+                &target_stage.name,
+                &reason,
+                completed_stage_result.as_deref(),
+                source_task.prompt.as_deref().unwrap_or(""),
+            );
+            (RunWorkspaceSpec::Current, prompt, Some(reason))
+        }
         Err(reason) => {
             log::info!("task resume unavailable for {task_id}: {reason}; spawning fresh");
             let prev_result = previous_stage_result(db, task_id, source_task)?;
@@ -1197,6 +1327,11 @@ fn prepare_stage_restart(
         },
     )?;
     prepared.resume_fallback_reason = resume_fallback_reason;
+    // Every restart records what it replaced, whatever workspace it landed in.
+    // A fresh fallback resumes nothing, so `resumed_from_run_id` stays null on
+    // it and cannot carry this; without a separate pointer the chain back to a
+    // recorded verdict breaks at the first fallback.
+    prepared.replaces_run_id = Some(run.id.clone());
     Ok(prepared)
 }
 
