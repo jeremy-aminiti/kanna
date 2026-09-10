@@ -15,6 +15,7 @@ pub(super) const ADMISSION_INTERVAL: Duration = Duration::from_millis(60_000);
 /// exists to provide.
 pub(super) const MIN_OVERRIDE: Duration = Duration::from_millis(1_000);
 
+#[derive(Debug)]
 pub(super) struct Collection {
     first: Option<Instant>,
     last: Option<Instant>,
@@ -58,23 +59,38 @@ impl Collection {
         }
     }
 
-    pub(super) fn deadline(&self, receiver: Instant) -> Instant {
+    /// The subscription's own quiet/max-hold deadline, independent of any
+    /// single native call's receiver. `None` until something relevant has
+    /// been observed. A caller that chains several (up to 240s) native calls
+    /// to honor a larger window reads this to size each next request and to
+    /// know when it has genuinely finished, not merely run out of one call's
+    /// own budget.
+    pub(super) fn intrinsic_deadline(&self) -> Option<Instant> {
         match (self.first, self.last) {
-            (Some(first), Some(last)) => {
-                (last + self.quiet).min(first + self.max_hold).min(receiver)
-            }
-            _ => receiver,
+            (Some(first), Some(last)) => Some((last + self.quiet).min(first + self.max_hold)),
+            _ => None,
         }
     }
 
-    pub(super) fn ready(
-        &self,
-        count: usize,
-        capacity: i64,
-        receiver: Instant,
-        now: Instant,
-    ) -> bool {
-        count > 0 && (self.urgent || count >= capacity as usize || now >= self.deadline(receiver))
+    /// Capped by `receiver` (one native call's own hard budget) for sizing
+    /// how long that call should sleep before rechecking — never for deciding
+    /// whether the subscription's own window is satisfied; see `ready`.
+    pub(super) fn deadline(&self, receiver: Instant) -> Instant {
+        self.intrinsic_deadline().unwrap_or(receiver).min(receiver)
+    }
+
+    /// Whether the subscription's own criteria are genuinely satisfied:
+    /// urgent, a full page, or the intrinsic quiet/max-hold deadline reached.
+    /// Deliberately ignores any single native call's own receiver — a caller
+    /// chaining several calls to cover a window larger than one call's budget
+    /// must not mistake "this call's budget ran out" for "done".
+    pub(super) fn ready(&self, count: usize, capacity: i64, now: Instant) -> bool {
+        count > 0
+            && (self.urgent
+                || count >= capacity as usize
+                || self
+                    .intrinsic_deadline()
+                    .is_some_and(|deadline| now >= deadline))
     }
 }
 

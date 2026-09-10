@@ -100,13 +100,28 @@ async fn collect(
     state: Arc<AppState>,
     row: &EventSubscription,
     timeout: u64,
+    collection: Arc<std::sync::Mutex<subscription_timing::Collection>>,
 ) -> Result<Value, String> {
     let mut query = row.query.clone();
     query["timeoutSecs"] = json!(timeout);
     if let Some(cursor) = &row.cursor {
         query["cursor"] = json!(cursor);
     }
-    task_events::wait_subscription_events(state, query).await
+    task_events::wait_subscription_events(state, query, collection).await
+}
+
+/// A fresh, subscription-scoped collector seeded from the row's own
+/// (already-validated) quiet/max-hold overrides, falling back to the
+/// manager-adopted defaults when absent.
+fn fresh_collection(
+    row: &EventSubscription,
+) -> Arc<std::sync::Mutex<subscription_timing::Collection>> {
+    Arc::new(std::sync::Mutex::new(
+        subscription_timing::Collection::from_query(
+            row.query.get("quietMs").and_then(Value::as_u64),
+            row.query.get("maxHoldMs").and_then(Value::as_u64),
+        ),
+    ))
 }
 
 /// Query/body flag shared by every subscription endpoint: agent-facing callers
@@ -367,7 +382,11 @@ pub(super) async fn subscribe(
         wake_admitted: false,
     };
     drop(db);
-    let batch = collect(state.clone(), &row, 0).await.map_err(failure)?;
+    // A single zero-timeout bootstrap check: whatever is already settled,
+    // never a wait, so there is nothing here for a chained collection to own.
+    let batch = collect(state.clone(), &row, 0, fresh_collection(&row))
+        .await
+        .map_err(failure)?;
     accept_page(&mut row, batch, true);
     database(&state)
         .map_err(failure)?
@@ -570,42 +589,84 @@ async fn step(
     // peer legs, but an admitted relay request keeps running on the peer.
     // Recreating that wait for every local state edge exhausts its long-poll
     // permits even with only one subscription.
-    let batch = {
-        let collection = collect(
-            state.clone(),
-            &row,
-            kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS,
-        );
-        tokio::pin!(collection);
-        loop {
-            let mut notification = Box::pin(state.event_subscriptions_changed.notified());
-            notification.as_mut().enable();
-            let current = database(state)?
-                .event_subscription(id)
-                .map_err(|e| e.to_string())?;
-            if !current.is_some_and(|current| {
-                current.active
-                    && current.revision == row.revision
-                    && current.pending.is_none()
-                    && current.query == row.query
-                    && current.cursor == row.cursor
-            }) || !still_bound(state, &row)?
-            {
-                // Genuine retirement or a changed mailbox invalidates this
-                // collect. There is no relay cancellation protocol: at most
-                // one abandoned leg per peer per retirement finishes at its
-                // receiver's own deadline (MAX_WAIT_TIMEOUT_SECS). Repeated
-                // retirements can overlap those holds; this is not a bound on
-                // all historical requests from the subscription. Never put a
-                // cancelled aggregate back in the registry: it may already
-                // have advanced checkpoints for events not yet in the mailbox.
-                return Ok(Step::Iterate);
+    //
+    // One native call is capped at MAX_WAIT_TIMEOUT_SECS (240s) regardless of
+    // this subscription's own quiet/max-hold window, which can exceed it
+    // (defaults are 300s each). `collection` is shared across every chained
+    // call below, so the true first relevant observation — and hence the
+    // subscription's own deadline — survives across calls instead of
+    // resetting each time a call returns merely because its own native
+    // receiver expired. A native "events" outcome means the subscription's
+    // own criteria (urgent, full page, or quiet/max-hold reached) were
+    // genuinely satisfied; "timeout" means only that one call's own budget
+    // ran out, so the chain continues with the advanced cursor.
+    let collection = fresh_collection(&row);
+    let mut working_cursor = row.cursor.clone();
+    let batch = 'chain: loop {
+        let native_timeout = {
+            let guard = collection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match guard.intrinsic_deadline() {
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    remaining
+                        .as_secs()
+                        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+                        .clamp(1, kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS)
+                }
+                None => kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS,
             }
-            tokio::select! {
-                _ = notification => {},
-                _ = changes.recv() => {},
-                batch = &mut collection => break batch,
+        };
+        let mut call_row = row.clone();
+        call_row.cursor = working_cursor.clone();
+        let native_batch = {
+            let collection_call =
+                collect(state.clone(), &call_row, native_timeout, collection.clone());
+            tokio::pin!(collection_call);
+            loop {
+                let mut notification = Box::pin(state.event_subscriptions_changed.notified());
+                notification.as_mut().enable();
+                let current = database(state)?
+                    .event_subscription(id)
+                    .map_err(|e| e.to_string())?;
+                if !current.is_some_and(|current| {
+                    current.active
+                        && current.revision == row.revision
+                        && current.pending.is_none()
+                        && current.query == row.query
+                        && current.cursor == row.cursor
+                }) || !still_bound(state, &row)?
+                {
+                    // Genuine retirement or a changed mailbox invalidates this
+                    // collect. There is no relay cancellation protocol: at most
+                    // one abandoned leg per peer per retirement finishes at its
+                    // receiver's own deadline (MAX_WAIT_TIMEOUT_SECS). Repeated
+                    // retirements can overlap those holds; this is not a bound on
+                    // all historical requests from the subscription. Never put a
+                    // cancelled aggregate back in the registry: it may already
+                    // have advanced checkpoints for events not yet in the mailbox.
+                    return Ok(Step::Iterate);
+                }
+                tokio::select! {
+                    _ = notification => {},
+                    _ = changes.recv() => {},
+                    batch = &mut collection_call => break batch,
+                }
             }
+        };
+        match native_batch {
+            Ok(batch) => {
+                working_cursor = batch["cursor"].as_str().map(str::to_owned);
+                let machine_errors_present = batch["machineErrors"]
+                    .as_array()
+                    .is_some_and(|errors| !errors.is_empty());
+                if batch["waitOutcome"] == "timeout" && !machine_errors_present {
+                    continue 'chain;
+                }
+                break 'chain Ok(batch);
+            }
+            Err(error) => break 'chain Err(error),
         }
     };
     match batch {

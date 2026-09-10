@@ -520,10 +520,18 @@ async fn initial_discovery_fault_pins_local_tail_before_recovery() {
     let query = json!({"taskIds":"child-a,child-b", "from":"now",
         "includeCurrentActivity":false, "timeoutSecs":240, "limit":100});
     let started = tokio::time::Instant::now();
-    let fault =
-        super::super::super::task_events::wait_subscription_events(state.clone(), query.clone())
-            .await
-            .unwrap();
+    let fresh_collection = || {
+        Arc::new(std::sync::Mutex::new(
+            super::super::super::subscription_timing::Collection::default(),
+        ))
+    };
+    let fault = super::super::super::task_events::wait_subscription_events(
+        state.clone(),
+        query.clone(),
+        fresh_collection(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         tokio::time::Instant::now(),
         started,
@@ -540,9 +548,13 @@ async fn initial_discovery_fault_pins_local_tail_before_recovery() {
     .unwrap();
     let mut resumed = query;
     resumed["cursor"] = fault["cursor"].clone();
-    let page = super::super::super::task_events::wait_subscription_events(state, resumed)
-        .await
-        .unwrap();
+    let page = super::super::super::task_events::wait_subscription_events(
+        state,
+        resumed,
+        fresh_collection(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         event_pairs(&page),
         vec![("child-b".into(), "task.awaiting_input".into())]

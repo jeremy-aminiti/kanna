@@ -279,13 +279,15 @@ async fn both_adapters_trail_bursts_and_rate_gate_urgent_attention() {
         let first = watch.observed().await;
         tokio::time::advance(Duration::from_millis(800)).await;
         watch.emit(TaskEventKind::TaskClosed);
-        let last = watch.observed().await;
-        tokio::time::advance(Duration::from_millis(299_999)).await;
+        // max_hold is measured from `first`, quiet from this later event —
+        // with both set to 300s, max_hold's earlier deadline always wins, so
+        // this later observation does not push sealing out to `last + 300s`.
+        watch.observed().await;
+        tokio::time::advance(Duration::from_millis(299_199)).await;
         watch.no_admission();
         tokio::time::advance(Duration::from_millis(1)).await;
         let (batch, admitted) = watch.admitted().await;
-        assert_eq!(admitted, last + Duration::from_secs(300));
-        assert!(admitted > first + Duration::from_secs(300));
+        assert_eq!(admitted, first + Duration::from_secs(300));
         watch.delivered().await;
         assert_eq!(
             watch.row().pending.unwrap()["events"]
@@ -602,16 +604,22 @@ async fn restart_during_actual_delivery_parks_uncertainty_without_repeated_wake(
 }
 
 #[tokio::test(start_paused = true)]
-async fn receiver_deadline_clips_quiet_hold_without_losing_the_last_page() {
+async fn a_relevant_event_late_in_a_native_receiver_leg_still_gets_its_full_window() {
     let mut watch = Watch::new("input").await;
-    // Native collection is waiting on the existing 240s receiver window.
+    // The background worker's first native call has been running (silent)
+    // for nearly the whole of its own 240s receiver window before anything
+    // relevant arrives. The fixed 240s-native/300s-subscription split must
+    // chain a second (and, here, third) native call rather than truncating
+    // the ordinary collection window to whatever remained of this one.
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(239_500)).await;
     watch.emit(TaskEventKind::PrCreated);
     let observed = watch.observed().await;
-    tokio::time::advance(Duration::from_millis(500)).await;
+    tokio::time::advance(Duration::from_millis(299_999)).await;
+    watch.no_admission();
+    tokio::time::advance(Duration::from_millis(1)).await;
     let (_, admitted) = watch.admitted().await;
-    assert_eq!(admitted - observed, Duration::from_millis(500));
+    assert_eq!(admitted - observed, Duration::from_secs(300));
     watch.delivered().await;
     assert_eq!(
         event_pairs(watch.row().pending.as_ref().unwrap()),

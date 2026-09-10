@@ -14,7 +14,13 @@ fn run_with_policy(db: &Db, id: &str, task: &str, stage: &str, policy: &str) {
 }
 
 async fn selected(state: Arc<AppState>, query: Value) -> Value {
-    super::super::super::task_events::wait_subscription_events(state, query)
+    let collection = Arc::new(std::sync::Mutex::new(
+        super::super::super::subscription_timing::Collection::from_query(
+            query.get("quietMs").and_then(Value::as_u64),
+            query.get("maxHoldMs").and_then(Value::as_u64),
+        ),
+    ));
+    super::super::super::task_events::wait_subscription_events(state, query, collection)
         .await
         .unwrap()
 }
@@ -145,8 +151,15 @@ async fn excluded_events_neither_fill_batch_nor_start_its_debounce() {
     noise(&db, 8);
     let mut q = query(3);
     q["timeoutSecs"] = json!(30);
+    // `selected()` goes through `wait_subscription_events`, which always
+    // selects subscription-timing mode — the generic `minEvents`/`debounceMs`
+    // below are inert there. `quietMs` is that mode's own equivalent of the
+    // debounce this test exercises; `maxHoldMs` stays generous so quiet is
+    // what actually governs sealing here.
     q["minEvents"] = json!(2);
     q["debounceMs"] = json!(1000);
+    q["quietMs"] = json!(1_000);
+    q["maxHoldMs"] = json!(30_000);
     let wait = tokio::spawn(selected(state, q));
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(2)).await;
