@@ -32,9 +32,18 @@ loses its result is not evidence of a pass.
 
 ## Known incomplete checks
 
-- `./kd test all` has no current successful, retained-result run. The future
-  canonical run must likewise retain full output and an explicit exit-status
-  file under `.tmp/` before it is reported as passing.
+- Released revision-round-4 canonical gate: `CARGO_BUILD_JOBS=2 ./kd test all`
+  exited **1**. Full stdout/stderr is retained at
+  `.tmp/kd-test-all-revision4.log`; the owning shell's actual exit status is
+  `.tmp/kd-test-all-revision4.exit`. Its first failing target was the unrelated
+  desktop mock E2E `tests/e2e/mock/modal-tear-off.test.ts`, whose
+  `modal tear-off` assertion expected repo `modal-tear-off` but received
+  `modal-tear-off-startup`; the same run later also failed the unrelated
+  `tests/e2e/mock/terminal-output-performance.test.ts` because the terminal
+  buffer was not registered. Compared with this revision's base
+  `f269d4b00`, the branch changes only this verification document, so neither
+  failing test nor its product/test implementation is branch-caused. No source
+  change was made and this gate is not represented as passing.
 - Current-head canonical rerun (`CARGO_BUILD_JOBS=2 ./kd test all`) fixed the
   branch-caused route-audit omission below and then failed only in the
   independent `kanna-worker` default-database baseline: `config::tests::the_default_database_is_the_workers_own_under_its_data_dir` and
