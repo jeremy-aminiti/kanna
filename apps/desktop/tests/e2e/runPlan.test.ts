@@ -23,18 +23,23 @@ describe("shouldStartInitialInstances", () => {
 
 describe("remote visual companion runner plan", () => {
   const target = "tests/e2e/real/remote-visual-companion.test.ts";
+  const graphTarget = "tests/e2e/real/remote-task-graph-refusal.test.ts";
 
   it("starts both desktop instances", () => {
     expect(targetNeedsSecondaryInstance(target)).toBe(true);
+    expect(targetNeedsSecondaryInstance(graphTarget)).toBe(true);
   });
 
   it("isolates real agent providers so the non-returning fixture setup cannot launch one", () => {
     expect(targetNeedsIsolatedAgentProviders(target)).toBe(true);
+    expect(targetNeedsIsolatedAgentProviders(graphTarget)).toBe(true);
   });
 
   it("starts Firebase emulators and the relay", () => {
     expect(targetNeedsEmulators(target)).toBe(true);
     expect(targetNeedsRelay(target)).toBe(true);
+    expect(targetNeedsEmulators(graphTarget)).toBe(true);
+    expect(targetNeedsRelay(graphTarget)).toBe(true);
     expect(targetNeedsRelayControl(target)).toBe(true);
   });
 

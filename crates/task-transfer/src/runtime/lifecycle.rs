@@ -1702,6 +1702,45 @@ impl TransferRuntime {
         }
     }
 
+    pub async fn read_peer_task_graph(
+        &self,
+        target_peer_id: &str,
+        task_id: &str,
+        from_ref: Option<&str>,
+    ) -> Result<Value, RuntimeError> {
+        let target_peer = self.find_peer(target_peer_id).await?;
+        self.ensure_peer_is_durably_trusted(&target_peer.peer_id, &target_peer.public_key)?;
+        let request_id = self.next_request_id("read-task-graph");
+        let sealed_payload = self
+            .seal_authenticated_peer_request(
+                &target_peer,
+                "read_task_graph",
+                &request_id,
+                serde_json::json!({ "task_id": task_id, "from_ref": from_ref }),
+            )
+            .await?;
+        let response = self
+            .send_peer_request(
+                &target_peer,
+                PeerRequest::ReadTaskGraph {
+                    request_id: request_id.clone(),
+                    requester_peer_id: self.config.peer_id.clone(),
+                    task_id: task_id.to_owned(),
+                    from_ref: from_ref.map(str::to_owned),
+                    sealed_payload: Some(sealed_payload),
+                },
+            )
+            .await?;
+        match response {
+            PeerResponse::ReadTaskGraph {
+                request_id: response_request_id,
+                graph,
+            } if response_request_id == request_id => Ok(graph),
+            PeerResponse::Error { message, .. } => Err(RuntimeError::Protocol(message)),
+            other => Err(unexpected_peer_response("read-task-graph", &other)),
+        }
+    }
+
     pub async fn mark_peer_task_read(
         &self,
         target_peer_id: &str,

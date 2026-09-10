@@ -115,6 +115,13 @@ pub enum ControlRequest {
         scope: String,
         mode: String,
     },
+    ReadPeerTaskGraph {
+        request_id: String,
+        target_peer_id: String,
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_ref: Option<String>,
+    },
     MarkPeerTaskRead {
         request_id: String,
         target_peer_id: String,
@@ -300,6 +307,10 @@ pub enum ControlResponse {
     ReadPeerTaskDiff {
         request_id: String,
         diff: serde_json::Value,
+    },
+    ReadPeerTaskGraph {
+        request_id: String,
+        graph: serde_json::Value,
     },
     MarkPeerTaskRead {
         request_id: String,
@@ -550,6 +561,15 @@ pub enum PeerRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sealed_payload: Option<String>,
     },
+    ReadTaskGraph {
+        request_id: String,
+        requester_peer_id: String,
+        task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed_payload: Option<String>,
+    },
     MarkTaskRead {
         request_id: String,
         requester_peer_id: String,
@@ -647,6 +667,10 @@ pub enum PeerResponse {
     ReadTaskDiff {
         request_id: String,
         diff: serde_json::Value,
+    },
+    ReadTaskGraph {
+        request_id: String,
+        graph: serde_json::Value,
     },
     MarkTaskRead {
         request_id: String,

@@ -626,6 +626,7 @@ fn control_response_id(response: &ControlResponse) -> &str {
         | ControlResponse::ReadPeerTaskFile { request_id, .. }
         | ControlResponse::ReadPeerTaskDirectory { request_id, .. }
         | ControlResponse::ReadPeerTaskDiff { request_id, .. }
+        | ControlResponse::ReadPeerTaskGraph { request_id, .. }
         | ControlResponse::MarkPeerTaskRead { request_id }
         | ControlResponse::StartPairing { request_id, .. }
         | ControlResponse::AcceptPairing { request_id, .. }
@@ -645,4 +646,13 @@ fn control_response_id(response: &ControlResponse) -> &str {
         | ControlResponse::NackImportCommit { request_id, .. }
         | ControlResponse::MarkImportAckCompleted { request_id, .. } => request_id,
     }
+}
+
+#[test]
+fn read_peer_task_graph_response_carries_its_request_id() {
+    let response = ControlResponse::ReadPeerTaskGraph {
+        request_id: "graph-request".to_string(),
+        graph: serde_json::json!({ "commits": [] }),
+    };
+    assert_eq!(control_response_id(&response), "graph-request");
 }

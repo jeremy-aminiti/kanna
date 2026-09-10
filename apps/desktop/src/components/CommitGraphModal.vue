@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick } from "vue";
 import CommitGraphView from "./CommitGraphView.vue";
+import type { RemoteTaskGraphContent } from "../services/desktopRemoteTaskClient";
 import {
   useEmbeddableView,
   type EmbeddableViewProps,
@@ -9,6 +10,7 @@ import {
 const props = defineProps<EmbeddableViewProps & {
   repoPath: string;
   worktreePath?: string;
+  remoteGraphLoader?: (request: { fromRef?: "HEAD" }) => Promise<RemoteTaskGraphContent>;
 }>();
 
 const { zIndex, bringToFront, overlayClass, overlayStyle, dismissOnScrimClick, isForeground } =
@@ -43,6 +45,7 @@ onMounted(() => {
         ref="graphViewRef"
         :repo-path="repoPath"
         :worktree-path="worktreePath"
+        :remote-graph-loader="remoteGraphLoader"
         :is-foreground="isForeground"
         @close="emit('close')"
       />

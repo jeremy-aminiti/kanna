@@ -63,6 +63,60 @@ describe("CommitGraphView", () => {
     document.body.innerHTML = "";
   });
 
+  it("loads a remote task graph without invoking local git against its worktree", async () => {
+    const remoteGraphLoader = vi.fn(async () => ({
+      taskId: "owner-task",
+      headCommit: "aaa1111111111111111111111111111111111111",
+      commits: [{
+        hash: "aaa1111111111111111111111111111111111111",
+        shortHash: "aaa1111",
+        message: "from the owning machine",
+        author: "Owner",
+        timestamp: 1710000000,
+        parents: [],
+        refs: ["main"],
+      }],
+    }));
+    invokeMock.mockRejectedValue(new Error("local git must not run"));
+
+    const wrapper = mount(CommitGraphView, {
+      props: { repoPath: "/remote/repo", worktreePath: "/remote/worktree", remoteGraphLoader },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(remoteGraphLoader).toHaveBeenCalledOnce();
+    expect(remoteGraphLoader).toHaveBeenCalledWith({ fromRef: "HEAD" });
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("from the owning machine");
+  });
+
+  it("uses HEAD ancestry in auto mode and all refs after Space for a remote graph", async () => {
+    const remoteGraphLoader = vi.fn(async (request: { fromRef?: "HEAD" }) => ({
+      taskId: "owner-task",
+      headCommit: "aaa1111111111111111111111111111111111111",
+      commits: [{
+        hash: request.fromRef ? "aaa1111111111111111111111111111111111" : "ccc3333333333333333333333333333333333333",
+        shortHash: request.fromRef ? "aaa1111" : "ccc3333",
+        message: request.fromRef ? "HEAD only" : "all owner refs",
+        author: "Owner", timestamp: 1710000000, parents: [], refs: ["main"],
+      }],
+    }));
+    const wrapper = mount(CommitGraphView, {
+      props: { repoPath: "/remote/repo", remoteGraphLoader }, attachTo: document.body,
+    });
+    await flushPromises();
+    await flushPromises();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    await flushPromises();
+    await flushPromises();
+
+    expect(remoteGraphLoader).toHaveBeenNthCalledWith(1, { fromRef: "HEAD" });
+    expect(remoteGraphLoader).toHaveBeenNthCalledWith(2, { fromRef: undefined });
+    expect(wrapper.text()).toContain("all owner refs");
+  });
+
   it("opens search with slash and focuses the input", async () => {
     invokeMock.mockResolvedValue(graphResult());
 

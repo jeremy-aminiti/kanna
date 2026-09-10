@@ -12,12 +12,14 @@ import {
   type GraphLayout,
   type CurveDef,
 } from "../utils/commitGraph";
+import type { RemoteTaskGraphContent } from "../services/desktopRemoteTaskClient";
 
 const { t } = useI18n();
 
 const props = defineProps<{
   repoPath: string;
   worktreePath?: string;
+  remoteGraphLoader?: (request: { fromRef?: "HEAD" }) => Promise<RemoteTaskGraphContent>;
   /**
    * Whether this view is the one in front. `useLessScroll` binds window-level
    * keys, and a tab stays mounted behind another one, so without this a
@@ -343,11 +345,10 @@ async function loadGraph() {
   try {
     const path = props.worktreePath || props.repoPath;
     const fromRef = mode.value === "auto" ? "HEAD" : undefined;
-    const result = await invoke<GraphResult>("git_graph", {
-      repoPath: path,
-      fromRef,
-    });
-    headCommit.value = result.head_commit;
+    const result = props.remoteGraphLoader
+      ? await props.remoteGraphLoader({ fromRef })
+      : await invoke<GraphResult>("git_graph", { repoPath: path, fromRef });
+    headCommit.value = "headCommit" in result ? result.headCommit : result.head_commit;
     layout.value = layoutCommitGraph(result.commits);
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : String(e);

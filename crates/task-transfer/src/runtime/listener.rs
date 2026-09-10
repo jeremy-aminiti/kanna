@@ -6,8 +6,8 @@ use super::companion::{
 };
 use super::daemon::{
     advance_owner_task_stage, close_owner_task, mark_owner_task_read, prepare_session_observer,
-    read_owner_task_diff, read_owner_task_directory, read_owner_task_file, resize_daemon_session,
-    send_daemon_input, stream_daemon_session,
+    read_owner_task_diff, read_owner_task_directory, read_owner_task_file, read_owner_task_graph,
+    resize_daemon_session, send_daemon_input, stream_daemon_session,
 };
 use super::events::{
     IncomingTransferEvent, OutgoingTransferFinalizationRequestedEvent, PairingCompletedEvent,
@@ -1797,6 +1797,15 @@ async fn handle_connection(
                 request_id,
                 message: error.to_string(),
             },
+        },
+        Ok(PeerRequest::ReadTaskGraph { request_id, requester_peer_id, task_id, from_ref, sealed_payload }) => match async {
+            let payload = authenticate_peer_request(&context, &requester_peer_id, sealed_payload.as_deref(), "read_task_graph", &request_id).await?;
+            ensure_authenticated_argument(&payload, "task_id", &task_id)?;
+            ensure_optional_authenticated_argument(&payload, "from_ref", &from_ref)?;
+            read_owner_task_graph(&context, &task_id, from_ref.as_deref()).await
+        }.await {
+            Ok(graph) => PeerResponse::ReadTaskGraph { request_id, graph },
+            Err(error) => PeerResponse::Error { request_id, message: error.to_string() },
         },
         Ok(PeerRequest::MarkTaskRead {
             request_id,

@@ -6,9 +6,13 @@ import { useAppKeyboardActions } from "./useAppKeyboardActions";
 import type { ShortcutContext } from "./useShortcutContext";
 import { useMainTabs } from "./useMainTabs";
 
+const invokeMock = vi.hoisted(() => vi.fn());
+
 vi.mock("./useKeyboardShortcuts", () => ({
   useKeyboardShortcuts: vi.fn(),
 }));
+
+vi.mock("../invoke", () => ({ invoke: invokeMock }));
 
 function item(id: string): PipelineItem {
   return {
@@ -67,6 +71,8 @@ function createHarness(options: {
   const navigateForward = vi.fn(async () => {});
   const advanceSelectedRemoteWorkspaceTask = vi.fn(async () => {});
   const toast = { warning: vi.fn() };
+  const showFilePickerModal = ref(false);
+  const showFilePickerOnTop = vi.fn(() => { showFilePickerModal.value = true; });
   const store = {
     selectedRepoId: "repo-1",
     selectedItemId: options.selectedSlotId ?? "create:stable",
@@ -97,6 +103,11 @@ function createHarness(options: {
     shortcutsContext,
     shortcutsStartFull,
     showCommandPalette: ref(false),
+    showFilePickerModal,
+    showFilePickerOnTop,
+    closeFilePicker: vi.fn(),
+    getCurrentPreviewRecall: () => undefined,
+    openFilePreview: vi.fn(),
     navigateBack,
     navigateForward,
   } as unknown as Parameters<typeof useAppKeyboardActions>[0]);
@@ -114,6 +125,7 @@ function createHarness(options: {
     navigateBack,
     navigateForward,
     toast,
+    showFilePickerOnTop,
   };
 }
 
@@ -146,6 +158,52 @@ describe("useAppKeyboardActions durable selection", () => {
       selectedRepoId: "repo-1",
       selectedItemId: "cloud:repo:task-remote",
     });
+  });
+
+  it("refuses Open in IDE for a task owned by another machine without invoking a local path command", async () => {
+    const workspaceTask = remoteWorkspaceTask("cloud:repo:task-remote");
+    workspaceTask.capabilities = { canOpenShell: false } as WorkspaceTask["capabilities"];
+    const { keyboardActions, toast } = createHarness({ workspaceTask });
+
+    await keyboardActions.openInIDE();
+
+    expect(toast.warning).toHaveBeenCalledWith("toasts.remoteTaskPathUnavailable");
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses file picker shortcuts for a task owned by another machine before a local file command", () => {
+    const workspaceTask = remoteWorkspaceTask("cloud:repo:task-remote");
+    workspaceTask.capabilities = { canOpenShell: false } as WorkspaceTask["capabilities"];
+    const { keyboardActions, showFilePickerOnTop, toast } = createHarness({ workspaceTask });
+
+    keyboardActions.openFile();
+    keyboardActions.toggleFilePreview();
+
+    expect(toast.warning).toHaveBeenCalledWith("toasts.remoteTaskPathUnavailable");
+    expect(showFilePickerOnTop).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("opens the local file picker shortcuts when the repository has no selected task", () => {
+    const { keyboardActions, showFilePickerOnTop, toast } = createHarness();
+
+    keyboardActions.openFile();
+    keyboardActions.toggleFilePreview();
+
+    expect(showFilePickerOnTop).toHaveBeenCalledTimes(2);
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it("refuses the repo-root shell shortcut for a task owned by another machine", () => {
+    const workspaceTask = remoteWorkspaceTask("cloud:repo:task-remote");
+    workspaceTask.capabilities = { canOpenShell: false } as WorkspaceTask["capabilities"];
+    const { keyboardActions, mainTabs, toast } = createHarness({ workspaceTask });
+
+    keyboardActions.openShellRepoRoot();
+
+    expect(toast.warning).toHaveBeenCalledWith("toasts.remoteShellUnavailable");
+    expect(mainTabs.tabs.value.some((tab) => tab.kind === "shell")).toBe(false);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
   it("advances a selected durable task behind a noncanonical UI slot", () => {
