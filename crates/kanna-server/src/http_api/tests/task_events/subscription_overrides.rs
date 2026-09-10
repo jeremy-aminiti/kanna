@@ -49,11 +49,13 @@ async fn invalid_timing_overrides_are_rejected_before_any_registration() {
 async fn there_is_no_reachable_overflow_so_an_extreme_override_is_accepted_not_panicked() {
     // No policy ceiling. `Duration::from_millis` accepts any `u64`, and so
     // does the `Instant + Duration` arithmetic it feeds into
-    // (`Collection::deadline`, `Admission`): a `u64` millisecond count can
-    // never exceed `Duration`'s own (far larger) capacity, so registration
-    // has nothing to reject here — confirmed empirically, not just assumed.
-    // An extreme override is simply capped in practice by the existing
-    // receiver deadline via `Collection::deadline`'s own `.min(receiver)`.
+    // (`Collection::intrinsic_deadline`, `Admission`): a `u64` millisecond
+    // count can never exceed `Duration`'s own (far larger) capacity, so
+    // registration has nothing to reject here — confirmed empirically, not
+    // just assumed. An extreme quiet_ms/max_hold_ms is genuinely honored (the
+    // collector chains native calls to cover it); an extreme
+    // min_admission_interval_ms just delays this subscription's own future
+    // admissions.
     let state = test_state_with_seed("overrides-extreme", "Overrides", seed_orchestration);
     let db = Db::open(&state.config().db_path).unwrap();
     start_run(&db, "manager", "child-c", "in progress");
@@ -226,4 +228,120 @@ async fn exclude_event_types_is_additive_to_the_fixed_baseline() {
     );
     service.abort();
     let _ = service.await;
+}
+
+/// The exact minimal request an MCP/CLI caller sends when it does not ask
+/// for any timing override — the same shape `resolve_request` would build
+/// for a caller who never named `quiet_ms`/`max_hold_ms`/
+/// `min_admission_interval_ms`.
+fn resolved_minimal_subscribe(task_id: &str, delivery: &str) -> Value {
+    kanna_tool_catalog::resolve_request(
+        &kanna_tool_catalog::bundled_catalog(),
+        "kanna_subscribe_events",
+        &json!({"task_id": task_id, "local_only": true, "delivery": delivery}),
+    )
+    .expect("minimal subscribe request resolves")
+    .body
+}
+
+#[tokio::test]
+async fn mcp_resolved_omitted_knobs_resume_a_legacy_active_subscription_without_conflict() {
+    // Catalog request construction -> HTTP -> durable storage, end to end:
+    // the resolver must not bake a documented default into the wire body
+    // (crates/kanna-tool-catalog's own resolver test proves that in
+    // isolation), and the server must treat the resulting omitted-knob
+    // request as an exact retry of a subscription that predates this
+    // feature — not a differently configured one.
+    let state = test_state_with_seed(
+        "overrides-mcp-legacy-active",
+        "Overrides",
+        seed_orchestration,
+    );
+    start_run(
+        &Db::open(&state.config().db_path).unwrap(),
+        "manager",
+        "child-c",
+        "in progress",
+    );
+    let app = router(state.clone());
+    let request = resolved_minimal_subscribe("child-c", "poll");
+    let (status, initial) = subscribe(&app, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    let id = initial["id"].as_str().unwrap().to_string();
+    for key in ["quietMs", "maxHoldMs", "minAdmissionIntervalMs"] {
+        assert!(initial["query"][key].is_null(), "{key}: {initial}");
+    }
+    let (status, retried) = subscribe(&app, request).await;
+    assert_eq!(status, StatusCode::OK, "{retried}");
+    assert_eq!(
+        retried["id"], id,
+        "an MCP-resolved retry must reuse the mailbox, not conflict or reset"
+    );
+}
+
+#[tokio::test]
+async fn mcp_resolved_omitted_knobs_resume_a_legacy_paused_subscription_without_reset() {
+    let state = test_state_with_seed(
+        "overrides-mcp-legacy-paused",
+        "Overrides",
+        seed_orchestration,
+    );
+    let db = Db::open(&state.config().db_path).unwrap();
+    start_run(&db, "manager", "child-c", "in progress");
+    let app = router(state.clone());
+    let request = resolved_minimal_subscribe("child-c", "poll");
+    let (status, initial) = subscribe(&app, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    let id = initial["id"].as_str().unwrap().to_string();
+    // A watch fault pauses the subscription (matches the existing raw-HTTP
+    // subscription_watch_failure_... coverage): inactive, with an error, but
+    // not "stopped" — only an explicit unsubscribe is "stopped", and must not
+    // resume. The durable cursor here (empty for a fresh subscription) is
+    // exactly what a real fault would retain and must survive untouched.
+    let mut row = db.event_subscription(&id).unwrap().unwrap();
+    let checkpoint = row.cursor.clone();
+    row.active = false;
+    row.error = Some("event watch stopped: simulated fault".into());
+    assert!(db.save_event_subscription(&mut row).unwrap());
+    let (status, resumed) = subscribe(&app, request).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    assert_eq!(
+        resumed["id"], id,
+        "an MCP-resolved re-registration must resume this exact paused mailbox"
+    );
+    assert_eq!(resumed["active"], true);
+    assert!(resumed["error"].is_null());
+    assert_eq!(
+        db.event_subscription(&id).unwrap().unwrap().cursor,
+        checkpoint,
+        "resuming a paused mailbox must not reset its durable cursor"
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_timing_override_still_conflicts_with_a_differently_configured_active_subscription(
+) {
+    // The other side of the omission fix: a genuinely different explicit
+    // setting must still be refused as a scope/setting change, not silently
+    // accepted as a retry.
+    let state = test_state_with_seed("overrides-mcp-conflict", "Overrides", seed_orchestration);
+    start_run(
+        &Db::open(&state.config().db_path).unwrap(),
+        "manager",
+        "child-c",
+        "in progress",
+    );
+    let app = router(state.clone());
+    let (status, initial) = subscribe(&app, resolved_minimal_subscribe("child-c", "poll")).await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    let with_override = kanna_tool_catalog::resolve_request(
+        &kanna_tool_catalog::bundled_catalog(),
+        "kanna_subscribe_events",
+        &json!({"task_id": "child-c", "local_only": true, "delivery": "poll",
+            "quiet_ms": 2_000, "max_hold_ms": 10_000}),
+    )
+    .expect("explicit subscribe request resolves")
+    .body;
+    let (status, conflicted) = subscribe(&app, with_override).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflicted}");
 }

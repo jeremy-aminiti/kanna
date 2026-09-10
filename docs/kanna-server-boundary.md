@@ -2678,18 +2678,25 @@ an owner-specified value (superseding an earlier manager-proposed 30s/120s
 split); the 60s admission floor remains a manager-adopted engineering default,
 not measured tuning. Capacity remains 100, minimum one. Quiet resets only on
 relevant observations; the collection closes at the earliest of last
-observation + 300s, first observation + 300s, or the existing receiver
-deadline. Full pages seal early. The 300s figures now exceed the fixed 240s
-native receiver window (`kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS`), so that
-receiver deadline — not quiet/max-hold — is the one that actually binds an
-ordinary batch in practice whenever the subscription's scope sees other
-database activity in the meantime: any event append re-checks the collector's
-readiness immediately (even one filtered out as irrelevant, or belonging to a
-different relevant burst), and once past 240s that re-check completes the
-batch there. Only a subscription that stays genuinely silent after its last
-relevant observation reaches the full 300s. This is expected, not a defect —
-the receiver term already existed for exactly this purpose — but it means the
-practical ceiling on an active repository is closer to 240s than 300s.
+observation + 300s, first observation + 300s, urgent attention, or a full
+page.
+
+The 300s figures exceed the fixed 240s native receiver window
+(`kanna_tool_catalog::MAX_WAIT_TIMEOUT_SECS`), so a single native
+`wait_local_task_events`/`wait_aggregate_task_events` call cannot honor them
+alone. `event_subscriptions::step` owns the true window instead: it shares one
+`subscription_timing::Collection` across as many chained native calls as it
+takes (each still capped at 240s, and each sized to the remaining time once
+the first relevant observation is known), and treats a native call's own
+`"waitOutcome": "timeout"` — its budget merely expiring — as "not yet", not
+"done". Only a native `"events"` outcome (urgent, a full page, or the
+collector's own quiet/max-hold reached) is genuinely final. A native call's
+own receiver therefore never truncates the subscription's real window,
+including when the first relevant event arrives late inside one call's own
+240s leg — the shared collection's first-observation instant survives into
+whatever calls follow. Peer legs and checkpoints are unaffected: chaining
+just re-invokes the same wait with an advanced cursor, which the existing
+aggregate session retention already reuses like any other retry.
 Failed run/main/post facts, lifecycle/teardown/merge-handoff failures, provider
 parking, confirmed input requests, watch/machine errors and unknown attention
 seal urgently. Urgency skips quiet debounce, never admission pacing, FIFO cursors,
@@ -2765,17 +2772,16 @@ rejected below a 1000ms floor, and `max_hold_ms` is rejected below
 `quiet_ms`. There is deliberately no policy ceiling, and none is needed on
 correctness grounds either: `Duration::from_millis` accepts any `u64`, and so
 does the `Instant + Duration` arithmetic these values feed into
-(`Collection::deadline`, `Admission`) — a `u64` millisecond count can never
-exceed `Duration`'s own far larger capacity, confirmed empirically
+(`Collection::intrinsic_deadline`, `Admission`) — a `u64` millisecond count
+can never exceed `Duration`'s own far larger capacity, confirmed empirically
 (`Instant::now().checked_add(Duration::from_millis(u64::MAX))` never returns
-`None`). An extreme `quiet_ms`/`max_hold_ms` is simply capped in practice by
-the existing 240s native receiver deadline via `Collection::deadline`'s own
-`.min(receiver)`; an extreme `min_admission_interval_ms` just delays that
-subscription's own future admissions. Urgent-event handling is unaffected: an
-urgent batch still seals
-its collection immediately regardless of these overrides, gated only by the
-(possibly overridden) minimum admission interval — no new urgency taxonomy,
-no runtime retry loop.
+`None`). An extreme `quiet_ms`/`max_hold_ms` is genuinely honored — the
+collector chains native calls to cover it, exactly like the default — not
+capped by the 240s native receiver; an extreme `min_admission_interval_ms`
+just delays that subscription's own future admissions. Urgent-event handling
+is unaffected: an urgent batch still seals its collection immediately
+regardless of these overrides, gated only by the (possibly overridden)
+minimum admission interval — no new urgency taxonomy, no runtime retry loop.
 
 These fields are additive and optional at the wire and in storage: a
 subscription that never sets them persists the exact `query` shape it always
@@ -2785,7 +2791,14 @@ its persisted `query` on every collection (`quietMs`/`maxHoldMs`) and at
 worker (re)start (`minAdmissionIntervalMs`, bound once into that
 subscription's `Admission`); a row from before this feature shipped simply
 has no such keys and falls back to the global defaults, identical to its
-prior behavior.
+prior behavior. This omission contract depends on the request the server
+actually receives never carrying these keys unless the caller means to
+override — so the catalog declares no `default` for them: the shared MCP/CLI
+request resolver (`value_for_param`) fills in a declared default for any
+omitted parameter and sends it on the wire, which would turn every omitted
+knob into an explicit (if numerically identical) override, breaking retry and
+resume for every pre-existing row. Each description states its default in
+prose instead.
 
 The first returned page is already observed by the registering caller. A later
 page receives one coalesced wake. Wakes contain only the subscription and batch
