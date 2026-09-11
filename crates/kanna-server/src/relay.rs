@@ -108,18 +108,29 @@ fn apply_relay_authentication(
     publisher: &mut PublisherState,
     authenticated_user_id: &mut Option<String>,
     routing_generation: &mut u64,
+    desktop_routing_version: &mut u64,
 ) {
     let relay_client::RelayAuthentication {
         user_id,
         capabilities,
     } = authentication;
     log::info!("Relay authenticated as user {user_id}");
+    // Authority changes before cleanup runs: every LAN trust lookup reads
+    // `authenticated_account_uid` fresh at point of use, so a concurrent
+    // request during reconciliation must already see the *new* account
+    // rather than briefly still seeing the old one while the store is mid
+    // purge - see this account's own module doc comment.
+    let generation = http_state.set_authenticated_account_uid(Some(user_id.clone()));
+    if let Err(error) = reconcile_machine_trust_for_account(http_state, Some(&user_id), generation)
+    {
+        log::warn!("Failed to persist machine trust store after account reconciliation: {error}");
+    }
     *authenticated_user_id = Some(user_id);
-    if capabilities
+    *desktop_routing_version = capabilities
         .desktop_routing
         .as_ref()
-        .is_some_and(|capability| capability.version >= 1)
-    {
+        .map_or(0, |capability| capability.version);
+    if *desktop_routing_version >= 1 {
         *routing_generation = http_state.set_desktop_routing_available(true);
     } else {
         http_state.set_desktop_routing_unavailable(
@@ -136,6 +147,75 @@ fn apply_relay_authentication(
             .mobile_notifications
             .map_or(0, |capability| capability.version),
     );
+}
+
+/// The server-owned account-transition cleanup for
+/// `machine_trust::MachineTrustStore`, called at every point this desktop's
+/// own account identity is established or confirmed lost: a fresh
+/// `auth_ok` (covering a UID change *and* the first reconciliation after a
+/// restart, since nothing here depends on remembering a previous value),
+/// falling back to anonymous-push-only mode (covering an authoritative
+/// account-auth rejection), and an explicit local sign-out
+/// (`cloud_relay::sign_out_desktop_cloud_account`) - all of which collapse to
+/// the same "not signed into any account" state here when
+/// `current_account_uid` is `None`. `Some(uid)` keeps only what already
+/// matches it.
+///
+/// `observed_generation` must be the value `AppState::set_authenticated_account_uid`
+/// returned for *this* `current_account_uid` decision. Two reconciliation
+/// calls can run concurrently against each other (a relay auth event and an
+/// explicit sign-out, or a startup retry racing a fresh connection), and each
+/// call's own load-retain-save can take long enough for the other's setter to
+/// have already moved the account state on before this one gets to persist
+/// its now-stale decision. Checking the current generation against the one
+/// this call observed, while still holding the persistence lock, ensures the
+/// *last* setter's decision always wins the actual file: a stale reconcile
+/// can never resurrect trust an explicit sign-out already cleared, and a
+/// stale sign-out can never undo a legitimate re-authentication that raced
+/// ahead of it.
+///
+/// A missing machine trust store path (no configured pairing store - true
+/// for `kanna-worker`, which has no account relay identity to begin with) is
+/// a silent `Ok(())`, not an error: there is nothing to reconcile. Any other
+/// error is the caller's to report - see `sign_out_desktop_cloud_account`,
+/// which surfaces persistence failure and leaves its retry marker in place
+/// so the next signed-out startup retries this same decision.
+pub(crate) fn reconcile_machine_trust_for_account(
+    http_state: &http_api::AppState,
+    current_account_uid: Option<&str>,
+    observed_generation: u64,
+) -> Result<(), String> {
+    let Some(store_path) = http_state.config().machine_trust_store_path() else {
+        return Ok(());
+    };
+    let _guard = crate::machine_trust::persistence_mutex()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if http_state.account_state_generation() != observed_generation {
+        // Superseded by a later account-state change while this call was
+        // waiting on the lock or deciding what to write - that newer
+        // decision owns reconciliation now, and writing this stale one would
+        // either resurrect trust that decision already cleared, or clear
+        // trust it just legitimately re-established.
+        return Ok(());
+    }
+    let mut store = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+        .map_err(|error| format!("failed to load machine trust store: {error}"))?;
+    let account_changed = store.retain_account(current_account_uid);
+    // Every account-transition reconciliation already loads and is about to
+    // save this same store under this same lock, so it is also the natural,
+    // no-extra-cost place to reclaim space from records expiry already
+    // makes unusable on every lookup (`remove_expired`'s own doc comment) -
+    // rather than needing a dedicated timer nothing currently schedules.
+    let expired_purged = crate::machine_trust::unix_time_ms()
+        .map(|now_ms| store.remove_expired(now_ms))
+        .unwrap_or(false);
+    if !account_changed && !expired_purged {
+        return Ok(());
+    }
+    store
+        .save(&store_path)
+        .map_err(|error| format!("failed to persist machine trust store: {error}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +290,12 @@ async fn run_relay_loop_with_timing(
         .collect::<Result<Vec<_>, _>>()?
         .join("");
 
+    // An explicit sign-out's machine-trust cleanup may not have durably
+    // landed before this desktop last shut down; retry it now, before this
+    // loop's own account reconciliation ever runs - see
+    // `http_api::cloud_relay::retry_pending_account_sign_out`.
+    http_api::cloud_relay::retry_pending_account_sign_out(&http_state, &db).await;
+
     // Reconnection loop
     loop {
         let anonymous_identity_available =
@@ -229,9 +315,31 @@ async fn run_relay_loop_with_timing(
         } else {
             relay_client::AccountAuthProbe::Unavailable
         };
-        let use_anonymous_push = anonymous_identity_available
-            && (config.desktop_secret.is_none()
-                || account_auth == relay_client::AccountAuthProbe::Rejected);
+        // No configured credential, or relay authoritatively rejected the one
+        // this desktop has - either way, this desktop is not signed into any
+        // account right now. Automatic same-account LAN trust must not
+        // survive that: clear it rather than leave it to expire on its own
+        // lease. This must not be gated on anonymous_identity_available -
+        // that condition only decides *how* this loop proceeds next
+        // (anonymous push vs. falling through to a normal connection
+        // attempt), and gating the clear on it as well would silently skip
+        // reconciliation on a signed-out desktop whose anonymous identity
+        // also happens to be unavailable. An ordinary outage (relay
+        // unreachable) leaves account_auth as Unavailable, not Rejected, and
+        // a configured desktop_secret means this branch is not taken at
+        // all - either way this must retain eligible unexpired leases.
+        let signed_out_or_rejected = config.desktop_secret.is_none()
+            || account_auth == relay_client::AccountAuthProbe::Rejected;
+        if signed_out_or_rejected {
+            let generation = http_state.set_authenticated_account_uid(None);
+            if let Err(error) = reconcile_machine_trust_for_account(&http_state, None, generation)
+            {
+                log::warn!(
+                    "Failed to persist machine trust store after account reconciliation: {error}"
+                );
+            }
+        }
+        let use_anonymous_push = anonymous_identity_available && signed_out_or_rejected;
         if use_anonymous_push {
             run_anonymous_push_loop(
                 &config,
@@ -305,6 +413,14 @@ async fn run_relay_loop_with_timing(
         let publication_enabled = cloud_task_publication_enabled(config.desktop_secret.as_deref());
         let mut authenticated_user_id: Option<String> = None;
         let mut routing_generation = 0;
+        // The negotiated desktopRouting capability version for *this*
+        // connection - not merely "some v1+ session was once seen". A
+        // sourceDesktopId is trustworthy only when the relay serving this
+        // exact connection actually attested to stamping it (v2+); an older
+        // relay forwards a sender's frame unchanged, so the field's mere
+        // presence proves nothing about a v1 connection - it could be
+        // whatever the sender itself wrote into its own message.
+        let mut desktop_routing_version: u64 = 0;
         if let Some(authentication) = initial_authentication {
             apply_relay_authentication(
                 authentication,
@@ -312,6 +428,7 @@ async fn run_relay_loop_with_timing(
                 &mut publisher,
                 &mut authenticated_user_id,
                 &mut routing_generation,
+                &mut desktop_routing_version,
             );
         }
         let mut disconnect_reason = "desktop relay connection ended".to_string();
@@ -442,6 +559,7 @@ async fn run_relay_loop_with_timing(
                             RelayMessage::Invoke {
                                 id: RelayId::String(id.clone()),
                                 desktop_id: None,
+                                source_desktop_id: None,
                                 request: RelayInvoke::Command {
                                     command: "list_active_desktops".to_string(),
                                     args: serde_json::json!({}),
@@ -459,6 +577,7 @@ async fn run_relay_loop_with_timing(
                             RelayMessage::Invoke {
                                 id: RelayId::String(id.clone()),
                                 desktop_id: None,
+                                source_desktop_id: None,
                                 request: RelayInvoke::Command {
                                     command: "list_repo_singletons".to_string(),
                                     args: serde_json::json!({
@@ -480,6 +599,7 @@ async fn run_relay_loop_with_timing(
                             RelayMessage::Invoke {
                                 id: RelayId::String(id.clone()),
                                 desktop_id: None,
+                                source_desktop_id: None,
                                 request: RelayInvoke::Command {
                                     command: "claim_repo_singleton".to_string(),
                                     args: serde_json::json!({
@@ -503,6 +623,7 @@ async fn run_relay_loop_with_timing(
                             RelayMessage::Invoke {
                                 id: RelayId::String(id.clone()),
                                 desktop_id: None,
+                                source_desktop_id: None,
                                 request: RelayInvoke::Command {
                                     command: "release_repo_singleton_reservation".to_string(),
                                     args: serde_json::json!({
@@ -527,6 +648,7 @@ async fn run_relay_loop_with_timing(
                             RelayMessage::Invoke {
                                 id: RelayId::String(id.clone()),
                                 desktop_id: Some(desktop_id),
+                                source_desktop_id: None,
                                 request: RelayInvoke::Http { method, path, body },
                             },
                             PendingDesktopRequest::Invoke { response },
@@ -598,7 +720,12 @@ async fn run_relay_loop_with_timing(
                     };
 
                     match parsed {
-                        RelayMessage::Invoke { id, request, .. } => match request {
+                        RelayMessage::Invoke {
+                            id,
+                            request,
+                            source_desktop_id,
+                            ..
+                        } => match request {
                             RelayInvoke::Command { command, args } => {
                                 log::info!("Invoke #{}: {}", id, command);
 
@@ -803,6 +930,19 @@ async fn run_relay_loop_with_timing(
                             RelayInvoke::Http { method, path, body } => {
                                 log::info!("HTTP invoke #{}: {} {}", id, method, path);
 
+                                // Trust the frame's sourceDesktopId only when
+                                // *this connection* negotiated desktopRouting
+                                // v2+. An older relay forwards a sender's
+                                // frame unchanged, so on a v1 connection the
+                                // field's mere presence proves nothing - it
+                                // could be whatever the sender itself wrote
+                                // into its own message. Discard it rather
+                                // than propagate an unattested claim.
+                                let attested_source_desktop_id = if desktop_routing_version >= 2 {
+                                    source_desktop_id.clone()
+                                } else {
+                                    None
+                                };
                                 if let Err(e) = dispatch_relay_http_invoke(
                                     Arc::clone(&http_state),
                                     Arc::clone(&sink),
@@ -813,6 +953,7 @@ async fn run_relay_loop_with_timing(
                                         path,
                                         body,
                                         authenticated_user_id: authenticated_user_id.clone(),
+                                        source_desktop_id: attested_source_desktop_id,
                                     },
                                 )
                                 .await
@@ -835,6 +976,7 @@ async fn run_relay_loop_with_timing(
                                 &mut publisher,
                                 &mut authenticated_user_id,
                                 &mut routing_generation,
+                                &mut desktop_routing_version,
                             );
                         }
                         RelayMessage::TaskSnapshotAck {
@@ -1441,6 +1583,10 @@ pub(crate) struct RelayHttpInvokeRequest {
     pub(crate) path: String,
     pub(crate) body: serde_json::Value,
     pub(crate) authenticated_user_id: Option<String>,
+    /// The relay-attested source desktop, threaded straight from
+    /// `RelayMessage::Invoke::source_desktop_id` - see that field's own doc
+    /// comment for the trust boundary.
+    pub(crate) source_desktop_id: Option<String>,
 }
 
 /// Separate budgets keep long-poll task event watches from consuming every
@@ -1479,6 +1625,7 @@ pub(crate) async fn dispatch_relay_http_invoke(
         path,
         body,
         authenticated_user_id,
+        source_desktop_id,
     } = request;
     let permit = match invoke_permits.for_path(&path).try_acquire_owned() {
         Ok(permit) => permit,
@@ -1501,7 +1648,12 @@ pub(crate) async fn dispatch_relay_http_invoke(
                 match authenticated_user_id {
                     Some(actor) => {
                         http_api::dispatch_authenticated_relay_http_invoke(
-                            http_state, actor, &method, &path, body,
+                            http_state,
+                            actor,
+                            source_desktop_id,
+                            &method,
+                            &path,
+                            body,
                         )
                         .await
                     }
@@ -1739,12 +1891,143 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48_120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: std::env::temp_dir()
                 .join(format!("{unique}-pairings.json"))
                 .to_string_lossy()
                 .into_owned(),
         }
+    }
+
+    /// `relay_connection_test_config` places its pairing store directly
+    /// under the shared system temp dir with only its own filename made
+    /// unique, so machine_trust_store_path's fixed-filename sibling
+    /// derivation would collide with every other concurrent test using that
+    /// same helper. Machine-trust-specific tests need their own genuinely
+    /// isolated directory instead - see `crate::test_paths`'s own warning
+    /// about exactly this class of collision.
+    fn account_reconcile_test_config(name: &str) -> Config {
+        let dir = crate::test_paths::unique_test_dir(&format!("relay-account-reconcile-{name}"));
+        let mut config = relay_connection_test_config(name, "127.0.0.1:1".parse().unwrap());
+        config.pairing_store_path = dir.join("pairings.json").to_string_lossy().into_owned();
+        config
+    }
+
+    /// `reconcile_machine_trust_for_account` is the server-owned
+    /// account-transition cleanup: this exercises it directly against a real
+    /// machine_trust store on disk, independent of an actual relay
+    /// connection (the address here is never dialed).
+    #[test]
+    fn reconcile_machine_trust_for_account_keeps_only_the_current_account() {
+        let config = account_reconcile_test_config("keep-current");
+        let state = http_api::AppState::new(config.clone());
+        let store_path = config
+            .machine_trust_store_path()
+            .expect("machine trust store path");
+
+        let now_ms = crate::machine_trust::unix_time_ms().expect("clock");
+        let mut store = crate::machine_trust::MachineTrustStore::default();
+        store.accept_inbound(
+            "desktop-a",
+            "hash-a",
+            "uid-1",
+            "development",
+            &config.desktop_id,
+            now_ms,
+        );
+        store.accept_inbound(
+            "desktop-b",
+            "hash-b",
+            "uid-2",
+            "development",
+            &config.desktop_id,
+            now_ms,
+        );
+        store.save(&store_path).expect("seed machine trust store");
+
+        let generation = state.account_state_generation();
+        reconcile_machine_trust_for_account(&state, Some("uid-1"), generation)
+            .expect("reconcile succeeds");
+
+        let reloaded = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+            .expect("reload after reconcile");
+        assert_eq!(reloaded.inbound.len(), 1);
+        assert_eq!(reloaded.inbound[0].account_uid, "uid-1");
+    }
+
+    /// A reconcile call whose observed generation the account state has
+    /// since moved past must not touch the file at all - a superseded
+    /// decision must never resurrect trust a later, legitimate one cleared
+    /// (or vice versa).
+    #[test]
+    fn reconcile_machine_trust_for_account_skips_a_superseded_generation() {
+        let config = account_reconcile_test_config("superseded");
+        let state = http_api::AppState::new(config.clone());
+        let store_path = config
+            .machine_trust_store_path()
+            .expect("machine trust store path");
+
+        let now_ms = crate::machine_trust::unix_time_ms().expect("clock");
+        let mut store = crate::machine_trust::MachineTrustStore::default();
+        store.accept_inbound(
+            "desktop-a",
+            "hash-a",
+            "uid-1",
+            "development",
+            &config.desktop_id,
+            now_ms,
+        );
+        store.save(&store_path).expect("seed machine trust store");
+
+        let stale_generation = state.account_state_generation();
+        // A newer decision (e.g. a legitimate re-authentication) advances the
+        // generation before the stale call gets to persist anything.
+        state.set_authenticated_account_uid(Some("uid-1".to_string()));
+
+        reconcile_machine_trust_for_account(&state, None, stale_generation)
+            .expect("a superseded call is a no-op, not an error");
+
+        let reloaded = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+            .expect("reload after reconcile");
+        assert_eq!(
+            reloaded.inbound.len(),
+            1,
+            "the superseded None decision must not have cleared the store"
+        );
+    }
+
+    /// Falling back to anonymous-push-only mode - an authoritative rejection
+    /// or an explicit local sign-out both collapse to this - must clear
+    /// every automatic LAN trust record, not just the ones for whichever
+    /// account was previously observed.
+    #[test]
+    fn reconcile_machine_trust_for_account_none_clears_everything() {
+        let config = account_reconcile_test_config("sign-out");
+        let state = http_api::AppState::new(config.clone());
+        let store_path = config
+            .machine_trust_store_path()
+            .expect("machine trust store path");
+
+        let now_ms = crate::machine_trust::unix_time_ms().expect("clock");
+        let mut store = crate::machine_trust::MachineTrustStore::default();
+        store.accept_inbound(
+            "desktop-a",
+            "hash-a",
+            "uid-1",
+            "development",
+            &config.desktop_id,
+            now_ms,
+        );
+        store.save(&store_path).expect("seed machine trust store");
+
+        let generation = state.account_state_generation();
+        reconcile_machine_trust_for_account(&state, None, generation)
+            .expect("reconcile succeeds");
+
+        let reloaded = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+            .expect("reload after reconcile");
+        assert!(reloaded.inbound.is_empty());
     }
 
     async fn stalled_relay_listener() -> (
@@ -2159,6 +2442,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48_120,
             transfer_port: 4_455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: std::env::temp_dir()
                 .join(format!("{unique}-pairings.json"))
@@ -2330,6 +2614,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: format!("/tmp/{unique}-pairings.json"),
         }
@@ -2634,6 +2919,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: format!("/tmp/{unique}-pairings.json"),
         };
@@ -2905,6 +3191,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: pairing_store_path.to_string_lossy().into_owned(),
         };
@@ -3222,6 +3509,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: pairing_store_path.to_string_lossy().into_owned(),
         };
@@ -3402,6 +3690,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: pairing_store_path.to_string_lossy().into_owned(),
         };
@@ -3562,6 +3851,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: pairing_store_path.to_string_lossy().into_owned(),
         };
@@ -3757,6 +4047,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: format!("/tmp/{unique}-pairings.json"),
         };
@@ -3870,6 +4161,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: format!("/tmp/{unique}-pairings.json"),
         };
@@ -3964,6 +4256,146 @@ mod tests {
 
         relay_server.await.expect("relay server");
         let _ = std::fs::remove_file(database_path);
+    }
+
+    /// A relay that only ever negotiated desktopRouting v1 (or none at all)
+    /// forwards a sender's frame unchanged - it does not stamp or sanitize
+    /// sourceDesktopId itself. A caller-forged sourceDesktopId field on such
+    /// a connection must therefore never be trusted: this proves it through
+    /// the real receive/dispatch path (a fake relay sends the actual invoke
+    /// frame, this desktop's real relay loop and router process it) rather
+    /// than by constructing an AuthenticatedHttpInvoke marker directly - the
+    /// bootstrap endpoint's own RelayAttestedSource gate is the observable:
+    /// it must refuse the forged claim exactly as it would refuse one that
+    /// was never sent at all.
+    #[tokio::test]
+    async fn a_v1_relay_forwarding_a_forged_source_desktop_id_is_not_trusted() {
+        use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+        let relay_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind relay stand-in");
+        let relay_address = relay_listener.local_addr().expect("relay address");
+        let unique = format!(
+            "relay-v1-forged-source-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let database_path = crate::db::Db::test_db_path(&unique);
+        let isolated_dir = crate::test_paths::unique_test_dir(&unique);
+        let config = Config {
+            relay_url: format!("ws://{relay_address}"),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: isolated_dir.join("daemon").to_string_lossy().into_owned(),
+            db_path: database_path.clone(),
+            kanna_cli_path: None,
+            desktop_id: "desktop-target".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Target Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "127.0.0.1".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            lan_routing_port: 4460,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: isolated_dir
+                .join("pairings.json")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let database = crate::db::Db::open_for_tests(&database_path).expect("open test db");
+        let state = Arc::new(http_api::AppState::new(config.clone()));
+
+        let relay_server = tokio::spawn(async move {
+            let (stream, _) = relay_listener.accept().await.expect("accept relay");
+            let mut socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept websocket");
+            let _auth = socket
+                .next()
+                .await
+                .expect("auth message")
+                .expect("auth frame");
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "auth_ok",
+                        "userId": "operator-1",
+                        "capabilities": {
+                            "desktopRouting": { "version": 1 }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send auth ack");
+
+            // A well-behaved sender never populates this field itself (see
+            // relay_client.rs's own serialization test); a forged one here
+            // stands in for either a hostile client bypassing this crate's
+            // own sender entirely, or (equivalently, from the receiver's
+            // point of view) an old relay build that has not yet started
+            // sanitizing it.
+            socket
+                .send(TungsteniteMessage::Text(
+                    serde_json::json!({
+                        "type": "invoke",
+                        "id": "forged-source-probe",
+                        "desktopId": "desktop-target",
+                        "sourceDesktopId": "desktop-attacker-forged",
+                        "method": "POST",
+                        "path": "/v1/lan-routing/bootstrap",
+                        "body": { "candidateSecret": "whatever" }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send forged-source invoke");
+
+            let response = loop {
+                let TungsteniteMessage::Text(text) = socket
+                    .next()
+                    .await
+                    .expect("relay socket closed before a response arrived")
+                    .expect("relay frame")
+                else {
+                    continue;
+                };
+                let value: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse relay message");
+                if value["type"] == "response" && value["id"] == "forged-source-probe" {
+                    break value;
+                }
+            };
+            assert_eq!(
+                response["status"], 401,
+                "a v1-negotiated connection's forged sourceDesktopId must not satisfy \
+                 RelayAttestedSource: {response:?}"
+            );
+        });
+
+        let relay_loop = run_relay_loop(config, database, Arc::clone(&state));
+        tokio::pin!(relay_loop);
+        let wait_for_server = async {
+            relay_server.await.expect("relay server assertions");
+        };
+        tokio::pin!(wait_for_server);
+        tokio::select! {
+            _ = &mut wait_for_server => {}
+            result = &mut relay_loop => panic!("relay loop exited early: {result:?}"),
+        };
+
+        let _ = std::fs::remove_file(database_path);
+        let _ = std::fs::remove_dir_all(isolated_dir);
     }
 
     /// Drives the real `observer_loop` against a fake daemon connection and
@@ -4209,6 +4641,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48_120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: std::env::temp_dir()
                 .join(format!("{unique}-pairings.json"))
@@ -4420,6 +4853,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48_120,
             transfer_port,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: std::env::temp_dir()
                 .join(format!("{unique}-pairings.json"))

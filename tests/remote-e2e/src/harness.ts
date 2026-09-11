@@ -62,6 +62,7 @@ export interface RemoteHarness {
     auth: number;
     firestore: number;
     functions: number;
+    lanRouting: number;
     relay: number;
     server: number;
     transfer: number;
@@ -73,7 +74,21 @@ export interface RemoteHarness {
   restartServerWithIdentity(identity: { desktopId: string; desktopSecret?: string | null }): Promise<void>;
   restartDaemon(): Promise<void>;
   startRelay(): Promise<void>;
-  startAdditionalDesktop(identity?: { desktopId: string; desktopSecret: string }): Promise<RemoteDesktop>;
+  startAdditionalDesktop(identity?: {
+    desktopId: string;
+    desktopSecret: string;
+    /**
+     * Whether to wait for this harness's own (Buffy) relay client to see the
+     * new desktop before returning. Defaults to `true` for the common same-
+     * account case. Must be `false` for a desktop signed into a genuinely
+     * different account: `waitForRelayDesktop` polls
+     * `client.invokeDesktop`, which is scoped to this harness's own account
+     * and can structurally never observe a desktop connected under another
+     * one - see `services/relay/src/router.ts`'s `routeMessage`, which looks
+     * up `connections.get(userId)` before anything else.
+     */
+    waitForRelayVisibility?: boolean;
+  }): Promise<RemoteDesktop>;
   startServer(): Promise<void>;
   stopRelay(): Promise<void>;
   stopServer(): Promise<void>;
@@ -112,6 +127,12 @@ async function allocatePorts(): Promise<RemoteHarness["ports"]> {
     auth: await findFreePort(),
     firestore: await findFreePort(),
     functions: await findFreePort(),
+    // Independently allocated per desktop, like `server`/`transfer` - two
+    // real kanna-server processes on one host must not collide on the
+    // hardcoded 4460 default (`kanna_runtime_defaults::DEFAULT_LAN_ROUTING_PORT`)
+    // the way `relay`/`auth`/`firestore`/`functions`/`ui` are deliberately
+    // shared across `startAdditionalDesktop`'s peers.
+    lanRouting: await findFreePort(),
     relay: await findFreePort(),
     server: await findFreePort(),
     transfer: await findFreePort(),
@@ -313,6 +334,7 @@ async function writeServerConfig(input: {
         `environment = "development"`,
         `lan_host = "${shellTomlString(input.lanHost)}"`,
         `lan_port = ${input.ports.server}`,
+        `lan_routing_port = ${input.ports.lanRouting}`,
         `transfer_port = ${input.ports.transfer}`,
         `pairing_store_path = "${shellTomlString(join(input.daemonDir, "pairings.json"))}"`
       ];
@@ -491,7 +513,11 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     );
   };
 
-  const startAdditionalDesktop = async (identity?: { desktopId: string; desktopSecret: string }): Promise<RemoteDesktop> => {
+  const startAdditionalDesktop = async (identity?: {
+    desktopId: string;
+    desktopSecret: string;
+    waitForRelayVisibility?: boolean;
+  }): Promise<RemoteDesktop> => {
     const desktopRoot = join(root, `desktop-${randomUUID()}`);
     const desktopId = identity?.desktopId ?? `remote-e2e-${process.pid}-${Date.now()}-${randomUUID().slice(0, 8)}`;
     const desktopPorts = await allocatePorts();
@@ -522,7 +548,9 @@ export async function startRemoteHarness(options: RemoteHarnessOptions = {}): Pr
     desktopServer = startServerFor(desktopConfigPath);
     processes.push(desktopServer);
     await waitForHttpOk(`http://127.0.0.1:${desktopPorts.server}/v1/status`, timeoutMs);
-    await waitForRelayDesktop({ client: client!, desktopId, timeoutMs });
+    if (identity?.waitForRelayVisibility ?? true) {
+      await waitForRelayDesktop({ client: client!, desktopId, timeoutMs });
+    }
     return {
       client: client!,
       desktopId,

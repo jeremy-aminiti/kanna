@@ -8,7 +8,6 @@ import { DesktopCloudCredentialConflictError } from "./desktopCloudCredentialCon
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   setDoc: vi.fn(async () => undefined),
-  reconnectDesktopCloudRelay: vi.fn(async () => undefined),
   doc: vi.fn((...segments: unknown[]) => ({ segments })),
   serverTimestamp: vi.fn(() => "SERVER_TIMESTAMP"),
 }));
@@ -19,9 +18,6 @@ vi.mock("firebase/firestore", () => ({
   setDoc: (...args: unknown[]) => mocks.setDoc(...args),
 }));
 vi.mock("../invoke", () => ({ invoke: (...args: unknown[]) => mocks.invoke(...args) }));
-vi.mock("./desktopServerClient", () => ({
-  reconnectDesktopCloudRelay: () => mocks.reconnectDesktopCloudRelay(),
-}));
 vi.mock("./desktopAuthSdk", () => ({
   getConfiguredDesktopAuthSession: vi.fn(async () => ({
     getState: () => ({
@@ -45,7 +41,6 @@ describe("desktop cloud credential association", () => {
       if (command === "mobile_server_status") return { desktopName: "Studio Mac" };
       return "";
     });
-    mocks.reconnectDesktopCloudRelay.mockClear();
   });
 
   it("associates only the user profile and deterministic desktop credential document", async () => {
@@ -134,7 +129,6 @@ describe("desktop cloud credential association", () => {
     await expect(revokeDesktopCloudCredential()).rejects.toBeInstanceOf(
       DesktopCloudCredentialConflictError,
     );
-    expect(mocks.reconnectDesktopCloudRelay).not.toHaveBeenCalled();
   });
 
   it("passes non-permission association failures through unchanged", async () => {
@@ -145,6 +139,10 @@ describe("desktop cloud credential association", () => {
   });
 
   it("tombstones the canonical credential before account sign-out", async () => {
+    // The relay reconnect request is deliberately not this function's job -
+    // see its own doc comment: `signOut` (desktopAuthSdk.ts) requests it
+    // unconditionally, including when this throws, so a failed credential
+    // release never also skips telling kanna-server the account is leaving.
     await revokeDesktopCloudCredential();
 
     expect(mocks.setDoc).toHaveBeenCalledWith(
@@ -160,9 +158,5 @@ describe("desktop cloud credential association", () => {
       { merge: true },
     );
     expect(mocks.setDoc).toHaveBeenCalledTimes(1);
-    expect(mocks.reconnectDesktopCloudRelay).toHaveBeenCalledOnce();
-    expect(mocks.setDoc.mock.invocationCallOrder[0]).toBeLessThan(
-      mocks.reconnectDesktopCloudRelay.mock.invocationCallOrder[0]!,
-    );
   });
 });

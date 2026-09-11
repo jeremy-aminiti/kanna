@@ -475,20 +475,30 @@ async fn gather_remote_compact_stats(state: &Arc<AppState>) -> CompactMachineSta
         machines: vec![],
         machine_errors: vec![],
     };
-    let listing =
-        tokio::time::timeout(REMOTE_STATS_TIMEOUT, state.list_active_relay_desktops()).await;
+    let listing = tokio::time::timeout(
+        REMOTE_STATS_TIMEOUT,
+        super::invoke_desktop::relay_and_lan_desktop_ids(state),
+    )
+    .await;
     let mut machine_ids = match listing {
-        Ok(Ok(ids)) => ids,
-        result => {
-            let error = match result {
-                Ok(Err(error)) => error,
-                _ => "peer listing timed out; remote machine availability is unknown".into(),
-            };
+        Ok((ids, relay_error)) => {
+            if let Some(error) = relay_error {
+                output.machine_errors.push(MachineError {
+                    machine_id: None,
+                    error: bounded_text(&error, 160),
+                });
+            }
+            ids
+        }
+        Err(_) => {
             output.machine_errors.push(MachineError {
                 machine_id: None,
-                error: bounded_text(&error, 160),
+                error: "peer listing timed out; remote machine availability is unknown".into(),
             });
-            return output;
+            // The timeout covered the relay-owned listing. Re-read only the
+            // local ephemeral/trust projection so an eligible LAN peer is not
+            // erased by that unrelated outage.
+            super::invoke_desktop::eligible_lan_desktop_ids(state)
         }
     };
     machine_ids.sort();
@@ -509,7 +519,8 @@ async fn gather_remote_compact_stats(state: &Arc<AppState>) -> CompactMachineSta
         requests.push(async move {
             let result = tokio::time::timeout(
                 REMOTE_STATS_TIMEOUT,
-                state.invoke_relay_desktop(
+                super::invoke_desktop::invoke_desktop(
+                    state.clone(),
                     machine_id.clone(),
                     "GET".into(),
                     "/v1/machine-stats?localOnly=true".into(),
@@ -517,7 +528,7 @@ async fn gather_remote_compact_stats(state: &Arc<AppState>) -> CompactMachineSta
                 ),
             )
             .await;
-            let result = match result {
+            let result = match result.map(|result| result.map(|routed| routed.response)) {
                 Err(_) => Err("unreachable: stats request timed out".into()),
                 Ok(Err(error)) => Err(error),
                 Ok(Ok(response)) if response.status == 200 => response
@@ -667,6 +678,9 @@ async fn gather_remote_detailed_stats(state: &Arc<AppState>) -> MachineStatsResp
     };
     let listing =
         tokio::time::timeout(REMOTE_STATS_TIMEOUT, state.list_active_relay_desktops()).await;
+    // A relay outage is its own reported error, exactly as before - but it
+    // must not also hide a trusted discovered LAN peer, which
+    // `eligible_lan_desktop_ids` adds unconditionally in either branch.
     let mut machine_ids = match listing {
         Ok(Ok(ids)) => ids,
         result => {
@@ -678,9 +692,10 @@ async fn gather_remote_detailed_stats(state: &Arc<AppState>) -> MachineStatsResp
                 machine_id: None,
                 error: bounded_text(&error, 512),
             });
-            return output;
+            Vec::new()
         }
     };
+    machine_ids.extend(super::invoke_desktop::eligible_lan_desktop_ids(state));
     machine_ids.sort();
     machine_ids.dedup();
     machine_ids.retain(|id| id != &state.config.desktop_id);
@@ -699,7 +714,8 @@ async fn gather_remote_detailed_stats(state: &Arc<AppState>) -> MachineStatsResp
         requests.push(async move {
             let result = tokio::time::timeout(
                 REMOTE_STATS_TIMEOUT,
-                state.invoke_relay_desktop(
+                super::invoke_desktop::invoke_desktop(
+                    state.clone(),
                     machine_id.clone(),
                     "GET".into(),
                     "/v1/machine-stats?localOnly=true&detailed=true".into(),
@@ -707,7 +723,7 @@ async fn gather_remote_detailed_stats(state: &Arc<AppState>) -> MachineStatsResp
                 ),
             )
             .await;
-            let result = match result {
+            let result = match result.map(|result| result.map(|routed| routed.response)) {
                 Err(_) => Err("machine-stats request timed out".into()),
                 Ok(Err(error)) => Err(error),
                 Ok(Ok(response)) if response.status == 200 => response

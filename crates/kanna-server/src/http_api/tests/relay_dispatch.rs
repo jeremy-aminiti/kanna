@@ -83,6 +83,7 @@ async fn relay_http_invoke_dispatch_is_concurrent_and_off_the_runtime() {
             path: "/v1/repos/repo-1/kanna-definitions".to_string(),
             body: serde_json::Value::Null,
             authenticated_user_id: None,
+            source_desktop_id: None,
         },
     )
     .await
@@ -106,6 +107,7 @@ async fn relay_http_invoke_dispatch_is_concurrent_and_off_the_runtime() {
             path: "/v1/status".to_string(),
             body: serde_json::Value::Null,
             authenticated_user_id: None,
+            source_desktop_id: None,
         },
     )
     .await
@@ -186,6 +188,7 @@ async fn relay_http_invoke_dispatch_rejects_when_saturated() {
             path: "/v1/status".to_string(),
             body: serde_json::Value::Null,
             authenticated_user_id: None,
+            source_desktop_id: None,
         },
     )
     .await
@@ -198,6 +201,72 @@ async fn relay_http_invoke_dispatch_rejects_when_saturated() {
     assert_eq!(response["id"], "rejected-invoke");
     assert_eq!(response["status"], 503);
     drop(held);
+
+    sink.lock().await.close().await.expect("close ws");
+    relay_server.abort();
+}
+
+/// A relay new enough to attest the sending desktop's identity
+/// (desktopRouting v2) passes it through `RelayHttpInvokeRequest` alongside
+/// the account it already authenticated. Nothing reads the value out of the
+/// resulting `AuthenticatedHttpInvoke` yet - that lands with the bootstrap
+/// handler that consumes it - but the dispatch pipeline threading it through
+/// must not itself misbehave, error, or drop the pre-existing
+/// authenticated_user_id behavior it's now carried alongside.
+#[tokio::test(flavor = "current_thread")]
+async fn relay_http_invoke_dispatch_accepts_a_source_desktop_id_alongside_the_account() {
+    let state = super::test_state_with_seed("desktop-relay-provenance", "Studio Mac", |_db| {});
+
+    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind relay stand-in");
+    let addr = tcp.local_addr().expect("local addr");
+    let (frames_tx, mut frames_rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+    let relay_server = tokio::spawn(async move {
+        let (stream, _) = tcp.accept().await.expect("accept ws");
+        let mut ws =
+            tokio_tungstenite::accept_async(tokio_tungstenite::MaybeTlsStream::Plain(stream))
+                .await
+                .expect("ws handshake");
+        while let Some(Ok(message)) = ws.next().await {
+            if let TungsteniteMessage::Text(text) = message {
+                let frame: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse relay frame");
+                if frames_tx.send(frame).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .expect("connect ws");
+    let (sink, _read) = ws.split();
+    let sink = Arc::new(tokio::sync::Mutex::new(sink));
+    let permits = Arc::new(crate::relay::RelayHttpInvokePermits::new(2));
+
+    crate::relay::dispatch_relay_http_invoke(
+        Arc::clone(&state),
+        Arc::clone(&sink),
+        Arc::clone(&permits),
+        crate::relay::RelayHttpInvokeRequest {
+            id: crate::relay_client::RelayId::String("provenance-invoke".to_string()),
+            method: "GET".to_string(),
+            path: "/v1/status".to_string(),
+            body: serde_json::Value::Null,
+            authenticated_user_id: Some("account-uid-1".to_string()),
+            source_desktop_id: Some("desktop-source".to_string()),
+        },
+    )
+    .await
+    .expect("dispatch invoke carrying a source desktop id");
+
+    let response = tokio::time::timeout(Duration::from_secs(2), frames_rx.recv())
+        .await
+        .expect("response should arrive")
+        .expect("relay frame channel closed");
+    assert_eq!(response["id"], "provenance-invoke");
+    assert_eq!(response["status"], 200);
 
     sink.lock().await.close().await.expect("close ws");
     relay_server.abort();
@@ -259,6 +328,7 @@ async fn relay_http_long_poll_does_not_saturate_short_invokes() {
             path: "/v1/task-events?taskIds=task-relay-wait&cursor=0&timeoutSecs=1".to_string(),
             body: serde_json::Value::Null,
             authenticated_user_id: None,
+            source_desktop_id: None,
         },
     )
     .await
@@ -275,6 +345,7 @@ async fn relay_http_long_poll_does_not_saturate_short_invokes() {
             path: "/v1/status".to_string(),
             body: serde_json::Value::Null,
             authenticated_user_id: None,
+            source_desktop_id: None,
         },
     )
     .await

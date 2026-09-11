@@ -84,6 +84,10 @@ mod macos {
         desktop_id: String,
         environment: String,
         port: u16,
+        service_type: String,
+        txt_record: Vec<u8>,
+        role: &'static str,
+        thread_name: &'static str,
     }
 
     enum RegistrationEvent {
@@ -138,7 +142,7 @@ mod macos {
             .into_owned()
     }
 
-    enum RunResult {
+    pub(crate) enum NativeDnsSdRunResult {
         Stopped,
         Retry(String),
     }
@@ -155,18 +159,52 @@ mod macos {
             environment: &str,
             port: u16,
         ) -> Result<Self, String> {
-            let config = Config {
+            let txt_record = encode_txt(&[("desktopId", desktop_id)])?;
+            Self::start_config(Config {
                 desktop_name: desktop_name.to_string(),
                 desktop_id: desktop_id.to_string(),
                 environment: environment.to_string(),
                 port,
-            };
+                service_type: MOBILE_BONJOUR_SERVICE_TYPE.to_string(),
+                txt_record,
+                role: "mobile Bonjour",
+                thread_name: "kanna-mobile-bonjour",
+            })
+        }
+
+        pub(crate) fn start_service(
+            instance_name: &str,
+            service_type: &str,
+            txt: &[(&str, String)],
+            port: u16,
+        ) -> Result<Self, String> {
+            let borrowed: Vec<(&str, &str)> = txt
+                .iter()
+                .map(|(key, value)| (*key, value.as_str()))
+                .collect();
+            let txt_record = encode_txt(&borrowed)?;
+            Self::start_config(Config {
+                desktop_name: instance_name.to_string(),
+                desktop_id: instance_name.to_string(),
+                environment: txt
+                    .iter()
+                    .find_map(|(key, value)| (*key == "environment").then_some(value.clone()))
+                    .unwrap_or_default(),
+                port,
+                service_type: service_type.to_string(),
+                txt_record,
+                role: "LAN routing Bonjour",
+                thread_name: "kanna-lan-routing-advertisement",
+            })
+        }
+
+        fn start_config(config: Config) -> Result<Self, String> {
             let (stop, stop_receiver) = mpsc::sync_channel(1);
             let (startup, startup_receiver) = mpsc::sync_channel(1);
             let worker = std::thread::Builder::new()
-                .name("kanna-mobile-bonjour".to_string())
+                .name(config.thread_name.to_string())
                 .spawn(move || supervise(config, stop_receiver, startup))
-                .map_err(|error| format!("failed to start mobile Bonjour supervisor: {error}"))?;
+                .map_err(|error| format!("failed to start Bonjour supervisor: {error}"))?;
 
             match startup_receiver.recv_timeout(REGISTRATION_TIMEOUT) {
                 Ok(()) => Ok(Self {
@@ -175,7 +213,7 @@ mod macos {
                 }),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     log::warn!(
-                        "mobile Bonjour registration was not observable within {:?}; supervisor remains active and will retry",
+                        "Bonjour registration was not observable within {:?}; supervisor remains active and will retry",
                         REGISTRATION_TIMEOUT
                     );
                     Ok(Self {
@@ -185,10 +223,24 @@ mod macos {
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     let _ = worker.join();
-                    Err("mobile Bonjour supervisor stopped before publication".to_string())
+                    Err("Bonjour supervisor stopped before publication".to_string())
                 }
             }
         }
+    }
+
+    fn encode_txt(properties: &[(&str, &str)]) -> Result<Vec<u8>, String> {
+        let mut record = Vec::new();
+        for (key, value) in properties {
+            let entry = format!("{key}={value}");
+            if entry.len() > u8::MAX as usize {
+                return Err(format!("Bonjour TXT property {key} is too long"));
+            }
+            record.push(entry.len() as u8);
+            record.extend_from_slice(entry.as_bytes());
+        }
+        u16::try_from(record.len()).map_err(|_| "Bonjour TXT record is too long".to_string())?;
+        Ok(record)
     }
 
     impl Drop for Advertisement {
@@ -196,7 +248,7 @@ mod macos {
             let _ = self.stop.send(());
             if let Some(worker) = self.worker.take() {
                 if worker.join().is_err() {
-                    log::warn!("mobile Bonjour supervisor panicked during shutdown");
+                    log::warn!("Bonjour supervisor panicked during shutdown");
                 }
             }
         }
@@ -213,20 +265,40 @@ mod macos {
         retry_interval: Duration,
         mut attempt: F,
     ) where
-        F: FnMut(&Config, &Receiver<()>, &SyncSender<()>) -> RunResult,
+        F: FnMut(&Config, &Receiver<()>, &SyncSender<()>) -> NativeDnsSdRunResult,
     {
+        supervise_native_dns_sd(
+            &stop,
+            retry_interval,
+            || attempt(&config, &stop, &startup),
+            |error| {
+                log::warn!(
+                    "{} advertisement failed for {} ({}, {}, port {}): {}; retrying",
+                    config.role,
+                    config.desktop_name,
+                    config.desktop_id,
+                    config.environment,
+                    config.port,
+                    error
+                );
+            },
+        );
+    }
+
+    /// Shared ownership loop for native DNS-SD operations. Each caller owns
+    /// its operation-specific references and callback contexts, while this
+    /// one mechanism owns cancellable recovery after mDNSResponder failures.
+    pub(crate) fn supervise_native_dns_sd(
+        stop: &Receiver<()>,
+        retry_interval: Duration,
+        mut attempt: impl FnMut() -> NativeDnsSdRunResult,
+        mut log_retry: impl FnMut(&str),
+    ) {
         loop {
-            match attempt(&config, &stop, &startup) {
-                RunResult::Stopped => return,
-                RunResult::Retry(error) => {
-                    log::warn!(
-                        "mobile Bonjour advertisement failed for {} ({}, {}, port {}): {}; retrying",
-                        config.desktop_name,
-                        config.desktop_id,
-                        config.environment,
-                        config.port,
-                        error
-                    );
+            match attempt() {
+                NativeDnsSdRunResult::Stopped => return,
+                NativeDnsSdRunResult::Retry(error) => {
+                    log_retry(&error);
                     match stop.recv_timeout(retry_interval) {
                         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -236,31 +308,32 @@ mod macos {
         }
     }
 
-    fn register_once(config: &Config, stop: &Receiver<()>, startup: &SyncSender<()>) -> RunResult {
+    fn register_once(
+        config: &Config,
+        stop: &Receiver<()>,
+        startup: &SyncSender<()>,
+    ) -> NativeDnsSdRunResult {
         let name = match CString::new(config.desktop_id.as_str()) {
             Ok(value) => value,
-            Err(error) => return RunResult::Retry(format!("invalid desktop id: {error}")),
+            Err(error) => {
+                return NativeDnsSdRunResult::Retry(format!("invalid desktop id: {error}"));
+            }
         };
-        let registration_type =
-            match CString::new(MOBILE_BONJOUR_SERVICE_TYPE.trim_end_matches(".local.")) {
-                Ok(value) => value,
-                Err(error) => {
-                    return RunResult::Retry(format!("invalid Bonjour service type: {error}"));
-                }
-            };
+        let registration_type = match CString::new(config.service_type.trim_end_matches(".local."))
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return NativeDnsSdRunResult::Retry(format!(
+                    "invalid Bonjour service type: {error}"
+                ));
+            }
+        };
         let domain = match CString::new("local.") {
             Ok(value) => value,
             Err(error) => {
-                return RunResult::Retry(format!("invalid Bonjour domain: {error}"));
+                return NativeDnsSdRunResult::Retry(format!("invalid Bonjour domain: {error}"));
             }
         };
-        let txt_value = format!("desktopId={}", config.desktop_id);
-        if txt_value.len() > u8::MAX as usize {
-            return RunResult::Retry("desktop id is too long for Bonjour TXT".to_string());
-        }
-        let mut txt_record = Vec::with_capacity(txt_value.len() + 1);
-        txt_record.push(txt_value.len() as u8);
-        txt_record.extend_from_slice(txt_value.as_bytes());
         let (event_sender, event_receiver) = mpsc::channel();
         let context = Box::new(CallbackContext {
             events: event_sender,
@@ -281,8 +354,8 @@ mod macos {
                 domain.as_ptr(),
                 ptr::null(),
                 config.port.to_be(),
-                txt_record.len() as u16,
-                txt_record.as_ptr().cast(),
+                config.txt_record.len() as u16,
+                config.txt_record.as_ptr().cast(),
                 registration_callback,
                 context_ptr.cast(),
             )
@@ -291,7 +364,7 @@ mod macos {
             // SAFETY: DNSServiceRegister failed, so no callback can retain or
             // use the context pointer.
             unsafe { drop(Box::from_raw(context_ptr)) };
-            return RunResult::Retry(dns_error("register", error));
+            return NativeDnsSdRunResult::Retry(dns_error("register", error));
         }
 
         // SAFETY: A successful DNSServiceRegister initialized `service_ref`.
@@ -301,14 +374,16 @@ mod macos {
             unsafe { DNSServiceRefDeallocate(service_ref) };
             // SAFETY: Deallocation prevents future callbacks.
             unsafe { drop(Box::from_raw(context_ptr)) };
-            return RunResult::Retry("mobile Bonjour registration has no event socket".to_string());
+            return NativeDnsSdRunResult::Retry(
+                "Bonjour registration has no event socket".to_string(),
+            );
         }
 
         let mut published = false;
         let result = loop {
             match stop.try_recv() {
                 Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
-                    break RunResult::Stopped;
+                    break NativeDnsSdRunResult::Stopped;
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -320,17 +395,17 @@ mod macos {
             // SAFETY: `descriptor` points to one initialized pollfd.
             let poll_result = unsafe { libc::poll(&mut descriptor, 1, POLL_INTERVAL_MS) };
             if poll_result < 0 {
-                break RunResult::Retry(std::io::Error::last_os_error().to_string());
+                break NativeDnsSdRunResult::Retry(std::io::Error::last_os_error().to_string());
             }
             if let Some(error) = terminal_poll_error(descriptor.revents) {
-                break RunResult::Retry(error);
+                break NativeDnsSdRunResult::Retry(error);
             }
             if poll_result > 0 && descriptor.revents & libc::POLLIN != 0 {
                 // SAFETY: Only this worker thread processes and deallocates the
                 // service reference.
                 let process_error = unsafe { DNSServiceProcessResult(service_ref) };
                 if process_error != DNS_SERVICE_ERR_NO_ERROR {
-                    break RunResult::Retry(dns_error(
+                    break NativeDnsSdRunResult::Retry(dns_error(
                         "process registration result",
                         process_error,
                     ));
@@ -342,7 +417,8 @@ mod macos {
                 match event {
                     RegistrationEvent::Published { name, domain } => {
                         log::info!(
-                            "published mobile Bonjour service {}.{} for {} ({}, {}, port {})",
+                            "published {} service {}.{} for {} ({}, {}, port {})",
+                            config.role,
                             name,
                             domain,
                             config.desktop_name,
@@ -368,11 +444,11 @@ mod macos {
             if let Some(event) = terminal_event {
                 break match event {
                     RegistrationEvent::Failed(error) => {
-                        RunResult::Retry(dns_error("registration callback", error))
+                        NativeDnsSdRunResult::Retry(dns_error("registration callback", error))
                     }
-                    RegistrationEvent::Removed => {
-                        RunResult::Retry("registration was removed by mDNSResponder".to_string())
-                    }
+                    RegistrationEvent::Removed => NativeDnsSdRunResult::Retry(
+                        "registration was removed by mDNSResponder".to_string(),
+                    ),
                     RegistrationEvent::Published { .. } => continue,
                 };
             }
@@ -414,6 +490,10 @@ mod macos {
                 desktop_id: "desktop-test".to_string(),
                 environment: "development".to_string(),
                 port: 48_120,
+                service_type: MOBILE_BONJOUR_SERVICE_TYPE.to_string(),
+                txt_record: encode_txt(&[("desktopId", "desktop-test")]).unwrap(),
+                role: "mobile Bonjour",
+                thread_name: "kanna-mobile-bonjour",
             };
             let (stop_sender, stop_receiver) = mpsc::sync_channel(1);
             let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
@@ -429,12 +509,12 @@ mod macos {
                         let mut count = attempt_counts.lock().unwrap();
                         *count += 1;
                         if *count == 1 {
-                            RunResult::Retry("mDNSResponder unavailable".to_string())
+                            NativeDnsSdRunResult::Retry("mDNSResponder unavailable".to_string())
                         } else {
                             let _ = startup.try_send(());
                             drop(count);
                             let _ = stop.recv();
-                            RunResult::Stopped
+                            NativeDnsSdRunResult::Stopped
                         }
                     },
                 );
@@ -719,6 +799,10 @@ fn supervise_advertisement(
 
 #[cfg(target_os = "macos")]
 pub use macos::Advertisement as MobileBonjourAdvertisement;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::Advertisement as NativeBonjourAdvertisement;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::{supervise_native_dns_sd, NativeDnsSdRunResult};
 
 #[cfg(not(target_os = "macos"))]
 pub struct MobileBonjourAdvertisement {

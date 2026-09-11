@@ -1611,7 +1611,7 @@ describe("Relay integration", () => {
       desktop_secret: SECRET_DESKTOP_SECRET,
     });
     expect(capabilities).toMatchObject({
-      desktopRouting: { version: 1 },
+      desktopRouting: { version: 2 },
     });
     const desktopAck = waitForMessage(desktopServer, (message) =>
       message.type === "mobile_notification_ack" && message.id === "notify-desktop");

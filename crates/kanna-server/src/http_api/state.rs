@@ -36,8 +36,18 @@ pub(super) struct TunneledHttpInvoke;
 /// the request entered the Axum router (for example, an authenticated relay
 /// tunnel). This is deliberately distinct from `TunneledHttpInvoke`: the
 /// latter records transport provenance but grants no authority by itself.
-#[derive(Clone, Copy)]
-pub(super) struct AuthenticatedHttpInvoke;
+///
+/// Both fields are `None` for a dispatch with no relay account/desktop
+/// context to report (e.g. a local in-process authenticated dispatch).
+/// `source_desktop_id` is populated only from the relay's own
+/// connection-bound, desktop-secret-verified identity (`desktopRouting`
+/// capability v2 or later) - never from anything a caller could claim about
+/// itself - so its presence is exactly as trustworthy as `account_uid`.
+#[derive(Clone)]
+pub(super) struct AuthenticatedHttpInvoke {
+    pub(super) account_uid: Option<String>,
+    pub(super) source_desktop_id: Option<String>,
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -88,6 +98,47 @@ pub struct AppState {
     known_singleton_owners: Arc<StdMutex<SingletonOwnerObservations>>,
     relay_reconnect: Arc<Notify>,
     anonymous_push_revocations_changed: Arc<Notify>,
+    /// The account UID this desktop's relay connection currently
+    /// authenticates as, or `None` when signed out/rejected/not yet
+    /// authenticated. This is the single current-account reference every
+    /// automatic same-account LAN trust lookup must validate a record's own
+    /// `account_uid` against at the point of use - not merely a value
+    /// `machine_trust`'s periodic reconciliation happens to have run
+    /// against, which can otherwise leave a stale record momentarily
+    /// usable between an account transition and the next reconciliation
+    /// pass.
+    authenticated_account_uid: Arc<StdMutex<Option<String>>>,
+    /// Bumped by every call that changes `authenticated_account_uid` -
+    /// a fresh relay `AuthOk`, an authoritative rejection, or an explicit
+    /// local sign-out. `machine_trust` reconciliation is decided by whoever
+    /// changed the account state, but the persistence write is racy against
+    /// a concurrent decision from the other path; a caller captures the
+    /// generation `set_authenticated_account_uid` returns at the moment it
+    /// decided the target account, and the write is skipped if the current
+    /// generation has since moved past it - the most recent decision always
+    /// wins the actual file, so a stale in-flight reconnect can never
+    /// resurrect trust an explicit sign-out just cleared, and a stale
+    /// sign-out can never undo a legitimate re-authentication that raced
+    /// ahead of it. See `relay::reconcile_machine_trust_for_account`.
+    account_state_generation: Arc<AtomicU64>,
+    /// The last LAN address observed for a same-account sibling's secure
+    /// machine-invoke listener, by desktop_id. Discovery-owned (Bonjour), a
+    /// candidate here is only ever a hint of where to *attempt* a
+    /// connection - `invoke_desktop`'s TLS client is what actually proves
+    /// the responder's identity, never this map. Discovery itself already
+    /// filters out a candidate whose advertised environment or protocol
+    /// version does not match this desktop's own before it ever reaches
+    /// this map - see `lan_discovery::candidate_from_resolution` - so
+    /// nothing here needs to re-carry that untrusted metadata. Absent an
+    /// entry, or a desktop no longer advertised, there is simply nothing to
+    /// dial.
+    lan_candidates: Arc<StdMutex<HashMap<String, std::net::SocketAddr>>>,
+    /// Targets with an outbound LAN bootstrap currently in flight - a
+    /// de-duplication guard, not a scheduler: nothing here decides *when* to
+    /// bootstrap, only that a burst of calls for the same target while one
+    /// attempt is already running does not start a second one concurrently.
+    /// See `invoke_desktop::maybe_trigger_lan_bootstrap`.
+    lan_bootstrap_in_flight: Arc<StdMutex<HashSet<String>>>,
     relay_desktop_routing_available: Arc<AtomicBool>,
     relay_desktop_routing_unavailable_reason: Arc<StdMutex<Option<String>>>,
     relay_desktop_routing_unreachable_since: Arc<StdMutex<Option<String>>>,
@@ -464,6 +515,10 @@ impl AppState {
             repo_checkout_root,
             known_singleton_owners: Arc::new(StdMutex::new(HashMap::new())),
             relay_reconnect: Arc::new(Notify::new()),
+            authenticated_account_uid: Arc::new(StdMutex::new(None)),
+            account_state_generation: Arc::new(AtomicU64::new(0)),
+            lan_candidates: Arc::new(StdMutex::new(HashMap::new())),
+            lan_bootstrap_in_flight: Arc::new(StdMutex::new(HashSet::new())),
             anonymous_push_revocations_changed: Arc::new(Notify::new()),
             relay_desktop_routing_available: Arc::new(AtomicBool::new(false)),
             relay_desktop_routing_unavailable_reason: Arc::new(StdMutex::new(Some(
@@ -716,6 +771,105 @@ impl AppState {
 
     pub(crate) fn desktop_routing_available(&self) -> bool {
         self.relay_desktop_routing_available.load(Ordering::Acquire)
+    }
+
+    /// Sets the account UID this desktop's relay connection currently
+    /// authenticates as. `None` on sign-out, an authoritative rejection, or
+    /// before the first successful authentication. Returns the new
+    /// `account_state_generation` - see that field's own doc comment for why
+    /// a reconciliation caller must capture and pass this along.
+    pub(crate) fn set_authenticated_account_uid(&self, account_uid: Option<String>) -> u64 {
+        *self
+            .authenticated_account_uid
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = account_uid;
+        self.account_state_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    }
+
+    /// The current `account_state_generation` - see that field's own doc
+    /// comment. Read this immediately before deciding to reconcile machine
+    /// trust for account state that was NOT just set by this same caller
+    /// (i.e. a retry at startup, where nothing else could have raced yet).
+    pub(crate) fn account_state_generation(&self) -> u64 {
+        self.account_state_generation.load(Ordering::Acquire)
+    }
+
+    /// The account UID every automatic same-account LAN trust lookup must
+    /// validate a record's own `account_uid` against - see the field's own
+    /// doc comment for why this is checked at the point of use rather than
+    /// relied on solely via periodic reconciliation.
+    pub(crate) fn authenticated_account_uid(&self) -> Option<String> {
+        self.authenticated_account_uid
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Records the last LAN address discovery observed for a same-account
+    /// sibling's secure machine-invoke listener. Called only by discovery
+    /// (Bonjour); never by anything that has itself verified the address -
+    /// see the field's own doc comment.
+    pub(crate) fn set_lan_candidate(&self, desktop_id: String, address: std::net::SocketAddr) {
+        self.lan_candidates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(desktop_id, address);
+    }
+
+    /// Removes a desktop's LAN candidate - discovery lost it (advertisement
+    /// expired/withdrawn), so there is nothing left to attempt.
+    pub(crate) fn remove_lan_candidate(&self, desktop_id: &str) {
+        self.lan_candidates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(desktop_id);
+    }
+
+    /// The address to *attempt* dialing `desktop_id` at, if discovery has
+    /// ever observed one. This is a candidate, not a credential: whatever
+    /// answers there still has to complete the pinned TLS handshake before
+    /// anything trusts it.
+    pub(crate) fn lan_candidate_for(&self, desktop_id: &str) -> Option<std::net::SocketAddr> {
+        self.lan_candidates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(desktop_id)
+            .copied()
+    }
+
+    /// Every desktop_id discovery currently has a candidate address for -
+    /// still just an address hint list, not a trust decision. See
+    /// `invoke_desktop::eligible_lan_desktop_ids`, which is what turns this
+    /// into machines actually worth listing.
+    pub(crate) fn lan_candidate_desktop_ids(&self) -> Vec<String> {
+        self.lan_candidates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Claims the in-flight slot for a LAN bootstrap of `target_desktop_id`.
+    /// `true` means the caller now owns it and must call
+    /// `finish_lan_bootstrap_attempt` when done; `false` means one is
+    /// already running and the caller must not start another.
+    pub(crate) fn begin_lan_bootstrap_attempt(&self, target_desktop_id: &str) -> bool {
+        self.lan_bootstrap_in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(target_desktop_id.to_string())
+    }
+
+    /// Releases the in-flight slot claimed by `begin_lan_bootstrap_attempt`,
+    /// regardless of whether the attempt succeeded.
+    pub(crate) fn finish_lan_bootstrap_attempt(&self, target_desktop_id: &str) {
+        self.lan_bootstrap_in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(target_desktop_id);
     }
 
     pub(crate) fn take_desktop_relay_requests(

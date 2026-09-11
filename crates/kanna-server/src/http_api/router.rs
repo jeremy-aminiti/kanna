@@ -1,7 +1,7 @@
 use super::analytics::get_repo_analytics;
 use super::backup::create_backup;
 use super::cloud_desktops::{invoke_cloud_desktop, list_cloud_desktops};
-use super::cloud_relay::reconnect_cloud_relay;
+use super::cloud_relay::{reconnect_cloud_relay, sign_out_desktop_cloud_account};
 use super::desktop::list_desktops;
 use super::desktop_views::{
     acknowledge_desktop_view, open_desktop_view, wait_desktop_view_commands,
@@ -11,6 +11,7 @@ use super::e2e_mobile_controls::{gate_direct_lan_http, update_e2e_mobile_machine
 #[cfg(debug_assertions)]
 use super::e2e_sql::{execute_e2e_server_work, execute_e2e_sql};
 use super::ksp::{ksp_stream, legacy_ksp_stream};
+use super::lan_bootstrap::bootstrap_lan_trust;
 use super::lan_trust::{
     attach_trusted_lan_device, require_http_access, require_local_client_authority,
 };
@@ -94,11 +95,16 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/cloud/relay/actions/reconnect",
             post(reconnect_cloud_relay),
         )
+        .route(
+            "/v1/cloud/relay/actions/sign-out",
+            post(sign_out_desktop_cloud_account),
+        )
         .route("/v1/cloud/desktops", get(list_cloud_desktops))
         .route(
             "/v1/cloud/desktops/{desktop_id}/invoke",
             post(invoke_cloud_desktop),
         )
+        .route("/v1/lan-routing/bootstrap", post(bootstrap_lan_trust))
         .route(
             "/v1/settings/cloud-transfer-identity",
             axum::routing::put(put_cloud_transfer_identity),
@@ -603,7 +609,7 @@ pub async fn dispatch_http_invoke(
     path: &str,
     body: serde_json::Value,
 ) -> HttpInvokeResponse {
-    dispatch_http_invoke_with_access(state, method, path, body, false, None).await
+    dispatch_http_invoke_with_access(state, method, path, body, false, None, None).await
 }
 
 pub async fn dispatch_authenticated_http_invoke(
@@ -612,17 +618,54 @@ pub async fn dispatch_authenticated_http_invoke(
     path: &str,
     body: serde_json::Value,
 ) -> HttpInvokeResponse {
-    dispatch_http_invoke_with_access(state, method, path, body, true, None).await
+    dispatch_http_invoke_with_access(state, method, path, body, true, None, None).await
 }
 
 pub async fn dispatch_authenticated_relay_http_invoke(
     state: Arc<AppState>,
     actor: String,
+    source_desktop_id: Option<String>,
     method: &str,
     path: &str,
     body: serde_json::Value,
 ) -> HttpInvokeResponse {
-    dispatch_http_invoke_with_access(state, method, path, body, true, Some(actor)).await
+    dispatch_http_invoke_with_access(
+        state,
+        method,
+        path,
+        body,
+        true,
+        Some(actor),
+        source_desktop_id,
+    )
+    .await
+}
+
+/// Dispatches a call that arrived on the dedicated LAN machine-invoke
+/// listener, already authenticated by `LanMachineInvokeAuthenticated`'s
+/// bearer-secret check. The actor is this desktop's own current account
+/// (a LAN caller does not carry a separate account claim the way a relay
+/// message does - `LanMachineInvokeAuthenticated` already proved the
+/// caller's secret verifies under exactly that account), and
+/// `source_desktop_id` is the verified device id from that same check.
+pub async fn dispatch_authenticated_lan_http_invoke(
+    state: Arc<AppState>,
+    source_desktop_id: String,
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> HttpInvokeResponse {
+    let actor = state.authenticated_account_uid();
+    dispatch_http_invoke_with_access(
+        state,
+        method,
+        path,
+        body,
+        true,
+        actor,
+        Some(source_desktop_id),
+    )
+    .await
 }
 
 async fn dispatch_http_invoke_with_access(
@@ -632,6 +675,7 @@ async fn dispatch_http_invoke_with_access(
     body: serde_json::Value,
     authenticated_file_access: bool,
     authenticated_human_actor: Option<String>,
+    source_desktop_id: Option<String>,
 ) -> HttpInvokeResponse {
     let method = match method.parse::<axum::http::Method>() {
         Ok(method) => method,
@@ -692,12 +736,14 @@ async fn dispatch_http_invoke_with_access(
         .insert(axum::extract::ConnectInfo(invoke_peer));
     request.extensions_mut().insert(TunneledHttpInvoke);
     if authenticated_file_access {
-        request.extensions_mut().insert(AuthenticatedHttpInvoke);
+        request.extensions_mut().insert(AuthenticatedHttpInvoke {
+            account_uid: authenticated_human_actor,
+            source_desktop_id,
+        });
         request
             .extensions_mut()
             .insert(super::task_files::AuthenticatedTaskFileAccess);
     }
-    let _ = authenticated_human_actor;
 
     match router(state).oneshot(request).await {
         Ok(response) => response_to_http_invoke(response).await,

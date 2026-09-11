@@ -112,6 +112,7 @@ async fn assert_signal_agent_reuses_open_task_with_run_status(run_status: &str, 
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -954,6 +955,7 @@ fn merge_test_config(unique: &str, daemon_dir: &Path) -> Config {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     }
@@ -1434,6 +1436,7 @@ async fn assert_merge_signal_creates_singleton(close_previous: bool, stale_reser
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -1702,6 +1705,7 @@ async fn signal_agent_route_creates_agent_task_with_requested_provider_and_effor
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -1800,6 +1804,7 @@ async fn assert_signal_agent_route_rejects_override(
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -1931,6 +1936,7 @@ async fn signal_agent_route_detaches_creation_spawn_from_request_future() {
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };
@@ -2985,6 +2991,7 @@ async fn terminal_exit_with_legacy_notify_registration_uses_events_not_task_inpu
         lan_host: "127.0.0.1".to_string(),
         lan_port: 48120,
         transfer_port: 4455,
+        lan_routing_port: 4460,
         activity_event_debounce_seconds: 300,
         pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
     };

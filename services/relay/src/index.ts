@@ -819,8 +819,14 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
               version: MOBILE_NOTIFICATIONS_CAPABILITY_VERSION,
             },
             ...(sessionEntitlement?.grants("remote_task_control") ? {
+              // v2: a forwarded "invoke" frame carries `sourceDesktopId`,
+              // stamped by this router from the sending connection's own
+              // verified identity (see `routeMessage`'s "invoke" branch) -
+              // never anything a sender can claim itself. A server that
+              // only knows v1 simply doesn't look for the field; nothing
+              // else about the wire format changed.
               desktopRouting: {
-                version: 1,
+                version: 2,
               },
             } : {}),
           } : {}),

@@ -4,6 +4,13 @@ export const BUFFY_EMAIL = "upvote.sieve.7t@icloud.com";
 export const BUFFY_PASSWORD = "password123";
 export const BUFFY_UID = "Bax9TJvOWm5bbl0Aq4nXg3XmkTCu";
 
+/** A second real seeded account, genuinely distinct from Buffy - for tests
+ * that need two different signed-in identities rather than two desktops
+ * under one account. */
+export const OTHER_ACCOUNT_EMAIL = "relay.other.7t@example.com";
+export const OTHER_ACCOUNT_PASSWORD = "password123";
+export const OTHER_ACCOUNT_UID = "jt6bbtM5LL4pSXHec9zkKsYIZi2h";
+
 export interface SignInOutcome {
   idToken?: string;
   localId?: string;

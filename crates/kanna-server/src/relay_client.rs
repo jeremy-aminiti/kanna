@@ -278,6 +278,19 @@ pub enum RelayMessage {
         id: RelayId,
         #[serde(rename = "desktopId", skip_serializing_if = "Option::is_none")]
         desktop_id: Option<String>,
+        /// Present only on an inbound invoke this desktop is the target of,
+        /// from a relay new enough to speak `desktopRouting` capability v2:
+        /// the sending desktop's own relay-verified identity, stamped by the
+        /// relay itself and never something a sender can claim about
+        /// itself. Absent on every outbound invoke this desktop sends (this
+        /// desktop never populates it - only relay does) and on any inbound
+        /// invoke from a relay that predates the field.
+        #[serde(
+            rename = "sourceDesktopId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        source_desktop_id: Option<String>,
         #[serde(flatten)]
         request: RelayInvoke,
     },
@@ -668,6 +681,7 @@ mod tests {
             lan_host: "127.0.0.1".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: crate::test_paths::unique_test_file("kanna-pairings", "json"),
         }
@@ -932,6 +946,74 @@ mod tests {
         let serialized = serde_json::to_value(response).unwrap();
 
         assert_eq!(serialized["id"], 42);
+    }
+
+    #[test]
+    fn source_desktop_id_deserializes_when_relay_provides_it() {
+        let invoke: super::RelayMessage = serde_json::from_value(serde_json::json!({
+            "type": "invoke",
+            "id": "provenance-1",
+            "desktopId": "desktop-target",
+            "sourceDesktopId": "desktop-source",
+            "method": "GET",
+            "path": "/v1/status",
+            "body": null
+        }))
+        .expect("relay invoke with sourceDesktopId should deserialize");
+
+        let super::RelayMessage::Invoke {
+            source_desktop_id, ..
+        } = invoke
+        else {
+            panic!("expected invoke message");
+        };
+        assert_eq!(source_desktop_id.as_deref(), Some("desktop-source"));
+    }
+
+    /// A relay that predates `desktopRouting` capability v2 never sends this
+    /// field at all; it must not fail to parse the rest of a perfectly
+    /// ordinary invoke frame.
+    #[test]
+    fn source_desktop_id_defaults_to_none_for_a_pre_v2_relay() {
+        let invoke: super::RelayMessage = serde_json::from_value(serde_json::json!({
+            "type": "invoke",
+            "id": "legacy-1",
+            "desktopId": "desktop-target",
+            "method": "GET",
+            "path": "/v1/status",
+            "body": null
+        }))
+        .expect("relay invoke without sourceDesktopId must still deserialize");
+
+        let super::RelayMessage::Invoke {
+            source_desktop_id, ..
+        } = invoke
+        else {
+            panic!("expected invoke message");
+        };
+        assert_eq!(source_desktop_id, None);
+    }
+
+    /// This desktop, acting as a source, never populates the field itself -
+    /// only the relay does, from the sending connection's own identity. An
+    /// outbound invoke this desktop constructs must not serialize it at all.
+    #[test]
+    fn an_outbound_invoke_never_serializes_a_source_desktop_id() {
+        let outbound = super::RelayMessage::Invoke {
+            id: super::RelayId::String("outbound-1".to_string()),
+            desktop_id: Some("desktop-target".to_string()),
+            source_desktop_id: None,
+            request: super::RelayInvoke::Http {
+                method: "GET".to_string(),
+                path: "/v1/status".to_string(),
+                body: serde_json::Value::Null,
+            },
+        };
+        let serialized = serde_json::to_value(outbound).unwrap();
+        assert!(
+            serialized.get("sourceDesktopId").is_none(),
+            "{serialized:?}"
+        );
     }
 
     #[tokio::test]

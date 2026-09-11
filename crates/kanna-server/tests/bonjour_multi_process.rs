@@ -8,6 +8,7 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::net::UnixListener;
@@ -20,12 +21,18 @@ struct RunningServer {
     desktop_id: String,
     environment: String,
     port: u16,
+    lan_routing_port: u16,
+    stderr_lines: Arc<Mutex<Vec<String>>>,
+    stderr_reader: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for RunningServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if let Some(reader) = self.stderr_reader.take() {
+            let _ = reader.join();
+        }
         self.daemon.abort();
     }
 }
@@ -107,6 +114,7 @@ fn start_server(
     let db_path = root.path().join("kanna.sqlite3");
     let pairing_store_path = root.path().join("pairings.json");
     let transfer_port = reserve_port();
+    let lan_routing_port = reserve_port();
     std::fs::write(
         &config_path,
         format!(
@@ -122,6 +130,7 @@ fn start_server(
              environment = \"{environment}\"\n\
              lan_host = \"127.0.0.1\"\n\
              lan_port = {port}\n\
+             lan_routing_port = {lan_routing_port}\n\
              transfer_port = {transfer_port}\n\
              pairing_store_path = \"{}\"\n",
             toml_path(&daemon_dir),
@@ -141,7 +150,15 @@ fn start_server(
     if let Some(relay_url) = advertised_relay_url {
         command.env("KANNA_ADVERTISED_RELAY_URL", relay_url);
     }
-    let child = command.spawn().expect("launch kanna-server");
+    let mut child = command.spawn().expect("launch kanna-server");
+    let stderr = child.stderr.take().expect("capture kanna-server stderr");
+    let stderr_lines = Arc::new(Mutex::new(Vec::new()));
+    let stderr_lines_for_reader = Arc::clone(&stderr_lines);
+    let stderr_reader = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            stderr_lines_for_reader.lock().unwrap().push(line);
+        }
+    });
 
     RunningServer {
         child,
@@ -150,6 +167,15 @@ fn start_server(
         desktop_id: desktop_id.to_string(),
         environment: environment.to_string(),
         port,
+        lan_routing_port,
+        stderr_lines,
+        stderr_reader: Some(stderr_reader),
+    }
+}
+
+impl RunningServer {
+    fn stderr(&self) -> String {
+        self.stderr_lines.lock().unwrap().join("\n")
     }
 }
 
@@ -159,10 +185,7 @@ async fn wait_for_status(server: &mut RunningServer) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(status) = server.child.try_wait().expect("poll kanna-server") {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = server.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
+            let stderr = server.stderr();
             panic!("kanna-server exited with {status}: {stderr}");
         }
         if let Ok(response) = client.get(&url).send().await {
@@ -247,7 +270,11 @@ fn spawn_line_reader<R: Read + Send + 'static>(
     })
 }
 
-fn dns_sd_zone_until(predicate: impl Fn(&str) -> bool, timeout: Duration) -> DnsSdObservation {
+fn dns_sd_zone_until(
+    service_type: &str,
+    predicate: impl Fn(&str) -> bool,
+    timeout: Duration,
+) -> DnsSdObservation {
     // This is intentionally the host's resolver, not another in-process
     // mdns_sd daemon. A browser that exits before the deadline is retried and
     // its status/stderr are retained so a failure explains the host condition.
@@ -255,7 +282,7 @@ fn dns_sd_zone_until(predicate: impl Fn(&str) -> bool, timeout: Duration) -> Dns
     let mut diagnostics = String::new();
     loop {
         let mut child = Command::new("/usr/bin/dns-sd")
-            .args(["-Z", "_kanna-mobile._tcp", "local"])
+            .args(["-Z", service_type, "local"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -323,6 +350,8 @@ fn dns_sd_zone_until(predicate: impl Fn(&str) -> bool, timeout: Duration) -> Dns
 struct DiscoveredService {
     port: Option<u16>,
     txt_desktop_id: Option<String>,
+    txt_environment: Option<String>,
+    txt_protocol_version: Option<String>,
 }
 
 fn discovered_services(zone: &str) -> std::collections::HashMap<String, DiscoveredService> {
@@ -348,11 +377,16 @@ fn discovered_services(zone: &str) -> std::collections::HashMap<String, Discover
                     .and_then(|port| port.parse().ok());
             }
             "TXT" => {
-                service.txt_desktop_id = fields.get(record_index + 1).and_then(|txt| {
-                    txt.trim_matches('"')
-                        .strip_prefix("desktopId=")
-                        .map(str::to_string)
-                });
+                for txt in fields.iter().skip(record_index + 1) {
+                    let txt = txt.trim_matches('"');
+                    if let Some(value) = txt.strip_prefix("desktopId=") {
+                        service.txt_desktop_id = Some(value.to_string());
+                    } else if let Some(value) = txt.strip_prefix("environment=") {
+                        service.txt_environment = Some(value.to_string());
+                    } else if let Some(value) = txt.strip_prefix("protocolVersion=") {
+                        service.txt_protocol_version = Some(value.to_string());
+                    }
+                }
             }
             _ => unreachable!(),
         }
@@ -398,6 +432,7 @@ async fn distinct_real_servers_publish_and_clean_up_through_macos_bonjour() {
     }
 
     let zone = dns_sd_zone_until(
+        "_kanna-mobile._tcp",
         |output| {
             servers.iter().all(|server| {
                 discovered_service(output, &server.desktop_id)
@@ -536,6 +571,7 @@ async fn distinct_real_servers_publish_and_clean_up_through_macos_bonjour() {
     drop(removed);
     tokio::time::sleep(Duration::from_secs(1)).await;
     let after_shutdown = dns_sd_zone_until(
+        "_kanna-mobile._tcp",
         |output| {
             servers
                 .iter()
@@ -561,6 +597,7 @@ async fn distinct_real_servers_publish_and_clean_up_through_macos_bonjour() {
     );
     wait_for_status(&mut replacement).await;
     let after_restart = dns_sd_zone_until(
+        "_kanna-mobile._tcp",
         |output| {
             discovered_service(output, &removed_id)
                 .is_some_and(|service| service.port == Some(replacement_port))
@@ -573,6 +610,8 @@ async fn distinct_real_servers_publish_and_clean_up_through_macos_bonjour() {
         Some(DiscoveredService {
             port: Some(replacement_port),
             txt_desktop_id: Some(removed_id.clone()),
+            txt_environment: None,
+            txt_protocol_version: None,
         }),
         "replacement record missing or mismatched:\n{}\n{}",
         after_restart.output,
@@ -581,5 +620,115 @@ async fn distinct_real_servers_publish_and_clean_up_through_macos_bonjour() {
     assert_ne!(
         restarted.and_then(|service| service.port),
         Some(removed_port)
+    );
+}
+
+async fn wait_for_log(server: &RunningServer, needle: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let stderr = server.stderr();
+        if stderr.contains(needle) {
+            return stderr;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {needle:?} in server log:\n{stderr}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn lan_routing_native_discovery_handles_late_join_and_exact_withdrawal() {
+    let suffix = format!("{}-{}", std::process::id(), reserve_port());
+    let target_id = format!("lan-target-{suffix}");
+    let source_id = format!("lan-source-{suffix}");
+    let target_port = reserve_port();
+    let mut target = start_server("lan-target", "development", &target_id, target_port, None);
+    wait_for_status(&mut target).await;
+    let target_lan_routing_port = target.lan_routing_port;
+
+    // Establish that the advertiser is already live before the second
+    // process starts its browser. This is a real late-joining browser, not a
+    // synthetic event fed into the observation book.
+    let advertised = dns_sd_zone_until(
+        "_kanna-lan._tcp",
+        |output| {
+            discovered_service(output, &target_id).is_some_and(|service| {
+                service.port == Some(target_lan_routing_port)
+                    && service.txt_environment.as_deref() == Some("development")
+                    && service.txt_protocol_version.as_deref() == Some("1")
+            })
+        },
+        Duration::from_secs(15),
+    );
+    let target_service = discovered_service(&advertised.output, &target_id);
+    assert_eq!(
+        target_service,
+        Some(DiscoveredService {
+            port: Some(target_lan_routing_port),
+            txt_desktop_id: Some(target_id.clone()),
+            txt_environment: Some("development".to_string()),
+            txt_protocol_version: Some("1".to_string()),
+        }),
+        "LAN SRV/TXT contract was not published:\n{}\n{}",
+        advertised.output,
+        advertised.diagnostics
+    );
+
+    let mut source = start_server(
+        "lan-source",
+        "development",
+        &source_id,
+        reserve_port(),
+        None,
+    );
+    wait_for_status(&mut source).await;
+    let observed = wait_for_log(
+        &source,
+        &format!("LAN routing candidate observed: {target_id} at "),
+        Duration::from_secs(15),
+    )
+    .await;
+    let candidate_line = observed
+        .lines()
+        .find(|line| line.contains(&format!("LAN routing candidate observed: {target_id} at ")))
+        .expect("candidate observation log line");
+    assert!(
+        candidate_line.ends_with(&format!(":{target_lan_routing_port}")),
+        "candidate must carry the listener's actual bound port: {candidate_line}"
+    );
+    let address = candidate_line
+        .rsplit_once(" at ")
+        .and_then(|(_, value)| value.parse::<std::net::SocketAddr>().ok())
+        .expect("candidate log must carry a socket address");
+    assert!(
+        !address.ip().is_loopback()
+            && !address.ip().is_unspecified()
+            && !address.ip().is_multicast(),
+        "candidate address must be non-loopback and routable: {address}"
+    );
+
+    drop(target);
+    wait_for_log(
+        &source,
+        &format!("LAN routing candidate withdrawn: {target_id}"),
+        Duration::from_secs(15),
+    )
+    .await;
+
+    // The LAN routing service has an independent registration and lifetime;
+    // withdrawing one peer must not disturb the surviving server's mobile
+    // pairing advertisement.
+    let mobile = dns_sd_zone_until(
+        "_kanna-mobile._tcp",
+        |output| discovered_service(output, &source_id).is_some(),
+        Duration::from_secs(10),
+    );
+    assert!(
+        discovered_service(&mobile.output, &source_id).is_some(),
+        "mobile advertisement disappeared during LAN withdrawal:\n{}\n{}",
+        mobile.output,
+        mobile.diagnostics
     );
 }

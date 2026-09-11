@@ -11,8 +11,12 @@ mod http_api;
 mod human_control;
 mod internal_ports;
 mod ksp;
+mod lan_discovery;
+mod lan_tls;
+mod lan_tls_identity;
 mod logging;
 pub(crate) use kanna_runtime_defaults::login_shell;
+mod machine_trust;
 mod mobile_api;
 mod pairing;
 mod register;
@@ -21,6 +25,7 @@ mod relay_client;
 mod repo_browser;
 mod repo_commands;
 mod runtime;
+mod secure_file;
 mod session_replacements;
 mod task_creator;
 mod task_diff;
@@ -229,6 +234,14 @@ async fn main() {
     })
     .ok();
 
+    // Sidecar-independent from the mobile advertisement above: its own
+    // service type, its own port, its own optionality - a failure here must
+    // not affect mobile pairing or vice versa. Advertising itself is owned by
+    // `runtime::run_lan_machine_invoke_listener`, not started here: it only
+    // begins once that listener has actually bound its port, so a second
+    // instance that loses the port never advertises one it does not hold -
+    // see that function's own doc comment.
+
     // Capture the login-shell PATH before the first stage action needs it —
     // loading zshrc costs seconds and must never sit on a request path.
     tokio::task::spawn_blocking(task_creator::warm_login_shell_path);
@@ -245,6 +258,16 @@ async fn main() {
     });
 
     let http_state = Arc::new(http_api::AppState::new(config.clone()));
+    // Discovery only ever populates AppState::lan_candidates - an address
+    // hint invoke_desktop's own pinned-TLS client independently
+    // authenticates before trusting anything; nothing here grants trust.
+    let _lan_discovery = match lan_discovery::start_discovery(Arc::clone(&http_state)) {
+        Ok(discovery) => Some(discovery),
+        Err(error) => {
+            log::warn!("LAN routing discovery unavailable: {error}");
+            None
+        }
+    };
     let session_replacements = http_state.session_replacements();
     let detached_terminals = http_state
         .terminal_attachments()

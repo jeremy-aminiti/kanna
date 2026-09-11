@@ -2,7 +2,7 @@ mod analytics;
 mod backup;
 mod blocking;
 mod cloud_desktops;
-mod cloud_relay;
+pub(crate) mod cloud_relay;
 mod desktop;
 mod desktop_views;
 #[cfg(debug_assertions)]
@@ -11,7 +11,10 @@ mod e2e_mobile_controls;
 mod e2e_sql;
 pub(crate) mod event_subscriptions;
 mod harness_wake;
+pub(crate) mod invoke_desktop;
 mod ksp;
+mod lan_bootstrap;
+mod lan_listener;
 mod lan_trust;
 mod machine_stats;
 mod mobile_notifications;
@@ -87,11 +90,28 @@ pub(crate) async fn dispatch_authenticated_http_invoke(
 pub(crate) async fn dispatch_authenticated_relay_http_invoke(
     state: std::sync::Arc<AppState>,
     actor: String,
+    source_desktop_id: Option<String>,
     method: &str,
     path: &str,
     body: serde_json::Value,
 ) -> HttpInvokeResponse {
-    routes::dispatch_authenticated_relay_http_invoke(state, actor, method, path, body).await
+    routes::dispatch_authenticated_relay_http_invoke(
+        state,
+        actor,
+        source_desktop_id,
+        method,
+        path,
+        body,
+    )
+    .await
+}
+
+pub async fn serve_lan_machine_invoke_listener(
+    state: std::sync::Arc<AppState>,
+    port: u16,
+    on_bound: impl FnOnce(std::net::SocketAddr),
+) -> Result<(), String> {
+    lan_listener::serve(state, port, on_bound).await
 }
 
 pub async fn serve(state: std::sync::Arc<AppState>) -> Result<(), String> {

@@ -1978,6 +1978,7 @@ mod tests {
             // Let the OS assign the sidecar's listener port; two fixed test
             // ports collided across concurrently running worktrees.
             transfer_port: 0,
+            lan_routing_port: 0,
             activity_event_debounce_seconds: 300,
             pairing_store_path: crate::test_paths::unique_test_file(
                 &format!("kanna-pairings-item4-{label}"),

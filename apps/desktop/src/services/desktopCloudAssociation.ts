@@ -3,7 +3,6 @@ import { invoke } from "../invoke";
 import { getConfiguredDesktopAuthSession } from "./desktopAuthSdk";
 import { DesktopCloudCredentialConflictError } from "./desktopCloudCredentialConflict";
 import { getConfiguredDesktopFirestore } from "./desktopCloudTaskIndex";
-import { reconnectDesktopCloudRelay } from "./desktopServerClient";
 
 const GENERIC_DESKTOP_NAME = "Kanna Desktop";
 
@@ -56,6 +55,11 @@ export async function associateDesktopCloudCredential(): Promise<void> {
  * silent no-op here strands the machine on the account being left, and the next
  * account is refused by the rules with no way back. So every reason it cannot
  * write is raised, not swallowed.
+ *
+ * Deliberately does not itself request a local relay reconnect: its one
+ * caller (`signOut`) must request that unconditionally, including when this
+ * throws, so a failed cloud-credential release never also skips telling
+ * kanna-server the account is signing out.
  */
 export async function revokeDesktopCloudCredential(): Promise<void> {
   const [session, firestore, credential, status] = await Promise.all([
@@ -91,7 +95,6 @@ export async function revokeDesktopCloudCredential(): Promise<void> {
       updatedAt: serverTimestamp(),
     }, { merge: true }),
   );
-  await reconnectDesktopCloudRelay();
 }
 
 /**

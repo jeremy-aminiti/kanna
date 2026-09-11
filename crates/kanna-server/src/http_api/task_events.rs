@@ -1984,9 +1984,15 @@ fn spawn_aggregate_wait(
                 .map_err(|(status, error)| aggregate_machine_wait_error(status, error))
         } else {
             let path = aggregate_query_path(&query);
-            match state
-                .invoke_relay_desktop(waited_machine_id, "GET".to_string(), path, Value::Null)
-                .await
+            match super::invoke_desktop::invoke_desktop(
+                state.clone(),
+                waited_machine_id,
+                "GET".to_string(),
+                path,
+                Value::Null,
+            )
+            .await
+            .map(|routed| routed.response)
             {
                 Ok(response) if (200..300).contains(&response.status) => {
                     response.body.ok_or_else(|| {
@@ -2379,21 +2385,21 @@ async fn wait_aggregate_task_events(
     }
     let mut machine_errors = Vec::new();
     let mut active_machines = HashSet::from([local_machine_id.clone()]);
-    match state.list_active_relay_desktops().await {
-        Ok(machine_ids) => {
-            active_machines.extend(machine_ids);
-        }
-        Err(_error) => {
-            // Known peer ids below get the stable outage state. Before a
-            // first successful listing, attribute discovery failure to this
-            // machine's relay route rather than emitting an unowned error.
-            if session.cursor.machine_ids.len() == 1 {
-                machine_errors.push(json!({
-                    "machineId": local_machine_id,
-                    "error": state.desktop_routing_unreachable_error(),
-                    "stale": true,
-                }));
-            }
+    // `relay_and_lan_desktop_ids` folds in a trusted discovered LAN peer
+    // unconditionally, so a relay-listing failure no longer means this
+    // fan-out has nothing left to reach.
+    let (merged_ids, relay_error) = super::invoke_desktop::relay_and_lan_desktop_ids(&state).await;
+    active_machines.extend(merged_ids);
+    if relay_error.is_some() {
+        // Known peer ids below get the stable outage state. Before a
+        // first successful listing, attribute discovery failure to this
+        // machine's relay route rather than emitting an unowned error.
+        if session.cursor.machine_ids.len() == 1 {
+            machine_errors.push(json!({
+                "machineId": local_machine_id,
+                "error": state.desktop_routing_unreachable_error(),
+                "stale": true,
+            }));
         }
     }
     for machine_id in &active_machines {

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   verifyFirebaseAuthIndexedDbStorage: vi.fn(),
   invoke: vi.fn(),
   revokeDesktopCloudCredential: vi.fn(),
+  signOutDesktopCloudAccount: vi.fn(),
 }));
 
 const MockDesktopPersistence = vi.hoisted(() => class {
@@ -55,6 +56,10 @@ vi.mock("./desktopCloudAssociation", () => ({
   revokeDesktopCloudCredential: mocks.revokeDesktopCloudCredential,
 }));
 
+vi.mock("./desktopServerClient", () => ({
+  signOutDesktopCloudAccount: mocks.signOutDesktopCloudAccount,
+}));
+
 describe("getConfiguredDesktopAuthSession", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -71,6 +76,7 @@ describe("getConfiguredDesktopAuthSession", () => {
     mocks.firebaseSignOut.mockReset().mockResolvedValue(undefined);
     mocks.invoke.mockReset();
     mocks.revokeDesktopCloudCredential.mockReset().mockResolvedValue(undefined);
+    mocks.signOutDesktopCloudAccount.mockReset().mockResolvedValue(undefined);
     mocks.resolveDesktopFirebaseConfig.mockReset().mockResolvedValue({
       app: {
         apiKey: "kanna-local",
@@ -137,7 +143,7 @@ describe("getConfiguredDesktopAuthSession", () => {
     expect(mocks.getAuth).not.toHaveBeenCalled();
   });
 
-  it("revokes the desktop cloud credential before ending the local session", async () => {
+  it("revokes the desktop cloud credential and signs this desktop out of kanna-server before ending the local session", async () => {
     const { getConfiguredDesktopAuthSession } = await import("./desktopAuthSdk");
     const session = await getConfiguredDesktopAuthSession();
     await session.initialize();
@@ -145,8 +151,12 @@ describe("getConfiguredDesktopAuthSession", () => {
     await expect(session.signOut()).resolves.toEqual({ desktopCredentialError: null });
 
     expect(mocks.revokeDesktopCloudCredential).toHaveBeenCalledOnce();
+    expect(mocks.signOutDesktopCloudAccount).toHaveBeenCalledOnce();
     expect(mocks.firebaseSignOut).toHaveBeenCalledOnce();
     expect(mocks.revokeDesktopCloudCredential.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.firebaseSignOut.mock.invocationCallOrder[0]!,
+    );
+    expect(mocks.signOutDesktopCloudAccount.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.firebaseSignOut.mock.invocationCallOrder[0]!,
     );
   });
@@ -172,6 +182,52 @@ describe("getConfiguredDesktopAuthSession", () => {
     expect(warnSpy).toHaveBeenCalledWith(
       "[cloud] failed to release desktop credential during sign-out:",
       expect.objectContaining({ code: "permission-denied" }),
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  // Regression: a failed Firestore credential release used to short-circuit
+  // the whole sign-out flow before kanna-server's own sign-out call, so
+  // kanna-server never disabled its in-memory LAN authority or cleared its
+  // account-bound trust (machine_trust) for this sign-out at all - it kept
+  // believing the outgoing account was still authenticated until some later,
+  // unrelated relay hiccup.
+  it("still signs this desktop out of kanna-server when revoking the desktop cloud credential fails", async () => {
+    mocks.revokeDesktopCloudCredential.mockRejectedValue(
+      Object.assign(new Error("Missing or insufficient permissions."), {
+        code: "permission-denied",
+      }),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const { getConfiguredDesktopAuthSession } = await import("./desktopAuthSdk");
+    const session = await getConfiguredDesktopAuthSession();
+    await session.initialize();
+
+    await session.signOut();
+
+    expect(mocks.signOutDesktopCloudAccount).toHaveBeenCalledOnce();
+    expect(mocks.signOutDesktopCloudAccount.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.firebaseSignOut.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("signs out locally even when kanna-server's own sign-out call itself fails", async () => {
+    mocks.signOutDesktopCloudAccount.mockRejectedValue(new Error("kanna-server unreachable"));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const { getConfiguredDesktopAuthSession } = await import("./desktopAuthSdk");
+    const session = await getConfiguredDesktopAuthSession();
+    await session.initialize();
+
+    await expect(session.signOut()).resolves.toEqual({ desktopCredentialError: null });
+
+    expect(mocks.firebaseSignOut).toHaveBeenCalledOnce();
+    expect(session.getState()).toEqual({ status: "signedOut" });
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[cloud] failed to sign this desktop out of kanna-server:",
+      expect.any(Error),
     );
 
     warnSpy.mockRestore();

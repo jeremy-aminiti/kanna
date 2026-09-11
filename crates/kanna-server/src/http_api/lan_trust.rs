@@ -72,6 +72,115 @@ pub(super) struct DesktopLocalAccess;
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AccountWideTaskEventAccess(bool);
 
+/// Authority for the relay-only same-account LAN bootstrap endpoint. The
+/// caller must have arrived through relay's own connection-bound,
+/// desktop-secret-verified identity (`desktopRouting` capability v2 or
+/// later) - never a local dispatch, a legacy device-token-authenticated
+/// tunnel, or anything a caller could self-report. Both fields are exactly
+/// as trustworthy as `AuthenticatedHttpInvoke` documents them to be, which
+/// is why this extractor refuses unless *both* are present rather than
+/// trusting `TunneledHttpInvoke`/`AuthenticatedHttpInvoke` presence alone -
+/// a v1 relay, a local dispatch, or a non-desktop-secret-authenticated
+/// tunnel each leave one or both `None`.
+pub(super) struct RelayAttestedSource {
+    pub(super) source_desktop_id: String,
+    pub(super) account_uid: String,
+}
+
+/// Authority for the dedicated LAN machine-invoke listener (a separate
+/// router on its own TLS port - see `lan_listener`). This is the *inbound*
+/// side of automatic same-account LAN trust: the caller presents the
+/// bearer secret a relay bootstrap gave it, verified against
+/// `machine_trust::MachineTrustStore::verify_inbound` under this desktop's
+/// *current* authenticated account - never a `machine_trust` record whose
+/// account no longer matches. Reuses the same device-id/device-secret
+/// header names the mobile pairing model already uses; the two are
+/// unrelated wire conventions sharing header names, not the same trust
+/// store or verification path.
+pub(super) struct LanMachineInvokeAuthenticated {
+    pub(super) source_desktop_id: String,
+}
+
+impl FromRequestParts<Arc<AppState>> for LanMachineInvokeAuthenticated {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let unauthorized = || {
+            (
+                StatusCode::UNAUTHORIZED,
+                "LAN machine invoke requires a device id and a verified device secret".to_string(),
+            )
+        };
+        let device_id =
+            header_value_from_map(&parts.headers, DEVICE_ID_HEADER).ok_or_else(unauthorized)?;
+        let device_secret =
+            header_value_from_map(&parts.headers, DEVICE_SECRET_HEADER).ok_or_else(unauthorized)?;
+        let Some(store_path) = state.config().machine_trust_store_path() else {
+            return Err(unauthorized());
+        };
+        let Ok(store) = crate::machine_trust::MachineTrustStore::load_fail_closed(&store_path)
+        else {
+            return Err(unauthorized());
+        };
+        let Ok(now_ms) = crate::machine_trust::unix_time_ms() else {
+            return Err(unauthorized());
+        };
+        let current_account_uid = state.authenticated_account_uid();
+        if !store.verify_inbound(
+            &device_id,
+            &device_secret,
+            current_account_uid.as_deref(),
+            &state.config().environment,
+            &state.config().desktop_id,
+            now_ms,
+        ) {
+            return Err(unauthorized());
+        }
+        Ok(Self {
+            source_desktop_id: device_id,
+        })
+    }
+}
+
+fn header_value_from_map(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+impl FromRequestParts<Arc<AppState>> for RelayAttestedSource {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let unauthorized = || {
+            (
+                StatusCode::UNAUTHORIZED,
+                "same-account LAN bootstrap requires a relay attesting both the account and the source desktop identity".to_string(),
+            )
+        };
+        let invoke = parts
+            .extensions
+            .get::<AuthenticatedHttpInvoke>()
+            .ok_or_else(unauthorized)?;
+        match (&invoke.account_uid, &invoke.source_desktop_id) {
+            (Some(account_uid), Some(source_desktop_id)) => Ok(Self {
+                source_desktop_id: source_desktop_id.clone(),
+                account_uid: account_uid.clone(),
+            }),
+            _ => Err(unauthorized()),
+        }
+    }
+}
+
 impl FromRequestParts<Arc<AppState>> for PrivilegedTaskAccess {
     type Rejection = (StatusCode, String);
 

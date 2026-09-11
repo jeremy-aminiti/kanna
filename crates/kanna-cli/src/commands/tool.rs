@@ -135,21 +135,28 @@ pub(crate) async fn execute_catalog_request(
             }
         }
         (CatalogMethod::Get, ResponseKind::RuntimeInfo) => {
-            let (effective_url, status) = match machine_id {
-                Some(machine_id) => (
-                    format!("kanna+relay://{machine_id}"),
-                    get_routed_json(base_url, &request.path, Some(machine_id)).await,
-                ),
+            let (effective_url, status, route) = match machine_id {
+                Some(machine_id) => {
+                    let (status, route) =
+                        machine_status_with_route(base_url, machine_id, &request.path).await;
+                    (format!("kanna+relay://{machine_id}"), status, route)
+                }
                 None => (
                     base_url.to_string(),
                     get_runtime_status(base_url, &request.path).await,
+                    None,
                 ),
             };
             let mut snapshot =
                 runtime_info_snapshot(&effective_url, adapter, status, client_tool_names);
             if let Some(machine_id) = machine_id {
+                // A server old enough to not report a route is exactly the
+                // servers that only ever spoke relay - the label was
+                // accurate before route reporting existed, and stays
+                // accurate as the fallback for one that still doesn't.
+                let kind = route.unwrap_or_else(|| "accountRelay".to_string());
                 snapshot["connection"]["routing"] = serde_json::json!({
-                    "kind": "accountRelay",
+                    "kind": kind,
                     "machineId": machine_id,
                     "viaBaseUrl": base_url,
                 });
@@ -245,6 +252,12 @@ struct MachineInvokeResponse {
     status: u16,
     body: Option<Value>,
     error: Option<String>,
+    /// "local" | "lan" | "relay", reported by servers new enough to know
+    /// which transport actually served the call. `None` for an older
+    /// server, and callers must not read that as "not relay" or "not
+    /// local," only as "this server predates route reporting."
+    #[serde(default)]
+    route: Option<String>,
 }
 
 async fn resolve_remote_machine_id(
@@ -266,13 +279,13 @@ fn method_name(method: CatalogMethod) -> &'static str {
     }
 }
 
-async fn invoke_machine(
+async fn invoke_machine_response(
     base_url: &str,
     machine_id: &str,
     method: CatalogMethod,
     path: &str,
     body: &Value,
-) -> Result<Value, String> {
+) -> Result<MachineInvokeResponse, String> {
     let proxy_path = format!(
         "/v1/cloud/desktops/{}/invoke",
         crate::api::encode_path_segment(machine_id)
@@ -287,8 +300,17 @@ async fn invoke_machine(
         }),
     )
     .await?;
-    let response: MachineInvokeResponse = serde_json::from_value(response)
-        .map_err(|error| format!("invalid machine invoke response: {error}"))?;
+    serde_json::from_value(response).map_err(|error| format!("invalid machine invoke response: {error}"))
+}
+
+async fn invoke_machine(
+    base_url: &str,
+    machine_id: &str,
+    method: CatalogMethod,
+    path: &str,
+    body: &Value,
+) -> Result<Value, String> {
+    let response = invoke_machine_response(base_url, machine_id, method, path, body).await?;
     if !(200..300).contains(&response.status) {
         return Err(format!(
             "{} {} on machine {} failed with status {}: {}",
@@ -304,6 +326,40 @@ async fn invoke_machine(
         ));
     }
     Ok(response.body.unwrap_or(Value::Null))
+}
+
+/// Like [`invoke_machine`], but also hands back which transport served the
+/// call - kept separate rather than widening `invoke_machine`'s own return
+/// type, since every other caller of `invoke_machine`/`get_routed_json` only
+/// wants the body and has no use for route provenance.
+async fn machine_status_with_route(
+    base_url: &str,
+    machine_id: &str,
+    path: &str,
+) -> (Result<Value, String>, Option<String>) {
+    let response =
+        match invoke_machine_response(base_url, machine_id, CatalogMethod::Get, path, &Value::Null)
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => return (Err(error), None),
+        };
+    let route = response.route.clone();
+    if !(200..300).contains(&response.status) {
+        return (
+            Err(format!(
+                "GET {path} on machine {machine_id} failed with status {}: {}",
+                response.status,
+                response.error.unwrap_or_else(|| response
+                    .body
+                    .as_ref()
+                    .map(Value::to_string)
+                    .unwrap_or_default())
+            )),
+            route,
+        );
+    }
+    (Ok(response.body.unwrap_or(Value::Null)), route)
 }
 
 async fn get_routed_json(

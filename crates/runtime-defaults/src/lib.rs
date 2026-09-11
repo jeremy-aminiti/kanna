@@ -50,6 +50,12 @@ pub const STAGING_MOBILE_SERVER_PORT: u16 = 48_121;
 /// or staging and production contend for one listener and the loser never binds.
 pub const DEFAULT_TRANSFER_PORT: u16 = 4_455;
 pub const STAGING_TRANSFER_PORT: u16 = 4_456;
+/// Fallback for callers with no environment in hand - same caveat as
+/// `DEFAULT_TRANSFER_PORT`: an installed app must resolve
+/// `DesktopCloudEnvironment::lan_routing_port` instead, or staging and
+/// production contend for the same secure LAN machine-invoke listener port.
+pub const DEFAULT_LAN_ROUTING_PORT: u16 = 4_460;
+pub const STAGING_LAN_ROUTING_PORT: u16 = 4_461;
 
 /// Ports an installed Kanna binds on the user's machine. The per-task port
 /// allocator seeds these as occupied so a project's dev server is never handed
@@ -57,11 +63,13 @@ pub const STAGING_TRANSFER_PORT: u16 = 4_456;
 /// order). Development instances are absent on purpose: their ports come from
 /// `kd`/`.kanna/config.json` and vary per worktree, so they cannot be enumerated
 /// here.
-pub const RESERVED_INTERNAL_PORTS: [u16; 4] = [
+pub const RESERVED_INTERNAL_PORTS: [u16; 6] = [
     PRODUCTION_MOBILE_SERVER_PORT,
     STAGING_MOBILE_SERVER_PORT,
     DEFAULT_TRANSFER_PORT,
     STAGING_TRANSFER_PORT,
+    DEFAULT_LAN_ROUTING_PORT,
+    STAGING_LAN_ROUTING_PORT,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +111,13 @@ impl DesktopCloudEnvironment {
         match self {
             Self::Staging => STAGING_TRANSFER_PORT,
             Self::Production => DEFAULT_TRANSFER_PORT,
+        }
+    }
+
+    pub fn lan_routing_port(self) -> u16 {
+        match self {
+            Self::Staging => STAGING_LAN_ROUTING_PORT,
+            Self::Production => DEFAULT_LAN_ROUTING_PORT,
         }
     }
 
@@ -1228,6 +1243,7 @@ mod tests {
         ] {
             assert!(RESERVED_INTERNAL_PORTS.contains(&environment.mobile_server_port()));
             assert!(RESERVED_INTERNAL_PORTS.contains(&environment.transfer_port()));
+            assert!(RESERVED_INTERNAL_PORTS.contains(&environment.lan_routing_port()));
         }
 
         let mut unique = RESERVED_INTERNAL_PORTS;

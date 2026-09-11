@@ -1198,6 +1198,7 @@ mod tests {
             lan_host: "0.0.0.0".to_string(),
             lan_port,
             transfer_port,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: "/tmp/kanna-transfer-sidecar-pairings.json".to_string(),
         }
