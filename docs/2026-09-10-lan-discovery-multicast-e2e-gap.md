@@ -5,8 +5,13 @@ routing cannot be proven end-to-end on this development machine: empty-
 store bootstrap through real mDNS discovery
 (`tests/remote-e2e/src/lan-desktop-routing.e2e.test.ts`), and real CLI/MCP
 provenance reporting `"lan"` for a candidate a real, separately-spawned
-`kanna-server` process actually discovered on its own (as opposed to one
-seeded in-process by a test).
+`kanna-server` process actually discovered on its own. The HTTP/JSON
+contract itself is proven correct
+(`cloud_desktops::tests::invoke_cloud_desktop_reports_lan_route_provenance_in_its_real_http_response`
+calls the real `/v1/cloud/desktops/{id}/invoke` handler, the same one
+`crates/kanna-cli`/`crates/kanna-mcp` actually talk to, and asserts a real
+JSON response of `route: "lan"`) - only the *discovery-populated* case,
+as opposed to one seeded in-process by a test, remains unsatisfied.
 
 An earlier draft of this note also listed dropped-reply-exactly-once/
 `delivery_uncertain`/no-replay, fake-discovery/pinned-TLS rejection, and
