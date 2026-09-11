@@ -1,17 +1,27 @@
 # LAN Discovery Multicast E2E Gap
 
-Five accepted scenarios for LAN-first same-account desktop-to-desktop
-routing (`tests/remote-e2e/src/lan-desktop-routing.e2e.test.ts` and its
-sibling unit suites) cannot be proven end-to-end on this development
-machine: empty-store bootstrap through real mDNS discovery, dropped-reply-
-exactly-once/`delivery_uncertain`/no-replay over a real LAN dial,
-fake-discovery/pinned-TLS rejection through real Bonjour, encrypted-proxy-
-bytes over a real LAN dial, and real CLI/MCP provenance for the
-empty-store path.
+Two accepted scenarios for LAN-first same-account desktop-to-desktop
+routing cannot be proven end-to-end on this development machine: empty-
+store bootstrap through real mDNS discovery
+(`tests/remote-e2e/src/lan-desktop-routing.e2e.test.ts`), and real CLI/MCP
+provenance reporting `"lan"` for a candidate a real, separately-spawned
+`kanna-server` process actually discovered on its own (as opposed to one
+seeded in-process by a test).
 
-The blocker is not this task's own code. `lan_discovery.rs`'s `mdns-sd`-
-based advertise/discover never resolves a candidate on this host, and a
-matched, same-interface fixture
+An earlier draft of this note also listed dropped-reply-exactly-once/
+`delivery_uncertain`/no-replay, fake-discovery/pinned-TLS rejection, and
+encrypted-proxy-bytes as blocked by the same defect. That was wrong: none
+of the three actually need real discovery to resolve anything - they need
+only an authenticated candidate *address*, and discovery is only one of
+the ways a candidate gets populated, not the only one available to a
+test. All three are proven below with real sockets and a real pinned-TLS
+identity/handshake, exactly like `invoke_desktop.rs`'s own existing
+end-to-end test, just with the candidate seeded explicitly instead of
+discovered.
+
+The real blocker, for the two scenarios that remain: `lan_discovery.rs`'s
+`mdns-sd`-based advertise/discover never resolves a candidate on this
+host, and a matched, same-interface fixture
 (`lan_discovery::tests::matched_single_interface_explicit_vs_auto_publish_comparison`,
 using `mdns-sd`'s own existing `send_to` trace-log seam, not packet
 capture) isolated the exact cause: every multicast send on this host's
@@ -33,15 +43,32 @@ condition, just never exercised by a same-host query." See
 `.tmp/lan-revision-checkpoint.md` (task-local, not committed) for the full
 evidence chain.
 
-To make these paths end-to-end testable, the harness needs either a
+Neither remaining scenario can be made testable by seeding a candidate
+explicitly the way the three retracted ones were: both are specifically
+about a real, separately-spawned server process discovering and reporting
+on a candidate *it found itself*, which is exactly the step this host
+cannot complete. To make these two testable, the harness needs either a
 development host where this OS-level multicast condition does not
 reproduce, or a genuine second physical device on the same LAN segment
 (never exercised in this environment) to prove or disprove native
 delivery independent of mDNSResponder's same-host answering.
 
-Narrower coverage added instead, all real production paths, none gated by
-the discovery defect:
+Narrower/equivalent coverage added instead, all real production paths:
 
+- `invoke_desktop.rs`'s three new real-socket tests, each a real pinned-TLS
+  identity/handshake over a real socket with an explicitly-seeded
+  candidate, not a mock:
+  `a_dropped_reply_after_a_real_dispatch_is_delivery_uncertain_and_never_replayed_to_relay`
+  (a real target genuinely receives the request, then the reply is
+  dropped - proves `delivery_uncertain` and exactly-once, no automatic
+  replay), `every_byte_a_lan_proxy_observes_is_encrypted_never_plaintext_secrets_or_paths`
+  (a transparent byte-capturing proxy in front of the real production
+  listener, proving the wire never carries the plaintext bearer secret,
+  header name, or path), and
+  `a_candidate_presenting_a_different_desktops_real_identity_is_rejected_before_dispatch`
+  (a real raw TLS responder presenting a different desktop's real, validly
+  -issued identity, proving pinned-TLS rejection before any application
+  byte crosses, through the full `attempt_lan_invoke` path).
 - `lan-desktop-routing.e2e.test.ts` › "establishes a real trust grant over
   relay-based bootstrap, independent of LAN candidate discovery" and
   "keeps an already-established outbound grant through a relay outage" -
@@ -59,19 +86,10 @@ the discovery defect:
 - `invoke_desktop.rs`'s own real-TLS unit tests
   (`a_real_lan_invoke_completes_over_a_real_tls_socket_end_to_end`, its
   same-address variant, and `a_real_lan_invoke_with_the_wrong_bearer_secret_is_rejected_definitely`)
-  prove the pinned-TLS dial, the definite-response-without-fallback
+  prove the pinned-TLS dial and the definite-response-without-fallback
   contract, and (loopback and, separately, the real routable address) that
-  the listener/TLS layer itself was never the fault - only discovery is
-  blocked.
-- `invoke_desktop.rs`'s `resolve_lan_outcome` unit tests
-  (`after_send_uncertainty_never_falls_back_and_reports_delivery_uncertain`,
-  `before_send_failure_falls_back_to_relay_identically_to_no_candidate`,
-  `preflight_negative_falls_back_to_relay`) prove the
-  fallback/uncertainty decision table itself as a pure function,
-  independent of a real network - the exact contract the still-blocked
-  E2E scenarios would otherwise need a real dropped reply to exercise.
+  the listener/TLS layer itself was never the fault.
 - `lan_listener.rs`'s
   `listener_bound_to_all_interfaces_is_reachable_on_a_real_routable_address`
   proves the listener is reachable at this host's real address by plain
-  TCP, isolating the remaining fault to discovery/publication specifically
-  and ruling out the listener or TLS layer.
+  TCP, isolating the remaining fault to discovery/publication specifically.
