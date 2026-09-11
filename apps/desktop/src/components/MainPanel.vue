@@ -32,9 +32,10 @@ import AnalyticsModal from "./AnalyticsModal.vue";
 import ImageUrlPreviewModal from "./ImageUrlPreviewModal.vue";
 import PreferencesPanel from "./PreferencesPanel.vue";
 import { AGENT_TAB_ID, type MainTab } from "../composables/useMainTabs";
-import type {
-  DesktopViewOpenCommand,
-  DesktopViewOpenOutcome,
+import {
+  waitForViewReady,
+  type DesktopViewOpenCommand,
+  type DesktopViewOpenOutcome,
 } from "../composables/desktopViewOpen";
 import type { MainTabViewsController } from "./MainPanel.types";
 import type { BranchInclude, DiffScope, DiffScrollPositions } from "../composables/useAppModals";
@@ -248,9 +249,15 @@ async function revealTabTarget(
       message: "this window is not hosting task views",
     };
   }
-  controller.activateTab(tabId);
+  // Selecting the task is what moves this panel onto that task's tab set, and
+  // it lands through the store rather than in the same tick — so activation is
+  // retried until the scope catches up rather than giving up on the first one.
+  const activated = await waitForViewReady(() => {
+    controller.activateTab(tabId);
+    return controller.activeTabId.value === tabId;
+  }, { timeoutMs: 3_000 });
   await nextTick();
-  if (controller.activeTabId.value !== tabId) {
+  if (!activated) {
     return {
       opened: false,
       code: "renderer_failed",
