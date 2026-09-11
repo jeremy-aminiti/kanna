@@ -62,15 +62,11 @@ kanna_create_task {
 
 This does not change purpose-built child workflows: a QA dispatcher and other genuine fan-outs should keep their child-task hierarchy.
 
-## Watch Machine Capacity Before Starting Heavy Work
+## Observe Machine Headroom
 
-Every task you create shares a machine with the tasks already running on it. Three concurrent full verification gates saturated one Mac's CPU and made every terminal that machine served — remote views included — lag until a human ran `ps` by hand and throttled. Capacity is a coordination input, so read it before you add load, not after someone complains.
+Use the compact default `kanna_machine_stats {}` when machine headroom is relevant to coordination. Read one record per machine: `machineId`, `loadAverages.five`/`fifteen`, `availableMemoryBytes`, `freeDiskBytes`, and concise `errors`; read `machineErrors` for machines whose capacity is unavailable. Load averages describe demand over minutes, not CPU utilization. Unknown measurements and peers are unknown capacity, never idle capacity, and the snapshot reserves nothing. Do not impose verification holds or invent a scheduler from these advisory values.
 
-Use `kanna_machine_stats` before creating a task that will build or test, and before advancing a stage whose next agent starts a full gate. Read sampled `cpu.busyPercent`/`idlePercent`, its time/window, top consumers, memory and storage headroom, and collection errors. Load averages describe demand over minutes, not current CPU utilization. `heavyProcessCount` counts recognized build/test tools only; zero recognized tools never means idle CPU. Top process `cpuPercent` uses 100% per logical CPU and can exceed 100%; do not sum it as whole-machine percent. Busy tasks are session context, not a measure of host CPU. Missing sample fields on older peers are unknown. A peer in `machineErrors` is unknown capacity, never idle capacity. The snapshot may already be stale, reserves nothing, and supplies no safe-to-start quota. Stagger heavy verification using actual observed resources and explicit owner constraints.
-
-For an older server that does not advertise `kanna_machine_stats`, fall back to two reads and state their limits. On this manager's machine, use `uptime` for load, `sysctl -n hw.logicalcpu` for logical cores, and `ps -axo pcpu,command` filtered for `rustc`, `cargo`, `bazel`, `vitest`, `xcodebuild`, and Node test runners; this sees local build lanes only. For siblings, call `kanna_list_recent_tasks` with `all_machines: true`, group open rows by `machineId`, and count `runtimeState: "busy"`; this sees sessions, not build processes. A missing runtime state is not an idle lane: resolve it with `kanna_get_task` and a `kanna_task_logs` tail.
-
-Stagger by writing the constraint into the task, never by rationing it silently. Put an explicit pause-heavy-verification directive in the creation prompt, or send one to a task already running: name the exact commands to hold (in this repository, `./kd test all` and workspace-wide `cargo` builds) and the exact phrase that lifts the hold. Then track every task you paused and send that phrase with `kanna_send_task_input` once capacity frees — a paused task nobody resumed is a task you parked by accident. All of this is advisory: the numbers describe a moment already past, they reserve nothing, and there is no scheduler or admission control behind them. Do not invent a load or quota counter Kanna does not report.
+For an older server that does not advertise `kanna_machine_stats`, use `uptime` only for this manager's local load and state that remote machine headroom is unavailable. Do not substitute process lists or busy task counts for the compact machine measurements.
 
 ## Verify Before Acting
 

@@ -287,34 +287,29 @@ describe("QA workflow assets", () => {
     expect(agent.prompt).toContain(
       "Name pull requests the same way—a brief description of what the PR changes followed by its number"
     );
-    expect(agent.prompt).toContain("Watch Machine Capacity Before Starting Heavy Work");
-    expect(agent.prompt).toContain("Use `kanna_machine_stats`");
+    expect(agent.prompt).toContain("Observe Machine Headroom");
+    expect(agent.prompt).toContain("compact default `kanna_machine_stats {}`");
+    for (const field of [
+      "`machineId`",
+      "`loadAverages.five`/`fifteen`",
+      "`availableMemoryBytes`",
+      "`freeDiskBytes`",
+      "`errors`",
+      "`machineErrors`",
+    ]) {
+      expect(agent.prompt, field).toContain(field);
+    }
     expect(agent.prompt).toContain(
       "For an older server that does not advertise `kanna_machine_stats`"
     );
-    expect(agent.prompt).toContain("`sysctl -n hw.logicalcpu`");
-    expect(agent.prompt).toContain(
-      "`ps -axo pcpu,command` filtered for `rustc`, `cargo`, `bazel`, `vitest`, `xcodebuild`, and Node test runners"
-    );
-    expect(agent.prompt).toContain(
-      "`kanna_list_recent_tasks` with `all_machines: true`"
-    );
-    expect(agent.prompt).toContain(
-      "group open rows by `machineId`, and count `runtimeState: \"busy\"`"
-    );
-    expect(agent.prompt).toContain("this sees sessions, not build processes");
-    expect(agent.prompt).toContain("`kanna_task_logs` tail");
-    expect(agent.prompt).toContain("zero recognized tools never means idle CPU");
+    expect(agent.prompt).toContain("use `uptime` only for this manager's local load");
+    expect(agent.prompt).toContain("Do not substitute process lists or busy task counts");
+    expect(agent.prompt).not.toContain('kanna_machine_stats {"detailed": true}');
+    expect(agent.prompt).not.toContain("`cpu.busyPercent`/`idlePercent`");
+    expect(agent.prompt).not.toContain("`processes.topProcesses`");
+    expect(agent.prompt).not.toContain("`heavyProcessCount`");
     expect(agent.prompt).toContain("unknown capacity, never idle capacity");
-    expect(agent.prompt).toContain(
-      "Put an explicit pause-heavy-verification directive in the creation prompt"
-    );
-    expect(agent.prompt).toContain(
-      "a paused task nobody resumed is a task you parked by accident"
-    );
-    expect(agent.prompt).toContain(
-      "there is no scheduler or admission control behind them"
-    );
+    expect(agent.prompt).toContain("Do not impose verification holds or invent a scheduler");
     expect(task).toContain("name: Task Manager");
     expect(task).toContain("agent: task-manager");
   });

@@ -466,7 +466,7 @@ async fn list_desktops_route_returns_configured_desktop() {
 }
 
 #[tokio::test]
-async fn machine_stats_route_returns_sane_local_native_stats() {
+async fn machine_stats_route_returns_compact_local_stats() {
     let app = super::test_router_with_seed("desktop-stats", "Stats Mac", |db| {
         db.insert_test_repo("repo-stats", "Stats Repo").unwrap();
         db.insert_test_pipeline_item(
@@ -498,27 +498,13 @@ async fn machine_stats_route_returns_sane_local_native_stats() {
     println!("MACHINE_STATS_SAMPLE={stats}");
     let machine = &stats["machines"][0];
     assert_eq!(machine["machineId"], "desktop-stats");
-    assert!(machine["cpuCoreCount"].as_u64().unwrap() >= 1);
-    assert!(machine["memory"]["totalBytes"].as_u64().unwrap() > 0);
-    assert!(machine["memory"]["usedBytes"].as_u64().unwrap() > 0);
-    assert!(machine["loadAverages"]["one"].as_f64().unwrap() >= 0.0);
-    assert!(machine["heavyProcesses"]["rustc"].is_number());
-    assert_eq!(machine["busyTaskCount"], 1);
-    assert!(machine["cpu"]["sampleWindowMs"].as_u64().unwrap() >= 500);
-    let busy = machine["cpu"]["busyPercent"].as_f64().unwrap();
-    let idle = machine["cpu"]["idlePercent"].as_f64().unwrap();
-    assert!((0.0..=100.0).contains(&busy));
-    assert!((0.0..=100.0).contains(&idle));
-    assert!(machine["logicalCoreCount"].as_u64().unwrap() >= 1);
-    assert!(machine["sampledAt"].is_u64());
-    assert!(machine["memory"]["swapUsedBytes"].is_u64());
-    assert!(
-        machine["processes"]["topProcesses"]
-            .as_array()
-            .unwrap()
-            .len()
-            <= 10
-    );
+    assert!(machine["availableMemoryBytes"].is_u64());
+    assert!(machine["freeDiskBytes"].as_u64().unwrap() > 0);
+    assert!(machine["loadAverages"]["five"].as_f64().unwrap() >= 0.0);
+    assert!(machine["loadAverages"]["fifteen"].as_f64().unwrap() >= 0.0);
+    assert!(machine.get("cpu").is_none());
+    assert!(machine.get("processes").is_none());
+    assert!(machine.get("storage").is_none());
 
     assert_eq!(stats["machineErrors"], serde_json::json!([]));
 }
@@ -624,13 +610,20 @@ async fn machine_stats_route_keeps_successful_siblings_when_another_times_out() 
         .iter()
         .find(|m| m["machineId"] == "desktop-remote")
         .unwrap();
-    assert!(old.get("cpu").is_none(), "older peer must not become idle");
-    assert!(old.get("sampledAt").is_none());
-    assert!(old.get("processes").is_none());
+    assert_eq!(old["availableMemoryBytes"], 8000000000_u64);
+    assert!(old["freeDiskBytes"].is_null());
+    assert_eq!(
+        old["loadAverages"],
+        serde_json::json!({"five": 2.0, "fifteen": 3.0})
+    );
+    assert!(old["errors"][0]
+        .as_str()
+        .unwrap()
+        .contains("disk unavailable"));
     assert_eq!(stats["machineErrors"][0]["machineId"], "desktop-hung");
     assert_eq!(
         stats["machineErrors"][0]["error"],
-        "machine-stats request timed out"
+        "unreachable: stats request timed out"
     );
 }
 

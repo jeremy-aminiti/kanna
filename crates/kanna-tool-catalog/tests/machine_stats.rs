@@ -12,4 +12,8 @@ fn machine_stats_remains_a_server_aggregated_read_only_json_snapshot() {
     assert_eq!(request.body, json!({}));
     assert!(request.wait.is_none());
     assert!(request.local_response.is_none());
+
+    let detailed =
+        resolve_request(&catalog, "kanna_machine_stats", &json!({"detailed": true})).unwrap();
+    assert_eq!(detailed.path, "/v1/machine-stats?detailed=true");
 }

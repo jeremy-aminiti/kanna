@@ -204,11 +204,13 @@
     },
     {
       "name": "kanna_machine_stats",
-      "description": "Report a bounded server-owned resource snapshot for this machine and reachable siblings. cpu reports real sampled whole-machine busyPercent/idlePercent and userPercent/systemPercent (0–100 across all logical CPUs); Linux also separates ioWaitPercent/stealPercent. Load averages remain distinct 1/5/15-minute demand metrics, never utilization. sampledAt/cpu.sampledAt are source Unix-ms end times; cpu.sampleStartedAt is the Unix-ms start and cpu.sampleWindowMs is the measured monotonic interval; cacheAgeMs reports age at the source (up to 2 seconds), and relay adds delay. Missing CPU/sample fields on older peers or collection failure mean unknown, never healthy zero. physicalCoreCount and logicalCoreCount are explicit; legacy cpuCoreCount remains physical-first and is not a CPU-capacity multiplier for heterogeneous cores. processes.topProcesses contains up to 10 non-build or build consumers (top 5 CPU plus top 5 resident memory), with PID/parent PID/name, sampled cpuPercent (100% per logical CPU, may exceed 100), sampleWindowMs and residentBytes; no argv/env. Partial process coverage is explicit. Legacy heavyProcessCount/heavyProcesses count recognized build/test processes only: zero recognized tools or busyTaskCount=0 NEVER means idle CPU. Memory distinguishes free from estimated available bytes, pressure, swap and macOS compression; storage reports available backing-volume space for bounded repo/.build/.tmp and server-temp paths, deduplicated by device, not additive across APFS containers. Inspect collectionErrors and machineErrors; unavailable fields/peers and omitted machines are unknown capacity. No reservation, safe-to-start quota, or scheduling decision is provided.",
+      "description": "Report one compact record for this machine and each reachable sibling: machine id, 5/15-minute load averages, available memory, least free space across relevant disks, and concise errors. Null or an error means unknown/unavailable, never zero. Set detailed=true only for sampled CPU, processes, per-volume storage, and collection diagnostics. This is observational data, not a scheduling decision.",
       "method": "GET",
       "path": "/v1/machine-stats",
       "response": "json",
-      "params": []
+      "params": [
+        { "name": "detailed", "description": "Include sampled CPU, process, memory, storage-volume, and collection diagnostics.", "type": "boolean", "required": false, "location": "query" }
+      ]
     },
     {
       "name": "kanna_list_transfer_peers",

@@ -882,9 +882,15 @@ that names the owning machine and tells MCP callers to repeat
 
 `GET /v1/machine-stats` (`kanna_machine_stats`, `kanna-cli machine stats`) is
 an observational resource snapshot, not a scheduler or a safe-to-start quota.
-The server owns native collection; MCP and CLI relay the same JSON. Existing
+The default response is one compact row per available machine: `machineId`,
+5/15-minute `loadAverages`, `availableMemoryBytes`, the least
+`freeDiskBytes` available across relevant backing volumes, and concise `errors`.
+Null values and `machineErrors` preserve unknown and unreachable states. It does
+not sample CPU or enumerate processes. Pass `detailed=true` (or use
+`kanna-cli machine stats --detailed`) for the diagnostic response described
+below. The server owns native collection; MCP and CLI relay the same JSON. Existing
 load, memory, `cpuCoreCount`, `heavyProcessCount`/`heavyProcesses`, and
-`busyTaskCount` fields remain compatible. New fields are optional for old peers:
+`busyTaskCount` fields remain compatible in detailed mode. New fields are optional for old peers:
 **absent means unknown, never a healthy zero**.
 
 - `cpu`: a real two-point CPU-counter sample. `busyPercent` is user + system,

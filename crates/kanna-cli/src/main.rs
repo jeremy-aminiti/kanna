@@ -1111,8 +1111,12 @@ pub(crate) enum MachineCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
-    /// Report sampled CPU, top processes, memory and storage for this machine and siblings
+    /// Report compact load, available memory and free disk for this machine and siblings
     Stats {
+        /// Include sampled CPU, processes, and detailed storage diagnostics
+        #[arg(long)]
+        detailed: bool,
+
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,
