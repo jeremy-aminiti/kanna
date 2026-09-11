@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { mount } from "@vue/test-utils";
-import { AGENT_PROVIDERS, AGENT_PROVIDER_SPECS } from "@kanna/agent-protocol";
+import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import { describe, expect, it, vi } from "vitest";
 import PreferencesPanel from "../PreferencesPanel.vue";
 import en from "../../i18n/locales/en.json";
@@ -24,7 +24,7 @@ vi.mock("vue-i18n", () => ({
   useI18n: () => ({ t: (key: string) => key }),
 }));
 
-function mountPreferences() {
+function mountPreferences(defaultAgentType: "pty" | "agent" = "pty") {
   return mount(PreferencesPanel, {
     props: {
       preferences: {
@@ -34,7 +34,7 @@ function mountPreferences() {
         locale: "en",
         devLingerTerminals: false,
         defaultAgentProvider: "claude",
-        defaultAgentType: "pty",
+        defaultAgentType,
         appTheme: "dark",
         codeTheme: "match",
         agentMessageAppearance: "chat",
@@ -76,40 +76,31 @@ describe("PreferencesPanel theme controls", () => {
     expect(wrapper.emitted("update")).toContainEqual(["agentMessageAppearance", "terminal"]);
   });
 
-  it("uses the requested provider and sdk choices for the default agent preference", () => {
+  it("offers only provider choices for terminal defaults", () => {
     const wrapper = mountPreferences();
     const defaultAgentSelect = wrapper.get('[data-testid="default-agent-select"]');
 
     expect(en.preferences.defaultAgent).toBe("Default agent");
-    expect(defaultAgentSelect.findAll("option").map((option) => option.text())).toEqual([
-      ...AGENT_PROVIDERS,
-      ...AGENT_PROVIDER_SPECS
-        .filter((spec) => spec.supports_headless)
-        .map((spec) => `${spec.id} (sdk)`),
-    ]);
+    expect(defaultAgentSelect.findAll("option").map((option) => option.text())).toEqual(AGENT_PROVIDERS);
   });
 
-  it("emits provider and execution type when choosing an sdk default agent", async () => {
-    const wrapper = mountPreferences();
+  it("resolves a persisted legacy agent preference to its provider choice", () => {
+    const wrapper = mountPreferences("agent");
     const defaultAgentSelect = wrapper.get('[data-testid="default-agent-select"]');
 
-    await defaultAgentSelect.setValue("codex-sdk");
-
-    expect(wrapper.emitted("update")).toContainEqual(["defaultAgentProvider", "codex"]);
-    expect(wrapper.emitted("update")).toContainEqual(["defaultAgentType", "agent"]);
+    expect(defaultAgentSelect.element).toHaveProperty("value", "claude");
+    expect((defaultAgentSelect.element as HTMLSelectElement).selectedIndex).not.toBe(-1);
   });
 
-  it("emits provider and execution type when switching between cli and sdk defaults", async () => {
-    const wrapper = mountPreferences();
+  it("stores pty execution when changing the default provider", async () => {
+    const wrapper = mountPreferences("agent");
     const defaultAgentSelect = wrapper.get('[data-testid="default-agent-select"]');
 
     await defaultAgentSelect.setValue("opencode");
-    await defaultAgentSelect.setValue("claude-sdk");
 
     expect(wrapper.emitted("update")).toContainEqual(["defaultAgentProvider", "opencode"]);
     expect(wrapper.emitted("update")).toContainEqual(["defaultAgentType", "pty"]);
-    expect(wrapper.emitted("update")).toContainEqual(["defaultAgentProvider", "claude"]);
-    expect(wrapper.emitted("update")).toContainEqual(["defaultAgentType", "agent"]);
+    expect(wrapper.emitted("update")).not.toContainEqual(["defaultAgentType", "agent"]);
   });
 
   it("ignores an invalid provider selection", async () => {

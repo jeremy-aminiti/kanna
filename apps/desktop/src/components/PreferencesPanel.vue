@@ -4,8 +4,6 @@ import { useI18n } from 'vue-i18n'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import {
   AGENT_PROVIDERS,
-  AGENT_PROVIDER_SPECS,
-  getAgentProviderSpec,
   isAgentProvider,
 } from "@kanna/agent-protocol"
 import type { AgentProvider } from "../types/kanna"
@@ -98,16 +96,9 @@ const signedInUserEmail = computed(() =>
     : null
 )
 const defaultAgentSelection = computed(() => {
-  const provider = props.preferences.defaultAgentProvider
-  return props.preferences.defaultAgentType === "agent"
-    && getAgentProviderSpec(provider).supports_headless
-    ? `${provider}-sdk`
-    : provider
+  return props.preferences.defaultAgentProvider
 })
 const providerOptions = AGENT_PROVIDERS
-const headlessProviderOptions = AGENT_PROVIDER_SPECS
-  .filter((spec) => spec.supports_headless)
-  .map((spec) => spec.id)
 
 function cycleTab(direction: -1 | 1) {
   const idx = tabs.indexOf(activeTab.value)
@@ -259,12 +250,9 @@ async function openAccountPortal(path: "/register" | "/account") {
 }
 
 function handleDefaultAgentChange(value: string) {
-  const headless = value.endsWith("-sdk")
-  const rawProvider = headless ? value.slice(0, -4) : value
-  if (!isAgentProvider(rawProvider)) return
-  if (headless && !getAgentProviderSpec(rawProvider).supports_headless) return
-  emit("update", "defaultAgentProvider", rawProvider)
-  emit("update", "defaultAgentType", headless ? "agent" : "pty")
+  if (!isAgentProvider(value)) return
+  emit("update", "defaultAgentProvider", value)
+  emit("update", "defaultAgentType", "pty")
 }
 
 onMounted(() => {
@@ -410,13 +398,6 @@ defineExpose({ cycleTab })
           >
             <option v-for="provider in providerOptions" :key="provider" :value="provider">
               {{ provider }}
-            </option>
-            <option
-              v-for="provider in headlessProviderOptions"
-              :key="`${provider}-sdk`"
-              :value="`${provider}-sdk`"
-            >
-              {{ provider }} (sdk)
             </option>
           </select>
         </div>
