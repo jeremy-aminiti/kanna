@@ -44,15 +44,19 @@ import { buildFirebaseCommandEnv, buildFirebaseEmulatorArgs, formatMissingFireba
 import { resolveMobileServerUrl } from "../runtime/mobile";
 import {
   buildAndroidEmulatorLaunchCommand,
+  buildAndroidPhysicalRunPlan,
   buildAndroidPrebuildCommand,
-  buildAndroidReverseCommands,
   buildAndroidRunCommand,
+  cleanupOwnedAndroidReverseRoutes,
+  executeAndroidPhysicalRunPlan,
+  hasAndroidReverseOwnership,
   launchAndroidEmulator,
   missingRequiredAndroidDeviceTools,
   missingRequiredAndroidTools,
   resolveAndroidPhysicalDevice,
   resolveAndroidSdkTools,
   resolveAndroidVirtualDevice,
+  setupAndroidReverseRoutes,
   waitForAndroidVirtualDevice,
   type AndroidCommand,
   type AndroidEmulatorWaitOptions,
@@ -1718,12 +1722,20 @@ async function executeAndroidRun(
           .filter(Number.isInteger)
       ]
     : [];
-  for (const reverse of buildAndroidReverseCommands({ tools: target.tools, serial, ports: reversePorts })) {
-    const result = await executor.runner.run(reverse.command, reverse.args);
-    if (result.exitCode !== 0) {
+  let reverseSetup;
+  if (target.kind === "android-device") {
+    try {
+      reverseSetup = await setupAndroidReverseRoutes({
+        repoRoot: executor.context.repoRoot,
+        runner: executor.runner,
+        tools: target.tools,
+        serial,
+        ports: reversePorts
+      });
+    } catch (error) {
       return {
         ok: false,
-        message: result.stderr || result.stdout || `Failed to configure adb reverse for ${serial}.`,
+        message: error instanceof Error ? error.message : String(error),
         data: { profile, device: target.device, reversePorts }
       };
     }
@@ -1761,29 +1773,54 @@ async function executeAndroidRun(
     };
   }
 
-  const run = buildAndroidRunCommand({
-    repoRoot: executor.context.repoRoot,
-    deviceName: target.kind === "android-emulator" ? target.device.name : target.device.model ?? serial,
-    packageId: identity.packageId,
-    metroPort,
-    appEnv: identity.appEnv,
-    tools: target.tools,
-    packagerHost: deviceHost,
-    ...(target.kind === "android-device" ? { deviceSerial: serial } : {})
-  });
-  const runResult = await executor.runner.run(run.command, run.args, {
-    cwd: run.cwd,
-    env: { ...launch.env, ...run.env },
-    streamOutput: true
-  });
-  if (runResult.exitCode !== 0) {
-    return {
-      ok: false,
-      message:
-        runResult.stderr || runResult.stdout ||
-        `Failed to build, install, or launch ${identity.packageId} on ${targetName}.`,
-      data: { profile, packageId: identity.packageId, device: target.device, metroReadiness }
-    };
+  if (target.kind === "android-device") {
+    const plan = buildAndroidPhysicalRunPlan({
+      repoRoot: executor.context.repoRoot,
+      serial,
+      packageId: identity.packageId,
+      metroPort,
+      appEnv: identity.appEnv,
+      tools: target.tools,
+      packagerHost: deviceHost
+    });
+    const physicalRun = await executeAndroidPhysicalRunPlan({
+      runner: executor.runner,
+      plan,
+      env: launch.env
+    });
+    if (!physicalRun.ok) {
+      return {
+        ok: false,
+        message:
+          physicalRun.result.stderr || physicalRun.result.stdout ||
+          `Failed to ${physicalRun.step} ${identity.packageId} on ${targetName}.`,
+        data: { profile, packageId: identity.packageId, device: target.device, metroReadiness }
+      };
+    }
+  } else {
+    const run = buildAndroidRunCommand({
+      repoRoot: executor.context.repoRoot,
+      deviceName: target.device.name,
+      packageId: identity.packageId,
+      metroPort,
+      appEnv: identity.appEnv,
+      tools: target.tools,
+      packagerHost: deviceHost
+    });
+    const runResult = await executor.runner.run(run.command, run.args, {
+      cwd: run.cwd,
+      env: { ...launch.env, ...run.env },
+      streamOutput: true
+    });
+    if (runResult.exitCode !== 0) {
+      return {
+        ok: false,
+        message:
+          runResult.stderr || runResult.stdout ||
+          `Failed to build, install, or launch ${identity.packageId} on ${targetName}.`,
+        data: { profile, packageId: identity.packageId, device: target.device, metroReadiness }
+      };
+    }
   }
 
   return {
@@ -1803,6 +1840,7 @@ async function executeAndroidRun(
       device: target.device,
       metroReadiness,
       reversePorts,
+      reverseSetup,
       windows: launch.plan.windows.map((window) => window.name)
     }
   };
@@ -2413,6 +2451,13 @@ export async function executeDevDownWithContext(
     executor.runner,
     options.killProcess ?? options.cleanupOperations
   );
+  const androidReverseCleanup = hasAndroidReverseOwnership(executor.context.repoRoot)
+    ? await cleanupOwnedAndroidReverseRoutes({
+        repoRoot: executor.context.repoRoot,
+        runner: executor.runner,
+        tools: resolveAndroidSdkTools(executor.context.env)
+      })
+    : { cleaned: [], skipped: [], failed: [] };
   const daemonCleanup = input.killDaemon
     ? await killWorkspaceDaemons({
         repoRoot: executor.context.repoRoot,
@@ -2425,7 +2470,7 @@ export async function executeDevDownWithContext(
   return {
     ok: true,
     message: stopped ? "Stopped." : "No session running.",
-    data: { stopped, inventoryCleanup, daemonCleanup }
+    data: { stopped, inventoryCleanup, androidReverseCleanup, daemonCleanup }
   };
 }
 

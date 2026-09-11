@@ -777,9 +777,14 @@ For an authorized physical Android phone, pass its exact adb serial to
 starts the same task-scoped dev stack, and installs the dev identity alongside
 other environments. It creates serial-fenced `adb reverse` routes for Metro,
 the worktree server, relay, and Firebase emulators, so the physical phone uses
-loopback rather than the emulator-only `10.0.2.2` alias. The installed dev
-client requires the kd-managed task services and those reverse routes to remain
-available; this path does not publish to Play, Firebase, production, or OTA.
+loopback rather than the emulator-only `10.0.2.2` alias. kd preserves matching
+routes that already existed, records only routes it creates, and removes those
+owned routes from that exact serial during `./kd dev down`; a failed partial
+setup rolls back only its new routes. Installation and launch also use explicit
+serial-scoped adb commands, without Expo's all-device reverse helper. The
+installed dev client requires the kd-managed task services and those reverse
+routes to remain available; this path does not publish to Play, Firebase,
+production, or OTA.
 
 ## iOS development targets
 

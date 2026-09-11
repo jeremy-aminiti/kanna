@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import {
+  buildAndroidPhysicalRunPlan,
   buildAndroidPrebuildCommand,
   buildAndroidReverseCommands,
   buildAndroidRunCommand,
+  cleanupOwnedAndroidReverseRoutes,
+  executeAndroidPhysicalRunPlan,
   parseAdbEmulatorSerials,
   parseAdbPhysicalDevices,
+  parseAdbReverseList,
   parseAndroidAvdList,
+  resolveAndroidPhysicalDevice,
+  setupAndroidReverseRoutes,
   selectAndroidVirtualDevice
 } from "../src/runtime/mobile-android";
+import type { CommandRunner } from "../src/runtime/process";
+import { kdTestScratchDir } from "./test-paths";
 
 describe("Android emulator mobile runtime", () => {
   it("parses installed AVDs and running emulator serials", () => {
@@ -74,7 +84,7 @@ describe("Android emulator mobile runtime", () => {
     });
   });
 
-  it("builds serial-fenced reverse routes and loopback physical-device launch commands", () => {
+  it("executes physical install and launch only through the resolved exact serial", async () => {
     const tools = {
       root: "/sdk",
       adb: "/sdk/platform-tools/adb",
@@ -88,22 +98,150 @@ describe("Android emulator mobile runtime", () => {
       { command: tools.adb, args: ["-s", "R5CX42N3NLK", "reverse", "tcp:8082", "tcp:8082"] },
       { command: tools.adb, args: ["-s", "R5CX42N3NLK", "reverse", "tcp:48122", "tcp:48122"] }
     ]);
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_command, args) {
+        calls.push(args);
+        if (args[0] === "devices") {
+          return {
+            exitCode: 0,
+            stdout: "List of devices attached\nUNRELATED_SAME_MODEL device model:SM_A156W device:a15x\nR5CX42N3NLK device model:SM_A156W device:a15x\n",
+            stderr: ""
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+    const selected = await resolveAndroidPhysicalDevice({
+      runner,
+      tools,
+      serial: "R5CX42N3NLK"
+    });
+    const result = await executeAndroidPhysicalRunPlan({
+      runner,
+      plan: buildAndroidPhysicalRunPlan({
+        repoRoot: "/repo",
+        serial: selected.serial,
+        packageId: "build.kanna.app.dev",
+        metroPort: 8082,
+        appEnv: "dev",
+        tools
+      })
+    });
+    expect(result).toMatchObject({ ok: true, step: "launch" });
+    const deviceMutations = calls.filter((args) => args[0] !== "devices");
+    expect(deviceMutations).toHaveLength(4);
+    expect(deviceMutations.slice(1).every((args) =>
+      args[0] === "-s" && args[1] === "R5CX42N3NLK"
+    )).toBe(true);
+    expect(deviceMutations.flat()).not.toContain("UNRELATED_SAME_MODEL");
+    expect(deviceMutations[3]).toContain(
+      "exp+kanna-mobile://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8082"
+    );
+
+    const callsBeforeMissing = calls.length;
+    await expect(resolveAndroidPhysicalDevice({
+      runner,
+      tools,
+      serial: "NOT_AUTHORIZED"
+    })).rejects.toThrow(/not connected and authorized/);
+    expect(calls.slice(callsBeforeMissing)).toEqual([["devices", "-l"]]);
+
     expect(buildAndroidRunCommand({
       repoRoot: "/repo",
-      deviceName: "SM_A156W",
+      deviceName: "Medium_Phone_API_36.1",
       packageId: "build.kanna.app.dev",
       metroPort: 8082,
       appEnv: "dev",
       tools,
-      packagerHost: "127.0.0.1",
-      deviceSerial: "R5CX42N3NLK"
+      packagerHost: "10.0.2.2"
     })).toMatchObject({
-      args: expect.arrayContaining(["--device", "SM_A156W"]),
+      args: expect.arrayContaining(["--device", "Medium_Phone_API_36.1"]),
       env: {
-        ANDROID_SERIAL: "R5CX42N3NLK",
-        REACT_NATIVE_PACKAGER_HOSTNAME: "127.0.0.1",
+        KANNA_APP_ENV: "dev",
+        ANDROID_HOME: "/sdk",
+        ANDROID_SDK_ROOT: "/sdk",
+        REACT_NATIVE_PACKAGER_HOSTNAME: "10.0.2.2",
         RCT_METRO_PORT: "8082"
       }
     });
+  });
+
+  it("owns only new serial-scoped reverse routes and cleans them safely", async () => {
+    const repoRoot = await kdTestScratchDir("kanna-kd-android-reverse-");
+    const sdkRoot = join(repoRoot, "sdk");
+    await mkdir(join(sdkRoot, "platform-tools"), { recursive: true });
+    const tools = {
+      root: sdkRoot,
+      adb: join(sdkRoot, "platform-tools", "adb"),
+      emulator: join(sdkRoot, "emulator", "emulator")
+    };
+    const routes = new Map([
+      ["R5CX42N3NLK", new Map([["tcp:8082", "tcp:8082"]])],
+      ["UNRELATED", new Map([["tcp:48122", "tcp:59999"]])]
+    ]);
+    let failRemote = "tcp:9082";
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_command, args) {
+        calls.push(args);
+        const serial = args[1];
+        const deviceRoutes = routes.get(serial) ?? new Map<string, string>();
+        routes.set(serial, deviceRoutes);
+        if (args[3] === "--list") {
+          return {
+            exitCode: 0,
+            stdout: Array.from(deviceRoutes, ([remote, local]) => `${serial} ${remote} ${local}`).join("\n"),
+            stderr: ""
+          };
+        }
+        if (args[3] === "--remove") {
+          deviceRoutes.delete(args[4]);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (args[3] === failRemote) {
+          return { exitCode: 1, stdout: "", stderr: "injected reverse failure" };
+        }
+        deviceRoutes.set(args[3], args[4]);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+
+    expect(parseAdbReverseList("R5CX42N3NLK tcp:8082 tcp:8082\n"))
+      .toEqual([{ remote: "tcp:8082", local: "tcp:8082" }]);
+    await expect(setupAndroidReverseRoutes({
+      repoRoot,
+      runner,
+      tools,
+      serial: "R5CX42N3NLK",
+      ports: [8082, 48122, 9082]
+    })).rejects.toThrow("injected reverse failure");
+    expect(routes.get("R5CX42N3NLK")).toEqual(new Map([["tcp:8082", "tcp:8082"]]));
+    expect(routes.get("UNRELATED")).toEqual(new Map([["tcp:48122", "tcp:59999"]]));
+
+    failRemote = "";
+    const setup = await setupAndroidReverseRoutes({
+      repoRoot,
+      runner,
+      tools,
+      serial: "R5CX42N3NLK",
+      ports: [8082, 48122]
+    });
+    expect(setup).toEqual({
+      created: [{ remote: "tcp:48122", local: "tcp:48122" }],
+      preexisting: [{ remote: "tcp:8082", local: "tcp:8082" }],
+      owned: [{ remote: "tcp:48122", local: "tcp:48122" }]
+    });
+    expect(routes.get("R5CX42N3NLK")?.get("tcp:48122")).toBe("tcp:48122");
+    expect(calls.some((args) => args[1] === "UNRELATED")).toBe(false);
+
+    const cleanup = await cleanupOwnedAndroidReverseRoutes({ repoRoot, runner, tools });
+    expect(cleanup).toEqual({
+      cleaned: [{ remote: "tcp:48122", local: "tcp:48122" }],
+      skipped: [],
+      failed: []
+    });
+    expect(routes.get("R5CX42N3NLK")).toEqual(new Map([["tcp:8082", "tcp:8082"]]));
+    expect(routes.get("UNRELATED")).toEqual(new Map([["tcp:48122", "tcp:59999"]]));
   });
 });

@@ -13,6 +13,7 @@ import {
   listStagingRelayActiveDesktopIds
 } from "../src/tasks/registry";
 import type { CommandRunner } from "../src/runtime/process";
+import { setupAndroidReverseRoutes } from "../src/runtime/mobile-android";
 import { kdTestScratchDir } from "./test-paths";
 
 async function writeStagingDesktopAuth(home: string): Promise<void> {
@@ -165,11 +166,80 @@ describe("task executors", () => {
     expect(result.data).toEqual({
       stopped: false,
       inventoryCleanup: { cleaned: [], failed: [] },
+      androidReverseCleanup: { cleaned: [], skipped: [], failed: [] },
       daemonCleanup: {}
     });
     expect(killed).toEqual([]);
     expect(calls).toEqual([
       "tmux -L kanna-task-abc has-session -t kanna-task-abc"
+    ]);
+  });
+
+  it("removes only task-owned Android reverse routes during dev down", async () => {
+    const repoRoot = await kdTestScratchDir("kanna-kd-dev-down-android-");
+    const sdkRoot = join(repoRoot, "sdk");
+    await mkdir(join(sdkRoot, "platform-tools"), { recursive: true });
+    const adb = join(sdkRoot, "platform-tools", "adb");
+    const routes = new Map([
+      ["SELECTED", new Map([["tcp:8082", "tcp:8082"]])],
+      ["UNRELATED", new Map([["tcp:48122", "tcp:59999"]])]
+    ]);
+    const mutations: string[][] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        if (command === "tmux") {
+          return { exitCode: 1, stdout: "", stderr: "no server running" };
+        }
+        const serial = args[1];
+        const deviceRoutes = routes.get(serial) ?? new Map<string, string>();
+        routes.set(serial, deviceRoutes);
+        if (args[3] === "--list") {
+          return {
+            exitCode: 0,
+            stdout: Array.from(deviceRoutes, ([remote, local]) => `${serial} ${remote} ${local}`).join("\n"),
+            stderr: ""
+          };
+        }
+        mutations.push(args);
+        if (args[3] === "--remove") deviceRoutes.delete(args[4]);
+        else deviceRoutes.set(args[3], args[4]);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+    };
+    const tools = { root: sdkRoot, adb, emulator: join(sdkRoot, "emulator", "emulator") };
+    await setupAndroidReverseRoutes({
+      repoRoot,
+      runner,
+      tools,
+      serial: "SELECTED",
+      ports: [8082, 48122]
+    });
+    expect(routes.get("SELECTED")?.has("tcp:48122")).toBe(true);
+
+    const result = await executeDevDownWithContext(
+      { killDaemon: false },
+      {
+        runner,
+        context: {
+          repoRoot,
+          tmux: { server: "kanna-task-abc", session: "kanna-task-abc" },
+          ports: {},
+          env: { ANDROID_HOME: sdkRoot }
+        }
+      }
+    );
+
+    expect(result.data).toMatchObject({
+      androidReverseCleanup: {
+        cleaned: [{ remote: "tcp:48122", local: "tcp:48122" }],
+        skipped: [],
+        failed: []
+      }
+    });
+    expect(routes.get("SELECTED")).toEqual(new Map([["tcp:8082", "tcp:8082"]]));
+    expect(routes.get("UNRELATED")).toEqual(new Map([["tcp:48122", "tcp:59999"]]));
+    expect(mutations.at(-1)).toEqual([
+      "-s", "SELECTED", "reverse", "--remove", "tcp:48122"
     ]);
   });
 
