@@ -9,12 +9,13 @@ import CloudTerminalCache, {
   type CloudTerminalCacheEntry,
 } from "../CloudTerminalCache.vue";
 
-function terminal(key: string): CloudTerminalCacheEntry {
+function terminal(key: string, sessionRevision = `run-${key}`): CloudTerminalCacheEntry {
   return {
     key,
     ownerDesktopId: "desktop-owner",
     ownerTaskId: `owner-${key}`,
     transport: "lan",
+    sessionRevision,
   };
 }
 
@@ -80,6 +81,21 @@ describe("CloudTerminalCache", () => {
     expect(lifecycle.mock.calls).toEqual([
       ["mounted", "owner-task-a"],
       ["mounted", "owner-task-b"],
+    ]);
+  });
+
+  it("replaces a selected task's terminal when its remote session incarnation changes", async () => {
+    const { lifecycle, wrapper } = mountCache(terminal("task-a", "run-a"));
+    const cacheEntry = wrapper.get('[data-terminal-cache-key="task-a"]');
+
+    await wrapper.setProps({ activeTerminal: terminal("task-a", "run-b") });
+
+    expect(wrapper.findAll('[data-terminal-cache-key="task-a"]')).toHaveLength(1);
+    expect(wrapper.get('[data-terminal-cache-key="task-a"]').element).toBe(cacheEntry.element);
+    expect(lifecycle.mock.calls).toEqual([
+      ["mounted", "owner-task-a"],
+      ["unmounted", "owner-task-a"],
+      ["mounted", "owner-task-a"],
     ]);
   });
 

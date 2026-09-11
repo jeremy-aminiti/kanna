@@ -9,6 +9,8 @@ export interface CloudTerminalCacheEntry {
   ownerDesktopId: string;
   ownerTaskId: string;
   transport?: "cloud" | "lan";
+  /** Owner-side stage-run identity for the task's current PTY incarnation. */
+  sessionRevision: string | null;
 }
 </script>
 
@@ -115,6 +117,7 @@ onBeforeUnmount(() => {
       :data-terminal-cache-key="entry.key"
     >
       <CloudTerminalView
+        :key="entry.sessionRevision ?? 'legacy'"
         :active="entry.key === activeKey"
         :owner-desktop-id="entry.ownerDesktopId"
         :owner-task-id="entry.ownerTaskId"
