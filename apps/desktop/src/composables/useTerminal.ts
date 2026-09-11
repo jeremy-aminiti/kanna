@@ -105,16 +105,30 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let stopNativeWindowFocusTracking: (() => void) | null = null
   let nativeWindowFocusTrackingGeneration = 0
 
+  function traceNativeFocus(
+    phase: "start" | "ready" | "event" | "stale" | "error",
+    details: Partial<Omit<KannaNativeFocusTraceEntry, "sessionId" | "phase">> = {},
+  ) {
+    if (!import.meta.env.DEV || !window.__KANNA_E2E__) return
+    window.__KANNA_E2E__.nativeFocusTrace ??= []
+    window.__KANNA_E2E__.nativeFocusTrace.push({ sessionId, phase, ...details })
+  }
+
   function startNativeWindowFocusTracking() {
     if (!isTauri || stopNativeWindowFocusTracking) return
     const generation = ++nativeWindowFocusTrackingGeneration
+    traceNativeFocus("start")
     void getCurrentWindow().onFocusChanged((event) => {
       // A window becoming key again does not necessarily re-fire xterm's
       // focusin event: its helper textarea may still be document.activeElement.
       // It is nevertheless a real foreground-view edge, so reuse the same
       // lifecycle guard as terminal focus rather than inventing a second
       // geometry policy.
-      if (!event.payload || generation !== nativeWindowFocusTrackingGeneration) return
+      traceNativeFocus("event", { focused: event.payload })
+      if (!event.payload || generation !== nativeWindowFocusTrackingGeneration) {
+        traceNativeFocus("stale", { focused: event.payload })
+        return
+      }
       void lifecycle.activateVisibleViewer().catch((error) => {
         console.warn("[terminal] failed to activate native-focused viewer:", error)
       })
@@ -124,7 +138,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         return
       }
       stopNativeWindowFocusTracking = unlisten
+      traceNativeFocus("ready")
     }).catch((error) => {
+      traceNativeFocus("error", { detail: String(error) })
       console.warn("[terminal] failed to track native window focus:", error)
     })
   }

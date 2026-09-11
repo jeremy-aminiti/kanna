@@ -316,6 +316,10 @@ async function captureHandbackDiagnostics(
       return (window.__KANNA_E2E__?.activeViewTrace ?? [])
         .filter((entry) => entry?.sessionId === ${JSON.stringify(taskId)});
     `),
+    primaryNativeFocusTrace: await primary.executeSync(`
+      return (window.__KANNA_E2E__?.nativeFocusTrace ?? [])
+        .filter((entry) => entry?.sessionId === ${JSON.stringify(taskId)});
+    `),
   }, null, 2)}\n`);
 }
 
