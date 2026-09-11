@@ -151,6 +151,12 @@ enum Event {
     },
 }
 
+enum EventPrelude {
+    Process,
+    Ignore,
+    Retry(String),
+}
+
 struct BrowseContext {
     events: mpsc::Sender<Event>,
 }
@@ -538,6 +544,12 @@ fn browse_once(
         }
 
         while let Ok(event) = receiver.try_recv() {
+            match prepare_operation_event(&event, state, environment, observations, &mut resources)
+            {
+                EventPrelude::Process => {}
+                EventPrelude::Ignore => continue,
+                EventPrelude::Retry(error) => return NativeDnsSdRunResult::Retry(error),
+            }
             match event {
                 Event::Browse { added: true, key } => {
                     let generation = observations.begin(key.clone());
@@ -576,32 +588,14 @@ fn browse_once(
                     port,
                     txt,
                 } => {
-                    let current = resources.get(&key).is_some_and(|resource| {
-                        resource.resolution_generation == generation
-                            && observations.current_generation(&key) == Some(generation)
-                            && interface_index == key.interface_index
-                    });
-                    if !current {
+                    // DNSServiceResolveReply defines interface_index only for
+                    // successful callbacks. Generation/context validity was
+                    // already checked by prepare_operation_event, including
+                    // failure cleanup that must not consult this payload.
+                    if interface_index != key.interface_index {
                         continue;
                     }
-                    if error != DNS_SERVICE_ERR_NO_ERROR {
-                        if responder_failed(error) {
-                            return NativeDnsSdRunResult::Retry(dns_error(
-                                "resolve service",
-                                error,
-                            ));
-                        }
-                        discard_failed_service(
-                            state,
-                            environment,
-                            observations,
-                            &mut resources,
-                            &key,
-                            "resolve service",
-                            error,
-                        );
-                        continue;
-                    }
+                    debug_assert_eq!(error, DNS_SERVICE_ERR_NO_ERROR);
                     let resource = resources
                         .get_mut(&key)
                         .expect("current resolution has live resources");
@@ -653,32 +647,12 @@ fn browse_once(
                     address,
                     added,
                 } => {
-                    let current = resources.get(&key).is_some_and(|resource| {
-                        resource.resolution_generation == generation
-                            && observations.current_generation(&key) == Some(generation)
-                            && interface_index == key.interface_index
-                    });
-                    if !current {
+                    // As with resolve callbacks, address callback payload is
+                    // meaningful only after a successful error code.
+                    if interface_index != key.interface_index {
                         continue;
                     }
-                    if error != DNS_SERVICE_ERR_NO_ERROR {
-                        if responder_failed(error) {
-                            return NativeDnsSdRunResult::Retry(dns_error(
-                                "observe service address",
-                                error,
-                            ));
-                        }
-                        discard_failed_service(
-                            state,
-                            environment,
-                            observations,
-                            &mut resources,
-                            &key,
-                            "observe service address",
-                            error,
-                        );
-                        continue;
-                    }
+                    debug_assert_eq!(error, DNS_SERVICE_ERR_NO_ERROR);
                     if let Some(address) = address {
                         observations.address(&key, generation, address, added);
                         observations.project(state, environment);
@@ -733,6 +707,58 @@ fn browse_once(
             }
         }
     }
+}
+
+/// Fence resolve/address callbacks by their Rust-owned context before reading
+/// any callback payload. Apple's DNS-SD contract leaves fields such as the
+/// interface index undefined when `errorCode` is nonzero, while the context's
+/// service key and generation remain ours and identify the operation that
+/// failed.
+fn prepare_operation_event(
+    event: &Event,
+    state: &AppState,
+    environment: &str,
+    observations: &mut ObservationBook,
+    resources: &mut HashMap<ServiceKey, ServiceResources>,
+) -> EventPrelude {
+    let (key, generation, error, action) = match event {
+        Event::Resolved {
+            key,
+            generation,
+            error,
+            ..
+        } => (key, *generation, *error, "resolve service"),
+        Event::Address {
+            key,
+            generation,
+            error,
+            ..
+        } => (key, *generation, *error, "observe service address"),
+        _ => return EventPrelude::Process,
+    };
+    let current = resources.get(key).is_some_and(|resource| {
+        resource.resolution_generation == generation
+            && observations.current_generation(key) == Some(generation)
+    });
+    if !current {
+        return EventPrelude::Ignore;
+    }
+    if error == DNS_SERVICE_ERR_NO_ERROR {
+        return EventPrelude::Process;
+    }
+    if responder_failed(error) {
+        return EventPrelude::Retry(dns_error(action, error));
+    }
+    discard_failed_service(
+        state,
+        environment,
+        observations,
+        resources,
+        key,
+        action,
+        error,
+    );
+    EventPrelude::Ignore
 }
 
 fn responder_failed(error: DnsServiceError) -> bool {
@@ -967,5 +993,160 @@ mod tests {
             .expect("first generation attempted");
         stop_sender.send(()).unwrap();
         worker.join().unwrap();
+    }
+
+    fn projected_service(
+        desktop_id: &str,
+    ) -> (
+        Arc<AppState>,
+        ObservationBook,
+        HashMap<ServiceKey, ServiceResources>,
+        ServiceKey,
+        u64,
+    ) {
+        let state = crate::http_api::test_state_with_seed(desktop_id, "Native callback", |_| {});
+        let key = ServiceKey {
+            name: "native-callback".to_string(),
+            registration_type: LAN_ROUTING_SERVICE_TYPE.to_string(),
+            domain: "local.".to_string(),
+            interface_index: 27,
+        };
+        let mut observations = ObservationBook::default();
+        let generation = observations.begin(key.clone());
+        assert!(observations.resolve(
+            &key,
+            generation,
+            Resolution {
+                desktop_id: Some(desktop_id.to_string()),
+                environment: Some("development".to_string()),
+                protocol_version: Some(
+                    crate::lan_discovery::LAN_ROUTING_PROTOCOL_VERSION.to_string()
+                ),
+                port: 4460,
+            },
+        ));
+        assert!(observations.address(&key, generation, IpAddr::from([192, 168, 1, 20]), true,));
+        observations.project(&state, "development");
+        let resources = HashMap::from([(
+            key.clone(),
+            ServiceResources {
+                browse_generation: generation,
+                resolution_generation: generation,
+                resolve: None,
+                address: None,
+                srv_watch: None,
+                txt_watch: None,
+            },
+        )]);
+        (state, observations, resources, key, generation)
+    }
+
+    #[test]
+    fn current_resolve_error_with_undefined_interface_cleans_up_projected_service() {
+        let (state, mut observations, mut resources, key, generation) =
+            projected_service("desktop-current-error");
+        assert!(state.lan_candidate_for("desktop-current-error").is_some());
+        let (events, receiver) = mpsc::channel();
+        let mut context = ResolveContext {
+            events,
+            key: key.clone(),
+            generation,
+        };
+
+        // Fault-inject the actual native callback shape: on error, the SDK is
+        // allowed to report interface zero and every payload pointer may be
+        // undefined/null. The callback must carry its owned context through
+        // to the event owner without inspecting those fields.
+        unsafe {
+            resolve_callback(
+                ptr::null_mut(),
+                0,
+                0,
+                -65_537,
+                ptr::null(),
+                ptr::null(),
+                0,
+                0,
+                ptr::null(),
+                (&mut context as *mut ResolveContext).cast(),
+            );
+        }
+        let event = receiver.recv().expect("resolve callback event");
+        assert!(matches!(
+            prepare_operation_event(
+                &event,
+                &state,
+                "development",
+                &mut observations,
+                &mut resources,
+            ),
+            EventPrelude::Ignore
+        ));
+
+        assert!(!resources.contains_key(&key));
+        assert!(state.lan_candidate_for("desktop-current-error").is_none());
+    }
+
+    #[test]
+    fn stale_address_error_with_undefined_interface_keeps_replacement_generation() {
+        let (state, mut observations, mut resources, key, stale_generation) =
+            projected_service("desktop-stale-error");
+        let replacement_generation = observations.begin(key.clone());
+        assert!(observations.resolve(
+            &key,
+            replacement_generation,
+            Resolution {
+                desktop_id: Some("desktop-replacement".to_string()),
+                environment: Some("development".to_string()),
+                protocol_version: Some(
+                    crate::lan_discovery::LAN_ROUTING_PROTOCOL_VERSION.to_string()
+                ),
+                port: 4461,
+            },
+        ));
+        assert!(observations.address(
+            &key,
+            replacement_generation,
+            IpAddr::from([192, 168, 1, 21]),
+            true,
+        ));
+        observations.project(&state, "development");
+        resources.get_mut(&key).unwrap().resolution_generation = replacement_generation;
+        let (events, receiver) = mpsc::channel();
+        let mut stale_context = AddressContext {
+            events,
+            key: key.clone(),
+            generation: stale_generation,
+        };
+
+        unsafe {
+            address_callback(
+                ptr::null_mut(),
+                0,
+                0,
+                -65_537,
+                ptr::null(),
+                ptr::null(),
+                0,
+                (&mut stale_context as *mut AddressContext).cast(),
+            );
+        }
+        let event = receiver.recv().expect("address callback event");
+        assert!(matches!(
+            prepare_operation_event(
+                &event,
+                &state,
+                "development",
+                &mut observations,
+                &mut resources,
+            ),
+            EventPrelude::Ignore
+        ));
+
+        assert!(resources.contains_key(&key));
+        assert_eq!(
+            state.lan_candidate_for("desktop-replacement"),
+            Some("192.168.1.21:4461".parse().unwrap()),
+        );
     }
 }

@@ -312,6 +312,7 @@ impl ObservationBook {
         true
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub(super) fn address(
         &mut self,
         key: &ServiceKey,

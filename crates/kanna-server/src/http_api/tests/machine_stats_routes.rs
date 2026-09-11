@@ -353,6 +353,116 @@ async fn machine_stats_http_relay_keeps_native_peer_when_local_collection_fails(
 }
 
 #[tokio::test]
+async fn compact_machine_stats_reaches_an_eligible_lan_peer_during_relay_outage() {
+    let mut target =
+        (*test_state_with_seed("stats-compact-lan-peer", "Compact LAN peer", |_| {})).clone();
+    target.config.pairing_store_path = crate::test_paths::unique_test_dir("stats-compact-target")
+        .join("pairings.json")
+        .to_string_lossy()
+        .into_owned();
+    let target = Arc::new(target);
+    target.set_authenticated_account_uid(Some("stats-account".to_string()));
+    let target_identity = crate::lan_tls_identity::load_or_create(
+        &target.config().lan_tls_identity_path().unwrap(),
+        &target.config().desktop_id,
+        &target.config().environment,
+    )
+    .expect("create target TLS identity");
+    let now_ms = crate::machine_trust::unix_time_ms().unwrap();
+    let mut target_trust = crate::machine_trust::MachineTrustStore::default();
+    target_trust.accept_inbound(
+        "stats-compact-source",
+        &crate::pairing::hash_device_secret("stats-compact-secret"),
+        "stats-account",
+        "development",
+        &target.config().desktop_id,
+        now_ms,
+    );
+    target_trust
+        .save(&target.config().machine_trust_store_path().unwrap())
+        .expect("save target trust");
+    let target_listener = super::super::lan_listener::spawn_for_test(Arc::clone(&target)).await;
+
+    let mut source =
+        (*test_state_with_seed("stats-compact-source", "Compact source", |_| {})).clone();
+    source.config.pairing_store_path = crate::test_paths::unique_test_dir("stats-compact-source")
+        .join("pairings.json")
+        .to_string_lossy()
+        .into_owned();
+    let source = Arc::new(source);
+    source.set_authenticated_account_uid(Some("stats-account".to_string()));
+    source.set_lan_candidate(
+        "stats-compact-lan-peer".to_string(),
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            target_listener.port(),
+        ),
+    );
+    let mut source_trust = crate::machine_trust::MachineTrustStore::default();
+    source_trust
+        .pending_or_create(
+            "stats-compact-lan-peer",
+            "stats-account",
+            "development",
+            &source.config().desktop_id,
+            || Ok("stats-compact-secret".to_string()),
+            now_ms,
+        )
+        .expect("create source pending grant");
+    source_trust
+        .confirm_outbound(
+            "stats-compact-lan-peer",
+            "stats-compact-secret",
+            &source.config().desktop_id,
+            Some(target_identity.ca_certificate_pem),
+            now_ms + 60_000,
+        )
+        .expect("confirm source grant");
+    source_trust
+        .save(&source.config().machine_trust_store_path().unwrap())
+        .expect("save source trust");
+    // No relay request owner is installed: list_active_relay_desktops fails
+    // exactly as it does during an outage. The compact owner must retain that
+    // error while independently reaching the eligible peer over pinned TLS.
+    let response = router(source)
+        .oneshot(
+            Request::get("/v1/machine-stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Value = from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert!(
+        body["machines"].as_array().unwrap().iter().any(|machine| {
+            machine["machineId"] == "stats-compact-lan-peer"
+                && machine["availableMemoryBytes"].is_u64()
+                && machine.get("cpu").is_none()
+        }),
+        "{body}"
+    );
+    assert!(
+        body["machineErrors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| {
+                error["machineId"].is_null()
+                    && error["error"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("relay"))
+            }),
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn machine_stats_browser_requests_still_require_credentials() {
     let state = test_state_with_seed("stats-auth", "Stats Auth", |_| {});
     let token = state.local_task_events_token.clone().unwrap();
