@@ -41,6 +41,7 @@ describe("reset helpers", () => {
         return Promise.resolve([]);
       }),
       getText: vi.fn().mockResolvedValue("test-repo"),
+      pressKey: vi.fn().mockResolvedValue(undefined),
       sendKeys: vi.fn().mockResolvedValue(undefined),
       waitForElement: vi.fn().mockImplementation((selector: string) =>
         Promise.resolve(selector === ".modal-overlay .text-input" ? "repo-path-input" : selector),
@@ -185,6 +186,7 @@ describe("reset helpers", () => {
     expect(client.sendKeys).toHaveBeenCalledWith("repo-path-input", "/repo");
     expect(client.clear).toHaveBeenCalledWith("repo-name-input");
     expect(client.sendKeys).toHaveBeenCalledWith("repo-name-input", "test-repo");
+    expect(client.pressKey).toHaveBeenCalledWith("\uE007");
     expect(client.click).toHaveBeenCalledWith(".modal-overlay .repo-name-change");
     expect(client.click).toHaveBeenCalledWith(".modal-overlay .btn-primary:not(:disabled)");
     expect(client.waitForNoElement).toHaveBeenCalledWith(".modal-overlay", 30_000);
