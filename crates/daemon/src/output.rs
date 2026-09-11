@@ -196,6 +196,13 @@ pub(crate) async fn stream_output(
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
     }
 
+    #[cfg(debug_assertions)]
+    let test_input_rx_processing_delay = std::env::var("KANNA_TEST_INPUT_RX_PROCESSING_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|delay_ms| *delay_ms > 0)
+        .map(Duration::from_millis);
+
     loop {
         if stream_control.stop_requested() || session.is_retired() {
             log::info!("[stream] stopped retired reader session={}", session_id);
@@ -228,16 +235,10 @@ pub(crate) async fn stream_output(
         tokio::select! {
             biased;
 
-            maybe_input = input_rx.recv(), if !stream_control.quiesce_requested() => {
-                if let Some(input) = maybe_input {
-                    if input.data.is_empty() && input.kind == PendingInputKind::Raw {
-                        input.acknowledge_written();
-                    } else {
-                        pending_input.push_back(input);
-                    }
-                }
-            }
-
+            // Once this fixed pause expires, finish the delivery already at
+            // the head of the queue before accepting more input. In
+            // particular, a continuously-ready input channel must not starve
+            // the logical message's retained submission boundary.
             _ = tokio::time::sleep_until(
                 submit_pause.as_ref().map(|pause| pause.until).unwrap_or_else(Instant::now).into()
             ), if submit_pause.is_some() => {
@@ -334,6 +335,22 @@ pub(crate) async fn stream_output(
                         break;
                     }
                     Err(_would_block) => {}
+                }
+            }
+
+            maybe_input = input_rx.recv(), if !stream_control.quiesce_requested() => {
+                if let Some(input) = maybe_input {
+                    if input.data.is_empty() && input.kind == PendingInputKind::Raw {
+                        input.acknowledge_written();
+                    } else {
+                        pending_input.push_back(input);
+                    }
+                    #[cfg(debug_assertions)]
+                    if let Some(delay) = test_input_rx_processing_delay {
+                        // Keep a real daemon's input channel continuously
+                        // ready while exercising biased scheduler priority.
+                        tokio::time::sleep(delay).await;
+                    }
                 }
             }
 

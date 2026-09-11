@@ -14,7 +14,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -990,8 +991,8 @@ fn submit_input_is_acknowledged_only_after_its_whole_delivery_is_on_the_pty() {
 }
 
 /// A child that keeps its screen busy from the moment it starts, the way an
-/// agent TUI does mid-turn, and reports whether the submission boundary
-/// arrived in the same read as the message it belongs to.
+/// agent TUI does mid-turn, and reports the message body and later submission
+/// boundary as the two separate input events the daemon promises.
 ///
 /// It reads its own tty non-canonically so it can see the message before any
 /// line terminator. The background emitter runs the whole time, so the
@@ -1000,8 +1001,10 @@ fn submit_input_is_acknowledged_only_after_its_whole_delivery_is_on_the_pty() {
 const SLOW_DRAINING_CHILD: &str = "\
 stty -echo -icanon -icrnl min 1 time 0; \
 ( i=0; while [ $i -lt 300 ]; do printf 'R\\r\\n'; sleep 0.02; i=$((i+1)); done ) & \
-first=$(dd bs=4096 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); \
-case \"$first\" in *0d*) printf 'ENTER_WITH_MESSAGE\\r\\n';; *) printf 'ENTER_NOT_WITH_MESSAGE\\r\\n';; esac; \
+first=$(dd bs=11 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); \
+case \"$first\" in 6f776e6572207265706c79) printf 'BODY_WITHOUT_ENTER\\r\\n';; *) printf 'BAD_BODY:%s\\r\\n' \"$first\";; esac; \
+second=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); \
+case \"$second\" in 0d) printf 'ENTER_AFTER_BODY\\r\\n';; *) printf 'BAD_BOUNDARY:%s\\r\\n' \"$second\";; esac; \
 sleep 60";
 
 /// A child whose screen never settles, and which echoes what it is given so
@@ -1038,6 +1041,11 @@ fn a_submission_boundary_is_written_even_while_the_terminal_repaints() {
     expect_ok(&mut conn);
     let acknowledged_after = started.elapsed();
     assert!(
+        acknowledged_after >= Duration::from_millis(100),
+        "SubmitInput acknowledged before the discrete boundary write could reach the PTY; \
+         this one took {acknowledged_after:?}"
+    );
+    assert!(
         acknowledged_after < Duration::from_secs(2),
         "a delivery into a repainting terminal must not wait for it to settle; \
          this one took {acknowledged_after:?}"
@@ -1046,8 +1054,9 @@ fn a_submission_boundary_is_written_even_while_the_terminal_repaints() {
     let deadline = Instant::now() + Duration::from_secs(30);
     let vt = loop {
         let snapshot = recv_snapshot_for(&mut conn, session_id);
-        if snapshot.vt.contains("ENTER_WITH_MESSAGE")
-            || snapshot.vt.contains("ENTER_NOT_WITH_MESSAGE")
+        if snapshot.vt.contains("ENTER_AFTER_BODY")
+            || snapshot.vt.contains("BAD_BODY")
+            || snapshot.vt.contains("BAD_BOUNDARY")
         {
             break snapshot.vt;
         }
@@ -1060,8 +1069,9 @@ fn a_submission_boundary_is_written_even_while_the_terminal_repaints() {
     };
 
     assert!(
-        vt.contains("ENTER_WITH_MESSAGE"),
-        "the submission boundary was withheld from a repainting terminal: {vt:?}"
+        vt.contains("BODY_WITHOUT_ENTER") && vt.contains("ENTER_AFTER_BODY"),
+        "the body and later submission boundary did not reach the repainting terminal as \
+         separate input events: {vt:?}"
     );
 }
 
@@ -5775,28 +5785,25 @@ fn a_short_logical_message_is_delivered_unframed_and_whole() {
     assert_eq!(occurrences(&received, PASTE_BEGIN), 0);
 }
 
-/// Splitting the writes must not split ownership of the composer. Raw terminal
-/// input that arrives during the fixed pause stays behind the logical
-/// message's Enter, preserving the old one-delivery ordering and PID-fence
-/// semantics while giving the provider two input events.
+/// Splitting the writes must not split ownership of the composer. Even a raw
+/// input producer that keeps the daemon's channel continuously ready during
+/// the fixed pause cannot starve or interleave ahead of the logical message's
+/// Enter.
 #[test]
 fn raw_input_cannot_interleave_before_a_logical_submission_boundary() {
-    let daemon = DaemonHandle::start();
+    let daemon = DaemonHandle::start_with_env([("KANNA_TEST_INPUT_RX_PROCESSING_DELAY_MS", "1")]);
     let mut setup = daemon.connect();
     let session_id = "logical-boundary-ownership";
     let recorder = spawn_stdin_recorder(&daemon, &mut setup, session_id, true, 0.0);
     let message = b"mobile marker".to_vec();
+    let expected_pid = session_pid(&mut setup, session_id);
 
     let mut submitter = daemon.connect();
-    let delivery = thread::spawn({
-        let message = message.clone();
-        move || {
-            submitter.send(&Cmd::SubmitInput {
-                session_id: session_id.to_string(),
-                data: message,
-            });
-            expect_ok(&mut submitter);
-        }
+    let submitted_at = Instant::now();
+    submitter.send(&Cmd::SubmitInputIfSession {
+        session_id: session_id.to_string(),
+        expected_pid,
+        data: message.clone(),
     });
 
     assert_eq!(
@@ -5805,21 +5812,67 @@ fn raw_input_cannot_interleave_before_a_logical_submission_boundary() {
         "the message body must reach the PTY before the boundary pause"
     );
 
-    let mut raw = daemon.connect();
-    raw.send(&Cmd::InputNoReply {
-        session_id: session_id.to_string(),
-        data: b"later raw input".to_vec(),
-    });
-    delivery.join().expect("logical delivery thread");
+    let flooding = Arc::new(AtomicBool::new(true));
+    let raw_frames = Arc::new(AtomicUsize::new(0));
+    let flood = (0..8)
+        .map(|_| {
+            let mut raw = daemon.connect();
+            let flooding = Arc::clone(&flooding);
+            let raw_frames = Arc::clone(&raw_frames);
+            thread::spawn(move || {
+                while flooding.load(Ordering::Acquire) {
+                    raw.send(&Cmd::InputNoReply {
+                        session_id: session_id.to_string(),
+                        data: b"x".to_vec(),
+                    });
+                    raw_frames.fetch_add(1, Ordering::Release);
+                }
+            })
+        })
+        .collect::<Vec<_>>();
 
-    let mut expected = submitted(&message);
-    expected.extend_from_slice(b"later raw input");
-    assert_eq!(
-        recorder.wait_for_bytes(expected.len(), Duration::from_secs(15)),
-        expected,
-        "queued raw input interleaved between the message and its Enter"
+    let flood_deadline = Instant::now() + Duration::from_secs(1);
+    while raw_frames.load(Ordering::Acquire) < 100 {
+        assert!(
+            Instant::now() < flood_deadline,
+            "the raw input producer never established a continuous flood"
+        );
+        thread::yield_now();
+    }
+
+    let acknowledgement = submitter.recv_with_timeout(Duration::from_secs(2));
+    flooding.store(false, Ordering::Release);
+    for producer in flood {
+        producer.join().expect("raw input flood thread");
+    }
+    assert!(
+        matches!(acknowledgement, Ok(Evt::Ok)),
+        "SubmitInput was starved behind continuously-ready raw input: {acknowledgement:?}"
     );
-    recorder.assert_settled_at(&expected, Duration::from_millis(400));
+    submitter.assert_no_event_within(Duration::from_millis(100));
+    assert!(
+        submitted_at.elapsed() < Duration::from_secs(2),
+        "the logical boundary was not acknowledged within the bounded pause"
+    );
+
+    let received = recorder.wait_for_bytes(message.len() + 2, Duration::from_secs(15));
+    let expected_prefix = submitted(&message);
+    assert!(
+        received.starts_with(&expected_prefix),
+        "raw input interleaved before the logical message's Enter: {:?}",
+        String::from_utf8_lossy(&received)
+    );
+    assert_eq!(
+        received.iter().filter(|byte| **byte == b'\r').count(),
+        1,
+        "the logical message must receive exactly one submission boundary"
+    );
+    assert!(
+        received[expected_prefix.len()..]
+            .iter()
+            .all(|byte| *byte == b'x'),
+        "only later raw bytes may follow the logical submission boundary"
+    );
 }
 
 /// The contract's limit, stated as a test rather than left to be discovered.
