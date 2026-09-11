@@ -293,8 +293,125 @@ are `edb2c6a0a65bdee0c39189f633045397834ba97352a830bc85b9a63f9a2d1604`
 (amd64) and `36cbfd261645a958dd926151e3b3dadcab46dba5d787f6b12d4d65f88498e9e5`
 (arm64).
 
-This checkpoint is only macOS-host cross-toolchain/sysroot/canary evidence. It
-does not prove the eight-universe Rust repin, any full product or `.deb`, static
-Ghostty C++ linkage, native/hosted parity, installed or two-version upgrade
-lanes, release integration, apt publication, or real-key custody. All of those
-remain held for later explicitly authorized slices and verification releases.
+This foundation checkpoint is only macOS-host
+cross-toolchain/sysroot/canary evidence. At that checkpoint it did not prove
+the eight-universe Rust repin, any full product or `.deb`, static Ghostty C++
+linkage, native/hosted parity, installed or two-version upgrade lanes, release
+integration, apt publication, or real-key custody. The historical scheduling
+hold described above was subsequently removed by the owner. The next bounded
+checkpoint below advances the Rust dependency graph; it does not claim the
+remaining product, packaging, installed, release or publication proofs.
+
+## Rust dependency graph checkpoint (task `3d9fd829`)
+
+This slice was implemented on `Jeremys-Mac-Studio.local` (`Darwin 25.6.0`,
+arm64). Before editing, `origin/main` was fetched explicitly and both the
+worktree HEAD and the authoritative upstream tip were verified as
+`4e62750412b983a870d2aaa97a140608c097bb1a`, the merge of PR #1430. The graph
+implementation is commit `0e5631308c36cf1080922182f3ab87776bf6e910`;
+the canonical Cargo invocation then materialized its matching root-workspace
+lock entries, committed as `ae23a633e`.
+
+### Graph and native build-script boundary
+
+- All eight existing crate universes now resolve exactly the two Darwin and
+  two Linux triples (`aarch64-apple-darwin`, `x86_64-apple-darwin`,
+  `aarch64-unknown-linux-gnu`, and `x86_64-unknown-linux-gnu`). They were
+  repinned as one change. Three Cargo lock inputs changed; the other five were
+  regenerated and were byte-identical. `MODULE.bazel.lock` records the target
+  branches for every universe.
+- `kanna-worker` and `server-process`, which are actual server-side consumers,
+  joined the existing server universe. No ninth universe was introduced.
+- The parity contract now evaluates required features independently for every
+  universe/triple instead of allowing one platform branch to satisfy another.
+  Its negative controls remove the ARM Linux triple and put a required feature
+  only on a synthetic Darwin branch; both fail for the intended reason.
+- GTK/WebKit native build-script annotations cover the actual desktop and
+  delta-updater closure. Each Linux target receives only its architecture's
+  committed Noble sysroot, multiarch pkg-config directory, and marker. The
+  execution-built `//packaging/linux:pkg_config` reader resolves `.pc` files
+  without a host pkg-config installation; `PATH` and `PKG_CONFIG_PATH` are
+  empty in those actions.
+- Existing `openssl-src` Bazel annotations now also cover the CLI, MCP and
+  server universes. Those consumers explicitly select vendored OpenSSL. The
+  Zig C/C++ wrapper preserves Bazel-relative inputs for ordinary actions and
+  derives absolute declared Zig/sysroot paths for native build scripts that
+  change directory, while still fixing the targets to glibc 2.39.
+
+### Focused evidence
+
+Unless stated otherwise, each command below ran sequentially with `--jobs=1`
+on the Apple Silicon Studio at implementation head `0e5631308` and exited 0.
+
+- The universe parity Vitest suite passed all 10 tests, including both new
+  negative controls.
+- `bazel test //packaging/linux:pkg_config_test
+  //packaging/linux:resolve_sysroot_test --jobs=1` passed both targets.
+- The final toolchain canaries built for ARM64 Linux in 4.067 seconds and x86-64
+  Linux in 5.056 seconds.
+- The generated desktop WebKit dependency target
+  `@@rules_rust++crate+desktop_crates__webkit2gtk-sys-2.0.2//:webkit2gtk_sys`
+  built for ARM64 Linux in 189.235 seconds and x86-64 Linux in 88.796 seconds.
+  These builds executed and compiled the generated GTK, WebKit, JavaScriptCore,
+  Soup and transitive native build-script outputs into Rust libraries.
+- The corresponding delta-updater WebKit build-script closure also built for
+  both Linux targets after the final crate-universe environment wiring.
+- The generated server `openssl-sys` build-script target built vendored OpenSSL
+  for ARM64 Linux in 455.340 seconds and x86-64 Linux in 421.630 seconds. Zig's
+  compiler-probe diagnostics included an invalid Rust-style
+  `*-unknown-linux-gnu.2.39` spelling and a duplicate-sysroot library warning,
+  but the observed compiler action used the declared Zig 0.15.2 executable,
+  the fixed `aarch64-linux-gnu.2.39` or `x86_64-linux-gnu.2.39` target, and the
+  matching declared sysroot; both builds completed successfully.
+- `aquery` evidence for both generated WebKit actions showed the execution
+  tool at `bazel-out/darwin_arm64-opt-exec/bin/packaging/linux/pkg_config` and
+  only the matching Noble sysroot/multiarch directory. It contained no
+  Homebrew, `/usr/local`, host GTK or host pkg-config path.
+- `bazel build --config=notarize -c opt //:staging_release_apps --jobs=1`
+  exited 0 in 3,081.961 seconds after 10,141 actions and produced both Darwin
+  architecture staging app manifests/bundles. This is Darwin graph validity,
+  not a publication or Linux product proof.
+
+The repository checks on the same host and head were:
+
+- `pnpm test`: exit 0; 20/20 tasks succeeded in 2 minutes 21.338 seconds.
+- `cargo fmt --all --check`: exit 0.
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0 in 3 minutes
+  23 seconds. The desktop build script printed only its expected
+  sidecars-not-staged warning.
+- `pnpm exec tsc --noEmit` from the repository root: exit 1 because the root
+  has no `tsconfig.json`; TypeScript 5.9.3 printed command help and performed
+  no source compilation. The package-scoped TypeScript checks invoked by
+  `pnpm test` and the canonical test command passed.
+- `./kd test all`: exit 1. Its package tests, Bazel daemon build-script check,
+  generated-protocol check, desktop `vue-tsc`/Vite build, strict Rust clippy,
+  sidecar build/staging, and canonical Rust tests all passed. Of 48 unchanged
+  desktop mock E2E files, 46 passed and two failed: `new-window.test.ts` timed
+  out waiting for its current item while restoring persisted native bounds,
+  and `terminal-output-performance.test.ts` observed that its terminal buffer
+  was not registered after deliberately blocking and resuming the WebView
+  event loop. Neither test exercises this slice's dependency resolution,
+  build-script environment or target-platform wiring. The already-passed
+  canonical phases and 46 E2E files were not rerun.
+
+Before the canonical command, `kanna-cli machine stats` reported the Studio at
+high concurrent load with a memory-pressure warning and 55.4 GB free. The
+filesystem check reported 52 GiB available and 3% inode use. The owner had
+explicitly removed the earlier heavy-verification scheduling holds, so the
+authorized checks proceeded.
+
+### Proof boundary and remaining work
+
+This checkpoint proves resolution and compilation of the affected generated
+Rust/native dependency actions for both Linux target platforms from the macOS
+host, plus continued Darwin graph validity. It does **not** prove Linux desktop,
+worker or sidecar executable targets; static Ghostty/libc++ closure; `.deb`
+assembly or audit; installed/two-version upgrade lanes; CI-native parity or
+reproducibility; release/storage integration; publication or key custody; or
+the historical-tag and M4 obligations.
+
+The concrete next boundary is product ownership: repository BUILD targets must
+assemble the Linux desktop, worker and six sidecars, close Ghostty statically,
+and feed those declared outputs into the existing package layout/audit. That
+expands into the explicitly deferred product/package slice and was not pulled
+into this dependency-graph change.
