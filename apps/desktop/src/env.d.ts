@@ -79,6 +79,14 @@ interface KannaNativeFocusTraceEntry {
   detail?: string;
 }
 
+interface KannaTerminalStreamTraceEntry {
+  sessionId: string;
+  kind: "snapshot" | "output";
+  cols?: number;
+  rows?: number;
+  activeViewLines: string[];
+}
+
 interface KannaAppMetricsSnapshot {
   invokeCounts: Record<string, number>;
   listenCounts: Record<string, number>;
@@ -168,6 +176,7 @@ interface KannaE2EHook {
   activeViewTrace?: KannaActiveViewTraceEntry[];
   /** DEV/E2E-only native-window focus subscription events. */
   nativeFocusTrace?: KannaNativeFocusTraceEntry[];
+  terminalStreamTrace?: KannaTerminalStreamTraceEntry[];
   remoteCompanion?: KannaRemoteCompanionE2EApi;
   /** What the most recently initialized terminal view actually rendered with. */
   terminalRenderer?: import("./composables/terminalRenderer").TerminalRendererOutcome | null;

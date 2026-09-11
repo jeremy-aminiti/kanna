@@ -152,6 +152,17 @@ export function createTerminalSessionLifecycle(params: {
   })
   let outputPerf: TerminalOutputPerfHandle | null = null
   let attachFailureSignal = 0
+  const traceStream = (kind: "snapshot" | "output", data: string, cols?: number, rows?: number) => {
+    if (!import.meta.env.DEV || !window.__KANNA_E2E__) return
+    window.__KANNA_E2E__.terminalStreamTrace ??= []
+    window.__KANNA_E2E__.terminalStreamTrace.push({
+      sessionId: params.sessionId,
+      kind,
+      cols,
+      rows,
+      activeViewLines: data.split(/\r?\n/).filter((line) => line.includes("ACTIVE_VIEW")),
+    })
+  }
 
   function clearAttachRetry(resetFailure: boolean): void {
     if (params.state.attachRetryTimer) clearTimeout(params.state.attachRetryTimer)
@@ -257,6 +268,7 @@ export function createTerminalSessionLifecycle(params: {
             const liveTerminal = getLiveTerminal()
             if (!liveTerminal) return
             const vt = new TextDecoder().decode(base64ToBytes(dataB64))
+            traceStream("snapshot", vt, cols, rows)
             const replaceBuffer = shouldResetTerminalForSnapshot({
               preserveRecoveredScrollback:
                 params.state.preserveRecoveredScrollbackForNextSnapshot,
@@ -290,6 +302,7 @@ export function createTerminalSessionLifecycle(params: {
             markTaskSwitchFirstOutput(params.sessionId)
             const decodeStartedAt = performance.now()
             const bytes = base64ToBytes(dataB64)
+            traceStream("output", new TextDecoder().decode(bytes))
             perf?.recordDecode(performance.now() - decodeStartedAt, bytes.length)
             params.clipboardBridge.handleTerminalOutputControlSequences(bytes)
             const completeWrite = perf?.beginXtermWrite(bytes.length)
