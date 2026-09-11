@@ -310,7 +310,14 @@ describe("terminal re-attach re-seed", () => {
       "while IFS= read -r line; do :; done",
     ].join("; ");
 
-    await client.setWindowRect({ width: 1280, height: 1000 });
+    // tauri-plugin-webdriver sizes the native window in physical pixels.
+    // Keep a desktop-sized CSS viewport on Retina too; 1280 physical pixels
+    // puts the app into its narrow layout and leaves the terminal hidden.
+    const scale = await client.executeSync<number>("return window.devicePixelRatio;");
+    await client.setWindowRect({ width: 1280 * scale, height: 900 * scale });
+    await expect.poll(() => client.executeSync<number>("return innerWidth;"), {
+      timeout: 30_000,
+    }).toBeGreaterThanOrEqual(1100);
     for (const id of [sessionId, awayId]) {
       await execDb(client,
         `INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type, agent_provider)
