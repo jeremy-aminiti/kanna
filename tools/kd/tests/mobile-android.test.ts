@@ -199,10 +199,15 @@ describe("Android emulator mobile runtime", () => {
           deviceRoutes.delete(args[4]);
           return { exitCode: 0, stdout: "", stderr: "" };
         }
-        if (args[3] === failRemote) {
+        if (args[3] === "--no-rebind" && args[4] === failRemote) {
           return { exitCode: 1, stdout: "", stderr: "injected reverse failure" };
         }
-        deviceRoutes.set(args[3], args[4]);
+        if (args[3] === "--no-rebind") {
+          if (deviceRoutes.has(args[4])) {
+            return { exitCode: 1, stdout: "", stderr: "cannot rebind existing socket" };
+          }
+          deviceRoutes.set(args[4], args[5]);
+        }
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };
@@ -243,5 +248,93 @@ describe("Android emulator mobile runtime", () => {
     });
     expect(routes.get("R5CX42N3NLK")).toEqual(new Map([["tcp:8082", "tcp:8082"]]));
     expect(routes.get("UNRELATED")).toEqual(new Map([["tcp:48122", "tcp:59999"]]));
+  });
+
+  it("does not rebind a route created after setup's initial listing", async () => {
+    const repoRoot = await kdTestScratchDir("kanna-kd-android-reverse-raced-create-");
+    const tools = {
+      root: "/sdk",
+      adb: "/sdk/platform-tools/adb",
+      emulator: "/sdk/emulator/emulator"
+    };
+    const routes = new Map<string, string>();
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_command, args) {
+        calls.push(args);
+        if (args[3] === "--list") {
+          return {
+            exitCode: 0,
+            stdout: Array.from(routes, ([remote, local]) => `R5CX42N3NLK ${remote} ${local}`).join("\n"),
+            stderr: ""
+          };
+        }
+        if (args[3] === "--no-rebind") {
+          routes.set("tcp:48122", "tcp:59999");
+          return { exitCode: 1, stdout: "", stderr: "cannot rebind existing socket" };
+        }
+        throw new Error(`Unexpected fake-adb command: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(setupAndroidReverseRoutes({
+      repoRoot,
+      runner,
+      tools,
+      serial: "R5CX42N3NLK",
+      ports: [48122]
+    })).rejects.toThrow("cannot rebind existing socket");
+    expect(routes).toEqual(new Map([["tcp:48122", "tcp:59999"]]));
+    expect(calls).toContainEqual([
+      "-s", "R5CX42N3NLK", "reverse", "--no-rebind", "tcp:48122", "tcp:48122"
+    ]);
+    expect(calls.some((args) => args[3] === "--remove")).toBe(false);
+  });
+
+  it("does not roll back a created route after another process changes it", async () => {
+    const repoRoot = await kdTestScratchDir("kanna-kd-android-reverse-raced-rollback-");
+    const tools = {
+      root: "/sdk",
+      adb: "/sdk/platform-tools/adb",
+      emulator: "/sdk/emulator/emulator"
+    };
+    const routes = new Map<string, string>();
+    const calls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(_command, args) {
+        calls.push(args);
+        if (args[3] === "--list") {
+          return {
+            exitCode: 0,
+            stdout: Array.from(routes, ([remote, local]) => `R5CX42N3NLK ${remote} ${local}`).join("\n"),
+            stderr: ""
+          };
+        }
+        if (args[3] === "--no-rebind" && args[4] === "tcp:48122") {
+          routes.set(args[4], args[5]);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (args[3] === "--no-rebind" && args[4] === "tcp:9082") {
+          routes.set("tcp:48122", "tcp:59999");
+          return { exitCode: 1, stdout: "", stderr: "injected later failure" };
+        }
+        if (args[3] === "--remove") {
+          routes.delete(args[4]);
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        throw new Error(`Unexpected fake-adb command: ${args.join(" ")}`);
+      }
+    };
+
+    await expect(setupAndroidReverseRoutes({
+      repoRoot,
+      runner,
+      tools,
+      serial: "R5CX42N3NLK",
+      ports: [48122, 9082]
+    })).rejects.toThrow("injected later failure");
+    expect(routes).toEqual(new Map([["tcp:48122", "tcp:59999"]]));
+    expect(calls.filter((args) => args[3] === "--list")).toHaveLength(2);
+    expect(calls.some((args) => args[3] === "--remove")).toBe(false);
   });
 });

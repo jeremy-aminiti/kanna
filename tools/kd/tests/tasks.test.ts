@@ -202,7 +202,7 @@ describe("task executors", () => {
         }
         mutations.push(args);
         if (args[3] === "--remove") deviceRoutes.delete(args[4]);
-        else deviceRoutes.set(args[3], args[4]);
+        else if (args[3] === "--no-rebind") deviceRoutes.set(args[4], args[5]);
         return { exitCode: 0, stdout: "", stderr: "" };
       }
     };

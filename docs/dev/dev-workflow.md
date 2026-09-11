@@ -780,7 +780,8 @@ the worktree server, relay, and Firebase emulators, so the physical phone uses
 loopback rather than the emulator-only `10.0.2.2` alias. kd preserves matching
 routes that already existed, records only routes it creates, and removes those
 owned routes from that exact serial during `./kd dev down`; a failed partial
-setup rolls back only its new routes. Installation and launch also use explicit
+setup uses adb's no-rebind mode and rolls back a new route only while its
+mapping still matches. Installation and launch also use explicit
 serial-scoped adb commands, without Expo's all-device reverse helper. The
 installed dev client requires the kd-managed task services and those reverse
 routes to remain available; this path does not publish to Play, Firebase,

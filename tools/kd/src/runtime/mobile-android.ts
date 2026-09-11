@@ -295,20 +295,36 @@ export async function setupAndroidReverseRoutes(input: {
       "-s",
       input.serial,
       "reverse",
+      "--no-rebind",
       mapping.remote,
       mapping.local
     ]);
     if (result.exitCode !== 0) {
       const rollbackFailed: AndroidReverseMapping[] = [];
-      for (const added of [...created].reverse()) {
-        const rollback = await input.runner.run(input.tools.adb, [
-          "-s",
-          input.serial,
-          "reverse",
-          "--remove",
-          added.remote
-        ]);
-        if (rollback.exitCode !== 0) rollbackFailed.push(added);
+      let rollbackCurrent: Map<string, AndroidReverseMapping> | undefined;
+      try {
+        rollbackCurrent = new Map(
+          (await listAndroidReverseMappings(input)).map((currentMapping) => [
+            currentMapping.remote,
+            currentMapping
+          ])
+        );
+      } catch {
+        rollbackFailed.push(...created);
+      }
+      if (rollbackCurrent) {
+        for (const added of [...created].reverse()) {
+          const existing = rollbackCurrent.get(added.remote);
+          if (!existing || existing.local !== added.local) continue;
+          const rollback = await input.runner.run(input.tools.adb, [
+            "-s",
+            input.serial,
+            "reverse",
+            "--remove",
+            added.remote
+          ]);
+          if (rollback.exitCode !== 0) rollbackFailed.push(added);
+        }
       }
       if (rollbackFailed.length > 0) {
         const devices = ownership.devices.filter((device) => device.serial !== input.serial);
