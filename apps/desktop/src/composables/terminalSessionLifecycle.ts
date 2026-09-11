@@ -330,6 +330,13 @@ export function createTerminalSessionLifecycle(params: {
       params.state.attached = true
       params.state.hasAttachedOnce = true
       params.state.sessionExited = false
+      // A terminal can receive its real foreground focus while its stream is
+      // still attaching. The snapshot then restores the daemon's seed grid,
+      // but neither native-window focus nor xterm focusin will necessarily
+      // fire again once attachment completes. Re-evaluate the same guarded
+      // foreground edge here so an already-visible, focused owner registers
+      // as active without synthesizing a DOM event or accepting a hidden view.
+      await activateVisibleViewer()
       if (attachFailureSignal === failureSignalAtStart) {
         clearAttachRetry(true)
       }
