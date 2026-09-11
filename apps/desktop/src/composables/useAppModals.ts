@@ -480,7 +480,7 @@ export function useAppModals({
 
   /**
    * Show a file in the main content area. Every caller — the picker, the tree
-   * explorer, a terminal file link, a `kanna_open_file` request — lands here,
+   * explorer, a terminal file link, a `kanna_open_view` request — lands here,
    * and every one of them opens a tab in the current scope.
    */
   function openFilePreview(

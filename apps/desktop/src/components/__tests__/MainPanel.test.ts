@@ -10,11 +10,13 @@ import ko from "../../i18n/locales/ko.json";
 import type { PipelineItem } from "../../types/kanna";
 import type { TaskUiSlot } from "../../types/taskUi";
 import { computed } from "vue";
-import { useMainTabs } from "../../composables/useMainTabs";
+import { AGENT_TAB_ID, useMainTabs } from "../../composables/useMainTabs";
 import type { MainTabViewsController } from "../MainPanel.types";
 
 const invokeMock = vi.fn();
 const fetchTaskDetailMock = vi.fn();
+const readTaskFileMock = vi.fn();
+const listTaskDirectoryMock = vi.fn();
 
 const draft = {
   repo_id: "repo-1",
@@ -91,6 +93,8 @@ vi.mock("../../invoke", () => ({
 
 vi.mock("../../services/desktopServerClient", () => ({
   fetchDesktopTaskDetail: fetchTaskDetailMock,
+  readDesktopTaskFile: readTaskFileMock,
+  listDesktopTaskDirectory: listTaskDirectoryMock,
 }));
 
 describe("MainPanel", () => {
@@ -98,6 +102,8 @@ describe("MainPanel", () => {
     vi.resetModules();
     invokeMock.mockReset();
     fetchTaskDetailMock.mockReset();
+    readTaskFileMock.mockReset();
+    listTaskDirectoryMock.mockReset();
     fetchTaskDetailMock.mockImplementation(async (taskId: string) => ({
       id: taskId,
       stage: "in progress",
@@ -1135,5 +1141,90 @@ describe("MainPanel", () => {
 
     expect(wrapper.findAll(".blocker-name").map((item) => item.text()))
       .toEqual([unresolved, untitled]);
+  });
+
+  /**
+   * A view an agent opened has to still be where it was put after the reader
+   * looks at something else. The contained readers are props, and the views
+   * downstream read a new loader identity as a new place to be looking at, so
+   * an ordinary parent render must not hand them one.
+   */
+  it("keeps an agent-opened tree on its target across an unrelated parent render", async () => {
+    listTaskDirectoryMock.mockImplementation(
+      async (_taskId: string, path: string) =>
+        path === "src"
+          ? { entries: [{ name: "target.ts", path: "src/target.ts", isDir: false }] }
+          : {
+            entries: [
+              { name: "src", path: "src", isDir: true },
+              { name: "README.md", path: "README.md", isDir: false },
+            ],
+          },
+    );
+
+    const scopeKey = computed<string | null>(() => "item:task-a");
+    const tabs = useMainTabs({ scopeKey });
+    // Opened the way `kanna_open_view` opens it: contained, and therefore
+    // reading through the server rather than the worktree path.
+    tabs.openTabInScope("item:task-a", { kind: "tree", containedTaskId: "task-a" });
+
+    const { default: MainPanel } = await import("../MainPanel.vue");
+    const wrapper = mount(MainPanel, {
+      props: {
+        uiSlot: readySlot(durableTask()),
+        repoPath: "/tmp/repo",
+        hasRepos: true,
+        views: {
+          tabs,
+          modals: {
+            finishTransferredModal: vi.fn(),
+            homePath: computed(() => "/home/tester"),
+            treeExplorerRoot: computed(() => "/tmp/repo/.kanna-worktrees/task-a"),
+            activeRemoteTaskRoute: computed(() => null),
+            activeTaskViewIsRemote: computed(() => false),
+            listRemoteTaskDirectory: vi.fn(),
+            openFilePreview: vi.fn(),
+          },
+          preferences: {},
+          store: {},
+        } as unknown as MainTabViewsController,
+      },
+      attachTo: document.body,
+      global: {
+        mocks: { $t: (key: string) => key },
+        stubs: { TaskHeader: true, TerminalTabs: true, MainTabBar: true },
+      },
+    });
+    await flushPromises();
+
+    // The real explorer, driven through the real reveal contract.
+    const revealed = await (wrapper.vm as unknown as {
+      revealTabTarget: (id: string, command: unknown) => Promise<{ opened: boolean }>;
+    }).revealTabTarget("tree", {
+      requestId: "view-1",
+      taskId: "task-a",
+      view: "tree",
+      target: { path: "src", kind: "directory" },
+    });
+    await flushPromises();
+    expect(revealed).toEqual({ opened: true });
+    expect(wrapper.text()).toContain("target.ts");
+
+    const callsAfterReveal = listTaskDirectoryMock.mock.calls.length;
+
+    // The reader glances at the agent session and comes back. The tree never
+    // unmounts — it is behind `v-show` — but the parent re-renders around it.
+    tabs.activateTab(AGENT_TAB_ID);
+    await flushPromises();
+    tabs.activateTab("tree");
+    await flushPromises();
+
+    // Still on the directory the agent asked for, not back at the root.
+    expect(wrapper.text()).toContain("target.ts");
+    expect(wrapper.text()).not.toContain("README.md");
+    // And the parent render did not make it re-list anything.
+    expect(listTaskDirectoryMock.mock.calls.length).toBe(callsAfterReveal);
+
+    wrapper.unmount();
   });
 });

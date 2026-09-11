@@ -320,10 +320,14 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
             },
         ),
         (
-            "kanna_open_file",
+            "kanna_open_view",
             TypedToolSurface {
-                command_path: &["task", "open-file"],
-                param_args: &[("task_id", "task_id"), ("path", "path"), ("line", "line")],
+                command_path: &["task", "open-view"],
+                param_args: &[
+                    ("task_id", "task_id"),
+                    ("view", "view"),
+                    ("target", "target"),
+                ],
             },
         ),
         (

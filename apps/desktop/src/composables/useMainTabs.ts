@@ -43,6 +43,19 @@ export interface MainTabDescriptor {
   shellScope?: ShellTabScope;
   /** `image` tabs: the URL of the image to show. */
   imageUrl?: string;
+  /**
+   * `file` and `tree` tabs an agent opened through `kanna_open_view`: read
+   * this task's content through the server's contained resolution rather than
+   * from the worktree path directly.
+   *
+   * The server validates a target descriptor-relative to the task's worktree,
+   * refusing symlinks at every step. A renderer that then reads the same path
+   * off the filesystem re-walks it through whatever links exist by then, so a
+   * swap after validation would show content from outside the worktree. The
+   * task id travels with the tab because the read has to keep asking the
+   * component that owns the containment rule.
+   */
+  containedTaskId?: string;
 }
 
 export interface MainTab extends MainTabDescriptor {
@@ -95,6 +108,9 @@ export function isRestorableTab(tab: MainTabDescriptor): boolean {
 
 function persistedDescriptor(tab: MainTabDescriptor): MainTabDescriptor {
   const descriptor: MainTabDescriptor = { kind: tab.kind };
+  // A tab an agent opened keeps reading through the server after a restart:
+  // dropping this would quietly restore the tab onto the unfenced local read.
+  if (tab.containedTaskId) descriptor.containedTaskId = tab.containedTaskId;
   if (tab.filePath !== undefined) descriptor.filePath = tab.filePath;
   if (tab.initialLine !== undefined) descriptor.initialLine = tab.initialLine;
   if (tab.shellScope !== undefined) descriptor.shellScope = tab.shellScope;

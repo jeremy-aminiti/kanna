@@ -505,4 +505,66 @@ describe("FilePreviewModal", () => {
       wrapper.unmount();
     }
   });
+
+  it.each([
+    {
+      name: "content",
+      settleMountRead: (resolve: (value: string) => void, _reject: (error: Error) => void) =>
+        resolve("stale mount content\n"),
+    },
+    {
+      name: "error",
+      settleMountRead: (_resolve: (value: string) => void, reject: (error: Error) => void) =>
+        reject(new Error("stale mount failure")),
+    },
+  ])("keeps acknowledged reveal content stable after an older mount $name resolves", async ({ settleMountRead }) => {
+    let resolveMountRead!: (value: string) => void;
+    let rejectMountRead!: (error: Error) => void;
+    const mountRead = new Promise<string>((resolve, reject) => {
+      resolveMountRead = resolve;
+      rejectMountRead = reject;
+    });
+    const contentLoader = vi.fn()
+      .mockImplementationOnce(() => mountRead)
+      .mockResolvedValueOnce("acknowledged reveal content\n");
+
+    const wrapper = mount(FilePreviewModal, {
+      props: {
+        filePath: "src/review.ts",
+        worktreePath: "/repo",
+        contentLoader,
+        embedded: true,
+        active: true,
+      },
+      attachTo: document.body,
+      global: { mocks: { $t: (key: string) => key } },
+    });
+
+    try {
+      expect(contentLoader).toHaveBeenCalledTimes(1);
+
+      const outcome = await wrapper.vm.revealDesktopViewTarget({
+        requestId: "view-1",
+        taskId: "task-a",
+        view: "file",
+        target: { path: "src/review.ts" },
+      });
+
+      expect(outcome).toEqual({ opened: true });
+      expect(contentLoader).toHaveBeenCalledTimes(2);
+      await vi.waitFor(() => {
+        expect(wrapper.get(".preview-content").text()).toContain("acknowledged reveal content");
+      });
+
+      settleMountRead(resolveMountRead, rejectMountRead);
+      await flushPromises();
+      await flushPromises();
+
+      expect(wrapper.get(".preview-content").text()).toContain("acknowledged reveal content");
+      expect(wrapper.find('[data-testid="file-preview-unavailable"]').exists()).toBe(false);
+      expect(wrapper.find(".preview-status").exists()).toBe(false);
+    } finally {
+      wrapper.unmount();
+    }
+  });
 });

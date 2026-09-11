@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type MarkdownIt from "markdown-it";
-import type { BundledLanguage, ShikiTransformer } from "shiki";
+import type { BundledLanguage, DecorationItem, ShikiTransformer } from "shiki";
 import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "../invoke";
@@ -21,6 +21,12 @@ import { getShikiTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
 import { metaOrControlHint } from "../composables/shortcutPlatform";
 import {
+  fileViewTarget,
+  waitForViewReady,
+  type DesktopViewOpenCommand,
+  type DesktopViewOpenOutcome,
+} from "../composables/desktopViewOpen";
+import {
   DEFAULT_MARKDOWN_PREVIEW_MODE,
   type MarkdownPreviewMode,
 } from "../stores/markdownPreviewMode";
@@ -40,6 +46,14 @@ const props = withDefaults(
      */
     remoteContent?: string | null;
     remoteContentLoader?: (path: string) => Promise<string>;
+    /**
+     * Read the file through this instead of the local worktree, without the
+     * rest of the remote treatment. A view an agent opened uses it so the
+     * read stays inside the task's worktree the way the server proved it did;
+     * the file is still on this machine, so opening it in an editor and the
+     * other local affordances stay available.
+     */
+    contentLoader?: (path: string) => Promise<string>;
     ideCommand?: string;
     maximized?: boolean;
     initialLine?: number;
@@ -113,6 +127,8 @@ const highlighted = ref("");
 const currentLang = ref("text");
 const loading = ref(true);
 const error = ref<string | null>(null);
+let nextFileLoadId = 0;
+let activeFileLoadId = 0;
 
 const isMarkdownFile = computed(() =>
   props.filePath.toLowerCase().endsWith(".md")
@@ -206,14 +222,20 @@ watch([renderMarkdown, content, effectiveCodeTheme], async ([shouldRender, raw])
 });
 
 async function loadFile() {
+  const loadId = ++nextFileLoadId;
+  activeFileLoadId = loadId;
   loading.value = true;
   error.value = null;
   try {
-    const raw = props.remoteContentLoader
-      ? await props.remoteContentLoader(props.filePath)
-      : props.remoteContent !== null
-        ? props.remoteContent
-        : await invoke<string>("read_text_file", { path: `${props.worktreePath}/${props.filePath}` });
+    const raw = props.contentLoader
+      ? await props.contentLoader(props.filePath)
+      : props.remoteContentLoader
+        ? await props.remoteContentLoader(props.filePath)
+        : props.remoteContent !== null
+          ? props.remoteContent
+          : await invoke<string>("read_text_file", { path: `${props.worktreePath}/${props.filePath}` });
+
+    if (loadId !== activeFileLoadId) return;
 
     const hl = await getHighlighter();
     const lang = getSyntaxLanguageForPath(props.filePath);
@@ -225,14 +247,19 @@ async function loadFile() {
       // Language not available — fall back to text
     }
 
+    if (loadId !== activeFileLoadId) return;
+
     const loadedLangs = hl.getLoadedLanguages();
     // Set lang before content so the watcher fires once with the correct language
     currentLang.value = loadedLangs.includes(toShikiLanguage(lang)) ? lang : "text";
     content.value = raw;
   } catch (e: unknown) {
+    if (loadId !== activeFileLoadId) return;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    loading.value = false;
+    if (loadId === activeFileLoadId) {
+      loading.value = false;
+    }
   }
 }
 
@@ -249,7 +276,55 @@ let prevContent = "";
 let prevLang = "";
 let prevTheme = shikiTheme.value;
 
-async function renderHighlighted(raw: string, lang: string, decos: typeof searchDecorations.value) {
+/**
+ * A range an agent asked a human to read, as a shiki decoration.
+ *
+ * Positions rather than offsets: the command's line and column already mean
+ * "line and character", so converting to a byte offset and back would be a
+ * place for the two to disagree about what a character is.
+ */
+/**
+ * Where a 1-based Unicode scalar position starts, counted in UTF-16 units.
+ *
+ * The action's columns are scalars — one per character a reader sees — while
+ * the highlighter indexes JavaScript strings, where an emoji is two units.
+ * Handing a scalar index straight over both shifts the range on any line with
+ * non-BMP text and can split a surrogate pair, which renders as two broken
+ * halves. A scalar index at or past the end of the line resolves to the end of
+ * the line, which is the end-of-line position the API accepts as `column`
+ * width + 1.
+ */
+function utf16OffsetOfScalar(lineText: string, scalarIndex: number): number {
+  if (scalarIndex <= 0) return 0;
+  let scalars = 0;
+  let offset = 0;
+  for (const character of lineText) {
+    if (scalars === scalarIndex) return offset;
+    offset += character.length;
+    scalars += 1;
+  }
+  return lineText.length;
+}
+
+const revealRange = ref<{
+  start: { line: number; character: number };
+  end: { line: number; character: number };
+} | null>(null);
+
+/**
+ * Shiki refuses overlapping decorations, and a search match may sit inside the
+ * revealed range. The search is the reader's own live intent, so it wins: the
+ * revealed range steps aside while a search is running and comes back when it
+ * is closed.
+ */
+const decorations = computed<DecorationItem[]>(() => {
+  if (searchDecorations.value.length > 0) return searchDecorations.value;
+  const range = revealRange.value;
+  if (!range) return [];
+  return [{ start: range.start, end: range.end, properties: { class: "reveal-hl" } }];
+});
+
+async function renderHighlighted(raw: string, lang: string, decos: DecorationItem[]) {
   if (!raw) { highlighted.value = ""; return; }
   try {
     const hl = await getHighlighter();
@@ -272,7 +347,7 @@ async function renderHighlighted(raw: string, lang: string, decos: typeof search
   }
 }
 
-watch([content, currentLang, searchDecorations, effectiveCodeTheme], ([raw, lang, decos]) => {
+watch([content, currentLang, decorations, effectiveCodeTheme], ([raw, lang, decos]) => {
   if (highlightTimer) clearTimeout(highlightTimer);
   const theme = shikiTheme.value;
   // Content, language, or theme changed — render immediately
@@ -296,6 +371,10 @@ watch(() => props.remoteContent, () => {
 });
 
 watch(() => props.remoteContentLoader, () => {
+  loadFile();
+});
+
+watch(() => props.contentLoader, () => {
   loadFile();
 });
 
@@ -406,7 +485,89 @@ function dismiss(): boolean {
   return true;
 }
 
-defineExpose({ zIndex, bringToFront, dismiss });
+/**
+ * Put an agent's chosen file range in front of the reader, and say whether it
+ * is actually there.
+ *
+ * The route that asked is waiting on this answer, so nothing here reports
+ * success optimistically: a file still loading is waited for, a file that
+ * failed to load is a failure, and a line whose element never rendered is a
+ * failure rather than a scroll that quietly went nowhere.
+ */
+async function revealDesktopViewTarget(
+  command: DesktopViewOpenCommand,
+): Promise<DesktopViewOpenOutcome> {
+  const target = fileViewTarget(command);
+  if (!target) {
+    return { opened: false, code: "invalid_target", message: "no file path to open" };
+  }
+  // Re-read on every open, including a reopen of a tab that is already
+  // showing this path. An agent opens a file to have a human read what it
+  // says *now*, and the freshness must come from asking here rather than from
+  // a prop identity changing underneath — the loaders are deliberately stable
+  // so that an unrelated parent render cannot throw the view's place away.
+  await loadFile();
+  const settled = await waitForViewReady(() => !loading.value);
+  if (!settled) {
+    return { opened: false, code: "renderer_failed", message: `${props.filePath} is still loading` };
+  }
+  if (error.value) {
+    return { opened: false, code: "renderer_failed", message: error.value };
+  }
+  if (target.line === undefined) {
+    revealRange.value = null;
+    return { opened: true };
+  }
+
+  // A rendered markdown preview has no lines to land on — it is prose, not a
+  // file — so a line target switches this view to the raw text. The reader's
+  // remembered preference is deliberately not written: they asked for
+  // markdown, an agent asked for one line of it, and only this view moves.
+  renderMarkdown.value = false;
+
+  const lines = content.value.split("\n");
+  const startLine = Math.min(target.line, lines.length) - 1;
+  const endLine = Math.min(target.endLine ?? target.line, lines.length) - 1;
+  revealRange.value = {
+    start: {
+      line: startLine,
+      character: utf16OffsetOfScalar(lines[startLine] ?? "", (target.column ?? 1) - 1),
+    },
+    end: {
+      line: endLine,
+      // The API's end is inclusive and the decorator's is exclusive, so the
+      // offset wanted is the one *after* the last included scalar.
+      character: target.endColumn !== undefined
+        ? utf16OffsetOfScalar(lines[endLine] ?? "", target.endColumn)
+        : (lines[endLine]?.length ?? 0),
+    },
+  };
+  showLineNumbers.value = true;
+  // The reader is being taken somewhere deliberately, so the one-shot latch
+  // that keeps an ordinary reopen from re-scrolling does not apply.
+  scrolledToLine = true;
+
+  const rendered = await waitForViewReady(() =>
+    contentRef.value?.querySelector(`[data-line="${target.line}"]`) != null
+  );
+  await nextTick();
+  const element = contentRef.value?.querySelector(
+    `[data-line="${target.line}"]`,
+  ) as HTMLElement | null;
+  const scrollContainer = contentRef.value;
+  if (!rendered || !element || !scrollContainer) {
+    return {
+      opened: false,
+      code: "renderer_failed",
+      message: `line ${target.line} of ${props.filePath} did not render`,
+    };
+  }
+  scrollContainer.scrollTop = element.offsetTop - scrollContainer.clientHeight / 2;
+  element.classList.add("line-highlight-flash");
+  return { opened: true };
+}
+
+defineExpose({ zIndex, bringToFront, dismiss, revealDesktopViewTarget });
 
 onMounted(() => {
   loadFile();
@@ -841,6 +1002,12 @@ watch(
 }
 
 /* Search highlight styles (inside v-html, needs :deep) */
+/* A range an agent asked the reader to look at. Quieter than a search match:
+   it marks where to start reading, it is not a hit to step through. */
+.preview-content :deep(.reveal-hl) {
+  background: color-mix(in srgb, var(--kn-accent) 24%, transparent);
+  border-radius: 2px;
+}
 .preview-content :deep(.search-hl) {
   background: rgba(255, 200, 0, 0.25);
   border-radius: 2px;

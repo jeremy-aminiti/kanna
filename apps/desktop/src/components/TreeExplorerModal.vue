@@ -12,6 +12,10 @@ import {
 } from "../composables/useEmbeddableView";
 import { useModalTearOff } from "../composables/useModalTearOff";
 import type { RemoteTaskViewTransport } from "../modalTearOff";
+import type {
+  DesktopViewOpenCommand,
+  DesktopViewOpenOutcome,
+} from "../composables/desktopViewOpen";
 
 registerContextShortcuts("tree", [
   { label: "Filter", display: "/", groupKey: "shortcuts.groupSearch" },
@@ -55,7 +59,32 @@ const {
   dismissOnScrimClick,
   focusWhenBrought,
 } = useEmbeddableView(props, { context: "tree" });
-defineExpose({ zIndex, bringToFront, dismiss });
+/**
+ * Put the reader's cursor on the path an agent named, and say whether it is
+ * there. A path the explorer cannot find after loading is reported rather than
+ * left as a cursor sitting at the root of a tree nobody asked for.
+ */
+async function revealDesktopViewTarget(
+  command: DesktopViewOpenCommand,
+): Promise<DesktopViewOpenOutcome> {
+  const path = command.target?.path;
+  // An untargeted open still has to wait for the root: "the explorer is
+  // mounted" is not "the worktree is on screen", and a root that cannot be
+  // read must not come back as opened.
+  const targetPath = typeof path === "string" ? path : "";
+  const isDirectory = targetPath.length === 0 || command.target?.kind === "directory";
+  const result = await revealPath(targetPath, isDirectory);
+  if (!result.revealed) {
+    return {
+      opened: false,
+      code: result.reason.includes("still loading") ? "renderer_failed" : "file_not_found",
+      message: result.reason,
+    };
+  }
+  return { opened: true };
+}
+
+defineExpose({ zIndex, bringToFront, dismiss, revealDesktopViewTarget });
 
 const rootLabel = computed(() => {
   if (props.homePath && props.worktreePath === props.homePath) return "~";
@@ -90,6 +119,7 @@ const tearOff = useModalTearOff({
 
 const {
   state,
+  revealPath,
   showAllFiles,
   filterText,
   filtering,

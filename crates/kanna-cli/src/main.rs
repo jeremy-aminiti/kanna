@@ -345,27 +345,32 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         server_url: Option<String>,
     },
-    /// Ask the Kanna desktop to open one of a task's files as a tab beside
-    /// that task's agent session
+    /// Show one of a task's read-only views on this machine's Kanna window,
+    /// and report whether it reached the screen
     ///
-    /// Delivery is advisory: the answer says the file was requested, never
-    /// that it was shown. A window that is closed or not running loses the
-    /// request rather than queuing it, and the operator's own selection is
-    /// never changed — the tab is simply there when they look at that task.
-    OpenFile {
-        /// The task ID, or one of the task's branch names
+    /// The answer is about the screen, not about the queue: `opened: true`
+    /// comes back only once a window confirms the view and its target are
+    /// showing, and a closed desktop answers `opened: false` with
+    /// `desktop_unavailable`. Every target is resolved inside the task's own
+    /// current worktree first, so a path that leaves it, a line past the end
+    /// of a file, or a commit the task's graph does not have fails with the
+    /// reason instead of opening nothing.
+    OpenView {
+        /// The task ID, or the task's current branch name
         #[arg(long)]
         task_id: String,
 
-        /// Path of the file to open, relative to the task's workspace root
+        /// Which view to open: agent, file, diff, tree, graph or analytics
         #[arg(long)]
-        path: String,
+        view: String,
 
-        /// 1-based line to scroll to when the file opens
+        /// JSON object aiming the view, whose shape is fixed by --view. For
+        /// example '{"path":"src/main.rs","line":42}' for a file, or
+        /// '{"path":"src/main.rs","side":"new","line":42}' for a diff.
         #[arg(long)]
-        line: Option<i64>,
+        target: Option<String>,
 
-        /// Machine whose desktop should open the file. Omit for this machine.
+        /// Machine whose desktop should open the view. Omit for this machine.
         #[arg(long)]
         machine_id: Option<String>,
 

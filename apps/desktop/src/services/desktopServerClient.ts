@@ -662,6 +662,80 @@ export interface DesktopOperatorEventInput {
   repoId?: string | null;
 }
 
+/**
+ * Read one of a task's files through the server's contained resolution.
+ *
+ * This exists so a view an agent opened never reads the worktree itself. The
+ * server resolves a path descriptor-relative to the task's own worktree with
+ * `O_NOFOLLOW` at every step; a plain `read_text_file` on a reconstructed
+ * absolute path re-walks that path through whatever symlinks exist *now*, so
+ * a swap between the open request and the renderer's load would put content
+ * from outside the worktree on screen under the task's name. Asking the owner
+ * of the containment rule is the only way the answer stays true for the read
+ * that actually happens.
+ */
+export async function readDesktopTaskFile(taskId: string, path: string): Promise<string> {
+  const body = await requestJson<{ path: string; content: string }>(
+    `/v1/tasks/${encodeURIComponent(taskId)}/files/content?path=${encodeURIComponent(path)}`,
+  );
+  return body.content;
+}
+
+interface DesktopTaskDirectoryPage {
+  path: string;
+  entries: { name: string; path: string; isDir: boolean }[];
+  nextOffset: number | null;
+}
+
+/**
+ * List one of a task's directories through the same contained resolution, for
+ * the same reason. Paged like the relay client's equivalent, because the route
+ * caps a page and the explorer wants the whole directory.
+ */
+export async function listDesktopTaskDirectory(
+  taskId: string,
+  path: string,
+  showAllFiles: boolean,
+): Promise<{ entries: { name: string; path: string; isDir: boolean }[] }> {
+  const entries: { name: string; path: string; isDir: boolean }[] = [];
+  let offset = 0;
+  for (;;) {
+    const page = await requestJson<DesktopTaskDirectoryPage>(
+      `/v1/tasks/${encodeURIComponent(taskId)}/browse`
+      + `?path=${encodeURIComponent(path)}`
+      + `&showAllFiles=${showAllFiles === true}`
+      + `&offset=${offset}&limit=100`,
+    );
+    entries.push(...page.entries);
+    if (page.nextOffset === null || page.nextOffset === undefined) break;
+    offset = page.nextOffset;
+  }
+  return { entries };
+}
+
+/**
+ * Tell the server whether a `kanna_open_view` command reached the screen.
+ *
+ * The route that issued the command is still waiting on this: it reports
+ * `opened` to the agent that asked, and answers "the desktop is unavailable"
+ * when nothing arrives. So a window that failed must say so rather than stay
+ * quiet — a silent failure reads to the caller as a closed desktop.
+ */
+export async function acknowledgeDesktopViewOpen(
+  requestId: string,
+  outcome: { opened: boolean; code?: string; message?: string },
+): Promise<void> {
+  await requestJson<{ acknowledged: boolean }>("/v1/desktop/views/ack", {
+    method: "POST",
+    body: {
+      requestId,
+      opened: outcome.opened,
+      ...(outcome.code === undefined ? {} : { code: outcome.code }),
+      ...(outcome.message === undefined ? {} : { message: outcome.message }),
+    },
+  });
+}
+
 export async function postDesktopOperatorEvents(events: DesktopOperatorEventInput[]): Promise<void> {
   if (clientHandlersForTests?.postOperatorEvents) {
     await clientHandlersForTests.postOperatorEvents(events);

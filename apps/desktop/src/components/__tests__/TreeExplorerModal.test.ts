@@ -76,3 +76,90 @@ describe("TreeExplorerModal task roots", () => {
     wrapper.unmount();
   });
 });
+
+/**
+ * The explorer's half of `kanna_open_view` answers a waiting caller, so
+ * "opened" has to mean the requested directory was read — not that the
+ * explorer is mounted over an empty column.
+ */
+describe("TreeExplorerModal reveal for kanna_open_view", () => {
+  afterEach(() => {
+    invokeMock.mockReset();
+  });
+
+  function command(target?: Record<string, unknown>) {
+    return {
+      requestId: "view-1",
+      taskId: "task-a",
+      view: "tree" as const,
+      ...(target ? { target } : {}),
+    };
+  }
+
+  it("refuses a directory that vanished between validation and the read", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const wrapper = mount(TreeExplorerModal, {
+      props: { worktreePath: "/repo/.kanna-worktrees/task-a", repoRoot: "/repo" },
+    });
+    await settle();
+
+    // The server validated `build/`, and it is gone by the time the explorer
+    // asks for it.
+    invokeMock.mockRejectedValue(new Error("directory deleted after dispatch"));
+    const outcome = await wrapper.vm.revealDesktopViewTarget(
+      command({ path: "build", kind: "directory" }),
+    );
+
+    expect(outcome.opened).toBe(false);
+    expect(outcome.message).toContain("directory deleted after dispatch");
+    consoleError.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("refuses an untargeted root it could not read", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    invokeMock.mockRejectedValue(new Error("not a directory"));
+    const wrapper = mount(TreeExplorerModal, {
+      props: { worktreePath: "/repo/.kanna-worktrees/task-removed", repoRoot: "/repo" },
+    });
+    await settle();
+
+    // No target at all: being mounted is not being on screen.
+    const outcome = await wrapper.vm.revealDesktopViewTarget(command());
+
+    expect(outcome.opened).toBe(false);
+    expect(outcome.message).toContain("not a directory");
+    consoleError.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("opens a root it could read", async () => {
+    invokeMock.mockResolvedValue([
+      { name: "src", is_dir: true },
+      { name: "README.md", is_dir: false },
+    ]);
+    const wrapper = mount(TreeExplorerModal, {
+      props: { worktreePath: "/repo/.kanna-worktrees/task-a", repoRoot: "/repo" },
+    });
+    await settle();
+
+    expect(await wrapper.vm.revealDesktopViewTarget(command())).toEqual({ opened: true });
+    wrapper.unmount();
+  });
+
+  it("reveals a file through the reading it can actually do", async () => {
+    invokeMock.mockResolvedValue([
+      { name: "notes.txt", is_dir: false },
+    ]);
+    const wrapper = mount(TreeExplorerModal, {
+      props: { worktreePath: "/repo/.kanna-worktrees/task-a", repoRoot: "/repo" },
+    });
+    await settle();
+
+    expect(await wrapper.vm.revealDesktopViewTarget(command({ path: "notes.txt", kind: "file" })))
+      .toEqual({ opened: true });
+    expect(await wrapper.vm.revealDesktopViewTarget(command({ path: "absent.txt", kind: "file" })))
+      .toMatchObject({ opened: false, code: "file_not_found" });
+    wrapper.unmount();
+  });
+});

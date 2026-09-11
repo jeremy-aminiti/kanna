@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { localProcessFetch } from "@kanna/local-process-fetch";
-import { buildGlobalKeydownScript } from "../helpers/keyboard";
+import { buildGlobalKeydownScript, buildSelectorKeydownScript } from "../helpers/keyboard";
 import { WebDriverClient } from "../helpers/webdriver";
 import { cleanupFixtureRepos, createSeedFixtureRepo } from "../helpers/fixture-repo";
 import { resolveAppKannaServer } from "../helpers/kannaServer";
@@ -11,7 +11,7 @@ import { callVueMethod, getVueState, tauriInvoke } from "../helpers/vue";
 /**
  * The main content area hosts a task's views as tabs: the agent session plus
  * whichever of the diff, a file, and the task shell the operator (or an agent
- * through `kanna_open_file`) has opened. These are the boundary-crossing parts
+ * through `kanna_open_view`) has opened. These are the boundary-crossing parts
  * that unit tests cannot prove — the real keyboard path, the real xterm buffer
  * surviving a tab switch, and a server route reaching a live window.
  */
@@ -156,7 +156,7 @@ describe("main content area tabs", () => {
        const db = ctx.db.value || ctx.db;
        db.execute("INSERT INTO pipeline_item (id, repo_id, prompt, stage, branch, agent_type) VALUES (?, ?, ?, ?, ?, ?)",
          ["${id}", "${repoId}", "${prompt}", "in progress", "${branch}", "agent"])
-         // kanna_open_file resolves the file through the task's recorded
+         // kanna_open_view resolves the file through the task's recorded
          // workspace, so the row has to exist as well as the directory.
          .then(function() {
            return db.execute("INSERT INTO worktree (id, pipeline_item_id, path, branch) VALUES (?, ?, ?, ?)",
@@ -489,36 +489,299 @@ describe("main content area tabs", () => {
     await waitForActiveTab(client, "agent");
   });
 
-  it("opens a file an agent asked for through kanna_open_file", async () => {
+  it("takes the operator to the view an agent opened, and only calls it opened once it is", async () => {
+    // Start on the *other* task: the action has to bring this window to the
+    // task the agent named, not decorate whichever one happened to be up.
+    await selectTask(secondTaskId);
+    await closeViewTabs(client);
     await selectTask(taskId);
     await closeViewTabs(client);
-    await waitForActiveTab(client, "agent");
+    await selectTask(secondTaskId);
 
     const server = await resolveAppKannaServer(client);
-    const response = await localProcessFetch(`${server.baseUrl}/v1/desktop/views/open`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ taskId, path: "README.md" }),
-    });
-    expect(response.ok).toBe(true);
-    // Requested, never shown: the response says only that a window was asked.
-    expect(await response.json()).toMatchObject({ requested: true, path: "README.md" });
+    const openView = async (body: Record<string, unknown>) => {
+      const response = await localProcessFetch(`${server.baseUrl}/v1/desktop/views/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.ok).toBe(true);
+      return await response.json() as { opened: boolean; code?: string };
+    };
 
-    await waitForActiveTab(client, "file:README.md");
+    const file = await openView({
+      taskId,
+      view: "file",
+      target: { path: "README.md", line: 1 },
+    });
+    // `opened` is a statement about the screen: the route did not answer until
+    // this window had the file rendered.
+    expect(file).toMatchObject({ opened: true });
+    expect(await activeTabId(client)).toBe("file:README.md");
     await client.waitForText(".preview-modal .file-path", "README.md", 8_000);
 
-    const refused = await localProcessFetch(`${server.baseUrl}/v1/desktop/views/open`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ taskId, path: "../outside.txt" }),
-    });
-    // A path outside the task's workspace fails at the route, so a mistyped
-    // path is an error the agent can act on rather than a silent no-op.
-    expect(refused.ok).toBe(false);
+    // Re-aiming the same file focuses the tab that is already showing it.
+    expect(await openView({
+      taskId,
+      view: "file",
+      target: { path: "README.md" },
+    })).toMatchObject({ opened: true });
+    expect(await openTabIds(client)).toEqual(["agent", "file:README.md"]);
 
-    await pressShortcut(client, { key: "Escape" });
+    // The other views the action may open.
+    expect(await openView({ taskId, view: "diff" })).toMatchObject({ opened: true });
+    await waitForActiveTab(client, "diff");
+    expect(await openView({ taskId, view: "graph" })).toMatchObject({ opened: true });
+    await waitForActiveTab(client, "graph");
+    expect(await openView({ taskId, view: "agent" })).toMatchObject({ opened: true });
+    await waitForActiveTab(client, "agent");
+
+    // A nested tree target has to survive the reader looking away. Switching
+    // tabs re-renders the panel around the still-mounted explorer, and the
+    // contained reader it is handed must not read as a new place to be.
+    const worktreePath = `${testRepoPath}/.kanna-worktrees/task-${taskId}`;
+    await tauriInvoke(client, "run_script", {
+      script: `mkdir -p "${worktreePath}/nested/deep"`
+        + ` && printf 'leaf\n' > "${worktreePath}/nested/deep/leaf-marker.txt"`,
+      cwd: testRepoPath,
+      env: {},
+    });
+    expect(await openView({
+      taskId,
+      view: "tree",
+      target: { path: "nested/deep" },
+    })).toMatchObject({ opened: true });
+    await waitForActiveTab(client, "tree");
+    await client.waitForText(".tree-modal", "leaf-marker.txt", 8_000);
+
+    // An ordinary tab switch away and back — no reopen, no reveal.
+    await client.executeSync(
+      `document.querySelector('[data-testid="main-tab-agent"]').click();`,
+    );
+    await waitForActiveTab(client, "agent");
+    await client.executeSync(
+      `document.querySelector('[data-testid="main-tab-tree"]').click();`,
+    );
+    await waitForActiveTab(client, "tree");
+    await sleep(500);
+
+    const treeAfterSwitch = await client.executeSync<string>(
+      `const tree = document.querySelector('.tree-modal');
+       return tree ? tree.textContent : "";`,
+    );
+    // Still inside the directory the agent named, not back at the root.
+    expect(treeAfterSwitch).toContain("leaf-marker.txt");
+    expect(treeAfterSwitch).toContain("deep");
+    await tauriInvoke(client, "run_script", {
+      script: `rm -rf "${worktreePath}/nested"`,
+      cwd: testRepoPath,
+      env: {},
+    });
+
+    // A path outside the task's workspace is refused at the route, so a
+    // mistyped path is an error the agent can act on rather than a silent
+    // no-op — and nothing reaches a window.
+    expect(await openView({
+      taskId,
+      view: "file",
+      target: { path: "../outside.txt" },
+    })).toMatchObject({ opened: false, code: "invalid_path" });
+
+    // Neither a shell nor anything else outside the whitelist is reachable.
+    expect(await openView({ taskId, view: "shell" }))
+      .toMatchObject({ opened: false, code: "unsupported_view" });
+
+    await closeViewTabs(client);
     await waitForActiveTab(client, "agent");
     expect(await openTabIds(client)).toEqual(["agent"]);
+  });
+
+  it("refuses a view whose content the window could not load", async () => {
+    // A scope with no target is dispatched without the server reading
+    // anything, so the window is the only thing that can discover the
+    // worktree is gone — which is exactly what makes this a real renderer
+    // refusal rather than a fabricated acknowledgement.
+    const doomedId = await createTask("Main tabs doomed task");
+    const doomedWorktree = `${testRepoPath}/.kanna-worktrees/task-${doomedId}`;
+    await tauriInvoke(client, "run_script", {
+      script: `rm -rf "${doomedWorktree}"`,
+      cwd: testRepoPath,
+      env: {},
+    });
+
+    const server = await resolveAppKannaServer(client);
+    const openView = async (body: Record<string, unknown>) => {
+      const response = await localProcessFetch(`${server.baseUrl}/v1/desktop/views/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.ok).toBe(true);
+      return await response.json() as { opened: boolean; code?: string; message?: string };
+    };
+
+    const diff = await openView({ taskId: doomedId, view: "diff" });
+    expect(diff.opened).toBe(false);
+    expect(diff.code).toBe("renderer_failed");
+    // The window's own words, carried back to the caller.
+    expect(diff.message ?? "").toContain("unavailable");
+
+    const tree = await openView({ taskId: doomedId, view: "tree" });
+    expect(tree.opened).toBe(false);
+    expect(tree.message ?? "").toContain("unavailable");
+
+    await selectTask(taskId);
+    await closeViewTabs(client);
+  });
+
+  it("keeps a view an agent opened reading inside the task worktree", async () => {
+    await selectTask(taskId);
+    await closeViewTabs(client);
+
+    const worktree = `${testRepoPath}/.kanna-worktrees/task-${taskId}`;
+    const outside = `${testRepoPath}/.kanna-worktrees/outside-of-task-${taskId}`;
+    await tauriInvoke(client, "run_script", {
+      script: `mkdir -p "${worktree}/probe" "${outside}"`
+        + ` && printf 'inside\n' > "${worktree}/probe/inside-marker.txt"`
+        + ` && printf 'secret\n' > "${outside}/outside-secret.txt"`,
+      cwd: testRepoPath,
+      env: {},
+    });
+
+    const server = await resolveAppKannaServer(client);
+    const openView = async (body: Record<string, unknown>) => {
+      const response = await localProcessFetch(`${server.baseUrl}/v1/desktop/views/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return await response.json() as { opened: boolean; code?: string };
+    };
+
+    expect(await openView({ taskId, view: "tree", target: { path: "probe" } }))
+      .toMatchObject({ opened: true });
+    await waitForActiveTab(client, "tree");
+    await client.waitForText(".tree-modal", "inside-marker.txt", 8_000);
+
+    // The directory the server validated becomes a link out of the worktree,
+    // and the explorer is made to read it again — the read that happens after
+    // dispatch, which the pre-dispatch check cannot fence.
+    await tauriInvoke(client, "run_script", {
+      script: `rm -rf "${worktree}/probe" && ln -s "${outside}" "${worktree}/probe"`,
+      cwd: testRepoPath,
+      env: {},
+    });
+    // `a` re-lists the current directory under the other visibility, so this
+    // is a genuine fresh read rather than a cached column. The explorer owns
+    // its keys on its own element, so the event goes there rather than to the
+    // window, where it would never reach the handler.
+    await client.executeSync(buildSelectorKeydownScript(".tree-modal", { key: "a" }));
+    await sleep(800);
+
+    // Positive proof that a read actually happened and was refused, so the
+    // absence below is containment rather than a keypress that went nowhere.
+    await client.waitForText('[data-testid="tree-explorer-unavailable"]', "unavailable", 8_000);
+    const shown = await client.executeSync<string>(
+      `const tree = document.querySelector('.tree-modal');
+       return tree ? tree.textContent : "";`,
+    );
+    expect(shown).not.toContain("outside-secret.txt");
+
+    await tauriInvoke(client, "run_script", {
+      script: `rm -f "${worktree}/probe" && rm -rf "${outside}"`,
+      cwd: testRepoPath,
+      env: {},
+    });
+    await closeViewTabs(client);
+  });
+
+  it("shows the anchored diff line as it reads now, not as the tab last rendered it", async () => {
+    await selectTask(taskId);
+    await closeViewTabs(client);
+
+    const worktree = `${testRepoPath}/.kanna-worktrees/task-${taskId}`;
+    const server = await resolveAppKannaServer(client);
+    const openView = async (body: Record<string, unknown>) => {
+      const response = await localProcessFetch(`${server.baseUrl}/v1/desktop/views/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return await response.json() as { opened: boolean; code?: string; message?: string };
+    };
+    const anchoredLine = async (): Promise<number> => {
+      const response = await localProcessFetch(
+        `${server.baseUrl}/v1/tasks/${taskId}/diff?scope=working`,
+      );
+      const patch = ((await response.json()) as { patch: string }).patch.split("\n");
+      let line = 0;
+      for (let index = 0; index < patch.length; index += 1) {
+        const header = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(patch[index]);
+        if (header) { line = Number(header[1]); continue; }
+        if (patch[index].startsWith("+") && !patch[index].startsWith("+++")) {
+          if (patch[index].includes("ANCHOR-")) return line;
+          line += 1;
+        } else if (patch[index].startsWith(" ")) {
+          line += 1;
+        }
+      }
+      throw new Error(`no anchored line in ${patch.join("\n")}`);
+    };
+
+    await tauriInvoke(client, "run_script", {
+      script: `printf '\nANCHOR-ORIGINAL\n' >> README.md`,
+      cwd: worktree,
+      env: {},
+    });
+    expect(await openView({
+      taskId,
+      view: "diff",
+      target: {
+        scope: "working",
+        path: "README.md",
+        side: "new",
+        line: await anchoredLine(),
+        excerpt: "ANCHOR-ORIGINAL",
+      },
+    })).toMatchObject({ opened: true });
+    await waitForActiveTab(client, "diff");
+
+    // Replace the anchored line in place: same number, still an addition,
+    // different text. A tab that does not re-read would scroll to the old
+    // text and call it opened.
+    await tauriInvoke(client, "run_script", {
+      script: `sed -i '' 's/ANCHOR-ORIGINAL/ANCHOR-REPLACED/' README.md`,
+      cwd: worktree,
+      env: {},
+    });
+    expect(await openView({
+      taskId,
+      view: "diff",
+      target: {
+        scope: "working",
+        path: "README.md",
+        side: "new",
+        line: await anchoredLine(),
+        excerpt: "ANCHOR-REPLACED",
+      },
+    })).toMatchObject({ opened: true });
+
+    const rendered = await client.executeSync<string>(
+      `return Array.from(document.querySelectorAll('.diff-file'))
+        .flatMap((file) => Array.from(file.querySelectorAll('diffs-container')))
+        .map((container) => container.shadowRoot ? container.shadowRoot.textContent : "")
+        .join(" ");`,
+    );
+    // What the reader is looking at is the line the open was answered for.
+    expect(rendered).toContain("ANCHOR-REPLACED");
+    expect(rendered).not.toContain("ANCHOR-ORIGINAL");
+
+    await tauriInvoke(client, "run_script", {
+      script: `sed -i '' '/ANCHOR-REPLACED/d' README.md`,
+      cwd: worktree,
+      env: {},
+    });
+    await closeViewTabs(client);
   });
 
   it("brings a task's tabs back after the app restarts, and forgets a closed task's", async () => {

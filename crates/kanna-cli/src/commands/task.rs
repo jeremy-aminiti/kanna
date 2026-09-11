@@ -669,24 +669,36 @@ pub(crate) async fn run(command: TaskCommands) {
                 process::exit(1);
             }
         }
-        TaskCommands::OpenFile {
+        TaskCommands::OpenView {
             task_id,
-            path,
-            line,
+            view,
+            target,
             machine_id,
             server_url,
         } => {
             let mut args = serde_json::json!({
                 "task_id": task_id,
-                "path": path,
+                "view": view,
             });
-            // `line` is a catalog integer, so it goes in as a number rather
-            // than through the string-valued optional helper.
-            if let (Some(object), Some(line)) = (args.as_object_mut(), line) {
-                object.insert("line".to_string(), Value::from(line));
+            // The target is one JSON object rather than a flag per field, so
+            // the CLI and the tool have the same surface: a shell caller
+            // spells the shape the catalog documents instead of a second
+            // vocabulary that could drift from it.
+            if let Some(raw) = target {
+                let parsed = serde_json::from_str::<Value>(&raw).unwrap_or_else(|error| {
+                    eprintln!("Error: --target must be a JSON object: {error}");
+                    process::exit(1);
+                });
+                if !parsed.is_object() {
+                    eprintln!("Error: --target must be a JSON object");
+                    process::exit(1);
+                }
+                if let Some(object) = args.as_object_mut() {
+                    object.insert("target".to_string(), parsed);
+                }
             }
             insert_optional(&mut args, "machine_id", machine_id);
-            run_catalog_task_tool("kanna_open_file", &args, server_url.as_deref()).await;
+            run_catalog_task_tool("kanna_open_view", &args, server_url.as_deref()).await;
         }
         TaskCommands::Logs {
             task_id,

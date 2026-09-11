@@ -7,6 +7,11 @@ import { registerContextShortcuts } from "../composables/useShortcutContext";
 import { macOsTextInputAttrs } from "../utils/textInput";
 import { metaOrControlHint } from "../composables/shortcutPlatform";
 import {
+  waitForViewReady,
+  type DesktopViewOpenCommand,
+  type DesktopViewOpenOutcome,
+} from "../composables/desktopViewOpen";
+import {
   layoutCommitGraph,
   type GraphResult,
   type GraphLayout,
@@ -285,7 +290,47 @@ watch(isSearching, (searching) => {
   }
 });
 
-defineExpose({ dismiss });
+/**
+ * Scroll the graph to the commit an agent named, and say whether it is there.
+ *
+ * The server checked the commit against the task's whole graph, while the view
+ * opens on HEAD's ancestry — so a commit on a sibling branch is genuinely
+ * absent from what is on screen until the view is widened. Widening once and
+ * looking again is the difference between showing the commit and reporting a
+ * commit that exists as missing.
+ */
+async function revealDesktopViewTarget(
+  command: DesktopViewOpenCommand,
+): Promise<DesktopViewOpenOutcome> {
+  const commit = command.target?.commit;
+  const settled = await waitForViewReady(() => !loading.value);
+  if (!settled) {
+    return { opened: false, code: "renderer_failed", message: "the commit graph is still loading" };
+  }
+  if (error.value) {
+    return { opened: false, code: "renderer_failed", message: error.value };
+  }
+  if (typeof commit !== "string" || commit.length === 0) return { opened: true };
+
+  const has = () => layout.value.commits.some((row) => row.hash === commit);
+  if (!has() && mode.value === "auto") {
+    mode.value = "all";
+    await loadGraph();
+    await waitForViewReady(() => !loading.value);
+  }
+  if (!has()) {
+    return {
+      opened: false,
+      code: "commit_not_found",
+      message: `commit ${commit} is not in the graph this window is showing`,
+    };
+  }
+  await nextTick();
+  scrollToCommit(commit);
+  return { opened: true };
+}
+
+defineExpose({ dismiss, revealDesktopViewTarget });
 
 useLessScroll(scrollRef, {
   isActive: () => props.isForeground?.() ?? true,

@@ -586,6 +586,30 @@ impl Db {
             .optional()
     }
 
+    /// The task that once used `branch` as one of its workspaces.
+    ///
+    /// `resolve_pipeline_item_id` answers for a task's *current* branch only,
+    /// because that is the name the task answers to now. A stage transition
+    /// forks a new workspace and leaves the old branch behind, so an older
+    /// name is not a second name for the task — it names somewhere the task
+    /// has been. Callers use this to say so, rather than reporting a task that
+    /// is right there as missing.
+    pub fn resolve_task_by_workspace_branch(
+        &self,
+        branch: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT pipeline_item_id FROM worktree
+                 WHERE branch = ?
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT 1",
+                [branch],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
     pub fn resolve_task_terminal_session_id(
         &self,
         task_or_branch_id: &str,

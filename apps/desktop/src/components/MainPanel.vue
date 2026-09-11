@@ -15,6 +15,8 @@ import type {
 } from "../stores/workflow";
 import {
   fetchDesktopTaskDetail,
+  listDesktopTaskDirectory,
+  readDesktopTaskFile,
   type DesktopTaskDetail,
 } from "../services/desktopServerClient";
 import { isBlockerResolved } from "../utils/blockerResolution";
@@ -32,6 +34,12 @@ import AnalyticsModal from "./AnalyticsModal.vue";
 import ImageUrlPreviewModal from "./ImageUrlPreviewModal.vue";
 import PreferencesPanel from "./PreferencesPanel.vue";
 import { AGENT_TAB_ID, type MainTab } from "../composables/useMainTabs";
+import type { RemoteDirectoryEntry } from "../composables/useTreeExplorer";
+import {
+  waitForViewReady,
+  type DesktopViewOpenCommand,
+  type DesktopViewOpenOutcome,
+} from "../composables/desktopViewOpen";
 import type { MainTabViewsController } from "./MainPanel.types";
 import type { BranchInclude, DiffScope, DiffScrollPositions } from "../composables/useAppModals";
 import type { MarkdownPreviewMode } from "../stores/markdownPreviewMode";
@@ -139,6 +147,43 @@ const diffViewProps = computed(() => {
   };
 });
 
+/**
+ * The contained readers a view an agent opened uses, one stable function per
+ * task.
+ *
+ * These are read from the template, so a fresh closure here would be a new
+ * function identity on every parent render — and the views downstream treat a
+ * new loader as a new place to be looking at. The explorer resets breadcrumb,
+ * cursor, filter and visibility on it, and the file preview reloads: switching
+ * to the agent tab and back would silently throw away the very location an
+ * agent asked a human to read. Keying the cache by task keeps a genuine task
+ * change resetting the view, which is what that reset is for.
+ */
+const containedFileLoaders = new Map<string, (path: string) => Promise<string>>();
+const containedDirectoryLoaders = new Map<
+  string,
+  (path: string, showAllFiles: boolean) => Promise<{ entries: RemoteDirectoryEntry[] }>
+>();
+
+function containedFileLoader(taskId: string | undefined) {
+  if (!taskId) return undefined;
+  const existing = containedFileLoaders.get(taskId);
+  if (existing) return existing;
+  const loader = (path: string) => readDesktopTaskFile(taskId, path);
+  containedFileLoaders.set(taskId, loader);
+  return loader;
+}
+
+function containedDirectoryLoader(taskId: string | undefined) {
+  if (!taskId) return undefined;
+  const existing = containedDirectoryLoaders.get(taskId);
+  if (existing) return existing;
+  const loader = (path: string, showAllFiles: boolean) =>
+    listDesktopTaskDirectory(taskId, path, showAllFiles);
+  containedDirectoryLoaders.set(taskId, loader);
+  return loader;
+}
+
 function fileViewProps(tab: MainTab) {
   const modals = props.views?.modals;
   return {
@@ -148,6 +193,10 @@ function fileViewProps(tab: MainTab) {
     remoteContentLoader: modals?.activeTaskViewIsRemote.value
       ? modals.readRemoteTaskFile
       : undefined,
+    // A tab an agent opened reads through the server's contained resolution,
+    // so a symlink swapped in after validation cannot put outside content on
+    // screen under this task's name.
+    contentLoader: containedFileLoader(tab.containedTaskId),
     ideCommand: props.views?.store.ideCommand,
     initialLine: tab.initialLine,
     initialMarkdownMode: modals?.currentPreviewMarkdownMode.value,
@@ -169,16 +218,18 @@ function shellCwd(tab: MainTab): string {
   return taskWorktreePath.value ?? scopeRepoPath.value;
 }
 
-function treeViewProps() {
+function treeViewProps(tab: MainTab) {
   const modals = props.views?.modals;
   const route = modals?.activeRemoteTaskRoute.value;
+  const containedTaskId = tab.containedTaskId;
   return {
     worktreePath: modals?.treeExplorerRoot.value ?? taskWorktreePath.value ?? scopeRepoPath.value,
     repoRoot: scopeRepoPath.value || (modals?.treeExplorerRoot.value ?? ""),
     homePath: modals?.homePath.value,
-    remoteDirectoryLoader: modals?.activeTaskViewIsRemote.value
-      ? modals.listRemoteTaskDirectory
-      : undefined,
+    // Same containment reason as the file view: the explorer asks the server
+    // rather than walking the worktree path itself.
+    remoteDirectoryLoader: containedDirectoryLoader(containedTaskId)
+      ?? (modals?.activeTaskViewIsRemote.value ? modals.listRemoteTaskDirectory : undefined),
     remoteDesktopId: route?.desktopId,
     remoteTaskId: route?.taskId,
     remoteTransport: route?.transport,
@@ -203,6 +254,15 @@ function onMarkdownModeChange(mode: MarkdownPreviewMode) {
 
 interface DismissableView {
   dismiss?: () => boolean;
+  /**
+   * Show the view's content and whatever the command aimed it at, and say
+   * whether that succeeded. The contract every whitelisted view implements for
+   * `kanna_open_view`: the route reports `opened` to the agent that asked, so
+   * "rendered" here means rendered, not "mounted and loading".
+   */
+  revealDesktopViewTarget?: (
+    command: DesktopViewOpenCommand,
+  ) => Promise<DesktopViewOpenOutcome>;
 }
 
 const viewRefs = new Map<string, DismissableView>();
@@ -213,6 +273,53 @@ function setViewRef(id: string, component: Element | ComponentPublicInstance | n
   } else {
     viewRefs.delete(id);
   }
+}
+
+/**
+ * Aim one tab at what an agent asked a human to look at.
+ *
+ * The tab must be the one in front — a view that is behind another one is not
+ * showing anybody anything — and then the view itself decides when its content
+ * and target are up. Views with nothing to load and nothing to aim (the agent
+ * session, analytics) are ready as soon as they are the active tab.
+ */
+async function revealTabTarget(
+  tabId: string,
+  command: DesktopViewOpenCommand,
+): Promise<DesktopViewOpenOutcome> {
+  const controller = props.views?.tabs;
+  if (!controller) {
+    return {
+      opened: false,
+      code: "renderer_failed",
+      message: "this window is not hosting task views",
+    };
+  }
+  // Selecting the task is what moves this panel onto that task's tab set, and
+  // it lands through the store rather than in the same tick — so activation is
+  // retried until the scope catches up rather than giving up on the first one.
+  const activated = await waitForViewReady(() => {
+    controller.activateTab(tabId);
+    return controller.activeTabId.value === tabId;
+  }, { timeoutMs: 3_000 });
+  await nextTick();
+  if (!activated) {
+    return {
+      opened: false,
+      code: "renderer_failed",
+      message: `the ${command.view} view could not be brought to the front`,
+    };
+  }
+  const reveal = viewRefs.get(tabId)?.revealDesktopViewTarget;
+  if (!reveal) {
+    if (command.target === undefined) return { opened: true };
+    return {
+      opened: false,
+      code: "unsupported_target",
+      message: `this window's ${command.view} view cannot be aimed at a target`,
+    };
+  }
+  return await reveal(command);
 }
 
 /**
@@ -584,6 +691,7 @@ function cyclePreferencesSection(direction: -1 | 1) {
 defineExpose({
   recheckClis: checkAllClis,
   dismissActiveTab,
+  revealTabTarget,
   cyclePreferencesSection,
   onTabClosed,
 });
@@ -746,6 +854,7 @@ function dismissCommandHint() {
       <template v-for="tab in openViewTabs" :key="tabKey(tab)">
         <DiffModal
           v-if="tab.kind === 'diff' && diffViewProps"
+          :ref="(component) => setViewRef(tab.id, component)"
           v-show="activeTabId === tab.id"
           v-bind="diffViewProps"
           embedded
@@ -780,7 +889,7 @@ function dismissCommandHint() {
           v-else-if="tab.kind === 'tree'"
           :ref="(component) => setViewRef(tab.id, component)"
           v-show="activeTabId === tab.id"
-          v-bind="treeViewProps()"
+          v-bind="treeViewProps(tab)"
           embedded
           :active="activeTabId === tab.id"
           @open-file="(filePath: string) => views?.modals.openFilePreview(filePath)"
@@ -799,6 +908,7 @@ function dismissCommandHint() {
         />
         <AnalyticsModal
           v-else-if="tab.kind === 'analytics'"
+          :ref="(component) => setViewRef(tab.id, component)"
           v-show="activeTabId === tab.id"
           :repo-id="scopeRepoId"
           embedded
