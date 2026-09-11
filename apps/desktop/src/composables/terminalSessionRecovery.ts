@@ -85,26 +85,16 @@ export function shouldPushKittyKeyboardOnFreshAttach(_options?: TerminalOptions)
   return false;
 }
 
-export function shouldResetTerminalOnReconnect(options?: TerminalOptions): boolean {
-  return options?.agentProvider !== "codex";
-}
-
 /** Whether an incoming snapshot replaces the xterm buffer or is written on top
- * of it. A recovered-scrollback restore always keeps the buffer. A respawned
- * session id (stage-swap rebind, cleared exit latch) always resets: whatever
- * xterm shows belongs to the dead PTY, and the snapshot now opens with the
- * carried-over history — writing it below the stale copy would show it twice.
- * Only an ordinary reconnect keeps the provider-specific behavior. */
+ * of it. All providers send a full retained-history serialization, which must
+ * start in a reset grid. Only the one-shot recovered-scrollback restore keeps
+ * the buffer. Provider and respawn arguments remain accepted for callers. */
 export function shouldResetTerminalForSnapshot(params: {
   preserveRecoveredScrollback: boolean;
   sessionRespawned: boolean;
   agentProvider?: string;
 }): boolean {
-  if (params.preserveRecoveredScrollback) return false;
-  return (
-    params.sessionRespawned ||
-    shouldResetTerminalOnReconnect({ agentProvider: params.agentProvider })
-  );
+  return !params.preserveRecoveredScrollback;
 }
 
 export function getReconnectKeyboardPush(_options?: TerminalOptions): string | null {

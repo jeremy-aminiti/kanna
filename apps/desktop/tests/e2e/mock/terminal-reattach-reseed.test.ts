@@ -2,17 +2,25 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { RELOAD_APP_SCRIPT } from "../helpers/appReady";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { cleanupWorktrees, importTestRepoDirect, resetDatabase } from "../helpers/reset";
 import { callVueMethod, execDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
+import { assertNativeWindowIdentity, resolveExpectedNativeWindowIdentity, type ExpectedNativeWindowIdentity } from "../helpers/windowIdentity";
 
 const execFileAsync = promisify(execFile);
+let expectedIdentity: ExpectedNativeWindowIdentity;
+
+async function verifyWindow(client: WebDriverClient, label: string): Promise<void> {
+  await assertNativeWindowIdentity(client, expectedIdentity, `terminal fidelity ${label}`);
+}
 
 interface SessionRecoveryStatePayload {
   serialized: string;
@@ -110,7 +118,7 @@ async function replaceDaemon(client: WebDriverClient): Promise<{
   return { incumbent, successor };
 }
 
-async function renderedFrameLines(
+async function retainedBufferLines(
   client: WebDriverClient,
   sessionId: string,
 ): Promise<string[]> {
@@ -122,7 +130,7 @@ async function renderedFrameLines(
   return lines.map((line) => line.trimEnd()).filter((line) => line.length > 0);
 }
 
-async function waitForRenderedText(
+async function waitForBufferText(
   client: WebDriverClient,
   sessionId: string,
   text: string,
@@ -131,7 +139,7 @@ async function waitForRenderedText(
   const deadline = Date.now() + timeoutMs;
   let latest: string[] = [];
   while (Date.now() < deadline) {
-    latest = await renderedFrameLines(client, sessionId).catch(() => []);
+    latest = await retainedBufferLines(client, sessionId).catch(() => []);
     if (latest.some((line) => line.includes(text))) return;
     await sleep(200);
   }
@@ -187,10 +195,46 @@ async function queueUnparsedOutput(
   );
 }
 
+/** Read the actual DOM renderer, not xterm's retained cell buffer. */
+async function paintedRows(client: WebDriverClient, sessionId: string): Promise<string[]> {
+  return client.executeSync<string[]>(
+    `const hook = window.__KANNA_E2E__.terminalBuffers;
+     const el = hook.element(${JSON.stringify(sessionId)});
+     // Non-activating WKWebView can suspend rAF. Flush only the renderer,
+     // exactly like the existing native screenshot path; never change cells.
+     hook.refresh(${JSON.stringify(sessionId)});
+     if (!el?.getClientRects().length) throw new Error("terminal is not visible");
+     return Array.from(el.querySelectorAll(".xterm-rows > div"))
+       .map(row => (row.textContent || "").trimEnd()).filter(Boolean);`,
+  );
+}
+
+async function scrollToOldestRows(client: WebDriverClient, sessionId: string): Promise<void> {
+  await verifyWindow(client, "before scroll");
+  await client.executeSync(
+    `const el = window.__KANNA_E2E__.terminalBuffers.element(${JSON.stringify(sessionId)});
+     const viewport = el.querySelector(".xterm-scrollable-element");
+     if (!viewport) throw new Error("terminal scroll container unavailable");
+     // xterm 6 uses its own scrollable element, not native scrollTop.
+     viewport.dispatchEvent(new WheelEvent("wheel", {
+       deltaY: -10000, deltaMode: 0, bubbles: true, cancelable: true,
+     }));`,
+  );
+  await expect.poll(async () => client.executeSync<number>(
+    `return window.__KANNA_E2E__.terminalBuffers.stats(${JSON.stringify(sessionId)}).viewportY;`,
+  ), { timeout: 30_000 }).toBe(0);
+}
+
+function expectSubmittedRows(lines: string[], message: string, response: string): void {
+  expect(lines.filter(line => line.includes(message))).toEqual([message]);
+  expect(lines.filter(line => line.includes(response))).toEqual([response]);
+}
+
 // Importing the fixture repo leaves its own setup task selected, and the row
 // for a task inserted straight into the database only exists once the store
 // has refreshed. Keep asking until this task owns the terminal view.
 async function selectTask(client: WebDriverClient, taskId: string): Promise<void> {
+  await verifyWindow(client, "before task switch");
   const deadline = Date.now() + 45_000;
   let latest: unknown = null;
   while (Date.now() < deadline) {
@@ -206,7 +250,10 @@ async function selectTask(client: WebDriverClient, taskId: string): Promise<void
       latest = await client.executeSync(
         "return window.__KANNA_E2E__.setupState.store.selectedTaskId ?? null;",
       );
-      if (latest === taskId) return;
+      if (latest === taskId) {
+        await verifyWindow(client, "after task switch");
+        return;
+      }
     } else {
       latest = result;
     }
@@ -235,10 +282,13 @@ describe("terminal re-attach re-seed", () => {
   const sessionIds: string[] = [];
 
   beforeAll(async () => {
-    await client.createSession();
+    expectedIdentity = await resolveExpectedNativeWindowIdentity(fileURLToPath(new URL("../../../../../", import.meta.url)));
+    await client.createSession({ dismissStartupShortcuts: false });
+    await verifyWindow(client, "session connected");
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
+    await client.executeSync(RELOAD_APP_SCRIPT);
     await client.waitForAppReady();
+    await verifyWindow(client, "after reload");
     await dismissStartupShortcutsModal(client);
     fixtureRepoPath = await createFixtureRepo("terminal-reattach-reseed");
     repoId = await importTestRepoDirect(client, fixtureRepoPath, "Terminal re-attach re-seed");
@@ -255,10 +305,157 @@ describe("terminal re-attach re-seed", () => {
     await client.deleteSession();
   });
 
-  it("keeps the whole grid when the daemon is replaced under the owner viewer", async () => {
+  it.each([false, true])("discovers SU outgoing rows live and after a task switch (adapter disabled: %s)", async (disabled) => {
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
+    const sessionId = `su-${suffix}`;
+    const awayId = `su-away-${suffix}`;
+    sessionIds.push(sessionId, awayId);
+    const message = `KSU_SUBMITTED_${suffix}`;
+    const response = `KSU_RESPONSE_${suffix}`;
+    const ready = `KSU_READY_${suffix}`;
+    const settled = `KSU_SCROLLED_${suffix}`;
+    const away = `KSU_AWAY_${suffix}`;
+    const releasePath = join(fixtureRepoPath, `su-release-${suffix}`);
+    // Exact top-origin SU sequence from codex-live-20260905.ansi at 21233.
+    // 31 scrolling rows plus a fixed footer; the attached grid must fit both.
+    const scroll = "\\033[1;31r\\033[4S\\033[r";
+    const script = [
+      "stty -echo",
+      `printf '\\033[2J\\033[H${ready}'`,
+      "IFS= read -r submitted",
+      `printf '\\033[2J\\033[H%s\\033[2;1H${response}' "$submitted"`,
+      ...Array.from({ length: 29 }, (_, n) =>
+        `printf '\\033[${n + 3};1HKSU_ROW_${String(n + 3).padStart(2, "0")}_${suffix}'`),
+      `printf '\\033[32;1HKSU_FOOTER_${suffix}'`,
+      `while [ ! -f ${releasePath} ]; do sleep 0.05; done`,
+      `printf '${scroll}\\033[28;1H${settled}'`,
+      "while IFS= read -r line; do :; done",
+    ].join("; ");
+
+    // tauri-plugin-webdriver sizes the native window in physical pixels.
+    // Keep a desktop-sized CSS viewport on Retina too; 1280 physical pixels
+    // puts the app into its narrow layout and leaves the terminal hidden.
+    const scale = await client.executeSync<number>("return window.devicePixelRatio;");
+    await verifyWindow(client, "before window resize");
+    await client.setWindowRect({ width: 1280 * scale, height: 900 * scale });
+    await expect.poll(() => client.executeSync<number>("return innerWidth;"), {
+      timeout: 30_000,
+    }).toBeGreaterThanOrEqual(1100);
+    for (const id of [sessionId, awayId]) {
+      await execDb(client,
+        `INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type, agent_provider)
+         VALUES (?, ?, ?, 'in progress', 'pty', 'codex')`,
+        [id, repoId, id === sessionId ? "CSI S live scrollback fixture" : "Scrollback switch-away fixture"]);
+      await invokeOrThrow(client, "spawn_session", {
+        sessionId: id, cwd: fixtureRepoPath, executable: "/bin/zsh",
+        args: ["-f", "-c", id === sessionId ? script :
+          `stty -echo; printf '${away}'; while IFS= read -r line; do :; done`],
+        env: { TERM: "xterm-256color" }, cols: 100, rows: 40, agentProvider: "codex",
+      });
+    }
+    await callVueMethod(client, "loadItems", repoId);
+    if (disabled) {
+      // Test-only one-shot interception of the real initialization path. No
+      // production flag, parser replacement or synthetic viewer output.
+      const result = await client.executeAsync<string>(
+        `const cb = arguments[arguments.length - 1];
+         import('/src/composables/terminalScrollbackCompatibility.ts').then(({ TerminalScrollbackCompatibilityAddon }) => {
+           const proto = TerminalScrollbackCompatibilityAddon.prototype;
+           const original = proto.activate;
+           window.__restoreSUAdapter = () => { proto.activate = original; delete window.__restoreSUAdapter; };
+           proto.activate = function() { window.__restoreSUAdapter(); };
+           cb("ok");
+         }).catch(error => cb(String(error)));`,
+      );
+      expect(result).toBe("ok");
+    }
+    try {
+      await selectTask(client, sessionId);
+      await waitForBufferText(client, sessionId, ready);
+    } finally {
+      await client.executeSync("window.__restoreSUAdapter?.();");
+    }
+    const grid = await client.executeSync<{ columns: number; rows: number }>(
+      `return window.__KANNA_E2E__.terminalBuffers.cursor(${JSON.stringify(sessionId)});`,
+    );
+    expect(grid.rows).toBeGreaterThanOrEqual(32);
+    expect(grid.columns).toBeGreaterThanOrEqual(message.length);
+    await client.executeSync(
+      `window.__KANNA_E2E__.terminalBuffers.input(${JSON.stringify(sessionId)}, ${JSON.stringify(message + "\r")});`,
+    );
+    await waitForBufferText(client, sessionId, response);
+    await expect.poll(() => paintedRows(client, sessionId), { timeout: 30_000 }).toContain(message);
+    expectSubmittedRows(await paintedRows(client, sessionId), message, response);
+
+    const evidenceDir = process.env.KANNA_VISUAL_EVIDENCE_DIR;
+    const label = disabled ? "stock-negative" : "corrected";
+    async function evidence(state: string): Promise<void> {
+      if (!evidenceDir) return;
+      await mkdir(evidenceDir, { recursive: true });
+      await verifyWindow(client, "before capture");
+      await client.screenshot(join(evidenceDir, `terminal-su-${label}-${state}.png`));
+    }
+    await evidence("before-scroll");
+    await writeFile(releasePath, "");
+    await waitForBufferText(client, sessionId, settled);
+    await expect.poll(() => paintedRows(client, sessionId), { timeout: 30_000 }).toContain(settled);
+    // Both implementations paint the live screen correctly; only corrected
+    // SU retains the outgoing rows. No detach/snapshot has occurred yet.
+    expect(await paintedRows(client, sessionId)).not.toContain(message);
+    const snapshot = await waitForDaemonSnapshotText(client, sessionId, settled);
+    const retained = daemonFrameLines(snapshot.serialized).filter(line => line.startsWith("KSU_"));
+    expectSubmittedRows(retained, message, response);
+    const live = (await retainedBufferLines(client, sessionId)).filter(line => line.startsWith("KSU_"));
+    if (disabled) {
+      // Preserve the *same* live-retention assertion as a negative control.
+      expect(() => expectSubmittedRows(live, message, response)).toThrow();
+      expect(live).not.toContain(message);
+      expect(live).not.toContain(response);
+    } else {
+      expectSubmittedRows(live, message, response);
+      expect(live).toEqual(retained);
+    }
+    await scrollToOldestRows(client, sessionId);
+    if (!disabled) {
+      await expect.poll(() => paintedRows(client, sessionId), { timeout: 30_000 }).toContain(message);
+      expectSubmittedRows(await paintedRows(client, sessionId), message, response);
+    } else {
+      expect(await paintedRows(client, sessionId)).not.toContain(message);
+      expect(await paintedRows(client, sessionId)).not.toContain(response);
+    }
+    await evidence("live-scrollback");
+
+    await selectTask(client, awayId);
+    await waitForBufferText(client, awayId, away);
+    await expect.poll(() => paintedRows(client, awayId), { timeout: 30_000 }).toContain(away);
+    await evidence("away");
+    await selectTask(client, sessionId);
+    await expect.poll(() => retainedBufferLines(client, sessionId), { timeout: 30_000 }).toContain(message);
+    const returned = (await retainedBufferLines(client, sessionId)).filter(line => line.startsWith("KSU_"));
+    expectSubmittedRows(returned, message, response);
+    expect(returned).toEqual(retained);
+    if (!disabled) expect(returned).toEqual(live);
+    await scrollToOldestRows(client, sessionId);
+    await expect.poll(() => paintedRows(client, sessionId), { timeout: 30_000 }).toContain(message);
+    expectSubmittedRows(await paintedRows(client, sessionId), message, response);
+    await evidence("returned-scrollback");
+    if (evidenceDir) {
+      await writeFile(join(evidenceDir, `terminal-su-${label}.json`), JSON.stringify({
+        sessionId, awayId, grid, disabled, live, retained, returned,
+        painted: await paintedRows(client, sessionId),
+        build: await client.getAppBuildInfo(),
+        nativeTitle: await client.getNativeWindowTitle(),
+        reducedMotion: await client.executeSync("return matchMedia('(prefers-reduced-motion: reduce)').matches;"),
+      }, null, 2));
+    }
+  });
+
+  it.each(["claude", "codex"])("keeps the whole %s grid when the daemon is replaced under the owner viewer", async (agentProvider) => {
     const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
     const sessionId = `reseed-${suffix}`;
     sessionIds.push(sessionId);
+    const messageMarker = `KRESEED_SUBMITTED_${suffix}`;
+    const responseMarker = `KRESEED_RESPONSE_${suffix}`;
     const readyMarker = `KRESEED_READY_${suffix}`;
     const settledMarker = `KRESEED_SETTLED_${suffix}`;
     const deltaMarker = `KRESEED_DELTA_${suffix}`;
@@ -271,9 +468,14 @@ describe("terminal re-attach re-seed", () => {
     // restored around it, so it changes one row and leaves the rest of the
     // frame exactly as it was before the handoff.
     const script = [
+      "stty -echo",
       "printf '\\033[2J\\033[H'",
       ...frameRows.map((row) => `printf '${row}\\n'`),
       `printf '${readyMarker}\\n'`,
+      // A controlled PTY fixture receives a real terminal submission. It is
+      // labelled with the provider under test, not an actual provider CLI.
+      "IFS= read -r submitted",
+      `printf '%s\\n${responseMarker}\\n' "$submitted"`,
       `while [ ! -f ${quietPath} ]; do sleep 0.05; done`,
       `printf '\\0337\\033[3;1H\\033[2K${deltaMarker}\\0338'`,
       `printf '\\0337\\033[999;1H${settledMarker}\\0338'`,
@@ -283,8 +485,8 @@ describe("terminal re-attach re-seed", () => {
     await execDb(
       client,
       `INSERT INTO pipeline_item (id, repo_id, prompt, stage, agent_type, agent_provider)
-       VALUES (?, ?, ?, 'in progress', 'pty', 'claude')`,
-      [sessionId, repoId, "Daemon replacement re-seed fixture"],
+       VALUES (?, ?, ?, 'in progress', 'pty', ?)`,
+      [sessionId, repoId, "Daemon replacement re-seed fixture", agentProvider],
     );
     await invokeOrThrow(client, "spawn_session", {
       sessionId,
@@ -294,15 +496,24 @@ describe("terminal re-attach re-seed", () => {
       env: { TERM: "xterm-256color" },
       cols: 80,
       rows: 24,
-      agentProvider: "claude",
+      agentProvider,
     });
     await callVueMethod(client, "loadItems", repoId);
     await selectTask(client, sessionId);
     await client.waitForElement(".main-panel .terminal-container", 20_000);
-    await waitForRenderedText(client, sessionId, readyMarker);
+    await waitForBufferText(client, sessionId, readyMarker);
+
+    await client.executeSync(
+      `window.__KANNA_E2E__.terminalBuffers.input(${JSON.stringify(sessionId)}, ${JSON.stringify(messageMarker + "\r")});`,
+    );
+    await waitForBufferText(client, sessionId, responseMarker);
+    const attached = await retainedBufferLines(client, sessionId);
+    expect(attached.filter((line) => line.includes(messageMarker))).toEqual([messageMarker]);
+    expect(attached.filter((line) => line.includes(responseMarker))).toEqual([responseMarker]);
 
     await queueUnparsedOutput(client, sessionId, 10_000);
     const replacement = await replaceDaemon(client);
+    await verifyWindow(client, "after daemon reconnect");
     expect(replacement.successor).not.toBe(replacement.incumbent);
 
     // Quiesce, then change exactly one row. Every other frame row predates the
@@ -310,19 +521,21 @@ describe("terminal re-attach re-seed", () => {
     // from the re-attach snapshot rather than left holding the deltas that
     // arrived after it.
     await writeFile(quietPath, "");
-    await waitForRenderedText(client, sessionId, deltaMarker, 60_000);
-    await waitForRenderedText(client, sessionId, settledMarker, 60_000);
+    await waitForBufferText(client, sessionId, deltaMarker, 60_000);
+    await waitForBufferText(client, sessionId, settledMarker, 60_000);
     const snapshot = await waitForDaemonSnapshotText(client, sessionId, deltaMarker);
     // The daemon's frame and the viewer's buffer settle through different
     // paths; give the last deltas a beat to be parsed before comparing them.
     await sleep(1_000);
 
-    const rendered = await renderedFrameLines(client, sessionId);
+    const rendered = await retainedBufferLines(client, sessionId);
     for (const [index, row] of frameRows.entries()) {
       if (index === 2) continue;
       expect(rendered).toContain(row);
     }
     expect(rendered).toContain(deltaMarker);
+    expect(rendered.filter((line) => line.includes(messageMarker))).toEqual([messageMarker]);
+    expect(rendered.filter((line) => line.includes(responseMarker))).toEqual([responseMarker]);
     expect(rendered).not.toContain(frameRows[2]);
     expect(daemonFrameLines(snapshot.serialized)).toEqual(rendered);
 
@@ -334,7 +547,8 @@ describe("terminal re-attach re-seed", () => {
         `window.__KANNA_E2E__?.terminalBuffers?.refresh(${JSON.stringify(sessionId)});`,
       );
       await sleep(400);
-      await client.screenshot(join(evidenceDir, "terminal-reattach-reseed.png"));
+      await verifyWindow(client, "before capture");
+      await client.screenshot(join(evidenceDir, `terminal-reattach-reseed-${agentProvider}.png`));
     }
   });
 });

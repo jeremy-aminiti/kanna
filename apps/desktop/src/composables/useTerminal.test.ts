@@ -610,7 +610,7 @@ describe("useTerminal", () => {
     wrapper.unmount();
   });
 
-  it("uses the daemon-reported provider for snapshot reset behavior", async () => {
+  it("replaces snapshots even when the daemon-reported provider differs", async () => {
     const client = installKspStreamClient({
       onAttach: (_taskId, handlers) => {
         handlers.onSnapshot?.(80, 24, btoa("restored scrollback"), "claude");
@@ -667,7 +667,7 @@ describe("useTerminal", () => {
     expect(terminal.pendingStringWrites.some((write) => write.data === "restored scrollback")).toBe(true);
   });
 
-  it("preserves Codex scrollback when applying daemon snapshots", async () => {
+  it("replaces Codex scrollback with the full daemon snapshot", async () => {
     let terminalHandlers: {
       onSnapshot?: (
         cols: number,
@@ -724,13 +724,13 @@ describe("useTerminal", () => {
     expect(terminal).toBeDefined();
     terminal.reset.mockClear();
 
-    terminalHandlers?.onSnapshot?.(80, 24, btoa("codex partial redraw"), "codex");
+    terminalHandlers?.onSnapshot?.(80, 24, btoa("codex full retained history"), "codex");
 
-    expect(terminal.reset).not.toHaveBeenCalled();
-    expect(terminal.write).toHaveBeenCalledWith("codex partial redraw");
+    expect(terminal.reset).toHaveBeenCalledOnce();
+    expect(terminal.write).toHaveBeenCalledWith("codex full retained history", expect.any(Function));
   });
 
-  it("falls back to the configured Codex provider when a daemon snapshot omits it", async () => {
+  it("replaces full snapshots when a daemon omits the Codex provider", async () => {
     let terminalHandlers: TerminalStreamHandlers | null = null;
     const attachTerminal = vi.fn((_taskId: string, handlers: TerminalStreamHandlers) => {
       terminalHandlers = handlers;
@@ -778,10 +778,10 @@ describe("useTerminal", () => {
     expect(terminal).toBeDefined();
     terminal.reset.mockClear();
 
-    terminalHandlers?.onSnapshot?.(80, 24, btoa("legacy daemon partial redraw"));
+    terminalHandlers?.onSnapshot?.(80, 24, btoa("legacy daemon full retained history"));
 
-    expect(terminal.reset).not.toHaveBeenCalled();
-    expect(terminal.write).toHaveBeenCalledWith("legacy daemon partial redraw");
+    expect(terminal.reset).toHaveBeenCalledOnce();
+    expect(terminal.write).toHaveBeenCalledWith("legacy daemon full retained history", expect.any(Function));
   });
 
   it("updates xterm theme when the effective code theme changes", async () => {
@@ -991,7 +991,7 @@ describe("useTerminal", () => {
     expect(errorToastMock).not.toHaveBeenCalled();
     expect(spawnFn).toHaveBeenCalledTimes(1);
     expect(client.attachTerminal).toHaveBeenCalledTimes(2);
-    expect(terminal.write).toHaveBeenCalledWith("restored scrollback");
+    expect(terminal.write).toHaveBeenCalledWith("restored scrollback", expect.any(Function));
     expect(
       terminal.write.mock.calls.some(
         ([data]) =>

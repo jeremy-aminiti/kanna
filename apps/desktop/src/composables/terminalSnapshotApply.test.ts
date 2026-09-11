@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest"
+import { afterEach, describe, it, expect, vi } from "vitest"
 import { Terminal } from "@xterm/xterm"
 import { applyTerminalSnapshot, TERMINAL_FULL_RESET } from "./terminalSnapshotApply"
 
@@ -28,8 +28,12 @@ function renderedRows(term: Terminal): string[] {
   return rows
 }
 
+const terminals: Terminal[] = []
+afterEach(() => terminals.splice(0).forEach((term) => term.dispose()))
 function newTerminal(cols = 40, rows = 10): Terminal {
-  return new Terminal({ cols, rows, allowProposedApi: true, scrollback: 100 })
+  const term = new Terminal({ cols, rows, allowProposedApi: true, scrollback: 100 })
+  terminals.push(term)
+  return term
 }
 
 async function daemonFrame(): Promise<string[]> {
@@ -41,6 +45,66 @@ async function daemonFrame(): Promise<string[]> {
 }
 
 describe("applyTerminalSnapshot", () => {
+  it.each(["", new Uint8Array()])("keeps the buffer and geometry for an empty snapshot (%s)", async (data) => {
+    const viewer = newTerminal()
+    viewer.write("kept history\r\n")
+    const applyGeometry = vi.fn()
+    const onParsed = vi.fn()
+    applyTerminalSnapshot({ terminal: viewer, cols: 20, rows: 5, data, replaceBuffer: true, applyGeometry, onParsed })
+    await drain(viewer)
+    expect(renderedRows(viewer)[0]).toBe("kept history")
+    expect(viewer.cols).toBe(40)
+    expect(viewer.rows).toBe(10)
+    expect(applyGeometry).not.toHaveBeenCalled()
+    expect(onParsed).toHaveBeenCalledOnce()
+  })
+
+  it.each([0, 4, 50])("restores parsed distance from bottom, clamped to retained history (distance=%s)", async (distance) => {
+    const viewer = newTerminal()
+    viewer.write(Array.from({ length: 80 }, (_, n) => `old ${n}`).join("\r\n"))
+    await drain(viewer)
+    viewer.scrollToLine(viewer.buffer.active.baseY - distance)
+    const data = Array.from({ length: 30 }, (_, n) => `retained ${n}`).join("\r\n")
+    let parsedViewport = -1
+    applyTerminalSnapshot({
+      terminal: viewer, cols: 40, rows: 10, data, replaceBuffer: true,
+      onParsed: () => { parsedViewport = viewer.buffer.active.viewportY },
+    })
+    await drain(viewer)
+    expect(parsedViewport).toBe(Math.max(0, viewer.buffer.active.baseY - distance))
+    expect(viewer.buffer.active.getLine(0)?.translateToString(true)).toBe("retained 0")
+    expect(viewer.buffer.active.length).toBe(30)
+  })
+
+  it("captures the reading distance behind queued output and restores before later output", async () => {
+    const viewer = newTerminal()
+    const data = Array.from({ length: 30 }, (_, n) => `retained ${n}`).join("\r\n")
+    viewer.write(data)
+    await drain(viewer)
+    viewer.scrollToLine(5) // base 20, distance 15
+    viewer.write("\r\nqueued before snapshot") // base 21, distance 16 once parsed
+    applyTerminalSnapshot({ terminal: viewer, cols: 40, rows: 10, data, replaceBuffer: true })
+    viewer.write("\r\nafter snapshot")
+    await drain(viewer)
+    expect(viewer.buffer.active.viewportY).toBe(4)
+    expect(viewer.buffer.active.getLine(30)?.translateToString(true)).toBe("after snapshot")
+    expect(viewer.buffer.active.length).toBe(31)
+  })
+
+  it("restores each queued snapshot in order without duplicating history", async () => {
+    const viewer = newTerminal()
+    const data = Array.from({ length: 30 }, (_, n) => `retained ${n}`).join("\r\n")
+    viewer.write(data)
+    await drain(viewer)
+    viewer.scrollToLine(5)
+    for (let n = 0; n < 2; n++) {
+      applyTerminalSnapshot({ terminal: viewer, cols: 40, rows: 10, data, replaceBuffer: true })
+    }
+    await drain(viewer)
+    expect(viewer.buffer.active.viewportY).toBe(5)
+    expect(viewer.buffer.active.length).toBe(30)
+  })
+
   // The owner viewer's cell: an attached local terminal whose server stream
   // re-attached to a replacement daemon.
   it("re-seeds an owner viewer that still has unparsed output queued", async () => {

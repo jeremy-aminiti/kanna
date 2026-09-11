@@ -18,6 +18,7 @@ import { isShiftEnter, SHIFT_ENTER_CSI_U } from "./terminalKeyboard"
 import { createTerminalInputProducerClassifier } from "./terminalInputProducer"
 import { recordTerminalRendererOutcome, requestedTerminalRenderer } from "./terminalRenderer"
 import { resolveShortcutPlatform, terminalClipboardAction } from "./shortcutPlatform"
+import { TerminalScrollbackCompatibilityAddon } from "./terminalScrollbackCompatibility"
 
 const terminalPlatform = resolveShortcutPlatform()
 
@@ -64,6 +65,8 @@ export function initializeTerminalView(params: {
     cursorBlink: false,
     ...(shouldSupportKittyKeyboard(params.options) ? { vtExtensions: { kittyKeyboard: true } } : {}),
   })
+  // Instance-owned: xterm disposes the parser registration with its addons.
+  term.loadAddon(new TerminalScrollbackCompatibilityAddon())
   term.loadAddon(params.fitAddon)
   term.loadAddon(new WebLinksAddon(params.handleLinkActivate))
   // Production keeps WebGL; E2E defaults to the DOM renderer so screenshots

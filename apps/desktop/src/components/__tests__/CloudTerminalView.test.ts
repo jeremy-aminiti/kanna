@@ -31,6 +31,8 @@ const testState = vi.hoisted(() => {
     });
     open = vi.fn();
     refresh = vi.fn();
+    buffer = { active: { baseY: 0, viewportY: 0 } };
+    scrollToLine = vi.fn();
     reset = vi.fn();
     resize = vi.fn((cols: number, rows: number) => {
       this.cols = cols;
