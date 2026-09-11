@@ -490,6 +490,12 @@ async function revealDesktopViewTarget(
   if (!target) {
     return { opened: false, code: "invalid_target", message: "no file path to open" };
   }
+  // Re-read on every open, including a reopen of a tab that is already
+  // showing this path. An agent opens a file to have a human read what it
+  // says *now*, and the freshness must come from asking here rather than from
+  // a prop identity changing underneath — the loaders are deliberately stable
+  // so that an unrelated parent render cannot throw the view's place away.
+  await loadFile();
   const settled = await waitForViewReady(() => !loading.value);
   if (!settled) {
     return { opened: false, code: "renderer_failed", message: `${props.filePath} is still loading` };

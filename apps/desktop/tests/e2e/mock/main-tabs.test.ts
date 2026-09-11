@@ -536,6 +536,48 @@ describe("main content area tabs", () => {
     expect(await openView({ taskId, view: "agent" })).toMatchObject({ opened: true });
     await waitForActiveTab(client, "agent");
 
+    // A nested tree target has to survive the reader looking away. Switching
+    // tabs re-renders the panel around the still-mounted explorer, and the
+    // contained reader it is handed must not read as a new place to be.
+    const worktreePath = `${testRepoPath}/.kanna-worktrees/task-${taskId}`;
+    await tauriInvoke(client, "run_script", {
+      script: `mkdir -p "${worktreePath}/nested/deep"`
+        + ` && printf 'leaf\n' > "${worktreePath}/nested/deep/leaf-marker.txt"`,
+      cwd: testRepoPath,
+      env: {},
+    });
+    expect(await openView({
+      taskId,
+      view: "tree",
+      target: { path: "nested/deep" },
+    })).toMatchObject({ opened: true });
+    await waitForActiveTab(client, "tree");
+    await client.waitForText(".tree-modal", "leaf-marker.txt", 8_000);
+
+    // An ordinary tab switch away and back — no reopen, no reveal.
+    await client.executeSync(
+      `document.querySelector('[data-testid="main-tab-agent"]').click();`,
+    );
+    await waitForActiveTab(client, "agent");
+    await client.executeSync(
+      `document.querySelector('[data-testid="main-tab-tree"]').click();`,
+    );
+    await waitForActiveTab(client, "tree");
+    await sleep(500);
+
+    const treeAfterSwitch = await client.executeSync<string>(
+      `const tree = document.querySelector('.tree-modal');
+       return tree ? tree.textContent : "";`,
+    );
+    // Still inside the directory the agent named, not back at the root.
+    expect(treeAfterSwitch).toContain("leaf-marker.txt");
+    expect(treeAfterSwitch).toContain("deep");
+    await tauriInvoke(client, "run_script", {
+      script: `rm -rf "${worktreePath}/nested"`,
+      cwd: testRepoPath,
+      env: {},
+    });
+
     // A path outside the task's workspace is refused at the route, so a
     // mistyped path is an error the agent can act on rather than a silent
     // no-op — and nothing reaches a window.

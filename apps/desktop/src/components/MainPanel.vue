@@ -34,6 +34,7 @@ import AnalyticsModal from "./AnalyticsModal.vue";
 import ImageUrlPreviewModal from "./ImageUrlPreviewModal.vue";
 import PreferencesPanel from "./PreferencesPanel.vue";
 import { AGENT_TAB_ID, type MainTab } from "../composables/useMainTabs";
+import type { RemoteDirectoryEntry } from "../composables/useTreeExplorer";
 import {
   waitForViewReady,
   type DesktopViewOpenCommand,
@@ -146,6 +147,43 @@ const diffViewProps = computed(() => {
   };
 });
 
+/**
+ * The contained readers a view an agent opened uses, one stable function per
+ * task.
+ *
+ * These are read from the template, so a fresh closure here would be a new
+ * function identity on every parent render — and the views downstream treat a
+ * new loader as a new place to be looking at. The explorer resets breadcrumb,
+ * cursor, filter and visibility on it, and the file preview reloads: switching
+ * to the agent tab and back would silently throw away the very location an
+ * agent asked a human to read. Keying the cache by task keeps a genuine task
+ * change resetting the view, which is what that reset is for.
+ */
+const containedFileLoaders = new Map<string, (path: string) => Promise<string>>();
+const containedDirectoryLoaders = new Map<
+  string,
+  (path: string, showAllFiles: boolean) => Promise<{ entries: RemoteDirectoryEntry[] }>
+>();
+
+function containedFileLoader(taskId: string | undefined) {
+  if (!taskId) return undefined;
+  const existing = containedFileLoaders.get(taskId);
+  if (existing) return existing;
+  const loader = (path: string) => readDesktopTaskFile(taskId, path);
+  containedFileLoaders.set(taskId, loader);
+  return loader;
+}
+
+function containedDirectoryLoader(taskId: string | undefined) {
+  if (!taskId) return undefined;
+  const existing = containedDirectoryLoaders.get(taskId);
+  if (existing) return existing;
+  const loader = (path: string, showAllFiles: boolean) =>
+    listDesktopTaskDirectory(taskId, path, showAllFiles);
+  containedDirectoryLoaders.set(taskId, loader);
+  return loader;
+}
+
 function fileViewProps(tab: MainTab) {
   const modals = props.views?.modals;
   return {
@@ -158,9 +196,7 @@ function fileViewProps(tab: MainTab) {
     // A tab an agent opened reads through the server's contained resolution,
     // so a symlink swapped in after validation cannot put outside content on
     // screen under this task's name.
-    contentLoader: tab.containedTaskId
-      ? (path: string) => readDesktopTaskFile(tab.containedTaskId as string, path)
-      : undefined,
+    contentLoader: containedFileLoader(tab.containedTaskId),
     ideCommand: props.views?.store.ideCommand,
     initialLine: tab.initialLine,
     initialMarkdownMode: modals?.currentPreviewMarkdownMode.value,
@@ -192,12 +228,8 @@ function treeViewProps(tab: MainTab) {
     homePath: modals?.homePath.value,
     // Same containment reason as the file view: the explorer asks the server
     // rather than walking the worktree path itself.
-    remoteDirectoryLoader: containedTaskId
-      ? (path: string, showAllFiles: boolean) =>
-        listDesktopTaskDirectory(containedTaskId, path, showAllFiles)
-      : modals?.activeTaskViewIsRemote.value
-        ? modals.listRemoteTaskDirectory
-        : undefined,
+    remoteDirectoryLoader: containedDirectoryLoader(containedTaskId)
+      ?? (modals?.activeTaskViewIsRemote.value ? modals.listRemoteTaskDirectory : undefined),
     remoteDesktopId: route?.desktopId,
     remoteTaskId: route?.taskId,
     remoteTransport: route?.transport,
