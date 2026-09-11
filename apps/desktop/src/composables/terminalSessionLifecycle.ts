@@ -152,12 +152,20 @@ export function createTerminalSessionLifecycle(params: {
   })
   let outputPerf: TerminalOutputPerfHandle | null = null
   let attachFailureSignal = 0
-  const traceStream = (kind: "snapshot" | "output", data: string, cols?: number, rows?: number) => {
+  const traceStream = (
+    kind: "snapshot" | "output",
+    data: string,
+    cols?: number,
+    rows?: number,
+    phase: "received" | "parsed" = "received",
+  ) => {
     if (!import.meta.env.DEV || !window.__KANNA_E2E__) return
     window.__KANNA_E2E__.terminalStreamTrace ??= []
     window.__KANNA_E2E__.terminalStreamTrace.push({
       sessionId: params.sessionId,
       kind,
+      phase,
+      at: performance.now(),
       cols,
       rows,
       activeViewLines: data.split(/\r?\n/).filter((line) => line.includes("ACTIVE_VIEW")),
@@ -292,6 +300,7 @@ export function createTerminalSessionLifecycle(params: {
                 resize()
                 params.state.applyingSnapshot = false
               },
+              onParsed: () => traceStream("snapshot", vt, cols, rows, "parsed"),
             })
           },
           onOutput: (dataB64, metadata) => {
@@ -306,11 +315,10 @@ export function createTerminalSessionLifecycle(params: {
             perf?.recordDecode(performance.now() - decodeStartedAt, bytes.length)
             params.clipboardBridge.handleTerminalOutputControlSequences(bytes)
             const completeWrite = perf?.beginXtermWrite(bytes.length)
-            if (completeWrite) {
-              liveTerminal.write(bytes, completeWrite)
-            } else {
-              liveTerminal.write(bytes)
-            }
+            liveTerminal.write(bytes, () => {
+              completeWrite?.()
+              traceStream("output", new TextDecoder().decode(bytes), undefined, undefined, "parsed")
+            })
           },
           onStatus: (status) => {
             void forwardTerminalRuntimeStatus(params.sessionId, status).catch((error) => {

@@ -82,6 +82,8 @@ interface KannaNativeFocusTraceEntry {
 interface KannaTerminalStreamTraceEntry {
   sessionId: string;
   kind: "snapshot" | "output";
+  phase: "received" | "parsed";
+  at: number;
   cols?: number;
   rows?: number;
   activeViewLines: string[];
