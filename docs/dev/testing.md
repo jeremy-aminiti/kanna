@@ -2,7 +2,15 @@
 
 ## Canonical verification
 
-Every change should pass this before it is considered done:
+Choose verification from the changed behavior and its risks. Small terminology,
+documentation, presentation, and bounded API-output changes use the relevant
+focused contracts; they do not automatically require a full repository run.
+Reuse recorded results for unchanged code or verified patch-equivalent rebases.
+Keep integration coverage for changed process, persistence, and protocol
+boundaries. See `.kanna/agents/review/EXTEND.md` for the review policy.
+
+Use the full command for broad changes, impact that cannot be bounded by focused
+checks, and explicit release requirements:
 
 ```sh
 ./kd test all    # runs every lane below in order, failing fast
