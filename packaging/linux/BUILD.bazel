@@ -1,9 +1,11 @@
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
+    "pkg_config.rs",
     "resolve_sysroot.py",
     "runtime-policy.json",
     "runtime-policy.schema.json",
@@ -12,6 +14,20 @@ exports_files([
     "sysroot_overlay.c",
     "sysroot_repository.bzl",
 ])
+
+rust_binary(
+    name = "pkg_config",
+    srcs = ["pkg_config.rs"],
+    crate_root = "pkg_config.rs",
+    edition = "2021",
+)
+
+rust_test(
+    name = "pkg_config_test",
+    srcs = ["pkg_config.rs"],
+    crate_root = "pkg_config.rs",
+    edition = "2021",
+)
 
 py_test(
     name = "resolve_sysroot_test",

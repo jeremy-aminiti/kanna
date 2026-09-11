@@ -38,7 +38,7 @@ diff --git a/src/lib.rs b/src/lib.rs
  }
  
  pub fn version() -> &'static str {
-@@ -516,6 +544,25 @@
+@@ -516,6 +544,31 @@
              let mut skip_next = false;
              let mut is_isysroot = false;
              for arg in compiler.args() {
@@ -47,13 +47,19 @@ diff --git a/src/lib.rs b/src/lib.rs
 +                // Bazel's Apple toolchain injects wrapper/debug flags that OpenSSL's
 +                // Configure parser does not understand, or that duplicate the target
 +                // already selected via the platform name above.
++                // OpenSSL's Configure rejects Bazel's reproducibility flag as an
++                // unknown option on every platform. The compiler wrapper still
++                // receives it on ordinary C/C++ actions.
++                if arg_str == "-no-canonical-prefixes" {
++                    continue;
++                }
++
 +                if target.contains("apple") && !target.contains("apple-ios") {
 +                    if arg == "-isysroot" || arg == "-target" {
 +                        skip_next = true;
 +                        continue;
 +                    }
-+                    if arg_str == "-no-canonical-prefixes" ||
-+                        arg_str.starts_with("--target=") ||
++                    if arg_str.starts_with("--target=") ||
 +                        arg_str.starts_with("-fdebug-prefix-map=") ||
 +                        arg_str.starts_with("-F__BAZEL_") ||
 +                        arg_str.contains("__BAZEL_") {

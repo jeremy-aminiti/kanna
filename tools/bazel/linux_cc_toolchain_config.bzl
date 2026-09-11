@@ -36,20 +36,32 @@ def _zig_cc_wrapper_impl(ctx):
     marker = _exec_path(ctx.file.sysroot_marker)
     sysroot = marker[:-len("/.kanna-sysroot")]
     if ctx.attr.mode == "cc":
-        command = """exec "$zig" cc -target {target} --sysroot "$sysroot" \\
-  -isystem "$sysroot/usr/include" \\
-  -isystem "$sysroot/usr/include/{multiarch}" \\
-  -isystem "$sysroot/usr/include/gtk-3.0" \\
-  -isystem "$sysroot/usr/include/glib-2.0" \\
-  -isystem "$sysroot/usr/lib/{multiarch}/glib-2.0/include" \\
-  -isystem "$sysroot/usr/include/pango-1.0" \\
-  -isystem "$sysroot/usr/include/harfbuzz" \\
-  -isystem "$sysroot/usr/include/cairo" \\
-  -isystem "$sysroot/usr/include/gdk-pixbuf-2.0" \\
-  -isystem "$sysroot/usr/include/atk-1.0" \\
-  -isystem "$sysroot/usr/include/webkitgtk-4.1" \\
-  -isystem "$sysroot/usr/include/libsoup-3.0" \\
-  -L"$sysroot/usr/lib/{multiarch}" \"$@\"""".format(
+        command = """filter_args() {{
+  arg="$1"
+  shift
+  if [ "$arg" = __KANNA_ARGS_END__ ]; then
+    exec "$zig" cc -target {target} --sysroot "$sysroot" \\
+      -isystem "$sysroot/usr/include" \\
+      -isystem "$sysroot/usr/include/{multiarch}" \\
+      -isystem "$sysroot/usr/include/gtk-3.0" \\
+      -isystem "$sysroot/usr/include/glib-2.0" \\
+      -isystem "$sysroot/usr/lib/{multiarch}/glib-2.0/include" \\
+      -isystem "$sysroot/usr/include/pango-1.0" \\
+      -isystem "$sysroot/usr/include/harfbuzz" \\
+      -isystem "$sysroot/usr/include/cairo" \\
+      -isystem "$sysroot/usr/include/gdk-pixbuf-2.0" \\
+      -isystem "$sysroot/usr/include/atk-1.0" \\
+      -isystem "$sysroot/usr/include/webkitgtk-4.1" \\
+      -isystem "$sysroot/usr/include/libsoup-3.0" \\
+      -L"$sysroot/usr/lib/{multiarch}" "$@"
+  fi
+  case "$arg" in
+    -target|--sysroot) shift; filter_args "$@" ;;
+    --target=*|--sysroot=*) filter_args "$@" ;;
+    *) filter_args "$@" "$arg" ;;
+  esac
+}}
+filter_args "$@" __KANNA_ARGS_END__""".format(
             target = ctx.attr.target,
             multiarch = ctx.attr.multiarch,
         )
@@ -64,7 +76,7 @@ def _zig_cc_wrapper_impl(ctx):
     wrapper = ctx.actions.declare_file(ctx.label.name)
     ctx.actions.write(
         wrapper,
-        "#!/bin/sh\nset -eu\nzig=\"{}\"\nsysroot=\"{}\"\ncache=\"${{TMPDIR:-$PWD/.zig-cache}}\"\nmkdir -p \"$cache/global\" \"$cache/local\"\nexport ZIG_GLOBAL_CACHE_DIR=\"$cache/global\"\nexport ZIG_LOCAL_CACHE_DIR=\"$cache/local\"\nexport ZIG_LIB_DIR=\"$(dirname \"$zig\")/lib\"\n{}\n".format(
+        "#!/bin/sh\nset -eu\nzig={}\nsysroot={}\nif [ ! -x \"$zig\" ] || [ ! -f \"$sysroot/.kanna-sysroot\" ]; then\n  case \"$0\" in /*) self=\"$0\" ;; *) self=\"$PWD/$0\" ;; esac\n  self_dir=\"${{self%/*}}\"\n  execroot=\"$(cd \"$self_dir/../../..\" && pwd)\"\n  zig=\"$execroot/$zig\"\n  sysroot=\"$execroot/$sysroot\"\nfi\ncache=\"${{TMPDIR:-$PWD/.zig-cache}}\"\nexport ZIG_GLOBAL_CACHE_DIR=\"$cache/global\"\nexport ZIG_LOCAL_CACHE_DIR=\"$cache/local\"\nexport ZIG_LIB_DIR=\"${{zig%/*}}/lib\"\n{}\n".format(
             zig,
             sysroot,
             command,
