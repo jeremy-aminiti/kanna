@@ -104,6 +104,20 @@ async function ownerDimensions(taskId: string): Promise<Dimensions> {
   return { cols: state.cols, rows: state.rows };
 }
 
+async function ownerRecoveryDiagnostics(taskId: string): Promise<Record<string, unknown>> {
+  const state = await tauriInvoke(primary, "get_session_recovery_state", {
+    sessionId: taskId,
+  }) as { cols?: unknown; rows?: unknown; serialized?: unknown; sequence?: unknown } | null;
+  const serialized = typeof state?.serialized === "string" ? state.serialized : "";
+  return {
+    cols: state?.cols,
+    rows: state?.rows,
+    sequence: state?.sequence,
+    activeViewLines: serialized.split(/\r?\n/).filter((line) => line.includes("ACTIVE_VIEW")),
+    serializedTail: serialized.slice(-2_000),
+  };
+}
+
 async function renderedDimensions(
   client: WebDriverClient,
   taskId: string,
@@ -311,6 +325,7 @@ async function captureHandbackDiagnostics(
   await writeFile(join(directory, `${phase}-control-trace.json`), `${JSON.stringify({
     taskId,
     focus,
+    daemonRecovery: await ownerRecoveryDiagnostics(taskId),
     primaryOutboundControl: await terminalControlTrace(primary, taskId),
     primaryActiveViewTrace: await primary.executeSync(`
       return (window.__KANNA_E2E__?.activeViewTrace ?? [])
@@ -374,7 +389,8 @@ async function selectRemoteTask(itemId: string, taskId: string): Promise<void> {
 async function createOwnerTask(): Promise<string> {
   const script = [
     "select(STDOUT); $| = 1;",
-    "sub draw { my $size = `stty size`; $size =~ s/\\s+$//; my ($rows, $cols) = split(/\\s+/, $size); print qq{ACTIVE_VIEW:${cols}x${rows}\\n}; }",
+    "use POSIX qw(tcgetpgrp);",
+    "sub draw { my $size = `stty size`; $size =~ s/\\s+$//; my ($rows, $cols) = split(/\\s+/, $size); my $pgid = POSIX::getpgrp(); my $tpgid = tcgetpgrp(fileno(STDIN)); print qq{ACTIVE_VIEW:${cols}x${rows}\\n}; print qq{ACTIVE_VIEW_PTY:pid=$$ pgid=$pgid tpgid=$tpgid cols=${cols} rows=${rows}\\n}; }",
     "$SIG{WINCH} = sub { draw(); };",
     "draw(); while (1) { sleep 1; }",
   ].join(" ");
