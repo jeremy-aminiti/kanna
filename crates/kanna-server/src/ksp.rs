@@ -6266,6 +6266,97 @@ mod tests {
         (task, command_rx)
     }
 
+    async fn spawn_fake_geometry_v1_control_daemon(
+        daemon_dir: String,
+    ) -> (
+        tokio::task::JoinHandle<usize>,
+        oneshot::Receiver<DaemonCommand>,
+        oneshot::Sender<()>,
+        oneshot::Receiver<()>,
+        mpsc::Receiver<DaemonCommand>,
+    ) {
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind geometry-v1 daemon socket");
+        let (probe_tx, probe_rx) = oneshot::channel();
+        let (release_probe_tx, release_probe_rx) = oneshot::channel();
+        let (legacy_connection_tx, legacy_connection_rx) = oneshot::channel();
+        let (command_tx, command_rx) = mpsc::channel(4);
+
+        let task = tokio::spawn(async move {
+            let (probe_stream, _) = listener.accept().await.expect("accept geometry probe");
+            let (probe_read_half, mut probe_write_half) = probe_stream.into_split();
+            let mut probe_reader = BufReader::new(probe_read_half);
+            let mut line = String::new();
+            probe_reader
+                .read_line(&mut line)
+                .await
+                .expect("read geometry probe");
+            let probe: DaemonCommand =
+                serde_json::from_str(line.trim()).expect("parse geometry probe");
+            probe_tx.send(probe).expect("publish geometry probe");
+            release_probe_rx.await.expect("release geometry probe");
+            probe_write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::TerminalGeometryReady { version: 1 })
+                            .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("advertise geometry protocol v1");
+
+            let (legacy_stream, _) = listener
+                .accept()
+                .await
+                .expect("accept legacy control connection");
+            legacy_connection_tx
+                .send(())
+                .expect("publish legacy control connection");
+            let (legacy_read_half, _legacy_write_half) = legacy_stream.into_split();
+            let mut legacy_reader = BufReader::new(legacy_read_half);
+            let mut received_inputs = 0;
+            while received_inputs < 2 {
+                line.clear();
+                legacy_reader
+                    .read_line(&mut line)
+                    .await
+                    .expect("read legacy terminal command");
+                if line.is_empty() {
+                    break;
+                }
+                let command: DaemonCommand =
+                    serde_json::from_str(line.trim()).expect("parse legacy terminal command");
+                let unsupported_active = matches!(&command, DaemonCommand::ActiveViewer { .. });
+                if matches!(&command, DaemonCommand::InputNoReply { .. }) {
+                    received_inputs += 1;
+                }
+                command_tx
+                    .send(command)
+                    .await
+                    .expect("publish legacy terminal command");
+                if unsupported_active {
+                    // Geometry-v1 understood RegisterViewer, but ActiveViewer
+                    // was not in its command enum. Model that old parser by
+                    // ending the control socket as soon as the unsupported
+                    // frame is observed.
+                    break;
+                }
+            }
+            2
+        });
+
+        (
+            task,
+            probe_rx,
+            release_probe_tx,
+            legacy_connection_rx,
+            command_rx,
+        )
+    }
+
     async fn spawn_fake_control_daemon_with_disconnect(
         daemon_dir: String,
         command_count: usize,
@@ -6585,6 +6676,17 @@ mod tests {
                 KspCapability::CompanionEventEpoch,
                 KspCapability::TermInputBoundary,
                 KspCapability::TerminalGeometry,
+            ],
+        }
+    }
+
+    fn active_view_client_auth_frame() -> ClientFrame {
+        ClientFrame::Auth {
+            credential: None,
+            capabilities: vec![
+                KspCapability::TermInputBoundary,
+                KspCapability::TerminalGeometry,
+                KspCapability::TerminalActiveView,
             ],
         }
     }
@@ -10235,6 +10337,138 @@ mod tests {
             kind: TerminalInputKind::Draft,
         }
         .is_viewer_command());
+    }
+
+    #[tokio::test]
+    async fn new_server_keeps_geometry_v1_daemon_control_usable() {
+        let unique = format!(
+            "ksp-old-geometry-control-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config(&unique, "KSP Old Geometry Control");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let (daemon, probe_rx, release_probe_tx, legacy_connection_rx, mut commands) =
+            spawn_fake_geometry_v1_control_daemon(config.daemon_dir.clone()).await;
+        let state = Arc::new(AppState::new(config));
+        state.set_terminal_geometry_capability(std::process::id(), true);
+        let url = serve_router(crate::http_api::router(state)).await;
+        let mut socket = ws_connect(&url).await;
+
+        send_frame(&mut socket, &active_view_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+
+        // Active is the first pending command, covering the path that runs
+        // immediately after the worker's daemon negotiation.
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermViewerActive {
+                task_id: "shell-old-geometry-control".into(),
+            },
+        )
+        .await;
+        assert_command(
+            tokio::time::timeout(LIVENESS_WAIT, probe_rx)
+                .await
+                .expect("terminal control worker did not negotiate")
+                .ok(),
+            DaemonCommand::NegotiateTerminalGeometry {
+                version: kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+            },
+        );
+
+        // These viewer commands are queued while the fake old daemon holds
+        // its version-1 answer. Neither may leak after the worker reconnects.
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermViewerRegister {
+                task_id: "shell-old-geometry-control".into(),
+                viewer_id: "remote-viewer".into(),
+                role: TerminalViewerRole::Remote,
+                generation: 1,
+                cols: 50,
+                rows: 36,
+                visible: true,
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermViewerActive {
+                task_id: "shell-old-geometry-control".into(),
+            },
+        )
+        .await;
+        release_probe_tx
+            .send(())
+            .expect("release geometry-v1 reply");
+        tokio::time::timeout(LIVENESS_WAIT, legacy_connection_rx)
+            .await
+            .expect("worker did not reconnect after geometry-v1 reply")
+            .expect("geometry-v1 daemon did not publish legacy connection");
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-old-geometry-control".into(),
+                data_b64: b64(b"first local input"),
+            },
+        )
+        .await;
+        assert_command(
+            tokio::time::timeout(LIVENESS_WAIT, commands.recv())
+                .await
+                .expect("queued viewer control disrupted the legacy socket"),
+            DaemonCommand::InputNoReply {
+                session_id: "shell-old-geometry-control".into(),
+                data: b"first local input".to_vec(),
+            },
+        );
+
+        // Active is sent again only after the legacy socket has delivered
+        // input, exercising the live-command filter independently of the
+        // pending and queued copies of that unsupported old-daemon command.
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermViewerActive {
+                task_id: "shell-old-geometry-control".into(),
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-old-geometry-control".into(),
+                data_b64: b64(b"second local input"),
+            },
+        )
+        .await;
+        assert_command(
+            tokio::time::timeout(LIVENESS_WAIT, commands.recv())
+                .await
+                .expect("live viewer control disrupted the legacy socket"),
+            DaemonCommand::InputNoReply {
+                session_id: "shell-old-geometry-control".into(),
+                data: b"second local input".to_vec(),
+            },
+        );
+        assert_eq!(
+            daemon.await.expect("geometry-v1 daemon failed"),
+            2,
+            "ordinary input must stay on one post-negotiation control socket"
+        );
+
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
     }
 
     #[tokio::test]
