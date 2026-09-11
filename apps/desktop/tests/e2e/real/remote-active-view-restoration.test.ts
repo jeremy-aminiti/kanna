@@ -142,7 +142,9 @@ async function renderedDimensions(
     const screen = host?.querySelector?.(".xterm-screen");
     const rect = screen?.getBoundingClientRect() ?? host?.getBoundingClientRect();
     const rows = screen?.querySelector?.(".xterm-rows");
-    const marker = /^ACTIVE_VIEW:\d+x\d+$/;
+    // This script itself is inside a TypeScript template literal: preserve
+    // the regex escapes for the JavaScript evaluated by WebDriver.
+    const marker = /^ACTIVE_VIEW:\\d+x\\d+$/;
     const renderedActiveViewLines = Array.from(rows?.children ?? [])
       .map((row) => row.textContent?.trim() ?? "")
       .filter((line) => line.includes("ACTIVE_VIEW"));
