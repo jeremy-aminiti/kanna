@@ -716,6 +716,37 @@ mod tests {
             auto_termination.reader_joined.is_ok()
         );
         eprintln!("DIAG_MATCHED_MDNS_SEND_TRACE {trace_lines:?}");
+
+        // A decisive follow-up question, using the exact same daemon-level
+        // interface restriction and send-trace seam: does this module's own
+        // *browse* side (`start_discovery`'s underlying `daemon.browse()`)
+        // hit the identical `EHOSTUNREACH` when it sends its own PTR query,
+        // on the same interface the publish side just failed on? If it
+        // does, a native-advertisement correction on the publish side alone
+        // could never fix real discovery on this host, since a genuine
+        // sibling desktop's own mdns-sd browse query - unauthorized to
+        // change (`no native browser`) - would still never reach the wire
+        // either, independent of what the advertiser does. Both `send_query_on_intf`
+        // and `announce_service_on_intf` funnel through the same
+        // `send_dns_outgoing_impl` -> `multicast_on_intf` seam (confirmed by
+        // direct reading of `service_daemon.rs`), so this is exactly the
+        // browse-side counterpart of the publish-side check above, not a
+        // new, unrelated diagnostic axis.
+        start_mdns_trace_capture();
+        let browse_daemon = ServiceDaemon::new().expect("start mDNS daemon for browse-side check");
+        browse_daemon
+            .disable_interface(IfKind::All)
+            .expect("disable all interfaces for browse-side check");
+        browse_daemon
+            .enable_interface(IfKind::Name(if_name.clone()))
+            .expect("enable only the target interface for browse-side check");
+        let _receiver = browse_daemon
+            .browse(LAN_ROUTING_SERVICE_TYPE)
+            .expect("browse restricted to the target interface");
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let _ = browse_daemon.shutdown();
+        let browse_trace_lines = finish_mdns_trace_capture();
+        eprintln!("DIAG_MATCHED_BROWSE_SEND_TRACE {browse_trace_lines:?}");
     }
 
     #[test]

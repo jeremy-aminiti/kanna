@@ -1175,6 +1175,112 @@ mod tests {
         );
     }
 
+    /// Completes an actual LAN operation while relay is genuinely
+    /// unreachable - not merely unconfigured. The existing
+    /// `keeps an already-established outbound grant through a relay
+    /// outage` E2E scenario (`lan-desktop-routing.e2e.test.ts`) only reads
+    /// the trust store's own persisted state; it never dials. This test's
+    /// source desktop points `relay_url` at a real closed local port
+    /// (`ws://127.0.0.1:1`, nothing ever listens there) so a relay
+    /// fallback attempt would be a genuine, real connection failure, not an
+    /// absent configuration - then proves the *actual dial* succeeds over
+    /// LAN regardless, with a definite 200 response, exactly the
+    /// assertion grant-persistence alone does not provide.
+    #[tokio::test]
+    async fn a_real_lan_invoke_completes_while_relay_is_genuinely_unreachable() {
+        let target_config = lan_e2e_test_config("desktop-relay-outage-target");
+        let target_identity_path = target_config.lan_tls_identity_path().unwrap();
+        let target_identity = crate::lan_tls_identity::load_or_create(
+            &target_identity_path,
+            &target_config.desktop_id,
+            &target_config.environment,
+        )
+        .expect("create target identity");
+        let target_state = Arc::new(AppState::new(target_config.clone()));
+        target_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+
+        let now_ms = crate::machine_trust::unix_time_ms().unwrap();
+        let target_store_path = target_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            let hash = crate::pairing::hash_device_secret("the-bearer-secret");
+            store.accept_inbound(
+                "desktop-relay-outage-source",
+                &hash,
+                "uid-1",
+                "development",
+                &target_config.desktop_id,
+                now_ms,
+            );
+            store.save(&target_store_path).expect("seed target trust");
+        }
+
+        let listener_addr =
+            super::super::lan_listener::spawn_for_test(Arc::clone(&target_state)).await;
+        let candidate = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            listener_addr.port(),
+        );
+
+        let mut source_config = lan_e2e_test_config("desktop-relay-outage-source");
+        // The one deliberate difference from the ordinary end-to-end test:
+        // a real, actively-refused relay address, not an absent one -
+        // making "relay outage" a genuine reachability failure rather than
+        // "relay was never set up."
+        source_config.relay_url = "ws://127.0.0.1:1".to_string();
+        let source_state = Arc::new(AppState::new(source_config.clone()));
+        source_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+        source_state.set_lan_candidate("desktop-relay-outage-target".to_string(), candidate);
+        let source_store_path = source_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            store
+                .pending_or_create(
+                    "desktop-relay-outage-target",
+                    "uid-1",
+                    "development",
+                    &source_config.desktop_id,
+                    || Ok("the-bearer-secret".to_string()),
+                    now_ms,
+                )
+                .expect("prepare pending");
+            store
+                .confirm_outbound(
+                    "desktop-relay-outage-target",
+                    "the-bearer-secret",
+                    &source_config.desktop_id,
+                    Some(target_identity.ca_certificate_pem.clone()),
+                    now_ms + 1000,
+                )
+                .expect("confirm outbound grant");
+            store.save(&source_store_path).expect("seed source trust");
+        }
+
+        let routed = invoke_desktop(
+            Arc::clone(&source_state),
+            "desktop-relay-outage-target".to_string(),
+            "GET".to_string(),
+            "/v1/status".to_string(),
+            serde_json::Value::Null,
+        )
+        .await
+        .expect(
+            "invoke_desktop must complete via the real LAN dial without ever needing relay, \
+             which is genuinely unreachable in this test",
+        );
+
+        assert_eq!(
+            routed.route,
+            RouteProvenance::Lan,
+            "an actual LAN operation must complete over LAN while relay is unreachable, not fall \
+             back and fail: {:?}",
+            routed.response
+        );
+        assert_eq!(routed.response.status, 200, "{:?}", routed.response);
+        let body = routed.response.body.expect("status response body");
+        assert_eq!(body["desktopId"], "desktop-relay-outage-target");
+    }
+
     /// A transparent byte-level pass-through in front of the *real* target
     /// listener - it never terminates TLS itself, only relays whatever
     /// bytes arrive in each direction while capturing a copy - so a real
