@@ -193,14 +193,25 @@ async function waitForOwnerAndRenderer(
   expected?: Dimensions,
 ): Promise<Dimensions> {
   let latest: unknown = null;
+  const samples: Array<{ elapsedMs: number; readMs: number; daemon: Dimensions; rendered: RenderedTerminal }> = [];
+  const startedAt = Date.now();
   try {
     await expect.poll(async () => {
       try {
-        const [daemon, rendered] = await Promise.all([
-          ownerDimensions(taskId),
-          renderedDimensions(client, taskId, role),
-        ]);
+        // WebDriver commands on one window/session are ordered commands, not
+        // independent reads. Do not race executeAsync (the Tauri recovery
+        // query) with executeSync (the xterm inspection): plugin queues can
+        // otherwise let the assertion repeatedly observe an earlier frame.
+        const readStartedAt = Date.now();
+        const rendered = await renderedDimensions(client, taskId, role);
+        const daemon = await ownerDimensions(taskId);
         latest = { daemon, rendered };
+        samples.push({
+          elapsedMs: Date.now() - startedAt,
+          readMs: Date.now() - readStartedAt,
+          daemon,
+          rendered,
+        });
         const marker = `ACTIVE_VIEW:${daemon.cols}x${daemon.rows}`;
         return daemon.cols === rendered.cols && daemon.rows === rendered.rows
           && daemon.cols === rendered.viewport.cols && daemon.rows === rendered.viewport.rows
@@ -213,7 +224,11 @@ async function waitForOwnerAndRenderer(
     }, { timeout: 30_000, interval: 150 }).toBe(true);
   } catch (error) {
     throw new Error(
-      `owner/rendered terminal did not converge for ${taskId}: ${JSON.stringify(latest)}`,
+      `owner/rendered terminal did not converge for ${taskId}: ${JSON.stringify({
+        latest,
+        sampleCount: samples.length,
+        samples: samples.slice(-8),
+      })}`,
       { cause: error },
     );
   }
