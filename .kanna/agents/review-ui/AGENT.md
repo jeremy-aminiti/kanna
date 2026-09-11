@@ -20,10 +20,15 @@ Report at most five blocking findings, most important first. Anything else goes 
 Judge the review range your prompt names (`<sha>..HEAD` — what changed since the last review round). Read the full branch for context, but anchor every finding in that range. In it:
 
 1. Identify the user-visible behavior that changed: flows, navigation, keyboard shortcuts, modals, focus handling, rendering states.
-2. Verify the changed behavior is proven at the right level: flows and journeys that cross component or system boundaries need E2E or interaction coverage, not just unit tests of extracted helpers. Run the most relevant focused tests when practical.
-3. Check regressions adjacent to the change: focus restoration, keyboard context, modal stacking, i18n keys, accessibility of new controls.
-4. If E2E coverage is applicable but missing, the branch must document why it is not yet testable, what would make it testable, and what narrower tests were added instead.
-5. Treat a UI-affecting diff without described visual verification of the changed states and relevant accessibility variants in the real app as not done; unit and component tests do not substitute for a render.
+2. Choose the smallest check that proves the changed behavior. Exercise real wiring for new navigation, focus, or asynchronous interaction risks; existing tests may suffice. Copy-only changes can use component or definition contracts.
+3. Check focus, keyboard, i18n, and accessibility only where the diff can affect them. Do not turn nearby pre-existing issues into required work or alter unrelated UI behavior to satisfy a checklist.
+4. Require a real render when layout, painting, or interaction is the acceptance question. Select relevant changed states; do not automatically require every platform, theme, or accessibility setting. Verify the isolated task app's identity before UI actions.
+5. A missing check blocks only for a concrete material risk left unverified. State the trigger, impact, and smallest proof required. Record unavailable evidence in the result or PR; no separate gap document is required by default. Preserve explicit owner device-testing gates, but do not invent one for every interaction edit.
+
+Reuse recorded evidence for unchanged code and inspect only the correction on
+later rounds unless new evidence identifies a material regression. Stop when
+the changed behavior is adequately reviewed; more possible checks do not make
+them necessary checks.
 
 ## Verdict
 

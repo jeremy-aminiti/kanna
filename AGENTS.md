@@ -615,28 +615,32 @@ instead of scheduled and failed later on a relay socket. See
 
 ## E2E coverage expectation
 
-Any behavior that crosses component or system boundaries should add or update
-at least one E2E test — UI flows, client↔server interactions, daemon/PTY/git/
-filesystem behavior, persistence and reconnect, and async coordination where
-isolated tests do not prove the real wiring. Unit and integration tests are not
-a substitute when the risk is in the wiring.
+Choose the smallest verification layer that exercises the changed behavior and
+its credible failure modes. Changed process, persistence, protocol, recovery,
+or async ownership behavior needs integration evidence through the affected
+wiring. Existing integration coverage can suffice; add or update it when the
+new behavior is otherwise unverified. A terminology, formatting, or bounded
+component change does not need a new E2E merely because it sits in a larger
+system. Reuse recorded results for unchanged or patch-equivalent code.
 
-If a behavior should have E2E coverage but cannot get it yet, land a dated note
-in `docs/` (`YYYY-MM-DD-<topic>-e2e-gap.md` / `-e2e-note.md`) saying why it is
-not yet testable, what would make it testable, and what narrower tests were
-added meanwhile.
+Use real-app visual verification when layout, painting, focus, or interaction
+is the behavior being changed. Copy-only changes can use component/definition
+checks unless they introduce a concrete rendering concern. Test relevant
+states and accessibility variants, not an automatic platform/theme matrix;
+do not redesign neighboring UI to satisfy that matrix. Start the app through
+`./kd mobile run --simulator` or `./kd dev up`, and verify its exact isolated
+task identity before interacting. Save screenshots under the task's `.tmp/`,
+inspect them, and summarize results and limitations in the task or PR.
 
-Any change that affects rendered UI — mobile screens or components, or desktop
-Vue components or styling — must be visually verified before its PR is opened.
-Run the real app (`./kd mobile run --simulator` with the iOS Simulator for mobile, never
-bare `expo start`; `./kd dev up` for desktop), exercise the changed states and
-relevant accessibility variants such as Reduce Motion for animation work,
-capture and inspect screenshots, and summarize that verification in the PR
-description or task result. Save artifacts under the in-worktree, gitignored
-`docs/task-screenshots/<task>-screenshots/`, never commit the binaries, and
-treat the written PR description or task result as the durable record after the
-worktree is removed. Unit and component tests do not substitute for a render.
-For UI feel or interaction changes (animation, gesture, or dynamic layout), simulator verification is necessary but not sufficient: pause before review for human on-device testing, and iterate owner feedback in the same task so polish lands in as few PRs as possible.
+Require human on-device testing when explicitly requested by the owner or
+when physical-device behavior or subjective feel is a material acceptance
+question the available evidence cannot answer. Do not invent a human gate for
+every interaction edit, or waive an existing explicit owner gate.
+
+If material coverage is unavailable, state what remains unverified, why, and
+what narrower evidence exists in the task result or PR. A separate dated gap
+document is not required by default. Decide whether that concrete residual
+risk blocks; neither a gap note nor more testing by itself makes a change safe.
 
 ## Coding Style
 
