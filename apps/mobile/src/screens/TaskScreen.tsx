@@ -1167,6 +1167,8 @@ export function TaskScreen({
         >
           <Text
             accessible={false}
+            maxFontSizeMultiplier={1.5}
+            numberOfLines={1}
             style={[styles.stageLabel, { color: stageTheme.chipLabel }]}
           >
             {model.stageLabel}
@@ -1209,6 +1211,7 @@ export function TaskScreen({
             <>
               <Text
                 accessible={false}
+                maxFontSizeMultiplier={1.5}
                 numberOfLines={1}
                 style={styles.title}
                 testID={MOBILE_E2E_IDS.taskDetailTitle}
@@ -1218,6 +1221,7 @@ export function TaskScreen({
               {collapsedTaskId ? (
                 <Text
                   accessible={false}
+                  maxFontSizeMultiplier={1.5}
                   style={styles.collapsedTaskId}
                   testID={MOBILE_E2E_IDS.taskDetailTaskId}
                 >

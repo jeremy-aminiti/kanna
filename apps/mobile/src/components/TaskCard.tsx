@@ -181,7 +181,11 @@ export function TaskCard({
               { backgroundColor: stageTheme.chipBackground }
             ]}
           >
-            <Text style={[styles.stageLabel, { color: stageTheme.chipLabel }]}>
+            <Text
+              maxFontSizeMultiplier={1.5}
+              numberOfLines={1}
+              style={[styles.stageLabel, { color: stageTheme.chipLabel }]}
+            >
               {model.stageLabel}
             </Text>
           </View>
