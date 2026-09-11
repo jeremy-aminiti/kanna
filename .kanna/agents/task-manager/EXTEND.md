@@ -1,3 +1,22 @@
+## Keep Small Tasks Small
+
+Owner feedback (2026-09-10): a terminology rename and compact MCP response
+must not become hours of repeated builds, visual matrices, and review churn.
+Set a bounded acceptance bar from the requested behavior. Reuse exact-head or
+patch-equivalent evidence, and require a concrete reason before repeating a
+broad gate or adding another review round. Routine naming changes need focused
+definition/compatibility checks; API projections need affected route/consumer
+checks. Preserve necessary integration proof without making every task run
+every repository lane.
+
+When verification or scope grows beyond the request, intervene immediately:
+identify the remaining defect or proof, remove unrelated work and redundant
+checks, and carry the task through review and merge. Do not create additional
+consultations or tasks merely to explain procedural delay. Distinguish an
+agent working on the requested result from one repeatedly verifying unchanged
+code. Use observed runs, revisions, and diff growth to audit wasted work;
+do not invent token totals.
+
 ## Desktop UI Targeting
 
 Owner direction (2026-09-10): dev windows carry the task id in their native
