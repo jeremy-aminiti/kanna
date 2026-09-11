@@ -272,6 +272,7 @@ interface TerminalViewerRegistration {
   cols: number;
   rows: number;
   visible: boolean;
+  sentVisible?: boolean;
   sentCols?: number;
   sentRows?: number;
   /** One bounded latest-value flush while the socket/daemon catches up. */
@@ -671,12 +672,18 @@ export class StreamClient {
       generation: 1,
       cols,
       rows,
-      visible: true,
+      // Registration alone is deliberately passive. The rendered client
+      // marks a viewer visible immediately before it announces active view.
+      visible: false,
     };
     registration.cols = cols;
     registration.rows = rows;
     this.terminalViewerRegistrations.set(taskId, registration);
-    if (registration.sentCols === cols && registration.sentRows === rows) {
+    if (
+      registration.sentCols === cols &&
+      registration.sentRows === rows &&
+      registration.sentVisible === registration.visible
+    ) {
       return;
     }
 
@@ -701,11 +708,36 @@ export class StreamClient {
       registration.flushTimer = undefined;
       const latest = this.terminalViewerRegistrations.get(taskId);
       if (latest !== registration) return;
-      if (latest.sentCols === latest.cols && latest.sentRows === latest.rows) {
+      if (
+        latest.sentCols === latest.cols &&
+        latest.sentRows === latest.rows &&
+        latest.sentVisible === latest.visible
+      ) {
         return;
       }
       send();
     }, TERMINAL_GEOMETRY_FLUSH_DELAY_MS);
+  }
+
+  /** Declare that this already-measured viewer became the actively viewed task
+   * terminal. Reconnect replay deliberately does not call this. */
+  activateTerminalViewer(taskId: string): void {
+    if (
+      this.options.terminalViewerRole &&
+      // Geometry v1 recognizes registrations but has no active-view command.
+      // Keep an activation queued until AuthOk, then discard it unless the
+      // peer explicitly negotiated the v2 active-view authority.
+      (!this.authed || this.supportsCapability("terminal_active_view"))
+    ) {
+      this.sendFrame({ type: "term_viewer_active", task_id: taskId });
+    }
+  }
+
+  setTerminalViewerVisibility(taskId: string, visible: boolean): void {
+    const registration = this.terminalViewerRegistrations.get(taskId);
+    if (!registration || registration.visible === visible) return;
+    registration.visible = visible;
+    this.sendTerminalViewerRegistration(registration, taskId);
   }
 
   private sendTerminalViewerRegistration(
@@ -725,24 +757,7 @@ export class StreamClient {
     if (sent) {
       registration.sentCols = registration.cols;
       registration.sentRows = registration.rows;
-    }
-  }
-
-  takeTerminalControl(taskId: string): void {
-    if (
-      this.options.terminalViewerRole &&
-      (!this.authed || this.supportsCapability("terminal_geometry"))
-    ) {
-      this.sendFrame({ type: "term_viewer_takeover", task_id: taskId });
-    }
-  }
-
-  releaseTerminalControl(taskId: string): void {
-    if (
-      this.options.terminalViewerRole &&
-      (!this.authed || this.supportsCapability("terminal_geometry"))
-    ) {
-      this.sendFrame({ type: "term_viewer_release", task_id: taskId });
+      registration.sentVisible = registration.visible;
     }
   }
 
@@ -961,7 +976,7 @@ export class StreamClient {
           ? (["agent_history_window"] as const)
           : []),
         ...(this.options.terminalViewerRole
-          ? (["terminal_geometry"] as const)
+          ? (["terminal_geometry", "terminal_active_view"] as const)
           : []),
       ],
     }, socket);
@@ -1060,10 +1075,12 @@ export class StreamClient {
             continue;
           }
           if (
-            !this.supportsCapability("terminal_geometry") &&
-            (frame.type === "term_viewer_register" ||
+            ((frame.type === "term_viewer_active" &&
+              !this.supportsCapability("terminal_active_view")) ||
+              (!this.supportsCapability("terminal_geometry") &&
+              (frame.type === "term_viewer_register" ||
               frame.type === "term_viewer_takeover" ||
-              frame.type === "term_viewer_release")
+              frame.type === "term_viewer_release")))
           ) {
             continue;
           }

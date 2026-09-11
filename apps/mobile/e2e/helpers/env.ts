@@ -45,7 +45,8 @@ function collectReservedKannaPorts(
 }
 
 export function resolveRequiredMobileE2eEnv(
-  env: Record<string, string | undefined>
+  env: Record<string, string | undefined>,
+  options: { requireDesktopServerUrl?: boolean } = {},
 ): MobileE2eEnv {
   const rawAppiumPort = env.KANNA_APPIUM_PORT?.trim();
   if (!rawAppiumPort) {
@@ -66,7 +67,7 @@ export function resolveRequiredMobileE2eEnv(
   }
 
   const desktopServerUrl = env.KANNA_E2E_DESKTOP_SERVER_URL?.trim();
-  if (!desktopServerUrl) {
+  if (!desktopServerUrl && options.requireDesktopServerUrl !== false) {
     throw new Error(
       "KANNA_E2E_DESKTOP_SERVER_URL is required. Start Kanna with ./kd dev up --mobile."
     );
@@ -96,7 +97,10 @@ export function resolveRequiredMobileE2eEnv(
     bundleId,
     cloudEmail: env.KANNA_E2E_CLOUD_EMAIL?.trim() || undefined,
     cloudPassword: env.KANNA_E2E_CLOUD_PASSWORD?.trim() || undefined,
-    desktopServerUrl,
+    // Relay harness modes own their authenticated desktop endpoint after the
+    // harness starts; they must not invent a localhost sentinel just to pass
+    // this shared environment parser.
+    desktopServerUrl: desktopServerUrl || "",
     metroPort,
     target,
     deviceName: env.KANNA_IOS_SIMULATOR_NAME?.trim() || undefined,

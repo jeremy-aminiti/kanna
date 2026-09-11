@@ -2,6 +2,7 @@ import { ref, onUnmounted } from "vue"
 import { Terminal } from "@xterm/xterm"
 import { FitAddon } from "@xterm/addon-fit"
 import { openUrl } from "@tauri-apps/plugin-opener"
+import { getCurrentWindow } from "@tauri-apps/api/window"
 import { isTauri } from "../tauri-mock"
 import { useThemeRuntime } from "../theme/runtime"
 import { getSharedStreamClient } from "./desktopStreamClient"
@@ -101,6 +102,78 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     toast,
     getTerminalStreamClient,
   })
+  let stopNativeWindowFocusTracking: (() => void) | null = null
+  let nativeWindowFocusTrackingGeneration = 0
+
+  function traceNativeFocus(
+    phase: "start" | "ready" | "event" | "awaiting-document" | "activate" | "stale" | "error",
+    details: Partial<Omit<KannaNativeFocusTraceEntry, "sessionId" | "phase">> = {},
+  ) {
+    if (!import.meta.env.DEV || !window.__KANNA_E2E__) return
+    window.__KANNA_E2E__.nativeFocusTrace ??= []
+    window.__KANNA_E2E__.nativeFocusTrace.push({ sessionId, phase, ...details })
+  }
+
+  function startNativeWindowFocusTracking() {
+    if (!isTauri || stopNativeWindowFocusTracking) return
+    const generation = ++nativeWindowFocusTrackingGeneration
+    traceNativeFocus("start")
+    void getCurrentWindow().onFocusChanged((event) => {
+      // A window becoming key again does not necessarily re-fire xterm's
+      // focusin event: its helper textarea may still be document.activeElement.
+      // It is nevertheless a real foreground-view edge, so reuse the same
+      // lifecycle guard as terminal focus rather than inventing a second
+      // geometry policy.
+      traceNativeFocus("event", { focused: event.payload })
+      if (!event.payload || generation !== nativeWindowFocusTrackingGeneration) {
+        if (!event.payload) {
+          void lifecycle.setViewerVisibility(false).catch((error) => {
+            traceNativeFocus("error", { detail: String(error) })
+            console.warn("[terminal] failed to withdraw background viewer:", error)
+          })
+        }
+        traceNativeFocus("stale", { focused: event.payload })
+        return
+      }
+      const activate = () => {
+        if (generation !== nativeWindowFocusTrackingGeneration) {
+          traceNativeFocus("stale", { focused: event.payload })
+          return
+        }
+        traceNativeFocus("activate", { focused: event.payload })
+        void lifecycle.activateVisibleViewer().catch((error) => {
+          traceNativeFocus("error", { detail: String(error) })
+          console.warn("[terminal] failed to activate native-focused viewer:", error)
+        })
+      }
+      // macOS delivers Tauri's key-window event just before WebKit updates
+      // document.hasFocus(). Preserve the lifecycle's foreground guard, but
+      // subscribe to that same real DOM focus transition instead of losing
+      // the native producer edge or polling for it.
+      if (!document.hasFocus()) {
+        traceNativeFocus("awaiting-document", { focused: event.payload })
+        window.addEventListener("focus", activate, { once: true })
+        return
+      }
+      activate()
+    }).then((unlisten) => {
+      if (generation !== nativeWindowFocusTrackingGeneration) {
+        unlisten()
+        return
+      }
+      stopNativeWindowFocusTracking = unlisten
+      traceNativeFocus("ready")
+    }).catch((error) => {
+      traceNativeFocus("error", { detail: String(error) })
+      console.warn("[terminal] failed to track native window focus:", error)
+    })
+  }
+
+  function stopNativeWindowFocusTrackingNow() {
+    nativeWindowFocusTrackingGeneration += 1
+    stopNativeWindowFocusTracking?.()
+    stopNativeWindowFocusTracking = null
+  }
 
   function init(el: HTMLElement) {
     state.container = el
@@ -133,17 +206,28 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       onNativeDropCleanupReady: (cleanup) => {
         state.cleanupNativeDropEvents = cleanup
       },
+      onTerminalFocus: () => {
+        void lifecycle.activateVisibleViewer().catch((error) => {
+          console.warn("[terminal] failed to activate focused viewer:", error)
+        })
+      },
       setTerminal: (term) => {
         terminal.value = term
       },
     })
     state.cleanupContainerEvents = state.terminalView.cleanupContainerEvents
     state.stopThemeWatch = state.terminalView.stopThemeWatch
+    startNativeWindowFocusTracking()
   }
 
   onUnmounted(() => {
-    lifecycle.dispose()
+    dispose()
   })
+
+  function dispose() {
+    stopNativeWindowFocusTrackingNow()
+    lifecycle.dispose()
+  }
 
   return {
     terminal,
@@ -154,6 +238,6 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
     redraw: lifecycle.redraw,
     ensureConnected: lifecycle.ensureConnected,
     pause: lifecycle.pause,
-    dispose: lifecycle.dispose,
+    dispose,
   }
 }

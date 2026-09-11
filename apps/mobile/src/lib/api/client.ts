@@ -89,9 +89,11 @@ export interface TaskTerminalSubscription {
   /** Resize both the observer's xterm grid and the owning PTY. The transport
    * keeps this scoped to the attached task session. */
   resize?(cols: number, rows: number): void;
-  /** Explicitly take/release PTY geometry ownership. */
-  takeControl?(): void;
-  releaseControl?(): void;
+  /** This task terminal became the actively viewed geometry viewer. */
+  activate?(): void;
+  /** The terminal entered or left the actively viewed UI. Hidden viewers
+   * remain attached for output, but must not retain geometry control. */
+  setViewerVisible?(visible: boolean): void;
   /** Pull one bounded chunk of scrollback older than the loaded buffer.
    * Optional: a transport whose desktop sent the whole terminal has none to
    * pull. */

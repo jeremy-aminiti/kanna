@@ -164,6 +164,10 @@ async function importRepoThroughUi(
   }
   await client.clear(nameInput);
   await client.sendKeys(nameInput, name);
+  // AddRepoModal keeps a local-name draft while its inline editor is open.
+  // Commit it through the same Enter transition a user takes before looking
+  // for the enabled Import button; sending text alone leaves the editor open.
+  await client.pressKey("\uE007");
   const submit = await client.waitForElement(IMPORT_REPO_SUBMIT_SELECTOR, 5_000);
   await client.click(submit);
   try {

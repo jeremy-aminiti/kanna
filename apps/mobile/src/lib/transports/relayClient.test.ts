@@ -496,7 +496,7 @@ describe("createRelayDesktopClient", () => {
         generation: 1,
         cols: 80,
         rows: 48,
-        visible: true
+        visible: false
       })
     );
     expect(socket.send).toHaveBeenNthCalledWith(

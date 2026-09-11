@@ -241,7 +241,7 @@ async fn connection_drop_cleanup_reports_remaining_effective_terminal_size() {
             viewers: HashMap::new(),
             legacy_sizes: HashMap::from([(large_id, (120, 43)), (small_id, (80, 24))]),
             controller: None,
-            explicit_controller: None,
+            active_sequence: 0,
         },
     );
 

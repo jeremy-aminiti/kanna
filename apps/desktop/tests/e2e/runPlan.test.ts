@@ -7,6 +7,7 @@ import {
   targetNeedsRelay,
   targetNeedsRelayControl,
   targetNeedsSecondaryInstance,
+  targetRequiresForegroundActivation,
   resolveRelayControlOperation,
   shouldStartInitialInstances,
 } from "./runPlan";
@@ -86,6 +87,29 @@ describe("remote visual companion runner plan", () => {
     expect(relayStartupReportedListening(
       "[relay] Listening on port 48120\n",
       48121,
+    )).toBe(false);
+  });
+});
+
+describe("remote active-view restoration runner plan", () => {
+  const target = "tests/e2e/real/remote-active-view-restoration.test.ts";
+
+  it("starts the isolated two-desktop relay fixture", () => {
+    expect(targetNeedsSecondaryInstance(target)).toBe(true);
+    expect(targetNeedsIsolatedAgentProviders(target)).toBe(true);
+    expect(targetNeedsEmulators(target)).toBe(true);
+    expect(targetNeedsRelay(target)).toBe(true);
+  });
+
+  it("does not start companion-only relay controls or Chromium", () => {
+    expect(targetNeedsRelayControl(target)).toBe(false);
+    expect(targetNeedsPlaywrightChromium(target)).toBe(false);
+  });
+
+  it("is the only target that starts foreground-capable desktop windows", () => {
+    expect(targetRequiresForegroundActivation(target)).toBe(true);
+    expect(targetRequiresForegroundActivation(
+      "tests/e2e/real/remote-visual-companion.test.ts",
     )).toBe(false);
   });
 });

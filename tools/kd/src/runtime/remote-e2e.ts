@@ -44,6 +44,7 @@ export interface RemoteE2eSelection {
 export interface RemoteE2eOptions {
   staging: boolean;
   mobileRelay: boolean;
+  mobileRelayTerminalControl?: boolean;
   desktopPairing: boolean;
   ifChanged: boolean;
 }
@@ -130,7 +131,7 @@ export async function selectRemoteE2eByChangedPaths(
 }
 
 export function buildRemoteE2eLaneArgs(
-  options: Pick<RemoteE2eOptions, "staging" | "mobileRelay" | "desktopPairing">
+  options: Pick<RemoteE2eOptions, "staging" | "mobileRelay" | "mobileRelayTerminalControl" | "desktopPairing">
 ): string[] {
   const args = [
     "--dir",
@@ -141,6 +142,7 @@ export function buildRemoteE2eLaneArgs(
     options.staging ? "--staging" : "--dev",
   ];
   if (options.mobileRelay) args.push("--mobile-relay");
+  if (options.mobileRelayTerminalControl) args.push("--mobile-relay-terminal-control");
   if (options.desktopPairing) args.push("--desktop-pairing");
   return args;
 }

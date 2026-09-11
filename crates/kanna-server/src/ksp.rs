@@ -774,6 +774,18 @@ fn auth_ok_frame_with_terminal_geometry(
     companion_access: bool,
     terminal_geometry_supported: bool,
 ) -> ServerFrame {
+    auth_ok_frame_with_terminal_capabilities(
+        companion_access,
+        terminal_geometry_supported,
+        terminal_geometry_supported,
+    )
+}
+
+fn auth_ok_frame_with_terminal_capabilities(
+    companion_access: bool,
+    terminal_geometry_supported: bool,
+    terminal_active_view_supported: bool,
+) -> ServerFrame {
     let mut stream_kinds = vec![
         StreamKind::Agent,
         StreamKind::Terminal,
@@ -792,6 +804,9 @@ fn auth_ok_frame_with_terminal_geometry(
     if terminal_geometry_supported {
         capabilities.push(KspCapability::TerminalGeometry);
     }
+    if terminal_active_view_supported {
+        capabilities.push(KspCapability::TerminalActiveView);
+    }
     ServerFrame::AuthOk {
         stream_kinds,
         capabilities,
@@ -806,6 +821,18 @@ fn auth_capabilities_do_not_advertise_geometry_without_daemon_support() {
         panic!("expected auth success frame");
     };
     assert!(!capabilities.contains(&KspCapability::TerminalGeometry));
+    assert!(!capabilities.contains(&KspCapability::TerminalActiveView));
+}
+
+#[cfg(test)]
+#[test]
+fn auth_capabilities_keep_active_view_distinct_from_geometry() {
+    let frame = auth_ok_frame_with_terminal_capabilities(true, true, false);
+    let ServerFrame::AuthOk { capabilities, .. } = frame else {
+        panic!("expected auth success frame");
+    };
+    assert!(capabilities.contains(&KspCapability::TerminalGeometry));
+    assert!(!capabilities.contains(&KspCapability::TerminalActiveView));
 }
 
 #[derive(Clone)]
@@ -1706,6 +1733,7 @@ async fn handle_stream_channels(
         supports_term_input_boundary: false,
         supports_terminal_window: false,
         supports_terminal_geometry: false,
+        supports_terminal_active_view: false,
         supports_agent_history_window: false,
         legacy_companion_tasks_on_connection: HashSet::new(),
         auth_mode,
@@ -1801,6 +1829,7 @@ struct StreamConn {
     supports_term_input_boundary: bool,
     supports_terminal_window: bool,
     supports_terminal_geometry: bool,
+    supports_terminal_active_view: bool,
     supports_agent_history_window: bool,
     legacy_companion_tasks_on_connection: HashSet<String>,
     auth_mode: AuthMode,
@@ -1933,6 +1962,7 @@ enum TerminalControlCommand {
         rows: u16,
         visible: bool,
     },
+    Active,
     Takeover,
     Release,
 }
@@ -1945,6 +1975,13 @@ enum TerminalInputKind {
 }
 
 impl TerminalControlCommand {
+    fn is_viewer_command(&self) -> bool {
+        matches!(
+            self,
+            Self::Register { .. } | Self::Active | Self::Takeover | Self::Release
+        )
+    }
+
     fn into_daemon_command(self, session_id: String) -> DaemonCommand {
         match self {
             Self::Input { data, kind } => match kind {
@@ -1977,6 +2014,7 @@ impl TerminalControlCommand {
                 rows,
                 visible,
             },
+            Self::Active => DaemonCommand::ActiveViewer { session_id },
             Self::Takeover => DaemonCommand::TakeoverViewer { session_id },
             Self::Release => DaemonCommand::ReleaseViewer { session_id },
         }
@@ -2347,14 +2385,14 @@ async fn run_terminal_control(
             }
         }
 
-        let pending_is_registration = pending_command
+        let pending_is_viewer_command = pending_command
             .as_ref()
-            .is_some_and(|command| matches!(command, TerminalControlCommand::Register { .. }));
+            .is_some_and(TerminalControlCommand::is_viewer_command);
         if !geometry_supported.unwrap_or(false) {
-            if pending_is_registration {
+            if pending_is_viewer_command {
                 pending_command = None;
             }
-        } else if !pending_is_registration {
+        } else if !pending_is_viewer_command {
             if let Some(command) = registration.as_ref() {
                 if daemon_writer.send_one_way(command).await.is_err() {
                     continue;
@@ -2431,15 +2469,7 @@ async fn run_terminal_control(
                             "[ksp] writing terminal resize (task={task_id}, session={session_id}, cols={cols}, rows={rows}, source=live)"
                         );
                     }
-                    let daemon_command = command.into_daemon_command(session_id.clone());
-                    if !geometry_supported.unwrap_or(false)
-                        && matches!(
-                            &daemon_command,
-                            DaemonCommand::RegisterViewer { .. }
-                                | DaemonCommand::TakeoverViewer { .. }
-                                | DaemonCommand::ReleaseViewer { .. }
-                        )
-                    {
+                    if !geometry_supported.unwrap_or(false) && command.is_viewer_command() {
                         let _ = send_task_error(
                             &frame_tx,
                             &task_id,
@@ -2449,6 +2479,7 @@ async fn run_terminal_control(
                         .await;
                         continue;
                     }
+                    let daemon_command = command.into_daemon_command(session_id.clone());
                     if matches!(&daemon_command, DaemonCommand::RegisterViewer { .. }) {
                         registration = Some(daemon_command.clone());
                     }
@@ -2893,6 +2924,24 @@ impl StreamConn {
             }
         }
 
+        if std::env::var_os("KANNA_E2E_TRACE_TERMINAL_GEOMETRY").is_some() {
+            let kind = match &command {
+                TerminalControlCommand::Register { .. } => "register",
+                TerminalControlCommand::Active => "active",
+                TerminalControlCommand::Resize { .. } => "resize",
+                TerminalControlCommand::Takeover => "takeover",
+                TerminalControlCommand::Release => "release",
+                TerminalControlCommand::Input { .. } => "input",
+            };
+            let session_id = self
+                .terminal_controls
+                .get(&task_id)
+                .and_then(|control| control.session_id.as_deref())
+                .unwrap_or("unbound");
+            log::warn!(
+                "[e2e-terminal-geometry] ksp queued {kind} task={task_id} session={session_id}"
+            );
+        }
         let send_result = self
             .terminal_controls
             .get(&task_id)
@@ -3143,6 +3192,7 @@ impl StreamConn {
                 | ClientFrame::TermInputControl { task_id, .. }
                 | ClientFrame::TermResize { task_id, .. }
                 | ClientFrame::TermViewerRegister { task_id, .. }
+                | ClientFrame::TermViewerActive { task_id }
                 | ClientFrame::TermViewerTakeover { task_id }
                 | ClientFrame::TermViewerRelease { task_id }
                 | ClientFrame::TermScrollbackRequest { task_id, .. }
@@ -3164,9 +3214,10 @@ impl StreamConn {
 
         match frame {
             ClientFrame::Auth { .. } => {
-                self.send(auth_ok_frame_with_terminal_geometry(
+                self.send(auth_ok_frame_with_terminal_capabilities(
                     self.companion_access,
                     self.supports_terminal_geometry,
+                    self.supports_terminal_active_view,
                 ))
                 .await;
             }
@@ -3410,6 +3461,18 @@ impl StreamConn {
                     .await;
                 }
             }
+            ClientFrame::TermViewerActive { task_id } => {
+                if self.supports_terminal_active_view {
+                    self.enqueue_terminal_control(task_id, TerminalControlCommand::Active);
+                } else {
+                    self.error(
+                        Some(task_id),
+                        "terminal_active_view_unsupported",
+                        "terminal active-viewer geometry is unavailable on this desktop".into(),
+                    )
+                    .await;
+                }
+            }
             ClientFrame::TermViewerRelease { task_id } => {
                 if self.supports_terminal_geometry {
                     self.enqueue_terminal_control(task_id, TerminalControlCommand::Release);
@@ -3562,11 +3625,14 @@ impl StreamConn {
         self.supports_terminal_window = capabilities.contains(&KspCapability::TermScrollbackWindow);
         self.supports_terminal_geometry = capabilities.contains(&KspCapability::TerminalGeometry)
             && self.state.terminal_geometry_supported();
+        self.supports_terminal_active_view = self.supports_terminal_geometry
+            && capabilities.contains(&KspCapability::TerminalActiveView);
         self.supports_agent_history_window =
             capabilities.contains(&KspCapability::AgentHistoryWindow);
-        self.send(auth_ok_frame_with_terminal_geometry(
+        self.send(auth_ok_frame_with_terminal_capabilities(
             self.companion_access,
             self.supports_terminal_geometry,
+            self.supports_terminal_active_view,
         ))
         .await;
         true
@@ -6200,6 +6266,97 @@ mod tests {
         (task, command_rx)
     }
 
+    async fn spawn_fake_geometry_v1_control_daemon(
+        daemon_dir: String,
+    ) -> (
+        tokio::task::JoinHandle<usize>,
+        oneshot::Receiver<DaemonCommand>,
+        oneshot::Sender<()>,
+        oneshot::Receiver<()>,
+        mpsc::Receiver<DaemonCommand>,
+    ) {
+        let socket_path = daemon_socket_path_for_dir(&daemon_dir);
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind geometry-v1 daemon socket");
+        let (probe_tx, probe_rx) = oneshot::channel();
+        let (release_probe_tx, release_probe_rx) = oneshot::channel();
+        let (legacy_connection_tx, legacy_connection_rx) = oneshot::channel();
+        let (command_tx, command_rx) = mpsc::channel(4);
+
+        let task = tokio::spawn(async move {
+            let (probe_stream, _) = listener.accept().await.expect("accept geometry probe");
+            let (probe_read_half, mut probe_write_half) = probe_stream.into_split();
+            let mut probe_reader = BufReader::new(probe_read_half);
+            let mut line = String::new();
+            probe_reader
+                .read_line(&mut line)
+                .await
+                .expect("read geometry probe");
+            let probe: DaemonCommand =
+                serde_json::from_str(line.trim()).expect("parse geometry probe");
+            probe_tx.send(probe).expect("publish geometry probe");
+            release_probe_rx.await.expect("release geometry probe");
+            probe_write_half
+                .write_all(
+                    format!(
+                        "{}\n",
+                        serde_json::to_string(&DaemonEvent::TerminalGeometryReady { version: 1 })
+                            .unwrap()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("advertise geometry protocol v1");
+
+            let (legacy_stream, _) = listener
+                .accept()
+                .await
+                .expect("accept legacy control connection");
+            legacy_connection_tx
+                .send(())
+                .expect("publish legacy control connection");
+            let (legacy_read_half, _legacy_write_half) = legacy_stream.into_split();
+            let mut legacy_reader = BufReader::new(legacy_read_half);
+            let mut received_inputs = 0;
+            while received_inputs < 2 {
+                line.clear();
+                legacy_reader
+                    .read_line(&mut line)
+                    .await
+                    .expect("read legacy terminal command");
+                if line.is_empty() {
+                    break;
+                }
+                let command: DaemonCommand =
+                    serde_json::from_str(line.trim()).expect("parse legacy terminal command");
+                let unsupported_active = matches!(&command, DaemonCommand::ActiveViewer { .. });
+                if matches!(&command, DaemonCommand::InputNoReply { .. }) {
+                    received_inputs += 1;
+                }
+                command_tx
+                    .send(command)
+                    .await
+                    .expect("publish legacy terminal command");
+                if unsupported_active {
+                    // Geometry-v1 understood RegisterViewer, but ActiveViewer
+                    // was not in its command enum. Model that old parser by
+                    // ending the control socket as soon as the unsupported
+                    // frame is observed.
+                    break;
+                }
+            }
+            2
+        });
+
+        (
+            task,
+            probe_rx,
+            release_probe_tx,
+            legacy_connection_rx,
+            command_rx,
+        )
+    }
+
     async fn spawn_fake_control_daemon_with_disconnect(
         daemon_dir: String,
         command_count: usize,
@@ -6523,6 +6680,17 @@ mod tests {
         }
     }
 
+    fn active_view_client_auth_frame() -> ClientFrame {
+        ClientFrame::Auth {
+            credential: None,
+            capabilities: vec![
+                KspCapability::TermInputBoundary,
+                KspCapability::TerminalGeometry,
+                KspCapability::TerminalActiveView,
+            ],
+        }
+    }
+
     fn legacy_client_auth_frame() -> ClientFrame {
         ClientFrame::Auth {
             credential: None,
@@ -6551,6 +6719,7 @@ mod tests {
                 supports_term_input_boundary: true,
                 supports_terminal_window: false,
                 supports_terminal_geometry: false,
+                supports_terminal_active_view: false,
                 supports_agent_history_window: false,
                 terminal_taps: HashMap::new(),
                 agent_histories: HashMap::new(),
@@ -9598,6 +9767,7 @@ mod tests {
                 supports_term_input_boundary: true,
                 supports_terminal_window: false,
                 supports_terminal_geometry: false,
+                supports_terminal_active_view: false,
                 supports_agent_history_window: false,
                 terminal_taps: HashMap::new(),
                 agent_histories: HashMap::new(),
@@ -9711,6 +9881,7 @@ mod tests {
             supports_term_input_boundary: true,
             supports_terminal_window: false,
             supports_terminal_geometry: false,
+            supports_terminal_active_view: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -10147,6 +10318,159 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn old_geometry_probe_filters_every_viewer_command_but_not_local_input() {
+        let register = TerminalControlCommand::Register {
+            viewer_id: "viewer".into(),
+            role: TerminalViewerRole::Remote,
+            generation: 1,
+            cols: 80,
+            rows: 24,
+            visible: true,
+        };
+        assert!(register.is_viewer_command());
+        assert!(TerminalControlCommand::Active.is_viewer_command());
+        assert!(TerminalControlCommand::Takeover.is_viewer_command());
+        assert!(TerminalControlCommand::Release.is_viewer_command());
+        assert!(!TerminalControlCommand::Input {
+            data: b"local input".to_vec(),
+            kind: TerminalInputKind::Draft,
+        }
+        .is_viewer_command());
+    }
+
+    #[tokio::test]
+    async fn new_server_keeps_geometry_v1_daemon_control_usable() {
+        let unique = format!(
+            "ksp-old-geometry-control-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let daemon_dir = std::env::temp_dir().join(format!("{unique}-daemon"));
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon dir");
+        let mut config = test_config(&unique, "KSP Old Geometry Control");
+        config.daemon_dir = daemon_dir.to_string_lossy().to_string();
+        config.db_path = Db::test_db_path(&unique);
+        config.pairing_store_path = crate::test_paths::unique_test_file("kanna-pairings", "json");
+        let _db = Db::open_for_tests(&config.db_path).expect("open test db");
+
+        let (daemon, probe_rx, release_probe_tx, legacy_connection_rx, mut commands) =
+            spawn_fake_geometry_v1_control_daemon(config.daemon_dir.clone()).await;
+        let state = Arc::new(AppState::new(config));
+        state.set_terminal_geometry_capability(std::process::id(), true);
+        let url = serve_router(crate::http_api::router(state)).await;
+        let mut socket = ws_connect(&url).await;
+
+        send_frame(&mut socket, &active_view_client_auth_frame()).await;
+        assert_eq!(recv_frame(&mut socket).await, auth_ok_frame_for(false));
+
+        // Active is the first pending command, covering the path that runs
+        // immediately after the worker's daemon negotiation.
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermViewerActive {
+                task_id: "shell-old-geometry-control".into(),
+            },
+        )
+        .await;
+        assert_command(
+            tokio::time::timeout(LIVENESS_WAIT, probe_rx)
+                .await
+                .expect("terminal control worker did not negotiate")
+                .ok(),
+            DaemonCommand::NegotiateTerminalGeometry {
+                version: kanna_daemon::protocol::TERMINAL_GEOMETRY_PROTOCOL_VERSION,
+            },
+        );
+
+        // These viewer commands are queued while the fake old daemon holds
+        // its version-1 answer. Neither may leak after the worker reconnects.
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermViewerRegister {
+                task_id: "shell-old-geometry-control".into(),
+                viewer_id: "remote-viewer".into(),
+                role: TerminalViewerRole::Remote,
+                generation: 1,
+                cols: 50,
+                rows: 36,
+                visible: true,
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermViewerActive {
+                task_id: "shell-old-geometry-control".into(),
+            },
+        )
+        .await;
+        release_probe_tx
+            .send(())
+            .expect("release geometry-v1 reply");
+        tokio::time::timeout(LIVENESS_WAIT, legacy_connection_rx)
+            .await
+            .expect("worker did not reconnect after geometry-v1 reply")
+            .expect("geometry-v1 daemon did not publish legacy connection");
+
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-old-geometry-control".into(),
+                data_b64: b64(b"first local input"),
+            },
+        )
+        .await;
+        assert_command(
+            tokio::time::timeout(LIVENESS_WAIT, commands.recv())
+                .await
+                .expect("queued viewer control disrupted the legacy socket"),
+            DaemonCommand::InputNoReply {
+                session_id: "shell-old-geometry-control".into(),
+                data: b"first local input".to_vec(),
+            },
+        );
+
+        // Active is sent again only after the legacy socket has delivered
+        // input, exercising the live-command filter independently of the
+        // pending and queued copies of that unsupported old-daemon command.
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermViewerActive {
+                task_id: "shell-old-geometry-control".into(),
+            },
+        )
+        .await;
+        send_frame(
+            &mut socket,
+            &ClientFrame::TermInput {
+                task_id: "shell-old-geometry-control".into(),
+                data_b64: b64(b"second local input"),
+            },
+        )
+        .await;
+        assert_command(
+            tokio::time::timeout(LIVENESS_WAIT, commands.recv())
+                .await
+                .expect("live viewer control disrupted the legacy socket"),
+            DaemonCommand::InputNoReply {
+                session_id: "shell-old-geometry-control".into(),
+                data: b"second local input".to_vec(),
+            },
+        );
+        assert_eq!(
+            daemon.await.expect("geometry-v1 daemon failed"),
+            2,
+            "ordinary input must stay on one post-negotiation control socket"
+        );
+
+        drop(socket);
+        let _ = std::fs::remove_dir_all(&daemon_dir);
+    }
+
     #[tokio::test]
     async fn terminal_geometry_barriers_preserve_order_while_daemon_reconnects() {
         let unique = format!(
@@ -10181,6 +10505,7 @@ mod tests {
             supports_term_input_boundary: true,
             supports_terminal_window: false,
             supports_terminal_geometry: true,
+            supports_terminal_active_view: true,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -11085,6 +11410,7 @@ mod tests {
             supports_term_input_boundary: true,
             supports_terminal_window: false,
             supports_terminal_geometry: false,
+            supports_terminal_active_view: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -11170,6 +11496,7 @@ mod tests {
             supports_term_input_boundary: true,
             supports_terminal_window: false,
             supports_terminal_geometry: false,
+            supports_terminal_active_view: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -11221,6 +11548,7 @@ mod tests {
             supports_term_input_boundary: true,
             supports_terminal_window: false,
             supports_terminal_geometry: true,
+            supports_terminal_active_view: true,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -11289,6 +11617,7 @@ mod tests {
             supports_term_input_boundary: true,
             supports_terminal_window: false,
             supports_terminal_geometry: false,
+            supports_terminal_active_view: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -11358,6 +11687,7 @@ mod tests {
             supports_term_input_boundary: true,
             supports_terminal_window: false,
             supports_terminal_geometry: false,
+            supports_terminal_active_view: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),
@@ -11470,6 +11800,7 @@ mod tests {
             supports_term_input_boundary: true,
             supports_terminal_window: false,
             supports_terminal_geometry: false,
+            supports_terminal_active_view: false,
             supports_agent_history_window: false,
             terminal_taps: HashMap::new(),
             agent_histories: HashMap::new(),

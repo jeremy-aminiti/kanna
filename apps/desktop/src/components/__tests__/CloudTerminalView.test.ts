@@ -76,6 +76,8 @@ const testState = vi.hoisted(() => {
     terminals: [] as FakeTerminal[],
     webLinksAddons: [] as FakeWebLinksAddon[],
     resizeCallbacks: [] as ResizeObserverCallback[],
+    nativeFocusHandler: null as ((event: { payload: boolean }) => void) | null,
+    isTauri: false,
     effectiveCodeTheme: null as import("vue").Ref<string> | null,
     FakeTerminal,
     FakeFitAddon,
@@ -107,6 +109,19 @@ vi.mock("@xterm/addon-web-links", () => ({
 
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openUrl: testState.openUrl,
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    onFocusChanged: async (handler: (event: { payload: boolean }) => void) => {
+      testState.nativeFocusHandler = handler;
+      return () => { testState.nativeFocusHandler = null; };
+    },
+  }),
+}));
+
+vi.mock("../../tauri-mock", () => ({
+  get isTauri() { return testState.isTauri; },
 }));
 
 vi.mock("../../services/desktopRelayTerminal", () => ({
@@ -236,6 +251,8 @@ describe("CloudTerminalView remote visual companion links", () => {
     testState.terminals.length = 0;
     testState.webLinksAddons.length = 0;
     testState.resizeCallbacks.length = 0;
+    testState.nativeFocusHandler = null;
+    testState.isTauri = false;
     if (testState.effectiveCodeTheme) {
       testState.effectiveCodeTheme.value = "dark";
     }
@@ -306,6 +323,33 @@ describe("CloudTerminalView remote visual companion links", () => {
     await flushAsync();
 
     expect(testState.terminals[0]?.focus).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("withdraws a cached remote viewer on native blur even while WebKit still reports focus", async () => {
+    const client = createClient();
+    const setViewerVisible = vi.fn();
+    const activate = vi.fn();
+    client.observeTerminal.mockReturnValue({
+      close: client.terminalClose,
+      setViewerVisible,
+      activate,
+    });
+    mocks.relayFactory.mockResolvedValue(client);
+    testState.isTauri = true;
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+
+    const wrapper = mount(CloudTerminalView, {
+      attachTo: document.body,
+      props: { ownerDesktopId: "desktop-1", ownerTaskId: "task-1" },
+    });
+    await flushAsync();
+    expect(testState.nativeFocusHandler).not.toBeNull();
+
+    testState.nativeFocusHandler?.({ payload: false });
+    await flushAsync();
+    expect(setViewerVisible).toHaveBeenLastCalledWith(false);
+    expect(activate).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 

@@ -38,6 +38,14 @@ interface KannaTerminalBuffersE2EApi {
     columns: number;
     rows: number;
   };
+  viewport: (sessionId: string) => {
+    availableCols: number;
+    availableRows: number;
+    cellHeight: number;
+    cellWidth: number;
+    viewportHeight: number;
+    viewportWidth: number;
+  } | null;
   cellAttributes: (
     sessionId: string,
     row: number,
@@ -49,6 +57,36 @@ interface KannaTerminalBuffersE2EApi {
     foregroundMode: number;
   } | null;
   selectText: (sessionId: string, text: string) => string | null;
+}
+
+interface KannaActiveViewTraceEntry {
+  sessionId: string;
+  phase: "ineligible" | "eligible" | "stale" | "sent";
+  attached: boolean;
+  paused: boolean;
+  disposed: boolean;
+  hasContainer: boolean;
+  visible: boolean;
+  terminal: { cols: number; rows: number } | null;
+  documentHasFocus: boolean;
+  documentHidden: boolean;
+}
+
+interface KannaNativeFocusTraceEntry {
+  sessionId: string;
+  phase: "start" | "ready" | "event" | "awaiting-document" | "activate" | "stale" | "error";
+  focused?: boolean;
+  detail?: string;
+}
+
+interface KannaTerminalStreamTraceEntry {
+  sessionId: string;
+  kind: "snapshot" | "output";
+  phase: "received" | "parsed";
+  at: number;
+  cols?: number;
+  rows?: number;
+  activeViewLines: string[];
 }
 
 interface KannaAppMetricsSnapshot {
@@ -136,6 +174,11 @@ interface KannaE2EHook {
     getAll(): Array<{ event: string; payload?: unknown }>;
   };
   terminalBuffers?: KannaTerminalBuffersE2EApi;
+  /** DEV/E2E-only active-view lifecycle decisions. */
+  activeViewTrace?: KannaActiveViewTraceEntry[];
+  /** DEV/E2E-only native-window focus subscription events. */
+  nativeFocusTrace?: KannaNativeFocusTraceEntry[];
+  terminalStreamTrace?: KannaTerminalStreamTraceEntry[];
   remoteCompanion?: KannaRemoteCompanionE2EApi;
   /** What the most recently initialized terminal view actually rendered with. */
   terminalRenderer?: import("./composables/terminalRenderer").TerminalRendererOutcome | null;

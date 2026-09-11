@@ -26,6 +26,15 @@ export interface TerminalCursorPosition {
   rows: number;
 }
 
+export interface TerminalViewportMetrics {
+  availableCols: number;
+  availableRows: number;
+  cellHeight: number;
+  cellWidth: number;
+  viewportHeight: number;
+  viewportWidth: number;
+}
+
 export interface TerminalCellAttributes {
   bold: boolean;
   inverse: boolean;
@@ -34,11 +43,17 @@ export interface TerminalCellAttributes {
 }
 
 const terminals = new Map<string, Terminal>();
+const viewportProposals = new Map<string, () => { cols: number; rows: number } | undefined>();
 
-export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal): () => void {
+export function registerE2ETerminalBuffer(
+  sessionId: string,
+  terminal: Terminal,
+  getViewportProposal?: () => { cols: number; rows: number } | undefined,
+): () => void {
   if (!import.meta.env.DEV || !window.__KANNA_E2E__) return () => {};
 
   terminals.set(sessionId, terminal);
+  if (getViewportProposal) viewportProposals.set(sessionId, getViewportProposal);
   window.__KANNA_E2E__.terminalBuffers ??= {
     stats: getTerminalBufferStats,
     lines: getTerminalBufferLines,
@@ -49,6 +64,7 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     element: getTerminalElement,
     findTextCell: findTerminalTextCell,
     cursor: getTerminalCursorPosition,
+    viewport: getTerminalViewportMetrics,
     cellAttributes: getTerminalCellAttributes,
     selectText: selectTerminalBufferText,
   };
@@ -57,7 +73,37 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     const current = terminals.get(sessionId);
     if (current === terminal) {
       terminals.delete(sessionId);
+      viewportProposals.delete(sessionId);
     }
+  };
+}
+
+/**
+ * A DEV/E2E observation of the renderer's independently measured viewport.
+ * It deliberately does not fit or resize the terminal; callers use it to
+ * verify the grid which the production FitAddon would propose.
+ */
+function getTerminalViewportMetrics(sessionId: string): TerminalViewportMetrics | null {
+  const terminal = terminals.get(sessionId);
+  if (!terminal?.element) return null;
+  const dimensions = (terminal as unknown as {
+    _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } } };
+  })._core?._renderService?.dimensions?.css?.cell;
+  const cellWidth = dimensions?.width;
+  const cellHeight = dimensions?.height;
+  const viewport = terminal.element.getBoundingClientRect();
+  const proposal = viewportProposals.get(sessionId)?.();
+  if (!cellWidth || !cellHeight || viewport.width <= 0 || viewport.height <= 0 || !proposal) return null;
+  return {
+    // FitAddon is xterm's canonical viewport/cell measurement. Calling its
+    // proposal API is observation-only; it does not call fit() or resize the
+    // session, unlike approximating a possibly clipped terminal element.
+    availableCols: proposal.cols,
+    availableRows: proposal.rows,
+    cellHeight,
+    cellWidth,
+    viewportHeight: viewport.height,
+    viewportWidth: viewport.width,
   };
 }
 

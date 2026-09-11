@@ -1063,7 +1063,7 @@ describe("createLanTransport", () => {
         generation: 1,
         cols: 80,
         rows: 48,
-        visible: true
+        visible: false
       },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
     ]);

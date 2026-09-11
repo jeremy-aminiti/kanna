@@ -118,6 +118,9 @@ enum Cmd {
         rows: u16,
         visible: bool,
     },
+    ActiveViewer {
+        session_id: String,
+    },
     Snapshot {
         session_id: String,
     },
@@ -4019,6 +4022,11 @@ fn test_one_way_follower_resize_applies_without_attached_size_owner() {
         cols: 80,
         rows: 48,
         visible: true,
+    });
+    // Registration is passive: a viewer must explicitly become active before
+    // its measured viewport may control the PTY geometry.
+    follower.send(&Cmd::ActiveViewer {
+        session_id: "sess-follower-resize".to_string(),
     });
 
     let snapshot = recv_snapshot(&mut follower, "sess-follower-resize");

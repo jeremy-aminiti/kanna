@@ -26,7 +26,6 @@ export const selectors = {
   taskMoreButton: `~${MOBILE_E2E_IDS.taskMoreButton}`,
   taskInput: `~${MOBILE_E2E_IDS.taskInput}`,
   taskInputStatus: `~${MOBILE_E2E_IDS.taskInputStatus}`,
-  taskTerminalControl: `~${MOBILE_E2E_IDS.taskTerminalControl}`,
   taskSendButton: `~${MOBILE_E2E_IDS.taskSendButton}`,
   taskTerminalDirectInputToggle:
     `~${MOBILE_E2E_IDS.taskTerminalDirectInputToggle}`,

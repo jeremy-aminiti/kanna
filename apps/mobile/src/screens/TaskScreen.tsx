@@ -167,8 +167,6 @@ interface TaskScreenProps {
   /** The terminal view scrolled near the top of its loaded buffer. */
   onRequestTerminalScrollback?(): void;
   onResizeTerminal?(cols: number, rows: number): void;
-  onTakeTerminalControl?(): void;
-  onReleaseTerminalControl?(): void;
   onStopAgent(): void;
   onRequestAgentHistory?(): void;
   onResolveAgentPermission(requestId: string, decision: PermissionDecision): void;
@@ -250,8 +248,6 @@ export function TaskScreen({
   onSendTerminalInput,
   onRequestTerminalScrollback,
   onResizeTerminal,
-  onTakeTerminalControl,
-  onReleaseTerminalControl,
   onStopAgent,
   onRequestAgentHistory,
   onResolveAgentPermission,
@@ -297,7 +293,6 @@ export function TaskScreen({
   const [isPickingAttachment, setIsPickingAttachment] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [isBackPending, setIsBackPending] = useState(false);
-  const [terminalControlTaken, setTerminalControlTaken] = useState(false);
   const [measuredTerminalCapacity, setMeasuredTerminalCapacity] = useState<{
     cols: number;
     rows: number;
@@ -305,21 +300,11 @@ export function TaskScreen({
   // Reset per task: the resting obstruction belongs to one screen's layout.
   const restingTerminalInsetRef = useRef<number | null>(null);
   useEffect(() => {
-    // Takeover belongs to one live terminal attachment, not to the task row
-    // or screen component. A task switch, reconnect, background expiry, or
-    // terminal replacement must never leave the next attachment showing a
-    // stale release action.
-    setTerminalControlTaken(false);
     // The next task's page measures itself; the previous task's capacity is
     // not a proposal for this one, and neither is its resting obstruction.
     setMeasuredTerminalCapacity(null);
     restingTerminalInsetRef.current = null;
   }, [task.id]);
-  useEffect(() => {
-    if (terminalStatus !== "live") {
-      setTerminalControlTaken(false);
-    }
-  }, [terminalStatus]);
   const [screenViewport, setScreenViewport] = useState<{
     width: number;
     height: number;
@@ -1032,27 +1017,6 @@ export function TaskScreen({
                 />
               </View>
             ) : null}
-            {onTakeTerminalControl && onReleaseTerminalControl ? (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityState={{ selected: terminalControlTaken }}
-                style={styles.terminalControlButton}
-                testID={MOBILE_E2E_IDS.taskTerminalControl}
-                onPress={() => {
-                  if (terminalControlTaken) {
-                    onReleaseTerminalControl();
-                    setTerminalControlTaken(false);
-                  } else {
-                    onTakeTerminalControl();
-                    setTerminalControlTaken(true);
-                  }
-                }}
-              >
-                <Text style={styles.terminalControlLabel}>
-                  {terminalControlTaken ? "Release terminal control" : "Take terminal control"}
-                </Text>
-              </Pressable>
-            ) : null}
           </>
         ) : (
           <View style={styles.terminalSkeleton}>
@@ -1654,23 +1618,6 @@ const styles = StyleSheet.create({
     right: 0,
     top: 0
   },
-  terminalControlButton: {
-    backgroundColor: "#101A29",
-    borderColor: "#33445F",
-    borderRadius: 6,
-    borderWidth: 1,
-    bottom: 112,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    position: "absolute",
-    right: 12,
-    zIndex: 3
-  },
-  terminalControlLabel: {
-    color: "#D8E4F4",
-    fontSize: 12,
-    fontWeight: "600"
-  },
   terminalSkeleton: {
     backgroundColor: "#050B14",
     gap: 14,
@@ -2135,9 +2082,6 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 8,
     left: 0,
-    // Clears the floating "Take terminal control" button, which sits 112pt up
-    // from the bottom of the terminal. The notice this replaced was drawn
-    // straight through that button, leaving both unreadable.
     marginBottom: 36,
     paddingHorizontal: 12,
     paddingVertical: 10,

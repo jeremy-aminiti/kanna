@@ -448,7 +448,7 @@ describe("createDesktopRelayTerminalClient", () => {
       generation: 1,
       cols: 80,
       rows: 24,
-      visible: true,
+      visible: false,
     });
     expect(JSON.parse(socket.sent[4])).toEqual({
       type: "attach",
@@ -626,7 +626,7 @@ describe("createDesktopRelayTerminalClient", () => {
       generation: 1,
       cols: 100,
       rows: 32,
-      visible: true,
+      visible: false,
     });
     const closeRequest = sent.find((entry) => entry.path === "/v1/tasks/task-1/actions/close");
     const advanceRequest = sent.find((entry) => entry.path === "/v1/tasks/task-1/actions/advance-stage");

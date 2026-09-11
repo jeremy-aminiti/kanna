@@ -9,6 +9,7 @@ import {
   supportedSmokeTargets,
   waitForExpoAppReady
 } from "./run";
+import { shouldReuseExpoServer } from "./helpers/metro";
 
 describe("mobile smoke runner", () => {
   it("leaves relay and profile alerts manual while preserving other lane policies", () => {
@@ -196,6 +197,21 @@ describe("mobile smoke runner", () => {
     expect(supportedSmokeModes).toContain("relay");
     expect(smokeSpecPaths).toContain("specs/relay/relay-task-flow.e2e.ts");
     expect(requiresExactExpoEnvironment("relay")).toBe(true);
+    expect(requiresExactExpoEnvironment("relay-terminal-control")).toBe(true);
+  });
+
+  it("does not reuse a Metro server configured for another relay environment", () => {
+    expect(shouldReuseExpoServer(
+      {
+        cwd: "/repo/apps/mobile",
+        commandLine: "KANNA_APP_ENV=dev EXPO_PUBLIC_KANNA_RELAY_URL=https://other.example expo start --dev-client",
+      },
+      {
+        projectRoot: "/repo/apps/mobile",
+        requireExactEnvironment: true,
+        env: { KANNA_APP_ENV: "dev", EXPO_PUBLIC_KANNA_RELAY_URL: "https://relay.example" },
+      },
+    )).toBe(false);
   });
 
   it("supports a signed-in cloud plus trusted-LAN hybrid Appium mode", () => {

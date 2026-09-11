@@ -41,6 +41,7 @@ const onWebviewDragDropEventMock = vi.fn();
 const onWindowDragDropEventMock = vi.fn();
 let nativeWebviewDragDropHandler: ((event: any) => void) | null = null;
 let nativeWindowDragDropHandler: ((event: any) => void) | null = null;
+let nativeWindowFocusHandler: ((event: { payload: boolean }) => void) | null = null;
 let isTauriMock = false;
 
 async function waitForQueuedInputFlush() {
@@ -233,6 +234,12 @@ vi.mock("@tauri-apps/api/webview", () => ({
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     onDragDropEvent: onWindowDragDropEventMock,
+    onFocusChanged: async (handler: (event: { payload: boolean }) => void) => {
+      nativeWindowFocusHandler = handler;
+      return () => {
+        if (nativeWindowFocusHandler === handler) nativeWindowFocusHandler = null;
+      };
+    },
   }),
 }));
 
@@ -286,6 +293,7 @@ describe("useTerminal", () => {
     terminalStreamHandlers.clear();
     nativeWebviewDragDropHandler = null;
     nativeWindowDragDropHandler = null;
+    nativeWindowFocusHandler = null;
     isTauriMock = false;
     onWebviewDragDropEventMock.mockReset();
     onWindowDragDropEventMock.mockReset();
@@ -607,6 +615,189 @@ describe("useTerminal", () => {
 
     expect(attachTerminal).toHaveBeenCalledTimes(2);
 
+    wrapper.unmount();
+  });
+
+  it("activates local geometry when a focused, visible terminal finishes attaching", async () => {
+    const attachTerminal = vi.fn((taskId: string, handlers: TerminalStreamHandlers) => {
+      terminalStreamHandlers.set(taskId, handlers);
+      handlers.onSnapshot?.(80, 24, btoa("focused local terminal"));
+    });
+    const registerTerminalViewer = vi.fn();
+    const setTerminalViewerVisibility = vi.fn();
+    const activateTerminalViewer = vi.fn();
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal,
+      sendTermInput: vi.fn(),
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+      registerTerminalViewer,
+      setTerminalViewerVisibility,
+      activateTerminalViewer,
+    });
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        return useTerminal("session-1");
+      },
+      render() { return h("div"); },
+    });
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    document.body.appendChild(terminalElement);
+    wrapper.vm.init(terminalElement);
+    await wrapper.vm.startListening();
+
+    // The terminal was already foreground while its stream attached. The
+    // attachment completion reuses the real focus guard so the daemon does
+    // not retain a snapshot's seed grid merely because xterm focusin occurred
+    // before the stream became interactive.
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(1);
+    expect(activateTerminalViewer).toHaveBeenLastCalledWith("session-1");
+    await wrapper.vm.ensureConnected();
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(1);
+
+    terminalElement.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    await flushAsyncWork();
+    expect(setTerminalViewerVisibility).toHaveBeenLastCalledWith("session-1", true);
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(2);
+    expect(activateTerminalViewer).toHaveBeenLastCalledWith("session-1");
+
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    terminalElement.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    await flushAsyncWork();
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(2);
+
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    terminalElement.style.visibility = "hidden";
+    terminalElement.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    await flushAsyncWork();
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(2);
+
+    terminalElement.style.visibility = "visible";
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 0 });
+    terminalElement.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    await flushAsyncWork();
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(2);
+
+    terminalElement.remove();
+    wrapper.unmount();
+  });
+
+  it("activates an eligible local viewer when its native window becomes foreground and tears down the listener", async () => {
+    const attachTerminal = vi.fn((taskId: string, handlers: TerminalStreamHandlers) => {
+      terminalStreamHandlers.set(taskId, handlers);
+      handlers.onSnapshot?.(80, 24, btoa("native focused local terminal"));
+    });
+    const activateTerminalViewer = vi.fn();
+    const setTerminalViewerVisibility = vi.fn();
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal,
+      sendTermInput: vi.fn(),
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+      registerTerminalViewer: vi.fn(),
+      setTerminalViewerVisibility,
+      activateTerminalViewer,
+    });
+    isTauriMock = true;
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() {
+        return useTerminal("session-1");
+      },
+      render() { return h("div"); },
+    });
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    document.body.appendChild(terminalElement);
+    wrapper.vm.init(terminalElement);
+    await wrapper.vm.startListening();
+    await flushAsyncWork();
+
+    expect(nativeWindowFocusHandler).not.toBeNull();
+    nativeWindowFocusHandler?.({ payload: false });
+    await flushAsyncWork();
+    expect(setTerminalViewerVisibility).toHaveBeenLastCalledWith("session-1", false);
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(1);
+
+    nativeWindowFocusHandler?.({ payload: true });
+    await flushAsyncWork();
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(2);
+    expect(activateTerminalViewer).toHaveBeenLastCalledWith("session-1");
+
+    terminalElement.style.visibility = "hidden";
+    nativeWindowFocusHandler?.({ payload: true });
+    await flushAsyncWork();
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(2);
+
+    terminalElement.style.visibility = "visible";
+    wrapper.vm.pause();
+    nativeWindowFocusHandler?.({ payload: true });
+    await flushAsyncWork();
+    expect(activateTerminalViewer).toHaveBeenCalledTimes(2);
+
+    wrapper.vm.dispose();
+    expect(nativeWindowFocusHandler).toBeNull();
+    wrapper.unmount();
+  });
+
+  it("waits for the real document focus edge when macOS reports its key window first", async () => {
+    const attachTerminal = vi.fn((taskId: string, handlers: TerminalStreamHandlers) => {
+      terminalStreamHandlers.set(taskId, handlers);
+      handlers.onSnapshot?.(80, 24, btoa("native focus ordering"));
+    });
+    const activateTerminalViewer = vi.fn();
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal,
+      sendTermInput: vi.fn(),
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+      registerTerminalViewer: vi.fn(),
+      setTerminalViewerVisibility: vi.fn(),
+      activateTerminalViewer,
+    });
+    isTauriMock = true;
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() { return useTerminal("session-1"); },
+      render() { return h("div"); },
+    });
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    document.body.appendChild(terminalElement);
+    wrapper.vm.init(terminalElement);
+    await wrapper.vm.startListening();
+    await flushAsyncWork();
+
+    nativeWindowFocusHandler?.({ payload: true });
+    await flushAsyncWork();
+    expect(activateTerminalViewer).not.toHaveBeenCalled();
+
+    hasFocus.mockReturnValue(true);
+    window.dispatchEvent(new Event("focus"));
+    await flushAsyncWork();
+    expect(activateTerminalViewer).toHaveBeenCalledWith("session-1");
+
+    terminalElement.remove();
     wrapper.unmount();
   });
 

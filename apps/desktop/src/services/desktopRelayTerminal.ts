@@ -178,11 +178,12 @@ export function createDesktopRelayTerminalClient({
         registerViewer(cols: number, rows: number) {
           client.registerTerminalViewer(options.taskId, cols, rows);
         },
-        takeControl() {
-          client.takeTerminalControl(options.taskId);
+        setViewerVisible(visible: boolean) {
+          client.setTerminalViewerVisibility(options.taskId, visible);
         },
-        releaseControl() {
-          client.releaseTerminalControl(options.taskId);
+        activate() {
+          client.setTerminalViewerVisibility(options.taskId, true);
+          client.activateTerminalViewer(options.taskId);
         },
       };
     },

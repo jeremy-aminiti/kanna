@@ -93,8 +93,8 @@ function createTerminalSubscriptionMock(): {
       close: vi.fn(),
       sendInput: vi.fn(),
       resize: vi.fn(),
-      takeControl: vi.fn(),
-      releaseControl: vi.fn(),
+      activate: vi.fn(),
+      setViewerVisible: vi.fn(),
       requestScrollback: vi.fn(),
       setListener(nextListener) {
         listener = nextListener;
@@ -7079,6 +7079,8 @@ describe("createMobileController", () => {
     const client = createClientMock();
     const controller = createMobileController(client, store);
     const resize = client.__terminalStream.subscription.resize;
+    const activate = client.__terminalStream.subscription.activate;
+    const setViewerVisible = client.__terminalStream.subscription.setViewerVisible;
 
     await controller.bootstrap();
     controller.resizeTaskTerminal("task-1", 80, 48);
@@ -7086,6 +7088,18 @@ describe("createMobileController", () => {
 
     expect(resize).toHaveBeenCalledTimes(1);
     expect(resize).toHaveBeenLastCalledWith(80, 48);
+    expect(activate).not.toHaveBeenCalled();
+
+    // The opened, rendered phone terminal becomes the active viewer; a
+    // backgrounded screen withdraws that eligibility without a resize.
+    controller.setTaskDetailVisible(true);
+    expect(setViewerVisible).toHaveBeenLastCalledWith(true);
+    expect(activate).toHaveBeenCalledOnce();
+    controller.setAppForeground(false);
+    expect(setViewerVisible).toHaveBeenLastCalledWith(false);
+    controller.setAppForeground(true);
+    expect(setViewerVisible).toHaveBeenLastCalledWith(true);
+    expect(activate).toHaveBeenCalledTimes(2);
 
     client.__terminalStream.emit({
       type: "snapshot",
@@ -7108,53 +7122,6 @@ describe("createMobileController", () => {
     controller.resizeTaskTerminal("task-1", 128, 72);
     expect(resize).toHaveBeenCalledTimes(2);
     expect(resize).toHaveBeenLastCalledWith(128, 72);
-  });
-
-  it("registers the measured viewport before asking to control the terminal", async () => {
-    const store = createSessionStore();
-    const client = createClientMock();
-    const controller = createMobileController(client, store);
-    const { resize, takeControl, releaseControl } =
-      client.__terminalStream.subscription as unknown as {
-        resize: ReturnType<typeof vi.fn>;
-        takeControl: ReturnType<typeof vi.fn>;
-        releaseControl: ReturnType<typeof vi.fn>;
-      };
-
-    await controller.bootstrap();
-    controller.openTask("task-1");
-    controller.resizeTaskTerminal("task-1", 65, 34);
-    resize.mockClear();
-
-    // The daemon adopts the controller's registered viewport, so a takeover
-    // that does not restate the measurement wins control of a terminal it
-    // then sizes to whatever it happened to register earlier — which is the
-    // "taking control doesn't resize it for mobile" the owner reported.
-    controller.takeTaskTerminalControl("task-1");
-
-    expect(resize).toHaveBeenCalledWith(65, 34);
-    expect(takeControl).toHaveBeenCalledOnce();
-    expect(resize.mock.invocationCallOrder[0]).toBeLessThan(
-      takeControl.mock.invocationCallOrder[0]
-    );
-
-    controller.releaseTaskTerminalControl("task-1");
-    expect(releaseControl).toHaveBeenCalledOnce();
-  });
-
-  it("ignores control requests aimed at a task that is not attached", async () => {
-    const store = createSessionStore();
-    const client = createClientMock();
-    const controller = createMobileController(client, store);
-    const { takeControl } = client.__terminalStream.subscription as unknown as {
-      takeControl: ReturnType<typeof vi.fn>;
-    };
-
-    await controller.bootstrap();
-    controller.openTask("task-1");
-    controller.takeTaskTerminalControl("task-2");
-
-    expect(takeControl).not.toHaveBeenCalled();
   });
 
   it("replaces stale replay output with an authoritative reconnect snapshot", async () => {

@@ -381,6 +381,7 @@ const remoteE2eInputSchema = z.object({
   dev: z.boolean().default(true),
   staging: z.boolean().default(false),
   mobileRelay: z.boolean().default(false),
+  mobileRelayTerminalControl: z.boolean().default(false),
   desktopPairing: z.boolean().default(false),
   ifChanged: z.boolean().default(false)
 });
@@ -3467,7 +3468,7 @@ export const taskDefinitions = [
       if (parsed.dev && parsed.staging) {
         return { ok: false, message: "remote-e2e accepts only one of --dev or --staging." };
       }
-      if (parsed.staging && (parsed.mobileRelay || parsed.desktopPairing)) {
+      if (parsed.staging && (parsed.mobileRelay || parsed.mobileRelayTerminalControl || parsed.desktopPairing)) {
         return {
           ok: false,
           message: "remote-e2e staging is only supported for the headless Layer B lane."
@@ -3481,6 +3482,7 @@ export const taskDefinitions = [
         options: {
           staging: parsed.staging,
           mobileRelay: parsed.mobileRelay,
+          mobileRelayTerminalControl: parsed.mobileRelayTerminalControl,
           desktopPairing: parsed.desktopPairing,
           ifChanged: parsed.ifChanged
         }

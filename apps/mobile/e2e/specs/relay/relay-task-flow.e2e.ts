@@ -1083,14 +1083,10 @@ export async function verifyRelaySendOutcomesJourney(
 }
 
 /**
- * Taking control on the phone means "size this terminal for my phone". As a
- * follower the mobile client correctly renders the daemon's authoritative
- * grid — a desktop-shaped 132x43 here — but the owner reported that taking
- * control changed nothing, because the phone registered a viewport it had
- * never measured.
+ * Opening the rendered phone terminal makes its measured viewport active.
  */
 export async function verifyRelayMobileTerminalControlJourney(
-  driver: Browser,
+  _driver: Browser,
   ui: Pick<RelayUi, "inspectTerminalWebView" | "waitUntil">,
   fixture: PtyTerminalFixture,
   actions: {
@@ -1099,51 +1095,59 @@ export async function verifyRelayMobileTerminalControlJourney(
     restoreDesktopTerminalControl(): Promise<void>;
   },
 ): Promise<void> {
-  const followed = await actions.observeAuthoritativeTerminalGeometry();
-  if (followed.cols !== fixture.expectedCols || followed.rows !== fixture.expectedRows) {
-    throw new Error(
-      `Expected the desktop-owned grid ${fixture.expectedCols}x${fixture.expectedRows} ` +
-        `before the phone takes control; observed ${followed.cols}x${followed.rows}`,
-    );
+  // First establish that the phone renderer has made a real measurement. Do
+  // not use the fixture's desktop grid as readiness: opening this view is
+  // precisely what replaces that grid.
+  let phoneMeasurement: Awaited<ReturnType<RelayUi["inspectTerminalWebView"]>> | null = null;
+  await ui.waitUntil(
+    async () => {
+      phoneMeasurement = await ui.inspectTerminalWebView();
+      return phoneMeasurement.kind === "rendered"
+        && phoneMeasurement.byteCount >= fixture.minDecodedBytes
+        && phoneMeasurement.frameCount > 0
+        && phoneMeasurement.cols !== null
+        && phoneMeasurement.rows !== null
+        && phoneMeasurement.cols > 0
+        && phoneMeasurement.rows > 0
+        && phoneMeasurement.text.includes(fixture.sentinel);
+    },
+    {
+      interval: POLL_INTERVAL_MS,
+      timeout: SCREEN_TIMEOUT_MS,
+      timeoutMsg: `Expected a measured phone terminal before geometry election; last inspection ${JSON.stringify(phoneMeasurement)}`,
+    },
+  );
+  // TypeScript cannot carry assignments made by the polling callback across
+  // the await, so read the settled renderer once at the ownership boundary.
+  const settledPhoneMeasurement = await ui.inspectTerminalWebView();
+  if (
+    settledPhoneMeasurement.kind !== "rendered" ||
+    settledPhoneMeasurement.cols === null ||
+    settledPhoneMeasurement.rows === null
+  ) {
+    throw new Error("Phone terminal measurement disappeared before geometry election");
   }
+  const measuredPhoneGrid = {
+    cols: settledPhoneMeasurement.cols,
+    rows: settledPhoneMeasurement.rows,
+  };
 
-  await actions.captureScreenshot("01-terminal-following-desktop-grid");
-  const control = await driver.$(selectors.taskTerminalControl);
-  await control.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
-  await control.click();
-
-  let taken: { cols: number; rows: number } = followed;
+  let taken: { cols: number; rows: number } | null = null;
   await ui.waitUntil(
     async () => {
       taken = await actions.observeAuthoritativeTerminalGeometry();
-      return taken.cols !== followed.cols || taken.rows !== followed.rows;
+      return taken.cols === measuredPhoneGrid.cols && taken.rows === measuredPhoneGrid.rows;
     },
     {
-      // Each probe opens its own observer, so poll far less often than the UI.
       interval: GEOMETRY_POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
-      timeoutMsg:
-        "Expected taking terminal control on the phone to resize the daemon's PTY; " +
-        `it stayed at ${followed.cols}x${followed.rows}`,
+      timeoutMsg: `Expected daemon grid to equal measured phone viewport ${measuredPhoneGrid.cols}x${measuredPhoneGrid.rows}; last daemon grid ${JSON.stringify(taken)}`,
     },
   );
 
-  if (taken.cols >= followed.cols) {
-    throw new Error(
-      `Expected the phone's measured grid to be narrower than the desktop's ` +
-        `${followed.cols} columns; it took control at ${taken.cols}x${taken.rows}`,
-    );
-  }
-  if (taken.cols < 20 || taken.rows < 8) {
-    throw new Error(
-      `Expected a readable measured grid, not a still-settling layout; ` +
-        `the phone took control at ${taken.cols}x${taken.rows}`,
-    );
-  }
-
   process.stdout.write(
-    `[mobile-e2e] phone took control: daemon grid ${followed.cols}x${followed.rows} ` +
-      `-> ${taken.cols}x${taken.rows} (measured on this device at its current zoom)\n`,
+    `[mobile-e2e] phone active view: measured ${measuredPhoneGrid.cols}x${measuredPhoneGrid.rows}, daemon grid ${taken!.cols}x${taken!.rows} ` +
+      `(measured on this device at its current zoom)\n`,
   );
 
   // Every renderer still shows the daemon's grid, which is now the phone's.
@@ -1153,21 +1157,23 @@ export async function verifyRelayMobileTerminalControlJourney(
       lastInspection = await ui.inspectTerminalWebView();
       return (
         lastInspection.kind === "rendered" &&
-        lastInspection.cols === taken.cols &&
-        lastInspection.rows === taken.rows
+        lastInspection.cols === measuredPhoneGrid.cols &&
+        lastInspection.rows === measuredPhoneGrid.rows
       );
     },
     {
       interval: POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
       timeoutMsg:
-        `Expected the WebView to render the grid it now owns (${taken.cols}x${taken.rows}); ` +
+        `Expected the WebView to render the grid it now owns (${measuredPhoneGrid.cols}x${measuredPhoneGrid.rows}); ` +
         `last inspection ${JSON.stringify(lastInspection)}`,
     },
   );
 
-  await actions.captureScreenshot("02-terminal-fitted-after-taking-control");
-  await control.click();
+  await actions.captureScreenshot("02-terminal-fitted-after-phone-open");
+  // This is an authenticated protocol-viewer handback, intentionally kept
+  // separate from the desktop UI E2E that proves a real desktop view restores
+  // itself without terminal input.
   await actions.restoreDesktopTerminalControl();
   await ui.waitUntil(
     async () => {
@@ -1180,12 +1186,13 @@ export async function verifyRelayMobileTerminalControlJourney(
       interval: GEOMETRY_POLL_INTERVAL_MS,
       timeout: SCREEN_TIMEOUT_MS,
       timeoutMsg:
-        "Expected releasing control on the phone to hand the grid back to the desktop",
+        "Expected making the desktop terminal active to restore the desktop grid",
     },
   );
   await verifyRelayPtyRenderedGridAndCursor(ui, fixture);
+  await actions.captureScreenshot("03-terminal-restored-after-protocol-handback");
   process.stdout.write(
-    `[mobile-e2e] terminal control take/release passed at ${taken.cols}x${taken.rows}\n`,
+    `[mobile-e2e] terminal active-view ownership passed at ${measuredPhoneGrid.cols}x${measuredPhoneGrid.rows}\n`,
   );
 }
 
@@ -2480,5 +2487,28 @@ export async function runRelayTaskFlow(
         options.draft,
         options.waitForQuickReplyInput,
       ),
+  });
+}
+
+/** Focused real-boundary journey for terminal active-view geometry ownership. */
+export async function runRelayTerminalControlJourney(
+  driver: Browser,
+  options: Pick<RelayTaskFlowOptions, "credentials" | "fixture" | "observeAuthoritativeTerminalGeometry" | "restoreDesktopTerminalControl" | "captureScreenshot">,
+): Promise<void> {
+  const ui = createRelayUi(driver);
+  await dismissSavePasswordPrompt(driver);
+  const appShell = await driver.$(selectors.appShell);
+  await appShell.waitForDisplayed({ timeout: SCREEN_TIMEOUT_MS });
+  await returnToTaskListShell(ui);
+  if (!(await isTaskVisible(ui, options.fixture.taskId))) {
+    await signInToRelay(driver, ui, options.credentials);
+  }
+  await ensureTaskListVisible(ui);
+  await openRelayFixtureTask(ui, options.fixture.taskId);
+  await waitForTaskTerminalLive(ui);
+  await verifyRelayMobileTerminalControlJourney(driver, ui, options.fixture, {
+    captureScreenshot: options.captureScreenshot,
+    observeAuthoritativeTerminalGeometry: options.observeAuthoritativeTerminalGeometry,
+    restoreDesktopTerminalControl: options.restoreDesktopTerminalControl,
   });
 }

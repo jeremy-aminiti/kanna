@@ -2872,7 +2872,7 @@ describe("StreamClient", () => {
     client.close();
   });
 
-  it("registers a remote viewport without sending a legacy owner resize", () => {
+  it("registers a remote viewport passively, then announces active viewing without a legacy resize", () => {
     const client = new StreamClient({
       url: "ws://test/v1/stream",
       webSocketFactory: factory,
@@ -2886,11 +2886,12 @@ describe("StreamClient", () => {
         "companion_event_epoch",
         "term_input_boundary",
         "terminal_geometry",
+        "terminal_active_view",
       ],
     });
     socket.receive({
       type: "auth_ok",
-      capabilities: ["term_input_boundary", "terminal_geometry"],
+      capabilities: ["term_input_boundary", "terminal_geometry", "terminal_active_view"],
     });
     client.attachTerminal("task-pty", { onOutput() {} });
     expect(socket.sent).not.toContainEqual(
@@ -2906,7 +2907,7 @@ describe("StreamClient", () => {
       generation: 1,
       cols: 42,
       rows: 18,
-      visible: true,
+      visible: false,
     }, {
       type: "attach",
       task_id: "task-pty",
@@ -2916,6 +2917,16 @@ describe("StreamClient", () => {
     expect(socket.sent).not.toContainEqual(
       expect.objectContaining({ type: "term_resize" }),
     );
+    client.setTerminalViewerVisibility("task-pty", true);
+    client.activateTerminalViewer("task-pty");
+    expect(socket.sent.slice(-2)).toEqual([
+      expect.objectContaining({
+        type: "term_viewer_register",
+        task_id: "task-pty",
+        visible: true,
+      }),
+      { type: "term_viewer_active", task_id: "task-pty" },
+    ]);
     client.close();
   });
 
@@ -2949,6 +2960,31 @@ describe("StreamClient", () => {
         from_seq: 0,
       },
     ]);
+    client.close();
+  });
+
+  it("does not send active-view commands to a geometry-v1 peer", () => {
+    const client = new StreamClient({
+      url: "ws://test/v1/stream",
+      webSocketFactory: factory,
+      terminalViewerRole: "remote",
+    });
+    const socket = sockets[0];
+    socket.open();
+    // A pre-active-view server legitimately offers geometry registration, but
+    // cannot parse term_viewer_active. Keep the remote passive in that case.
+    socket.receive({ type: "auth_ok", capabilities: ["terminal_geometry"] });
+    client.attachTerminal("task-pty", { onOutput() {} });
+    client.sendTermResize("task-pty", 42, 18);
+    client.setTerminalViewerVisibility("task-pty", true);
+    client.activateTerminalViewer("task-pty");
+
+    expect(socket.sent).toContainEqual(expect.objectContaining({
+      type: "term_viewer_register",
+      task_id: "task-pty",
+      visible: true,
+    }));
+    expect(socket.sent).not.toContainEqual({ type: "term_viewer_active", task_id: "task-pty" });
     client.close();
   });
 
@@ -3050,6 +3086,7 @@ describe("StreamClient", () => {
           "companion_event_epoch",
           "term_input_boundary",
           "terminal_geometry",
+          "terminal_active_view",
         ],
       },
       expect.objectContaining({
@@ -3120,30 +3157,6 @@ describe("StreamClient", () => {
       expect.objectContaining({ type: "term_viewer_register", cols: 42, rows: 18 }),
       { type: "attach", task_id: "task-pty", kind: "terminal", from_seq: 0 },
     ]);
-    client.close();
-  });
-
-  it("suppresses remote geometry control against an old owner", () => {
-    const client = new StreamClient({
-      url: "ws://test/v1/stream",
-      webSocketFactory: factory,
-      terminalViewerRole: "remote",
-    });
-    const socket = sockets[0];
-    socket.open();
-    socket.receive({ type: "auth_ok", capabilities: ["term_input_boundary"] });
-    client.attachTerminal("task-pty", { onOutput() {} });
-    client.sendTermResize("task-pty", 42, 18);
-    client.takeTerminalControl("task-pty");
-    client.releaseTerminalControl("task-pty");
-
-    expect(socket.sent).toHaveLength(2);
-    expect(socket.sent[1]).toEqual({
-      type: "attach",
-      task_id: "task-pty",
-      kind: "terminal",
-      from_seq: 0,
-    });
     client.close();
   });
 

@@ -51,6 +51,8 @@ export interface TerminalSessionLifecycleController {
   dispose(): void
   redraw(): Promise<void>
   ensureConnected(): Promise<void>
+  activateVisibleViewer(): Promise<void>
+  setViewerVisibility(visible: boolean): Promise<void>
 }
 
 export function createTerminalSessionLifecycle(params: {
@@ -69,6 +71,82 @@ export function createTerminalSessionLifecycle(params: {
   function getLiveTerminal(): Terminal | null {
     return getLiveTerminalFromState(params.state, params.terminal)
   }
+
+  /**
+   * Geometry ownership is elected by the daemon, but a local terminal must
+   * explicitly report the foreground-focus edge that makes it eligible to
+   * take over. Registration and a measured resize are deliberately passive:
+   * a hidden tab, reconnect, or layout pass must not move another viewer's
+   * grid. The DOM checks keep synthetic focus from an occluded/zero-sized
+   * terminal from becoming that edge.
+   */
+  async function activateVisibleViewer(): Promise<void> {
+    const container = params.state.container
+    const terminal = getLiveTerminal()
+    const documentHidden = (document as Document & { visibilityState: string }).visibilityState === "hidden"
+    const hasVisibleSize = (element: HTMLElement) => {
+      const style = window.getComputedStyle(element)
+      return element.isConnected
+        && element.offsetWidth > 0
+        && element.offsetHeight > 0
+        && style.display !== "none"
+        && style.visibility !== "hidden"
+    }
+    const trace = (phase: "ineligible" | "eligible" | "stale" | "sent") => {
+      if (!import.meta.env.DEV || !window.__KANNA_E2E__) return
+      const visible = container ? hasVisibleSize(container) : false
+      window.__KANNA_E2E__.activeViewTrace ??= []
+      window.__KANNA_E2E__.activeViewTrace.push({
+        sessionId: params.sessionId,
+        phase,
+        attached: params.state.attached,
+        paused: params.state.paused,
+        disposed: params.state.disposed,
+        hasContainer: container !== null,
+        visible,
+        terminal: terminal ? { cols: terminal.cols, rows: terminal.rows } : null,
+        documentHasFocus: document.hasFocus(),
+        documentHidden,
+      })
+    }
+    if (
+      !params.state.attached
+      || params.state.paused
+      || params.state.disposed
+      || !container
+      || !hasVisibleSize(container)
+      || terminal === null
+      || terminal.cols <= 0
+      || terminal.rows <= 0
+      || documentHidden
+      || !document.hasFocus()
+    ) {
+      trace("ineligible")
+      return
+    }
+
+    trace("eligible")
+    const client = await params.getTerminalStreamClient()
+    if (
+      params.state.paused
+      || params.state.disposed
+      || !params.state.attached
+      || !hasVisibleSize(container)
+      || (document as Document & { visibilityState: string }).visibilityState === "hidden"
+      || !document.hasFocus()
+    ) {
+      trace("stale")
+      return
+    }
+    client.setTerminalViewerVisibility?.(params.sessionId, true)
+    client.activateTerminalViewer?.(params.sessionId)
+    trace("sent")
+  }
+
+  async function setViewerVisibility(visible: boolean): Promise<void> {
+    const client = await params.getTerminalStreamClient()
+    client.setTerminalViewerVisibility?.(params.sessionId, visible)
+  }
   const disposal = createTerminalDisposalController({
     sessionId: params.sessionId,
     instanceId: params.instanceId,
@@ -80,6 +158,25 @@ export function createTerminalSessionLifecycle(params: {
   })
   let outputPerf: TerminalOutputPerfHandle | null = null
   let attachFailureSignal = 0
+  const traceStream = (
+    kind: "snapshot" | "output",
+    data: string,
+    cols?: number,
+    rows?: number,
+    phase: "received" | "parsed" = "received",
+  ) => {
+    if (!import.meta.env.DEV || !window.__KANNA_E2E__) return
+    window.__KANNA_E2E__.terminalStreamTrace ??= []
+    window.__KANNA_E2E__.terminalStreamTrace.push({
+      sessionId: params.sessionId,
+      kind,
+      phase,
+      at: performance.now(),
+      cols,
+      rows,
+      activeViewLines: data.split(/\r?\n/).filter((line) => line.includes("ACTIVE_VIEW")),
+    })
+  }
 
   function clearAttachRetry(resetFailure: boolean): void {
     if (params.state.attachRetryTimer) clearTimeout(params.state.attachRetryTimer)
@@ -175,14 +272,17 @@ export function createTerminalSessionLifecycle(params: {
         const initialViewer = getLiveTerminal()
         if (initialViewer) {
           // Establish the owning local role on the same KSP control path
-          // before the attach can become interactive or emit a resize.
+          // before the attach can become interactive or emit a resize. This
+          // is passive: foreground focus is the only local takeover edge.
           client.registerTerminalViewer?.(params.sessionId, initialViewer.cols, initialViewer.rows)
+          client.setTerminalViewerVisibility?.(params.sessionId, true)
         }
         client.attachTerminal(params.sessionId, {
           onSnapshot: (cols, rows, dataB64, agentProvider) => {
             const liveTerminal = getLiveTerminal()
             if (!liveTerminal) return
             const vt = new TextDecoder().decode(base64ToBytes(dataB64))
+            traceStream("snapshot", vt, cols, rows)
             const replaceBuffer = shouldResetTerminalForSnapshot({
               preserveRecoveredScrollback:
                 params.state.preserveRecoveredScrollbackForNextSnapshot,
@@ -206,6 +306,7 @@ export function createTerminalSessionLifecycle(params: {
                 resize()
                 params.state.applyingSnapshot = false
               },
+              onParsed: () => traceStream("snapshot", vt, cols, rows, "parsed"),
             })
           },
           onOutput: (dataB64, metadata) => {
@@ -216,14 +317,14 @@ export function createTerminalSessionLifecycle(params: {
             markTaskSwitchFirstOutput(params.sessionId)
             const decodeStartedAt = performance.now()
             const bytes = base64ToBytes(dataB64)
+            traceStream("output", new TextDecoder().decode(bytes))
             perf?.recordDecode(performance.now() - decodeStartedAt, bytes.length)
             params.clipboardBridge.handleTerminalOutputControlSequences(bytes)
             const completeWrite = perf?.beginXtermWrite(bytes.length)
-            if (completeWrite) {
-              liveTerminal.write(bytes, completeWrite)
-            } else {
-              liveTerminal.write(bytes)
-            }
+            liveTerminal.write(bytes, () => {
+              completeWrite?.()
+              traceStream("output", new TextDecoder().decode(bytes), undefined, undefined, "parsed")
+            })
           },
           onStatus: (status) => {
             void forwardTerminalRuntimeStatus(params.sessionId, status).catch((error) => {
@@ -281,6 +382,13 @@ export function createTerminalSessionLifecycle(params: {
       params.state.attached = true
       params.state.hasAttachedOnce = true
       params.state.sessionExited = false
+      // A terminal can receive its real foreground focus while its stream is
+      // still attaching. The snapshot then restores the daemon's seed grid,
+      // but neither native-window focus nor xterm focusin will necessarily
+      // fire again once attachment completes. Re-evaluate the same guarded
+      // foreground edge here so an already-visible, focused owner registers
+      // as active without synthesizing a DOM event or accepting a hidden view.
+      await activateVisibleViewer()
       if (attachFailureSignal === failureSignalAtStart) {
         clearAttachRetry(true)
       }
@@ -613,6 +721,9 @@ export function createTerminalSessionLifecycle(params: {
 
   function pause() {
     params.state.paused = true
+    void params.getTerminalStreamClient().then((client) => {
+      client.setTerminalViewerVisibility?.(params.sessionId, false)
+    })
     outputPerf?.dispose()
     outputPerf = null
     params.state.connectionGeneration += 1
@@ -706,6 +817,9 @@ export function createTerminalSessionLifecycle(params: {
     try {
       const { cols, rows } = params.terminal.value
       await params.layout.resizeLiveSession(cols, rows, false)
+      const client = await params.getTerminalStreamClient()
+      client.registerTerminalViewer(params.sessionId, cols, rows)
+      client.setTerminalViewerVisibility?.(params.sessionId, true)
     } catch {
       params.state.attached = false
       await startListening()
@@ -725,5 +839,7 @@ export function createTerminalSessionLifecycle(params: {
     dispose,
     redraw,
     ensureConnected,
+    activateVisibleViewer,
+    setViewerVisibility,
   }
 }

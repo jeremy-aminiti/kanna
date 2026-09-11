@@ -17,12 +17,52 @@ import {
   verifyRelayVisualCompanionJourney,
   verifyRelayTaskActivityTransitions,
   verifyRelayTaskMarkedRead,
+  verifyRelayMobileTerminalControlJourney,
   verifyRecentTabShowsRepoLabel,
   type RelayTaskRowExpectation,
 } from "./relay-task-flow.e2e";
 import * as relayTaskFlow from "./relay-task-flow.e2e";
 
 describe("relay task flow orchestration", () => {
+  it("requires the daemon and renderer to match the measured phone grid before protocol handback", async () => {
+    let restored = false;
+    const screenshots: string[] = [];
+    const inspection = () => restored
+      ? {
+          kind: "rendered" as const, byteCount: 100, frameCount: 1,
+          cols: 132, rows: 20, text: "RELAY_GRID_CELL", cursorColumn: 0, cursorRow: 3,
+          visibleRows: ["", "", "RELAY_GRID_CELL"],
+        }
+      : {
+          kind: "rendered" as const, byteCount: 100, frameCount: 1,
+          cols: 50, rows: 36, text: "RELAY_GRID_CELL", cursorColumn: 0, cursorRow: 3,
+          visibleRows: ["", "", "RELAY_GRID_CELL"],
+        };
+    const ui = {
+      inspectTerminalWebView: vi.fn(async () => inspection()),
+      waitUntil: async (condition: () => Promise<boolean>) => {
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          if (await condition()) return;
+        }
+        throw new Error("condition did not settle");
+      },
+    };
+    await verifyRelayMobileTerminalControlJourney({} as never, ui, {
+      taskId: "task", sentinel: "RELAY_GRID_CELL", minDecodedBytes: 1,
+      expectedCols: 132, expectedRows: 20,
+      expectedCell: { column: 0, row: 2, text: "RELAY_GRID_CELL" },
+      expectedCursor: { column: 0, row: 3 },
+    }, {
+      captureScreenshot: async (name) => { screenshots.push(name); },
+      observeAuthoritativeTerminalGeometry: async () => restored ? { cols: 132, rows: 20 } : { cols: 50, rows: 36 },
+      restoreDesktopTerminalControl: async () => { restored = true; },
+    });
+    expect(screenshots).toEqual([
+      "02-terminal-fitted-after-phone-open",
+      "03-terminal-restored-after-protocol-handback",
+    ]);
+  });
+
   it("matches tablet detail identity against the owner-local cloud task id", () => {
     expect(relayTaskDetailDisplayId(
       "cloud:desktop-1:repo-1:owner-task-1",

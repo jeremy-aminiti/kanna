@@ -608,6 +608,9 @@ describe("kd CLI", () => {
     await expect(runCli(["test", "rust", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test rust"));
 
+    await expect(runCli(["test", "remote-e2e", "--help"])).resolves.toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("--mobile-relay-terminal-control"));
+
     await expect(runCli(["test", "desktop-e2e", "--help"])).resolves.toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("Usage: kd test desktop-e2e"));
 
@@ -1489,15 +1492,19 @@ describe("kd CLI", () => {
     });
     expect(parseCliArgs(["test", "remote-e2e"])).toEqual({
       taskId: "test.remote-e2e",
-      input: { dev: true, staging: false, mobileRelay: false, desktopPairing: false, ifChanged: false },
+      input: { dev: true, staging: false, mobileRelay: false, mobileRelayTerminalControl: false, desktopPairing: false, ifChanged: false },
     });
     expect(parseCliArgs(["test", "remote-e2e", "--staging"])).toEqual({
       taskId: "test.remote-e2e",
-      input: { dev: false, staging: true, mobileRelay: false, desktopPairing: false, ifChanged: false },
+      input: { dev: false, staging: true, mobileRelay: false, mobileRelayTerminalControl: false, desktopPairing: false, ifChanged: false },
     });
     expect(parseCliArgs(["test", "remote-e2e", "--if-changed"])).toEqual({
       taskId: "test.remote-e2e",
-      input: { dev: true, staging: false, mobileRelay: false, desktopPairing: false, ifChanged: true },
+      input: { dev: true, staging: false, mobileRelay: false, mobileRelayTerminalControl: false, desktopPairing: false, ifChanged: true },
+    });
+    expect(parseCliArgs(["test", "remote-e2e", "--mobile-relay-terminal-control"])).toEqual({
+      taskId: "test.remote-e2e",
+      input: { dev: true, staging: false, mobileRelay: false, mobileRelayTerminalControl: true, desktopPairing: false, ifChanged: false },
     });
     expect(() => parseCliArgs(["test", "remote-e2e", "--staging", "--if-changed"])).toThrow(
       "remote-e2e --if-changed applies to the dev lane only"

@@ -16,11 +16,11 @@ kanna-daemon manages persistent PTY sessions for Claude CLI agents. It runs as a
 8. **Multiple clients per session.** Attached clients receive output via broadcast. A
    geometry-capable viewer registers its role and measured dimensions on the
    control connection. One daemon-owned controller proposes the PTY size:
-   eligible local viewers win over eligible remote viewers, ties are
-   deterministic by viewer id, and a remote viewer never shrinks an attached
-   local viewer. An explicit takeover overrides automatic election until
-   release or disconnect. Followers render the controller's authoritative grid
+   an eligible registered viewer that becomes the actively viewed terminal
+   steals controller sizing. Followers render the controller's authoritative grid
    and may pan/scroll it; their viewport is not a PTY resize.
+   Geometry protocol v2 separately negotiates active-view election; a v1 peer
+   may register geometry but must never receive an active-view command.
 9. **Always broadcast.** Before exiting during handoff, the old daemon broadcasts `ShuttingDown` to all subscribers.
 10. **Always reconnect.** Apps detect daemon restart (via `ShuttingDown` or EOF) and automatically reconnect + re-attach all tracked sessions.
 11. **Authorize the successor before handoff state.** For every supported handoff version, the sender authenticates the peer as a daemon directly spawned by the trusted app-launcher executable before it acquires daemon-lifecycle ownership, seals a registry, snapshots a session, writes `HandoffReady`, or transfers a descriptor.
@@ -169,18 +169,18 @@ is fenced by the control connection, viewer id, and registration generation.
 viewer can change the PTY and headless terminal. A follower resize is a no-op.
 The selection table is:
 
-| Eligible candidates | Automatic controller |
+| Eligible candidates | Controller |
 |---|---|
-| local viewers | deterministic local candidate |
-| no local, remote viewers | deterministic remote candidate |
-| no visible measured viewers | retain last applied size |
+| actively viewed terminal | most recently active viewer |
+| no actively viewed terminal | retain last applied size |
 
-The current eligible controller is retained. A local arrival preempts an
-automatically selected remote controller; ordinary focus and input never
-reclaim an explicit takeover. Detaching a follower does nothing. Detaching,
-disconnecting, or backgrounding the controller elects once. A transient
-transport loss may relinquish takeover; there is no heartbeat or timeout
-arbitration loop.
+The current eligible controller is retained across registration, resize, input,
+and reconnect hydration. `ActiveViewer` from an eligible registered viewer
+steals sizing for that viewer; command serialization is the tie break.
+Hidden, backgrounded, and zero-size viewers are ineligible. Detaching a
+follower does nothing. Detaching, disconnecting, or backgrounding the
+controller elects once; a reconnect re-registers but does not steal control.
+There is no heartbeat or timeout arbitration loop.
 
 Legacy undeclared resize requests retain the old minimum policy only while all
 participants are legacy. Once a geometry-capable viewer registers, legacy

@@ -138,8 +138,6 @@ export interface MobileController {
     kind: TaskTerminalInputKind
   ): void;
   resizeTaskTerminal(taskId: string, cols: number, rows: number): void;
-  takeTaskTerminalControl(taskId: string): void;
-  releaseTaskTerminalControl(taskId: string): void;
   /** Pull the next older chunk of terminal scrollback, if the desktop kept any
    * back and no request is already in flight. */
   requestTaskTerminalScrollback(taskId: string): void;
@@ -343,6 +341,7 @@ export function createMobileController(
         retagTaskId(taskId: string): void;
       }
     | null = null;
+  let taskTerminalActivationPending: string | null = null;
   let requestedTaskTerminalGeometry:
     | (MobileTerminalGeometry & { taskId: string })
     | null = null;
@@ -1128,11 +1127,27 @@ export function createMobileController(
     taskTerminalGeneration += 1;
     subscription?.close();
     if (current) {
-      // Closing the attachment is also the authority-release boundary. Drive
-      // the screen out of its optimistic takeover state before a replacement
-      // task or foreground rehydration can reuse the component.
+      // Closing the attachment releases its viewer registration before a
+      // replacement task or foreground rehydration can reuse the component.
       store.setTaskTerminalStatus(current.taskId, "restarting");
     }
+  };
+
+  const setActiveTaskTerminalViewing = (visible: boolean) => {
+    const current = activeTaskTerminal;
+    if (!current) return;
+    current.subscription.setViewerVisible?.(visible);
+    if (!visible) return;
+
+    // A terminal can be attached before React Native has measured it. Retain
+    // the active-view signal until that first non-zero viewport is available.
+    const geometry = requestedTaskTerminalGeometry;
+    if (geometry?.taskId !== current.taskId) {
+      taskTerminalActivationPending = current.taskId;
+      return;
+    }
+    current.subscription.activate?.();
+    taskTerminalActivationPending = null;
   };
 
   const stopTaskAgent = () => {
@@ -1499,17 +1514,6 @@ export function createMobileController(
     }
   };
 
-  /** Push the latest measured viewport at a live attachment, ignoring the
-   * dedupe that suppresses an unchanged size. Used where the daemon-side
-   * registration is known to be new: a fresh attachment, or a takeover. */
-  const resendRequestedTaskTerminalGeometry = (taskId: string) => {
-    const geometry = requestedTaskTerminalGeometry;
-    if (geometry?.taskId !== taskId || activeTaskTerminal?.taskId !== taskId) {
-      return;
-    }
-    activeTaskTerminal.subscription.resize?.(geometry.cols, geometry.rows);
-  };
-
   const startTaskTerminal = (taskId: string) => {
     const routeIdentity = client.getTaskRouteIdentity?.(taskId) ?? taskId;
     if (
@@ -1551,9 +1555,8 @@ export function createMobileController(
         }
         switch (event.type) {
           case "connection":
-            // A transport loss retires the daemon attachment's authority. The
-            // next snapshot is a fresh registration/reconciliation boundary;
-            // never keep presenting the old task's optimistic takeover state.
+            // A transport loss retires the daemon viewer attachment. The next
+            // snapshot re-registers the terminal without making it active.
             store.setTaskTerminalStatus(
               streamTaskId,
               event.connected ? "connecting" : "restarting"
@@ -1619,11 +1622,13 @@ export function createMobileController(
           streamTaskId = nextTaskId;
         }
       };
+      taskTerminalActivationPending = taskId;
       // The task-detail layout can be known before route resolution or stream
       // authentication completes. The transport queues this control frame
       // behind attach, so the initial daemon snapshot cannot strand the PTY at
       // its never-rendered 80x24 default.
       resizeToRequestedGeometry();
+      setActiveTaskTerminalViewing(appForeground && taskDetailVisible);
     } catch (error) {
       if (generation !== taskTerminalGeneration) {
         return;
@@ -2847,6 +2852,7 @@ export function createMobileController(
     setTaskDetailVisible(visible) {
       if (taskDetailVisible === visible) return;
       taskDetailVisible = visible;
+      setActiveTaskTerminalViewing(visible && appForeground);
       reconcileTaskSummarySubscriptions();
       reconcileSelectedTaskRead();
     },
@@ -2854,6 +2860,7 @@ export function createMobileController(
     setAppForeground(foreground) {
       if (appForeground === foreground) return;
       appForeground = foreground;
+      setActiveTaskTerminalViewing(foreground && taskDetailVisible);
       reconcileTaskSummarySubscriptions();
     },
 
@@ -3787,21 +3794,10 @@ export function createMobileController(
       requestedTaskTerminalGeometry = { taskId, cols, rows };
       if (activeTaskTerminal?.taskId === taskId) {
         activeTaskTerminal.subscription.resize?.(cols, rows);
-      }
-    },
-
-    takeTaskTerminalControl(taskId) {
-      if (activeTaskTerminal?.taskId !== taskId) return;
-      // Taking control means "size this terminal for my phone". The daemon
-      // adopts the controller's registered viewport, so the measurement has to
-      // be on the wire before the takeover is worth anything.
-      resendRequestedTaskTerminalGeometry(taskId);
-      activeTaskTerminal.subscription.takeControl?.();
-    },
-
-    releaseTaskTerminalControl(taskId) {
-      if (activeTaskTerminal?.taskId === taskId) {
-        activeTaskTerminal.subscription.releaseControl?.();
+        if (taskTerminalActivationPending === taskId && appForeground && taskDetailVisible) {
+          activeTaskTerminal.subscription.activate?.();
+          taskTerminalActivationPending = null;
+        }
       }
     },
 

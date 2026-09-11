@@ -54,7 +54,7 @@ import { runShellVisualSmoke } from "./specs/smoke/shell-visual.e2e";
 import { runTabReselectionSmoke } from "./specs/smoke/tab-reselection.e2e";
 import { runCloudTaskFlow } from "./specs/cloud/cloud-task-flow.e2e";
 import { runHybridTaskFlow } from "./specs/hybrid/hybrid-task-flow.e2e";
-import { runRelayTaskFlow } from "./specs/relay/relay-task-flow.e2e";
+import { runRelayTaskFlow, runRelayTerminalControlJourney } from "./specs/relay/relay-task-flow.e2e";
 import { startMobileRelayHarness } from "./helpers/relay-harness";
 
 export const smokeSpecPaths = [
@@ -75,7 +75,7 @@ export const supportedSmokeModes = [
   "shell-visual",
   "profile-disconnected",
   "cloud",
-  "relay",
+  "relay", "relay-terminal-control",
   "hybrid"
 ] as const;
 
@@ -90,7 +90,7 @@ export function resolveSmokeModeAppEnv(
 
 export function requiresExactExpoEnvironment(mode: string): boolean {
   return (
-    mode === "relay" ||
+    mode === "relay" || mode === "relay-terminal-control" ||
     mode === "hybrid" ||
     mode === "profile-disconnected" ||
     mode === "search-focus"
@@ -103,7 +103,7 @@ export function resolveSimulatorAlertHandling(
   if (mode === "hybrid" || mode === "search-focus") {
     return "accept";
   }
-  if (mode === "relay" || mode === "profile-disconnected") {
+  if (mode === "relay" || mode === "relay-terminal-control" || mode === "profile-disconnected") {
     return "manual";
   }
   return "dismiss";
@@ -191,24 +191,20 @@ async function main(): Promise<void> {
   if (!supportedSmokeModes.includes(mode as (typeof supportedSmokeModes)[number])) {
     throw new Error(`Unsupported mobile E2E mode: ${mode}`);
   }
-  if (
-    (mode === "relay" || mode === "hybrid" || mode === "profile-disconnected") &&
-    !process.env.KANNA_E2E_DESKTOP_SERVER_URL
-  ) {
-    process.env.KANNA_E2E_DESKTOP_SERVER_URL = "http://127.0.0.1:1";
-  }
   const modeAppEnv = resolveSmokeModeAppEnv(mode, process.env.KANNA_APP_ENV);
   if (modeAppEnv) {
     process.env.KANNA_APP_ENV = modeAppEnv;
   }
 
+  const relayHarnessOwnsDesktopEndpoint =
+    mode === "relay" || mode === "relay-terminal-control" || mode === "hybrid" || mode === "profile-disconnected";
   const env = resolveRequiredMobileE2eEnv(
-    process.env as Record<string, string | undefined>
+    process.env as Record<string, string | undefined>,
+    { requireDesktopServerUrl: !relayHarnessOwnsDesktopEndpoint },
   );
-  const desktopServerUrl = resolveDesktopServerUrlForTarget(
-    env.desktopServerUrl,
-    env.target
-  );
+  const desktopServerUrl = relayHarnessOwnsDesktopEndpoint
+    ? ""
+    : resolveDesktopServerUrlForTarget(env.desktopServerUrl, env.target);
   if ((mode === "hybrid" || mode === "profile-disconnected") && env.target !== "simulator") {
     throw new Error(
       `The mobile ${mode} E2E mode is simulator-only; it must not install or launch a physical device.`
@@ -217,6 +213,11 @@ async function main(): Promise<void> {
   if (mode === "shell-visual" && env.target !== "simulator") {
     throw new Error(
       "The mobile shell visual E2E mode is simulator-only so screenshot geometry and colors remain pinned."
+    );
+  }
+  if (mode === "relay-terminal-control" && env.target !== "simulator") {
+    throw new Error(
+      "The focused relay terminal-control journey is simulator-only because it requires retained simctl screenshots."
     );
   }
   await assertXcuitestDriverInstalled(process.env as Record<string, string | undefined>);
@@ -298,12 +299,13 @@ async function main(): Promise<void> {
     }
     if (
       mode === "relay" ||
+      mode === "relay-terminal-control" ||
       mode === "hybrid" ||
       mode === "profile-disconnected" ||
       mode === "search-focus"
     ) {
       relayHarness = await startMobileRelayHarness({
-        mode: mode === "relay" ? "relay" : "hybrid"
+        mode: (mode === "relay" || mode === "relay-terminal-control") ? "relay" : "hybrid"
       });
     }
 
@@ -314,7 +316,7 @@ async function main(): Promise<void> {
           mode === "search-focus") &&
         relayHarness
           ? relayHarness.hybridEnv
-          : mode === "relay" && relayHarness
+          : (mode === "relay" || mode === "relay-terminal-control") && relayHarness
           ? relayHarness.env
           :
         mode === "cloud"
@@ -375,6 +377,20 @@ async function main(): Promise<void> {
         setLanHttpEnabled: relayHarness.setLanHttpEnabled,
         waitForAppReady: (readySelector) =>
           waitForExpoAppReady(driver!, readySelector)
+      });
+    } else if (mode === "relay-terminal-control" && relayHarness) {
+      await runRelayTerminalControlJourney(driver, {
+        credentials: relayHarness.credentials, fixture: relayHarness.fixture,
+        observeAuthoritativeTerminalGeometry: relayHarness.observeAuthoritativeTerminalGeometry,
+        restoreDesktopTerminalControl: relayHarness.restoreDesktopTerminalControl,
+        async captureScreenshot(name) {
+          if (!simulatorDevice) {
+            throw new Error("Focused relay terminal-control screenshots require a simulator device");
+          }
+          const dir = join(projectRoot, "../..", "docs/task-screenshots/5c82e022-screenshots");
+          await mkdir(dir, { recursive: true });
+          await execFileAsync("xcrun", ["simctl", "io", simulatorDevice.udid, "screenshot", join(dir, `${name}.png`)]);
+        },
       });
     } else if (mode === "relay" && relayHarness) {
       await runRelayTaskFlow(driver, {
