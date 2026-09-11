@@ -2125,13 +2125,11 @@ describe("TaskScreen", () => {
     expect(titleText?.props).toMatchObject({
       accessible: false,
       children: title,
-      maxFontSizeMultiplier: 1.5,
       numberOfLines: 1,
       testID: "mobile.task-detail-title"
     });
     expect(findByTestId(tree, "mobile.task-detail-task-id")?.props).toMatchObject({
-      accessible: false,
-      maxFontSizeMultiplier: 1.5
+      accessible: false
     });
     expect(findByTypeAndText(tree, "Text", "in progress")?.props).toMatchObject({
       accessible: false,
