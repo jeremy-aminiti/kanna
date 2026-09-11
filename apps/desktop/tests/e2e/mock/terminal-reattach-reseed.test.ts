@@ -6,6 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { RELOAD_APP_SCRIPT } from "../helpers/appReady";
 import { cleanupFixtureRepos, createFixtureRepo } from "../helpers/fixture-repo";
 import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { cleanupWorktrees, importTestRepoDirect, resetDatabase } from "../helpers/reset";
@@ -190,7 +191,11 @@ async function queueUnparsedOutput(
 /** Read the actual DOM renderer, not xterm's retained cell buffer. */
 async function paintedRows(client: WebDriverClient, sessionId: string): Promise<string[]> {
   return client.executeSync<string[]>(
-    `const el = window.__KANNA_E2E__.terminalBuffers.element(${JSON.stringify(sessionId)});
+    `const hook = window.__KANNA_E2E__.terminalBuffers;
+     const el = hook.element(${JSON.stringify(sessionId)});
+     // Non-activating WKWebView can suspend rAF. Flush only the renderer,
+     // exactly like the existing native screenshot path; never change cells.
+     hook.refresh(${JSON.stringify(sessionId)});
      if (!el?.getClientRects().length) throw new Error("terminal is not visible");
      return Array.from(el.querySelectorAll(".xterm-rows > div"))
        .map(row => (row.textContent || "").trimEnd()).filter(Boolean);`,
@@ -200,10 +205,12 @@ async function paintedRows(client: WebDriverClient, sessionId: string): Promise<
 async function scrollToOldestRows(client: WebDriverClient, sessionId: string): Promise<void> {
   await client.executeSync(
     `const el = window.__KANNA_E2E__.terminalBuffers.element(${JSON.stringify(sessionId)});
-     const viewport = el.querySelector(".xterm-viewport");
-     if (!viewport) throw new Error("terminal viewport unavailable");
-     viewport.scrollTop = 0;
-     viewport.dispatchEvent(new Event("scroll"));`,
+     const viewport = el.querySelector(".xterm-scrollable-element");
+     if (!viewport) throw new Error("terminal scroll container unavailable");
+     // xterm 6 uses its own scrollable element, not native scrollTop.
+     viewport.dispatchEvent(new WheelEvent("wheel", {
+       deltaY: -10000, deltaMode: 0, bubbles: true, cancelable: true,
+     }));`,
   );
   await expect.poll(async () => client.executeSync<number>(
     `return window.__KANNA_E2E__.terminalBuffers.stats(${JSON.stringify(sessionId)}).viewportY;`,
@@ -265,7 +272,7 @@ describe("terminal re-attach re-seed", () => {
   beforeAll(async () => {
     await client.createSession();
     await resetDatabase(client);
-    await client.executeSync("location.reload()");
+    await client.executeSync(RELOAD_APP_SCRIPT);
     await client.waitForAppReady();
     await dismissStartupShortcutsModal(client);
     fixtureRepoPath = await createFixtureRepo("terminal-reattach-reseed");
