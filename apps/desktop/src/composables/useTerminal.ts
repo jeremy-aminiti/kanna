@@ -106,7 +106,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let nativeWindowFocusTrackingGeneration = 0
 
   function traceNativeFocus(
-    phase: "start" | "ready" | "event" | "activate" | "stale" | "error",
+    phase: "start" | "ready" | "event" | "awaiting-document" | "activate" | "stale" | "error",
     details: Partial<Omit<KannaNativeFocusTraceEntry, "sessionId" | "phase">> = {},
   ) {
     if (!import.meta.env.DEV || !window.__KANNA_E2E__) return
@@ -129,11 +129,27 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         traceNativeFocus("stale", { focused: event.payload })
         return
       }
-      traceNativeFocus("activate", { focused: event.payload })
-      void lifecycle.activateVisibleViewer().catch((error) => {
-        traceNativeFocus("error", { detail: String(error) })
-        console.warn("[terminal] failed to activate native-focused viewer:", error)
-      })
+      const activate = () => {
+        if (generation !== nativeWindowFocusTrackingGeneration) {
+          traceNativeFocus("stale", { focused: event.payload })
+          return
+        }
+        traceNativeFocus("activate", { focused: event.payload })
+        void lifecycle.activateVisibleViewer().catch((error) => {
+          traceNativeFocus("error", { detail: String(error) })
+          console.warn("[terminal] failed to activate native-focused viewer:", error)
+        })
+      }
+      // macOS delivers Tauri's key-window event just before WebKit updates
+      // document.hasFocus(). Preserve the lifecycle's foreground guard, but
+      // subscribe to that same real DOM focus transition instead of losing
+      // the native producer edge or polling for it.
+      if (!document.hasFocus()) {
+        traceNativeFocus("awaiting-document", { focused: event.payload })
+        window.addEventListener("focus", activate, { once: true })
+        return
+      }
+      activate()
     }).then((unlisten) => {
       if (generation !== nativeWindowFocusTrackingGeneration) {
         unlisten()

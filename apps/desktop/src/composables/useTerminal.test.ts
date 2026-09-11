@@ -752,6 +752,53 @@ describe("useTerminal", () => {
     wrapper.unmount();
   });
 
+  it("waits for the real document focus edge when macOS reports its key window first", async () => {
+    const attachTerminal = vi.fn((taskId: string, handlers: TerminalStreamHandlers) => {
+      terminalStreamHandlers.set(taskId, handlers);
+      handlers.onSnapshot?.(80, 24, btoa("native focus ordering"));
+    });
+    const activateTerminalViewer = vi.fn();
+    streamClientMock.getSharedStreamClient.mockResolvedValue({
+      attachTerminal,
+      sendTermInput: vi.fn(),
+      sendTermResize: vi.fn(),
+      detach: vi.fn(),
+      registerTerminalViewer: vi.fn(),
+      setTerminalViewerVisibility: vi.fn(),
+      activateTerminalViewer,
+    });
+    isTauriMock = true;
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+
+    const { useTerminal } = await import("./useTerminal");
+    const TestHarness = defineComponent({
+      setup() { return useTerminal("session-1"); },
+      render() { return h("div"); },
+    });
+    const wrapper = mount(TestHarness);
+    const terminalElement = document.createElement("div");
+    Object.defineProperty(terminalElement, "offsetWidth", { configurable: true, value: 800 });
+    Object.defineProperty(terminalElement, "offsetHeight", { configurable: true, value: 600 });
+    terminalElement.querySelector = vi.fn(() => null) as typeof terminalElement.querySelector;
+    terminalElement.closest = vi.fn(() => null) as typeof terminalElement.closest;
+    document.body.appendChild(terminalElement);
+    wrapper.vm.init(terminalElement);
+    await wrapper.vm.startListening();
+    await flushAsyncWork();
+
+    nativeWindowFocusHandler?.({ payload: true });
+    await flushAsyncWork();
+    expect(activateTerminalViewer).not.toHaveBeenCalled();
+
+    hasFocus.mockReturnValue(true);
+    window.dispatchEvent(new Event("focus"));
+    await flushAsyncWork();
+    expect(activateTerminalViewer).toHaveBeenCalledWith("session-1");
+
+    terminalElement.remove();
+    wrapper.unmount();
+  });
+
   it("replaces snapshots even when the daemon-reported provider differs", async () => {
     const client = installKspStreamClient({
       onAttach: (_taskId, handlers) => {
