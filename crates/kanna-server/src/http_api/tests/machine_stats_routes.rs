@@ -33,7 +33,7 @@ async fn compact_local_disk_unavailability_is_concise_and_hides_database_path() 
 }
 
 #[tokio::test]
-async fn compact_local_stats_do_not_expose_failed_storage_paths() {
+async fn compact_local_stats_report_partial_storage_without_exposing_failed_paths() {
     let marker = "compact-private-storage-path";
     let state = test_state_with_seed("stats-storage-filter", "Storage filter", |db| {
         db.insert_test_repo_with_path("broken-storage", &format!("/{marker}\0/repo"), "Broken")
@@ -60,7 +60,12 @@ async fn compact_local_stats_do_not_expose_failed_storage_paths() {
         compact["machines"][0]["freeDiskBytes"].is_u64(),
         "{compact}"
     );
-    assert!(compact["machines"][0].get("errors").is_none(), "{compact}");
+    assert_eq!(
+        compact["machines"][0]["errors"],
+        json!([
+            "disk partially unavailable: free value excludes unmeasured paths; use detailed=true"
+        ])
+    );
     assert!(!compact.to_string().contains(marker), "{compact}");
 
     let detailed = app
@@ -118,7 +123,10 @@ async fn compact_legacy_remote_filters_detailed_diagnostics_but_detailed_retains
                 "observedProcessCount": 1, "sampledProcessCount": 1,
                 "unavailableProcessCount": 0, "truncated": false
             },
-            "storage": [],
+            "storage": [{
+                "volumeId": "device:1", "paths": [], "totalBytes": 10000,
+                "availableBytes": 2500, "freeBytes": 3000, "readOnly": false
+            }],
             "collectionErrors": [
                 "CPU topology unavailable",
                 "process enumeration failed",
@@ -175,10 +183,12 @@ async fn compact_legacy_remote_filters_detailed_diagnostics_but_detailed_retains
         .iter()
         .find(|machine| machine["machineId"] == "stats-legacy-peer")
         .unwrap();
-    assert!(compact_peer["freeDiskBytes"].is_null(), "{compact}");
+    assert_eq!(compact_peer["freeDiskBytes"], 2500, "{compact}");
     assert_eq!(
         compact_peer["errors"],
-        json!(["disk unavailable: peer returned no storage measurement"])
+        json!([
+            "disk partially unavailable: free value excludes unmeasured paths; use detailed=true"
+        ])
     );
     assert!(compact_peer.get("cpu").is_none(), "{compact}");
     assert!(compact_peer.get("processes").is_none(), "{compact}");

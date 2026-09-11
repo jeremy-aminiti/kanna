@@ -440,11 +440,13 @@ fn gather_local_compact_stats(state: &AppState) -> CompactMachineStats {
     };
     let free_disk_bytes = match Db::open(&state.config.db_path) {
         Ok(db) => {
-            // Detailed storage errors contain a path-by-path inventory. Compact
-            // callers only need to know whether a usable measurement exists.
             let mut storage_errors = Vec::new();
             let storage = storage::collect(&db, &mut storage_errors);
-            storage::least_available_bytes(&storage)
+            let available = storage::least_available_bytes(&storage);
+            if available.is_some() && !storage_errors.is_empty() {
+                errors.push(compact_partial_disk_error());
+            }
+            available
         }
         Err(_) => {
             errors.push("disk unavailable: database could not be opened".into());
@@ -605,6 +607,12 @@ fn compact_from_detailed(machine: MachineStats) -> CompactMachineStats {
         .and_then(storage::least_available_bytes);
     if free_disk_bytes.is_none() {
         errors.push("disk unavailable: peer returned no storage measurement".into());
+    } else if machine
+        .collection_errors
+        .as_deref()
+        .is_some_and(|errors| errors.iter().any(|error| error.starts_with("storage ")))
+    {
+        errors.push(compact_partial_disk_error());
     }
     compact_errors(&mut errors);
     CompactMachineStats {
@@ -614,6 +622,10 @@ fn compact_from_detailed(machine: MachineStats) -> CompactMachineStats {
         free_disk_bytes,
         errors,
     }
+}
+
+fn compact_partial_disk_error() -> String {
+    "disk partially unavailable: free value excludes unmeasured paths; use detailed=true".into()
 }
 
 fn compact_load_averages(five: f64, fifteen: f64, errors: &mut Vec<String>) -> CompactLoadAverages {
