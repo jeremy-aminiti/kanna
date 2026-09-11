@@ -142,21 +142,26 @@ function parseMobileUpInput(rest: string[]): ParsedCliCommand {
 function parseMobileRunInput(rest: string[]): ParsedCliCommand {
   let simulator: true | string | undefined;
   let androidEmulator: true | string | undefined;
+  let androidDevice: string | undefined;
   const remainingArgs: string[] = [];
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
-    if (arg !== "--simulator" && arg !== "--android-emulator") {
+    if (arg !== "--simulator" && arg !== "--android-emulator" && arg !== "--android-device") {
       remainingArgs.push(arg);
       continue;
     }
-    const current = arg === "--simulator" ? simulator : androidEmulator;
+    const current = arg === "--simulator" ? simulator : arg === "--android-emulator" ? androidEmulator : androidDevice;
     if (current !== undefined) {
       throw new Error(`mobile run accepts ${arg} only once`);
     }
     const value = rest[index + 1];
+    if (arg === "--android-device" && (!value || value.startsWith("--"))) {
+      throw new Error("mobile run --android-device requires an exact adb serial");
+    }
     const parsed = value && !value.startsWith("--") ? value : true;
     if (arg === "--simulator") simulator = parsed;
-    else androidEmulator = parsed;
+    else if (arg === "--android-emulator") androidEmulator = parsed;
+    else androidDevice = parsed as string;
     if (value && !value.startsWith("--")) {
       index += 1;
     }
@@ -168,6 +173,7 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
   );
   if (simulator !== undefined) input.simulator = simulator;
   if (androidEmulator !== undefined) input.androidEmulator = androidEmulator;
+  if (androidDevice !== undefined) input.androidDevice = androidDevice;
   const unsupportedFlags = Object.entries(input)
     .filter(
       ([key, value]) =>
@@ -175,6 +181,7 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
           "device",
           "simulator",
           "androidEmulator",
+          "androidDevice",
           "production",
           "staging",
           "withCredentials",
@@ -187,23 +194,23 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
     throw new Error(
-      "mobile run only accepts --device, --simulator [<udid|name>], --android-emulator [<avd>], --production, --staging, or --install"
+      "mobile run only accepts --device, --simulator [<udid|name>], --android-emulator [<avd>], --android-device <serial>, --production, --staging, or --install"
     );
   }
   if (input.production === true && input.staging === true) {
     throw new Error("mobile run accepts only one of --production or --staging");
   }
   const targetCount = Number(input.device) + Number(input.simulator !== undefined) +
-    Number(input.androidEmulator !== undefined);
+    Number(input.androidEmulator !== undefined) + Number(input.androidDevice !== undefined);
   if (targetCount > 1) {
-    throw new Error("mobile run accepts exactly one target: --device, --simulator [<udid|name>], or --android-emulator [<avd>]");
+    throw new Error("mobile run accepts exactly one target: --device, --simulator [<udid|name>], --android-emulator [<avd>], or --android-device <serial>");
   }
   if (targetCount === 0) {
     throw new Error(
-      "mobile run requires a target: use --simulator [<udid|name>], --device, or --android-emulator [<avd>]"
+      "mobile run requires a target: use --simulator [<udid|name>], --device, --android-emulator [<avd>], or --android-device <serial>"
     );
   }
-  if ((input.simulator !== undefined || input.androidEmulator !== undefined) && input.install === true) {
+  if ((input.simulator !== undefined || input.androidEmulator !== undefined || input.androidDevice !== undefined) && input.install === true) {
     throw new Error("mobile run --install is only supported with the physical-iPhone --device target");
   }
   if (input.withCredentials === true && (input.production === true || input.staging === true)) {
@@ -217,6 +224,7 @@ function parseMobileRunInput(rest: string[]): ParsedCliCommand {
       ...(input.androidEmulator !== undefined
         ? { androidEmulator: input.androidEmulator }
         : {}),
+      ...(input.androidDevice !== undefined ? { androidDevice: input.androidDevice } : {}),
       production: input.production === true,
       staging: input.staging === true,
       ...(typeof input.build === "string" ? { build: input.build } : {}),
@@ -288,19 +296,25 @@ function parseMobileUninstallInput(rest: string[]): ParsedCliCommand {
 
 function parseMobileDoctorInput(rest: string[]): ParsedCliCommand {
   let androidEmulator: true | string | undefined;
+  let androidDevice: string | undefined;
   const remainingArgs: string[] = [];
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
-    if (arg !== "--android-emulator") {
+    if (arg !== "--android-emulator" && arg !== "--android-device") {
       remainingArgs.push(arg);
       continue;
     }
-    if (androidEmulator !== undefined) {
-      throw new Error("mobile doctor accepts --android-emulator only once");
+    if ((arg === "--android-emulator" && androidEmulator !== undefined) || (arg === "--android-device" && androidDevice !== undefined)) {
+      throw new Error(`mobile doctor accepts ${arg} only once`);
     }
     const value = rest[index + 1];
-    androidEmulator = value && !value.startsWith("--") ? value : true;
-    if (typeof androidEmulator === "string") index += 1;
+    if (arg === "--android-device" && (!value || value.startsWith("--"))) {
+      throw new Error("mobile doctor --android-device requires an exact adb serial");
+    }
+    const parsed = value && !value.startsWith("--") ? value : true;
+    if (arg === "--android-emulator") androidEmulator = parsed;
+    else androidDevice = parsed as string;
+    if (typeof parsed === "string") index += 1;
   }
   const input = parseFlagInput(
     remainingArgs,
@@ -308,17 +322,18 @@ function parseMobileDoctorInput(rest: string[]): ParsedCliCommand {
     { "--install": "install" }
   );
   if (androidEmulator !== undefined) input.androidEmulator = androidEmulator;
+  if (androidDevice !== undefined) input.androidDevice = androidDevice;
   const unsupportedFlags = Object.entries(input)
-    .filter(([key, value]) => !["device", "androidEmulator", "production", "staging", "withCredentials"].includes(key) && value === true)
+    .filter(([key, value]) => !["device", "androidEmulator", "androidDevice", "production", "staging", "withCredentials"].includes(key) && value === true)
     .map(([key]) => key);
   if (unsupportedFlags.length > 0) {
-    throw new Error("mobile doctor only accepts --device, --android-emulator [<avd>], --production, or --staging");
+    throw new Error("mobile doctor only accepts --device, --android-emulator [<avd>], --android-device <serial>, --production, or --staging");
   }
   if (input.production === true && input.staging === true) {
     throw new Error("mobile run accepts only one of --production or --staging");
   }
-  if (Number(input.device) + Number(input.androidEmulator !== undefined) !== 1) {
-    throw new Error("mobile doctor requires exactly one of --device or --android-emulator [<avd>]");
+  if (Number(input.device) + Number(input.androidEmulator !== undefined) + Number(input.androidDevice !== undefined) !== 1) {
+    throw new Error("mobile doctor requires exactly one of --device, --android-emulator [<avd>], or --android-device <serial>");
   }
   if (input.withCredentials === true) {
     throw new Error(CREDENTIALS_FLAG_ERROR);
@@ -1154,12 +1169,12 @@ const helpTopics: Record<string, string[]> = {
     "  dev seed [--db <path-or-name>] [--delete-db]",
     "  daemon kill",
     "  mobile up [--build dev|staging] [--owner staging] [--cloud staging] [--production|--staging]",
-    "  mobile run (--simulator [<udid|name>] | --device | --android-emulator [<avd>]) [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
+    "  mobile run (--simulator [<udid|name>] | --device | --android-emulator [<avd>] | --android-device <serial>) [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
     "  mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
     "  mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
     "  mobile publish --production --ref release/X.Y [--build-number <number>|auto] [--release-type <type>] [--dry-run]",
     "  mobile verify --ipa <path> [--version <version>] [--build-number <number>]",
-    "  mobile doctor (--device | --android-emulator [<avd>])",
+    "  mobile doctor (--device | --android-emulator [<avd>] | --android-device <serial>)",
     "  mobile qa --production [--ota]",
     "  mobile ota publish --staging|--production [--ref <branch|tag|sha>] [--dry-run] [--rollback-to <updateId>]",
     "  mobile ota status --staging|--production",
@@ -1301,10 +1316,10 @@ const helpTopics: Record<string, string[]> = {
     "",
     "Commands:",
     "  mobile up [--build dev|staging] [--owner staging] [--cloud staging] [--production|--staging]",
-    "  mobile run (--simulator [<udid|name>] | --device | --android-emulator [<avd>]) [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
+    "  mobile run (--simulator [<udid|name>] | --device | --android-emulator [<avd>] | --android-device <serial>) [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
     "  mobile uninstall --device --staging|--production --confirm-bundle <bundle-id> [--confirm-production]",
     "  mobile archive --production --ref <branch|tag|sha> --build-number <number> [--version <version>] [--out-dir <dir>] [--upload] [--dry-run]",
-    "  mobile doctor (--device | --android-emulator [<avd>])",
+    "  mobile doctor (--device | --android-emulator [<avd>] | --android-device <serial>)",
     "  mobile qa --production [--ota]",
     "  mobile ota <command>",
     "  mobile test",
@@ -1323,14 +1338,15 @@ const helpTopics: Record<string, string[]> = {
     "  --cloud staging     Use staging Firebase and relay services."
   ],
   "mobile run": [
-    "Usage: kd mobile run (--simulator [<udid|name>] | --device | --android-emulator [<avd>]) [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
+    "Usage: kd mobile run (--simulator [<udid|name>] | --device | --android-emulator [<avd>] | --android-device <serial>) [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging] [--install]",
     "",
-    "Build, install, and launch Kanna mobile on an iOS Simulator, physical iPhone, or Android emulator.",
+    "Build, install, and launch Kanna mobile on an iOS Simulator, physical iPhone, Android emulator, or authorized physical Android device.",
     "",
     "Options:",
     "  --simulator [target] Target a simulator by optional UDID or name; defaults to a booted or newest available iPhone.",
     "  --device             Target a physical iPhone selected from KANNA_IOS_DEVICE_UDID or KANNA_IOS_PHYSICAL_DEVICE_NAME.",
     "  --android-emulator [avd] Target an Android AVD by optional exact name; defaults to the sole running or installed AVD.",
+    "  --android-device <serial> Target exactly one authorized physical Android device by adb serial; uses task-scoped adb reverse routes.",
     "  --production        Guarded compatibility profile for the production build, owner, and cloud.",
     "  --staging           Compatibility profile: staging build + installed staging owner + staging cloud.",
     "  --build <identity>  Client build identity (dev or staging for development).",
@@ -1403,10 +1419,10 @@ const helpTopics: Record<string, string[]> = {
     "  --build-number <number>   Expected build number. Not asserted when omitted."
   ],
   "mobile doctor": [
-    "Usage: kd mobile doctor (--device | --android-emulator [<avd>]) [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging]",
+    "Usage: kd mobile doctor (--device | --android-emulator [<avd>] | --android-device <serial>) [--build dev|staging] [--owner worktree|staging] [--cloud emulators|staging] [--production|--staging]",
     "",
-    "Check physical iOS device or Android emulator mobile development readiness.",
-    "Android doctor resolves SDK tools and an exact AVD but never installs or boots anything."
+    "Check physical iOS, Android emulator, or exact authorized physical Android mobile development readiness.",
+    "Android doctor resolves SDK tools and an exact AVD or device, but never installs or boots anything."
   ],
   "mobile qa": [
     "Usage: kd mobile qa --production [--ota]",
