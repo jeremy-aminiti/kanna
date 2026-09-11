@@ -786,6 +786,29 @@ mod tests {
     /// service type natively (`dns-sd -i en1 -R`, a real, separate process,
     /// genuinely sent per the control above) while browsing, then check
     /// whether this daemon's receiver ever reports it.
+    ///
+    /// Tried, with a real bounded assertion, and disproven: `browse()`
+    /// (the version above) only accepts answers matching a query this
+    /// daemon itself successfully sent, which fails here with
+    /// `EHOSTUNREACH` - so `daemon.accept_unsolicited(true)` +
+    /// `daemon.browse_cache(...)` (an existing, public, receive-only
+    /// mdns-sd API that never sends an outbound query at all, still no
+    /// native browser) was tried in its place, requiring the specific
+    /// registered instance to resolve into a routable address, not merely
+    /// any `ServiceFound`. Result on this host:
+    /// `usable_candidate=None`, events limited to
+    /// `SearchStarted`/`SearchStopped` - no `ServiceFound`/`ServiceResolved`
+    /// at all, even for a genuinely-sent, genuinely-receivable native
+    /// Announce (raw evidence:
+    /// `.tmp/lan-discovery-evidence/verification-step-cache-only-run1.log`).
+    /// This means the "solicited-answers-only" filter was not, in fact,
+    /// what blocked this daemon's own browse from surfacing the record -
+    /// something else in its receive/cache pipeline does, for a reason
+    /// this investigation did not localize further (stopped here per
+    /// instruction, rather than trying more API variations). Kept
+    /// assertion-free (no permanent test may assert a bug persists) -
+    /// the mechanism is retained as real, reusable evidence of a disproven
+    /// hypothesis, not a passing or failing regression check.
     #[tokio::test]
     async fn mdns_sd_browse_receiving_a_genuinely_sent_native_announce() {
         let Some(if_name) = if_addrs::get_if_addrs().ok().and_then(|interfaces| {
@@ -820,9 +843,23 @@ mod tests {
         daemon
             .enable_interface(IfKind::Name(if_name.clone()))
             .expect("enable only the target interface");
+        // The one authorized verification step: `browse()` (the prior,
+        // diagnostic-only version of this test) only accepts answers
+        // matching a query this daemon itself sent - and that send is what
+        // fails with `EHOSTUNREACH` on this host. `accept_unsolicited(true)`
+        // + `browse_cache()` stays entirely inside mdns-sd's own existing
+        // public API (no native browser, no new dependency): `browse_cache`
+        // never sends an outbound query at all, and `accept_unsolicited`
+        // widens the daemon's own answer-acceptance filter
+        // (`is_for_us`/`service_queriers.contains_key`, confirmed by direct
+        // reading of `service_daemon.rs`'s incoming-answer path) to accept
+        // a record even with no active querier for it.
+        daemon
+            .accept_unsolicited(true)
+            .expect("enable unsolicited acceptance");
         let receiver = daemon
-            .browse(&service_type_domain)
-            .expect("browse restricted to the target interface");
+            .browse_cache(&service_type_domain)
+            .expect("cache-only browse restricted to the target interface, no outbound query sent");
 
         let mut native_register = std::process::Command::new("/usr/bin/dns-sd")
             .arg("-i")
@@ -837,16 +874,27 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let mut events = Vec::new();
-        let mut found_or_resolved = false;
+        // Deliberately narrower than "any ServiceFound for our name": a
+        // generic PTR-level sighting does not carry usable candidate data
+        // (an address `select_routable_address` could actually dial) -
+        // only `ServiceResolved`, for exactly this instance, carrying at
+        // least one routable address, counts. This is the same bar
+        // `start_discovery`'s own real candidate-selection logic applies.
+        let mut usable_candidate: Option<Vec<std::net::IpAddr>> = None;
         while std::time::Instant::now() < deadline {
             if let Ok(event) = receiver.try_recv() {
-                let is_relevant = match &event {
-                    ServiceEvent::ServiceFound(_, fullname) => fullname.contains(&unique),
-                    ServiceEvent::ServiceResolved(resolved) => resolved.fullname.contains(&unique),
-                    _ => false,
-                };
-                if is_relevant {
-                    found_or_resolved = true;
+                if let ServiceEvent::ServiceResolved(resolved) = &event {
+                    if resolved.fullname.contains(&unique) {
+                        let routable: Vec<std::net::IpAddr> = resolved
+                            .addresses
+                            .iter()
+                            .map(|addr| addr.to_ip_addr())
+                            .filter(is_routable_lan_address)
+                            .collect();
+                        if !routable.is_empty() && usable_candidate.is_none() {
+                            usable_candidate = Some(routable);
+                        }
+                    }
                 }
                 events.push(format!("{event:?}"));
             }
@@ -857,9 +905,14 @@ mod tests {
         let _ = native_register.wait();
         let _ = daemon.shutdown();
 
+        // Assertion-free: the `accept_unsolicited`+`browse_cache` hypothesis
+        // was tried and disproven on this host (see the doc comment above)
+        // - a permanent test must not assert that disproof persists as if
+        // it were a regression check, so this only prints the same
+        // evidence a real assertion run already captured.
         eprintln!(
-            "DIAG_RECEIVE_CHECK interface={if_name} service_type={service_type_domain} \
-             instance={unique} found_or_resolved={found_or_resolved} events={events:?}"
+            "DIAG_RECEIVE_CHECK_CACHE_ONLY interface={if_name} service_type={service_type_domain} \
+             instance={unique} usable_candidate={usable_candidate:?} events={events:?}"
         );
     }
 
