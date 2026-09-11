@@ -3,6 +3,7 @@
 import { mount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import DiffModal from "../DiffModal.vue";
 import DiffView from "../DiffView.vue";
 import { clearContextShortcuts, resetContext } from "../../composables/useShortcutContext";
 import en from "../../i18n/locales/en.json";
@@ -819,6 +820,161 @@ describe("DiffView", () => {
     expect(renderMock.mock.calls.at(-1)?.[0]?.fileDiff).toMatchObject({
       name: "after-rebase.txt",
     });
+
+    wrapper.unmount();
+  });
+
+  it("refreshes a background branch diff on reactivation without rebuilding unchanged content", async () => {
+    let branchPatchName = "background.txt";
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_branch_upstream") return null;
+      if (command === "git_merge_base") return "base-sha";
+      if (command === "git_diff_branch_range") {
+        return `diff --git a/${branchPatchName} b/${branchPatchName}`;
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mount(DiffModal, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "branch",
+        baseRef: "origin/main",
+        embedded: true,
+        active: true,
+      },
+      attachTo: document.body,
+      global: {
+        provide: {
+          windowWorkspace: {},
+        },
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    const branchLoads = () => invokeMock.mock.calls.filter(
+      ([command]) => command === "git_diff_branch_range",
+    );
+    expect(branchLoads()).toHaveLength(1);
+    expect(renderMock).toHaveBeenCalledTimes(1);
+    const renderedContainer = wrapper.get<HTMLElement>(".diff-container").element;
+
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "/",
+      bubbles: true,
+    }));
+    await flushPromises();
+    await wrapper.get(".search-input").setValue("keep this search");
+    renderedContainer.scrollTop = 240;
+    renderedContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+    await wrapper.setProps({ active: false });
+    // Native WebKit reports a hidden v-show scroller at zero even though the
+    // last emitted per-scope position remains the reader's actual offset.
+    renderedContainer.scrollTop = 0;
+    window.dispatchEvent(new Event("focus"));
+    await waitForTimerTurn();
+    expect(branchLoads()).toHaveLength(1);
+
+    // Returning to an unchanged patch performs the deferred freshness read but
+    // keeps the existing rendered tree and its local view state.
+    await wrapper.setProps({ active: true });
+    await waitForTimerTurn();
+    expect(branchLoads()).toHaveLength(2);
+    expect(renderMock).toHaveBeenCalledTimes(1);
+    expect(wrapper.get(".diff-container").element).toBe(renderedContainer);
+    expect(renderedContainer.scrollTop).toBe(240);
+    expect(wrapper.get(".diff-file-header").attributes("title")).toBe("background.txt");
+    expect(wrapper.get<HTMLInputElement>(".search-input").element.value).toBe("keep this search");
+
+    // If Git changed while focus arrived behind another tab, activation owns
+    // the deferred refresh and replaces the stale patch.
+    await wrapper.setProps({ active: false });
+    branchPatchName = "changed-while-hidden.txt";
+    window.dispatchEvent(new Event("focus"));
+    await waitForTimerTurn();
+    expect(branchLoads()).toHaveLength(2);
+    await wrapper.setProps({ active: true });
+    await waitForTimerTurn();
+    expect(branchLoads()).toHaveLength(3);
+    expect(renderMock).toHaveBeenCalledTimes(2);
+    expect(wrapper.get(".diff-file-header").attributes("title")).toBe("changed-while-hidden.txt");
+
+    // The existing visible-focus refresh path still detects later changes.
+    branchPatchName = "changed-while-visible.txt";
+    window.dispatchEvent(new Event("focus"));
+    await waitForTimerTurn();
+    expect(branchLoads()).toHaveLength(4);
+    expect(renderMock).toHaveBeenCalledTimes(3);
+    expect(wrapper.get(".diff-file-header").attributes("title")).toBe("changed-while-visible.txt");
+
+    wrapper.unmount();
+  });
+
+  it("keeps the newest branch refresh when a deferred reactivation load finishes last", async () => {
+    let branchLoadCount = 0;
+    let resolveDeferredLoad!: (patch: string) => void;
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_branch_upstream") return null;
+      if (command === "git_merge_base") return "base-sha";
+      if (command === "git_diff_branch_range") {
+        branchLoadCount += 1;
+        if (branchLoadCount === 1) return "diff --git a/initial.txt b/initial.txt";
+        if (branchLoadCount === 2) {
+          return new Promise<string>((resolve) => {
+            resolveDeferredLoad = resolve;
+          });
+        }
+        return "diff --git a/newest.txt b/newest.txt";
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+
+    const wrapper = mount(DiffModal, {
+      props: {
+        repoPath: "/repo",
+        initialScope: "branch",
+        baseRef: "origin/main",
+        embedded: true,
+        active: true,
+      },
+      attachTo: document.body,
+      global: {
+        provide: {
+          windowWorkspace: {},
+        },
+        mocks: {
+          $t: (key: string) => key,
+        },
+      },
+    });
+
+    await flushPromises();
+    await flushPromises();
+
+    await wrapper.setProps({ active: false });
+    window.dispatchEvent(new Event("focus"));
+    await wrapper.setProps({ active: true });
+    await flushPromises();
+    await flushPromises();
+    expect(branchLoadCount).toBe(2);
+
+    // A newer visible-focus signal starts its own load. DiffView's load id
+    // fence must prevent the delayed activation response from winning later.
+    window.dispatchEvent(new Event("focus"));
+    await waitForTimerTurn();
+    expect(branchLoadCount).toBe(3);
+    expect(wrapper.get(".diff-file-header").attributes("title")).toBe("newest.txt");
+
+    resolveDeferredLoad("diff --git a/stale-delayed.txt b/stale-delayed.txt");
+    await waitForTimerTurn();
+    expect(renderMock).toHaveBeenCalledTimes(2);
+    expect(wrapper.get(".diff-file-header").attributes("title")).toBe("newest.txt");
 
     wrapper.unmount();
   });
