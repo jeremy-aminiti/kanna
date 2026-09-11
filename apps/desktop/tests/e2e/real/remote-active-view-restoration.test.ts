@@ -56,6 +56,10 @@ let ownerDesktopId = "";
 let ownerTaskId: string | null = null;
 let expectedNativeWindowIdentity: ExpectedNativeWindowIdentity;
 
+async function assertTestWindow(client: WebDriverClient, label: string): Promise<void> {
+  await assertNativeWindowIdentity(client, expectedNativeWindowIdentity, label);
+}
+
 async function setSetupState(
   client: WebDriverClient,
   key: string,
@@ -391,6 +395,7 @@ async function selectRemoteTask(itemId: string, taskId: string): Promise<void> {
 }
 
 async function createOwnerTask(): Promise<string> {
+  await assertTestWindow(primary, "primary before owner setup");
   const script = [
     "select(STDOUT); $| = 1;",
     "use POSIX qw(tcgetpgrp);",
@@ -443,6 +448,7 @@ async function createOwnerTask(): Promise<string> {
 async function capture(client: WebDriverClient, name: string): Promise<void> {
   const directory = process.env.KANNA_E2E_SCREENSHOT_DIR;
   if (!directory) return;
+  await assertTestWindow(client, `window before ${name}`);
   await mkdir(directory, { recursive: true });
   await client.screenshot(join(directory, name));
 }
@@ -494,15 +500,19 @@ describe("remote active-view restoration", () => {
 
     const remoteItemId = await waitForRemoteTask(ownerTaskId);
     await secondary.setWindowRect({ width: 1600, height: 900, x: 80, y: 80 });
+    await assertTestWindow(secondary, "secondary before remote selection");
     await selectRemoteTask(remoteItemId, ownerTaskId);
+    await assertTestWindow(secondary, "secondary before remote focus");
     await focusTerminal(secondary, ownerTaskId, "remote");
     const remoteActive = await waitForOwnerAndRenderer(secondary, ownerTaskId, "remote");
     expect(remoteActive.cols).toBeLessThan(ownerInitial.cols);
     expect(remoteActive.rows).toBeLessThan(ownerInitial.rows);
+    await assertTestWindow(secondary, "secondary before remote capture");
     await capture(secondary, "remote-active-view-controls-grid.png");
 
     // This is the actual local desktop foreground handback. Do not send any
     // terminal bytes: focus alone must restore its measured grid.
+    await assertTestWindow(primary, "primary before owner handback focus");
     const ownerHandbackFocus = await focusTerminal(primary, ownerTaskId, "owner-handback");
     let ownerRestored: Dimensions;
     try {
@@ -513,6 +523,7 @@ describe("remote active-view restoration", () => {
       throw error;
     }
     expect(ownerRestored).toEqual(ownerInitial);
+    await assertTestWindow(primary, "primary before owner-restored capture");
     await capture(primary, "owner-restored-without-terminal-input.png");
   }, 180_000);
 });
