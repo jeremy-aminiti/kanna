@@ -2106,3 +2106,162 @@ describe("DiffView", () => {
     wrapper.unmount();
   });
 });
+
+/**
+ * `kanna_open_view`'s diff reveal answers a waiting caller, so every path that
+ * returns `opened: true` is a claim that the anchored line is on screen and
+ * still reads the way the server read it.
+ */
+describe("DiffView reveal for kanna_open_view", () => {
+  interface RevealRow {
+    line: string;
+    type: string;
+    text: string;
+  }
+
+  function setupReveal(options: {
+    rows: RevealRow[];
+    failLoad?: boolean;
+    onLoad?: () => void;
+  }) {
+    diffMocks.parsePatchFilesMock.mockReturnValue([
+      {
+        files: [
+          {
+            name: "anchored.txt",
+            __searchRows: options.rows.map((row, index) => ({
+              lineIndex: `row-${index}`,
+              text: row.text,
+            })),
+            hunks: [],
+          },
+        ],
+      },
+    ]);
+
+    let loads = 0;
+    invokeMock.mockImplementation(async (command) => {
+      if (command === "git_diff") {
+        loads += 1;
+        options.onLoad?.();
+        if (options.failLoad) throw new Error("worktree is gone");
+        return "diff --git a/anchored.txt b/anchored.txt";
+      }
+      return "";
+    });
+
+    renderMock.mockImplementation(({ containerWrapper }: { containerWrapper?: HTMLElement }) => {
+      const root = containerWrapper?.querySelector("diffs-container")?.shadowRoot;
+      if (!root) return;
+      options.rows.forEach((row, index) => {
+        const element = root.querySelector<HTMLElement>(
+          `[data-content] [data-line-index="row-${index}"]`,
+        );
+        if (!element) return;
+        element.setAttribute("data-line", row.line);
+        element.setAttribute("data-line-type", row.type);
+        element.textContent = row.text;
+        element.scrollIntoView = () => {};
+      });
+    });
+
+    return { loadCount: () => loads };
+  }
+
+  function mountReveal() {
+    return mount(DiffView, {
+      props: { repoPath: "/repo", initialScope: "working" },
+      attachTo: document.body,
+      global: { mocks: { $t: (key: string) => key } },
+    });
+  }
+
+  function anchorCommand(target: Record<string, unknown>) {
+    return {
+      requestId: "view-1",
+      taskId: "task-a",
+      view: "diff" as const,
+      target: { scope: "working", path: "anchored.txt", side: "new", ...target },
+    };
+  }
+
+  afterEach(() => {
+    renderMock.mockReset();
+  });
+
+  it("refuses an unanchored view whose diff failed to load", async () => {
+    setupReveal({ rows: [], failLoad: true });
+    const wrapper = mountReveal();
+    await waitForTimerTurn();
+    await waitForTimerTurn();
+
+    const outcome = await wrapper.vm.revealDesktopViewTarget({
+      requestId: "view-1",
+      taskId: "task-a",
+      view: "diff",
+      target: { scope: "working" },
+    });
+
+    // Settled is not loaded: an empty pane with an error on it is not opened.
+    expect(outcome.opened).toBe(false);
+    expect(outcome.code).toBe("renderer_failed");
+    expect(outcome.message).toContain("Task diff unavailable");
+    wrapper.unmount();
+  });
+
+  it("re-reads an already open diff so the row it lands on is the validated one", async () => {
+    const reveal = setupReveal({
+      rows: [{ line: "4", type: "change-addition", text: "let updated = 2;" }],
+    });
+    const wrapper = mountReveal();
+    await waitForTimerTurn();
+    await waitForTimerTurn();
+    const loadsBeforeReveal = reveal.loadCount();
+
+    const outcome = await wrapper.vm.revealDesktopViewTarget(
+      anchorCommand({ line: 4, newLine: 4, anchorKind: "addition", excerpt: "let updated = 2;" }),
+    );
+
+    expect(outcome).toEqual({ opened: true });
+    // The tab was already mounted in this scope; without the re-read it would
+    // have matched against whatever it last rendered.
+    expect(reveal.loadCount()).toBeGreaterThan(loadsBeforeReveal);
+    wrapper.unmount();
+  });
+
+  it("reports a line that kept its number but changed its text as stale", async () => {
+    // The row still sits at new-side line 4 and is still an addition, so the
+    // coordinates match; only the text moved on.
+    setupReveal({
+      rows: [{ line: "4", type: "change-addition", text: "let replaced = 99;" }],
+    });
+    const wrapper = mountReveal();
+    await waitForTimerTurn();
+    await waitForTimerTurn();
+
+    const outcome = await wrapper.vm.revealDesktopViewTarget(
+      anchorCommand({ line: 4, newLine: 4, anchorKind: "addition", excerpt: "let updated = 2;" }),
+    );
+
+    expect(outcome.opened).toBe(false);
+    expect(outcome.code).toBe("diff_target_stale");
+    wrapper.unmount();
+  });
+
+  it("still refuses an anchor that is not rendered at all", async () => {
+    setupReveal({
+      rows: [{ line: "9", type: "change-addition", text: "somewhere else" }],
+    });
+    const wrapper = mountReveal();
+    await waitForTimerTurn();
+    await waitForTimerTurn();
+
+    const outcome = await wrapper.vm.revealDesktopViewTarget(
+      anchorCommand({ line: 4, newLine: 4, anchorKind: "addition", excerpt: "let updated = 2;" }),
+    );
+
+    expect(outcome.opened).toBe(false);
+    expect(outcome.code).toBe("diff_target_not_found");
+    wrapper.unmount();
+  });
+});

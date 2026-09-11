@@ -480,36 +480,65 @@ export function useTreeExplorer(
    *
    * This is the explorer's half of `kanna_open_view`'s `tree` target: an agent
    * names a path, and the reader's cursor ends up on it rather than at the
-   * root with the file somewhere below. Returns false when the path is not
-   * there after the directories it names have loaded — a file that was deleted
-   * between the server resolving it and the explorer reading it — so the
-   * caller can say so instead of claiming the reveal worked.
+   * root with the file somewhere below. It reports a reason instead of
+   * revealing when the directory cannot be read, does not finish loading, or
+   * no longer holds the path — a target deleted between the server resolving
+   * it and the explorer reading it — so the caller says that rather than
+   * claiming a reveal over an empty column.
    *
    * `isDirectory` decides where the cursor lands: on a directory it is the
    * directory's *contents* that the reader wants to be looking at, and on a
    * file it is the file inside its parent.
    */
-  async function revealPath(relativePath: string, isDirectory: boolean): Promise<boolean> {
-    const parts = relativePath.split("/").filter((part) => part.length > 0 && part !== ".");
-    if (parts.length === 0) {
-      breadcrumb.value = [];
-      requestedCursor.value = 0;
-      return true;
-    }
+  async function revealPath(
+    relativePath: string,
+    isDirectory: boolean,
+  ): Promise<{ revealed: true } | { revealed: false; reason: string }> {
     filterText.value = "";
     filtering.value = false;
     // A path an agent chose may well be gitignored — a build output it wants
     // read — and the explorer hides those by default.
     showAllFiles.value = true;
-    breadcrumb.value = isDirectory ? parts : parts.slice(0, -1);
-    requestedCursor.value = isDirectory ? 0 : parts[parts.length - 1];
+    // A cached column cannot fail, which is exactly the wrong property here:
+    // this reveal answers for what the explorer can read *now*.
+    cache.clear();
+
+    const parts = relativePath.split("/").filter((part) => part.length > 0 && part !== ".");
+    const leaf = parts.length > 0 ? parts[parts.length - 1] : null;
+    breadcrumb.value = parts.length === 0 || isDirectory ? parts : parts.slice(0, -1);
+    requestedCursor.value = parts.length === 0 || isDirectory ? 0 : (leaf as string);
+    error.value = null;
     await nextTick();
+
+    // Read the directory here rather than inferring from the loading flag.
+    // Watching `loading` cannot tell "finished" from "has not started yet",
+    // and the answer this returns is a claim about a read that happened: a
+    // directory removed after the server validated it has to fail, not race.
+    const directory = currentDirAbs.value;
+    let entries: TreeNode[];
+    try {
+      entries = await fetchDir(directory, true);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      error.value = `Task files unavailable: ${message}`;
+      return { revealed: false, reason: error.value };
+    }
+
+    // Then let the columns catch up, so what was read is what is on screen.
     const deadline = Date.now() + 5_000;
     while (loading.value && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    if (isDirectory) return true;
-    return currentEntries.value.some((entry) => entry.name === parts[parts.length - 1]);
+    if (loading.value) {
+      return { revealed: false, reason: `${relativePath || "the worktree"} is still loading` };
+    }
+    if (error.value) {
+      return { revealed: false, reason: error.value };
+    }
+    if (parts.length === 0 || isDirectory) return { revealed: true };
+    return entries.some((entry) => entry.name === leaf)
+      ? { revealed: true }
+      : { revealed: false, reason: `${relativePath} is not in the worktree the explorer is showing` };
   }
 
   return {

@@ -46,6 +46,14 @@ const props = withDefaults(
      */
     remoteContent?: string | null;
     remoteContentLoader?: (path: string) => Promise<string>;
+    /**
+     * Read the file through this instead of the local worktree, without the
+     * rest of the remote treatment. A view an agent opened uses it so the
+     * read stays inside the task's worktree the way the server proved it did;
+     * the file is still on this machine, so opening it in an editor and the
+     * other local affordances stay available.
+     */
+    contentLoader?: (path: string) => Promise<string>;
     ideCommand?: string;
     maximized?: boolean;
     initialLine?: number;
@@ -215,11 +223,13 @@ async function loadFile() {
   loading.value = true;
   error.value = null;
   try {
-    const raw = props.remoteContentLoader
-      ? await props.remoteContentLoader(props.filePath)
-      : props.remoteContent !== null
-        ? props.remoteContent
-        : await invoke<string>("read_text_file", { path: `${props.worktreePath}/${props.filePath}` });
+    const raw = props.contentLoader
+      ? await props.contentLoader(props.filePath)
+      : props.remoteContentLoader
+        ? await props.remoteContentLoader(props.filePath)
+        : props.remoteContent !== null
+          ? props.remoteContent
+          : await invoke<string>("read_text_file", { path: `${props.worktreePath}/${props.filePath}` });
 
     const hl = await getHighlighter();
     const lang = getSyntaxLanguageForPath(props.filePath);
@@ -262,6 +272,29 @@ let prevTheme = shikiTheme.value;
  * "line and character", so converting to a byte offset and back would be a
  * place for the two to disagree about what a character is.
  */
+/**
+ * Where a 1-based Unicode scalar position starts, counted in UTF-16 units.
+ *
+ * The action's columns are scalars — one per character a reader sees — while
+ * the highlighter indexes JavaScript strings, where an emoji is two units.
+ * Handing a scalar index straight over both shifts the range on any line with
+ * non-BMP text and can split a surrogate pair, which renders as two broken
+ * halves. A scalar index at or past the end of the line resolves to the end of
+ * the line, which is the end-of-line position the API accepts as `column`
+ * width + 1.
+ */
+function utf16OffsetOfScalar(lineText: string, scalarIndex: number): number {
+  if (scalarIndex <= 0) return 0;
+  let scalars = 0;
+  let offset = 0;
+  for (const character of lineText) {
+    if (scalars === scalarIndex) return offset;
+    offset += character.length;
+    scalars += 1;
+  }
+  return lineText.length;
+}
+
 const revealRange = ref<{
   start: { line: number; character: number };
   end: { line: number; character: number };
@@ -327,6 +360,10 @@ watch(() => props.remoteContent, () => {
 });
 
 watch(() => props.remoteContentLoader, () => {
+  loadFile();
+});
+
+watch(() => props.contentLoader, () => {
   loadFile();
 });
 
@@ -475,11 +512,16 @@ async function revealDesktopViewTarget(
   const startLine = Math.min(target.line, lines.length) - 1;
   const endLine = Math.min(target.endLine ?? target.line, lines.length) - 1;
   revealRange.value = {
-    start: { line: startLine, character: (target.column ?? 1) - 1 },
+    start: {
+      line: startLine,
+      character: utf16OffsetOfScalar(lines[startLine] ?? "", (target.column ?? 1) - 1),
+    },
     end: {
       line: endLine,
+      // The API's end is inclusive and the decorator's is exclusive, so the
+      // offset wanted is the one *after* the last included scalar.
       character: target.endColumn !== undefined
-        ? target.endColumn - 1
+        ? utf16OffsetOfScalar(lines[endLine] ?? "", target.endColumn)
         : (lines[endLine]?.length ?? 0),
     },
   };

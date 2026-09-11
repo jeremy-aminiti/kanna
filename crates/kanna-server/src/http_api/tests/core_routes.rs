@@ -5098,6 +5098,7 @@ impl TaskFileRouteFixture {
     fn new_with_git_worktree() -> Option<Self> {
         let fixture = Self::new();
         fixture.write("src/main.rs", b"fn main() {}\n");
+        fixture.write("doc.md", b"-- old title\nbody stays\n");
         let git = |args: &[&str]| -> bool {
             std::process::Command::new("git")
                 .args(args)
@@ -5116,6 +5117,10 @@ impl TaskFileRouteFixture {
         {
             return None;
         }
+        // A change whose diff body lines are shaped exactly like file headers:
+        // `-- old title` becomes `--- old title` in the patch, and
+        // `++ new title` becomes `+++ new title`.
+        fixture.write("doc.md", b"++ new title\nbody stays\n");
         fixture.write("src/main.rs", b"fn main() {}\nlet added = 1;\n");
         Some(fixture)
     }
@@ -7571,6 +7576,109 @@ async fn a_diff_anchor_is_checked_against_the_diff_before_a_window_is_asked() {
             .len(),
         queued_after_the_valid_open
     );
+}
+
+#[tokio::test]
+async fn a_header_shaped_diff_line_is_anchored_as_content() {
+    let Some(fixture) = TaskFileRouteFixture::new_with_git_worktree() else {
+        eprintln!("git is unavailable; skipping the header-shaped anchor route test");
+        return;
+    };
+    fixture.state.set_desktop_view_open_timeout_ms(50);
+    // `-- old title` -> `++ new title` produces the patch body lines
+    // `--- old title` and `+++ new title`. Read as file headers they end the
+    // hunk and rename the file, and every anchor in it is lost.
+    for (side, line, excerpt, kind) in [
+        ("new", 1u32, "+ new title", "addition"),
+        ("old", 1, "- old title", "deletion"),
+        // The context line after them, which a header-shaped body line also
+        // took down with it.
+        ("new", 2, "body stays", "context"),
+    ] {
+        let request = serde_json::json!({
+            "taskId": "task-file",
+            "view": "diff",
+            "target": {
+                "scope": "working",
+                "path": "doc.md",
+                "side": side,
+                "line": line,
+                "excerpt": excerpt,
+            },
+        });
+        let (pending, command) = start_desktop_view_open(&fixture, request).await;
+        assert_eq!(
+            command["target"]["anchorKind"],
+            serde_json::json!(kind),
+            "{side} line {line}"
+        );
+        let request_id = command["requestId"].as_str().unwrap().to_string();
+        acknowledge_desktop_view(&fixture, &request_id, true, None).await;
+        assert_eq!(
+            pending.await.unwrap()["opened"],
+            serde_json::json!(true),
+            "{side} line {line}"
+        );
+    }
+}
+
+/// The window reads the file back through this route, so the containment the
+/// open validated has to still hold *here* — a symlink swapped in after the
+/// command was queued must not put outside content on screen.
+#[tokio::test]
+async fn the_read_a_window_performs_is_fenced_after_the_open_was_validated() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("notes.txt", b"INSIDE-ONLY\n");
+    let outside = fixture._temp_dir.path().join("outside.txt");
+    std::fs::write(&outside, b"OUTSIDE-SECRET\n").unwrap();
+
+    // The open validates while the path is an ordinary file, and the command
+    // reaches a window.
+    let (pending, command) = start_desktop_view_open(
+        &fixture,
+        serde_json::json!({
+            "taskId": "task-file",
+            "view": "file",
+            "target": { "path": "notes.txt" },
+        }),
+    )
+    .await;
+    assert_eq!(command["target"]["path"], serde_json::json!("notes.txt"));
+    let request_id = command["requestId"].as_str().unwrap().to_string();
+
+    // Between the queue and the window's load, the file becomes a link out of
+    // the worktree.
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(fixture.worktree.join("notes.txt")).unwrap();
+        std::os::unix::fs::symlink(&outside, fixture.worktree.join("notes.txt")).unwrap();
+
+        let mut request = Request::get("/v1/tasks/task-file/files/content?path=notes.txt")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                49152,
+            ))));
+        let response = fixture.app.clone().oneshot(request).await.unwrap();
+        // Refused, and specifically never carrying the outside content.
+        assert_ne!(response.status(), StatusCode::OK);
+        let body = String::from_utf8_lossy(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .to_string();
+        assert!(
+            !body.contains("OUTSIDE-SECRET"),
+            "the read a window performs must stay inside the worktree: {body}"
+        );
+    }
+
+    acknowledge_desktop_view(&fixture, &request_id, true, None).await;
+    let _ = pending.await.unwrap();
 }
 
 #[tokio::test]

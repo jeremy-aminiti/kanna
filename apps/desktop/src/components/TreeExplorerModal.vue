@@ -68,13 +68,17 @@ async function revealDesktopViewTarget(
   command: DesktopViewOpenCommand,
 ): Promise<DesktopViewOpenOutcome> {
   const path = command.target?.path;
-  if (typeof path !== "string" || path.length === 0) return { opened: true };
-  const revealed = await revealPath(path, command.target?.kind === "directory");
-  if (!revealed) {
+  // An untargeted open still has to wait for the root: "the explorer is
+  // mounted" is not "the worktree is on screen", and a root that cannot be
+  // read must not come back as opened.
+  const targetPath = typeof path === "string" ? path : "";
+  const isDirectory = targetPath.length === 0 || command.target?.kind === "directory";
+  const result = await revealPath(targetPath, isDirectory);
+  if (!result.revealed) {
     return {
       opened: false,
-      code: "file_not_found",
-      message: `${path} is not in the worktree the explorer is showing`,
+      code: result.reason.includes("still loading") ? "renderer_failed" : "file_not_found",
+      message: result.reason,
     };
   }
   return { opened: true };

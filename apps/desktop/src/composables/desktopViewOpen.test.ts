@@ -58,12 +58,21 @@ describe("mainTabDescriptorForCommand", () => {
   it("identifies a file tab by its path, so a second open re-aims it", () => {
     expect(mainTabDescriptorForCommand(command({
       target: { path: "src/main.rs", line: 12 },
-    }))).toEqual({ kind: "file", filePath: "src/main.rs", initialLine: 12 });
+    }))).toEqual({
+      kind: "file",
+      filePath: "src/main.rs",
+      initialLine: 12,
+      // The view reads back through the server's contained resolution, so the
+      // task whose worktree bounds it travels with the tab.
+      containedTaskId: "task-a",
+    });
   });
 
   it("gives every other view one tab per task", () => {
     expect(mainTabDescriptorForCommand(command({ view: "diff", target: { scope: "branch" } })))
       .toEqual({ kind: "diff" });
+    expect(mainTabDescriptorForCommand(command({ view: "tree", target: { path: "src" } })))
+      .toEqual({ kind: "tree", containedTaskId: "task-a" });
     expect(mainTabDescriptorForCommand(command({ view: "agent", target: undefined })))
       .toEqual({ kind: "agent" });
   });
@@ -103,7 +112,12 @@ describe("performDesktopViewOpen", () => {
     expect(selected).toEqual(["slot-a"]);
     expect(opened).toEqual([[
       "item:task-a",
-      { kind: "file", filePath: "src/main.rs", initialLine: 3 },
+      {
+        kind: "file",
+        filePath: "src/main.rs",
+        initialLine: 3,
+        containedTaskId: "task-a",
+      },
     ]]);
   });
 

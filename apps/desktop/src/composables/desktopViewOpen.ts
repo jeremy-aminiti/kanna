@@ -89,7 +89,13 @@ export function mainTabDescriptorForCommand(command: DesktopViewOpenCommand): Ma
       kind: "file",
       filePath: typeof path === "string" ? path : "",
       initialLine: typeof line === "number" ? line : undefined,
+      // The server validated this path inside the task's worktree; the view
+      // must read it back the same way rather than off the filesystem.
+      containedTaskId: command.taskId,
     };
+  }
+  if (command.view === "tree") {
+    return { kind: "tree", containedTaskId: command.taskId };
   }
   return { kind: command.view };
 }
@@ -219,6 +225,12 @@ export interface DiffViewTarget {
   anchorKind?: "context" | "addition" | "deletion";
   oldLine?: number;
   newLine?: number;
+  /**
+   * A short piece of the anchored line as the server read it. The view checks
+   * the rendered row still carries it, because line numbers survive an edit
+   * that replaces the line.
+   */
+  excerpt?: string;
 }
 
 export function diffViewTarget(command: DesktopViewOpenCommand): DiffViewTarget {
@@ -238,5 +250,8 @@ export function diffViewTarget(command: DesktopViewOpenCommand): DiffViewTarget 
     anchorKind,
     oldLine: number(target.oldLine),
     newLine: number(target.newLine),
+    excerpt: typeof target.excerpt === "string" && target.excerpt.length > 0
+      ? target.excerpt
+      : undefined,
   };
 }

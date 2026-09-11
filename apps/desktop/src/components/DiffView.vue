@@ -832,10 +832,22 @@ async function revealDesktopViewTarget(
   const target = diffViewTarget(command);
   if (scope.value !== target.scope) {
     await setScope(target.scope);
+  } else if (target.path) {
+    // An already-open tab is showing whatever it loaded last, which may be
+    // older than the diff the server just checked the anchor against. Reading
+    // again is what makes the row this scrolls to the row that was validated,
+    // rather than an older line that happens to sit at the same number.
+    await loadDiff({ preserveCurrentScroll: false });
   }
   const settled = await waitForViewReady(() => !loading.value);
   if (!settled) {
     return { opened: false, code: "renderer_failed", message: "the diff is still loading" };
+  }
+  // Settled is not loaded: a worktree that disappeared leaves the view idle
+  // with an error on it, and calling that opened would be a lie about an
+  // empty pane.
+  if (error.value) {
+    return { opened: false, code: "renderer_failed", message: error.value };
   }
   if (!target.path) return { opened: true };
 
@@ -846,6 +858,18 @@ async function revealDesktopViewTarget(
       opened: false,
       code: "diff_target_not_found",
       message: `${target.path} ${target.side ?? ""} line ${target.newLine ?? target.oldLine} is not in the rendered diff`,
+    };
+  }
+  // The coordinates can still match while the text behind them has changed —
+  // an edit between the server's read and this render replaces the line
+  // without moving it. The excerpt is the only thing that can tell those
+  // apart, so when one was given the rendered row has to still carry it.
+  const excerpt = target.excerpt?.trim();
+  if (excerpt && !(line.textContent ?? "").includes(excerpt)) {
+    return {
+      opened: false,
+      code: "diff_target_stale",
+      message: `${target.path} ${target.side ?? ""} line ${target.newLine ?? target.oldLine} no longer reads as it did when the open was prepared`,
     };
   }
   // Centred, and deliberately not decorated. The row lives inside the diff

@@ -710,67 +710,91 @@ fn locate_diff_line(
     let mut in_target_file = false;
     let mut old_line = 0u32;
     let mut new_line = 0u32;
-    let mut in_hunk = false;
+    // How many lines of the current hunk's body are still owed on each side.
+    // While either is outstanding the line is content, whatever it starts
+    // with — which is what keeps a deleted `-- title` (spelled `--- title`)
+    // from being read as the next file's header.
+    let mut old_remaining = 0u32;
+    let mut new_remaining = 0u32;
 
     for raw in patch.lines() {
-        if raw.starts_with("diff --git ") {
-            in_target_file = false;
-            in_hunk = false;
-            continue;
-        }
-        if let Some(header_path) = raw.strip_prefix("--- ") {
-            if wanted_old {
-                in_target_file = patch_path_matches(header_path, path);
-                if in_target_file {
-                    matching_sections += 1;
+        let in_hunk_body = old_remaining > 0 || new_remaining > 0;
+
+        if !in_hunk_body {
+            if raw.starts_with("diff --git ") {
+                in_target_file = false;
+                continue;
+            }
+            if let Some(header_path) = raw.strip_prefix("--- ") {
+                if wanted_old {
+                    in_target_file = patch_path_matches(header_path, path);
+                    if in_target_file {
+                        matching_sections += 1;
+                    }
                 }
+                continue;
             }
-            in_hunk = false;
-            continue;
-        }
-        if let Some(header_path) = raw.strip_prefix("+++ ") {
-            if !wanted_old {
-                in_target_file = patch_path_matches(header_path, path);
-                if in_target_file {
-                    matching_sections += 1;
+            if let Some(header_path) = raw.strip_prefix("+++ ") {
+                if !wanted_old {
+                    in_target_file = patch_path_matches(header_path, path);
+                    if in_target_file {
+                        matching_sections += 1;
+                    }
                 }
+                continue;
             }
-            in_hunk = false;
+            if raw.starts_with("@@ ") {
+                if let Some(header) = parse_hunk_header(raw) {
+                    old_line = header.old_start;
+                    new_line = header.new_start;
+                    old_remaining = header.old_count;
+                    new_remaining = header.new_count;
+                }
+                continue;
+            }
+            // Anything else outside a hunk — `index`, `similarity`, `Binary
+            // files differ`, a commit message in `git log -p` — numbers
+            // nothing.
             continue;
         }
-        if raw.starts_with("@@ ") {
-            if let Some((old_start, new_start)) = parse_hunk_header(raw) {
-                old_line = old_start;
-                new_line = new_start;
-                in_hunk = true;
-            } else {
-                in_hunk = false;
-            }
-            continue;
-        }
-        if !in_hunk || !in_target_file {
-            continue;
-        }
-        let Some(marker) = raw.chars().next() else {
-            // A bare empty line inside a hunk is an unchanged empty line.
-            if (wanted_old && old_line == line) || (!wanted_old && new_line == line) {
-                found.get_or_insert(DiffAnchor {
-                    text: String::new(),
-                    kind: "context",
-                    old_line: Some(old_line),
-                    new_line: Some(new_line),
-                });
-            }
-            old_line += 1;
-            new_line += 1;
-            continue;
-        };
-        let body = raw[1..].to_string();
+
+        // Inside a hunk body: the first character classifies the line, and a
+        // side that has run out of promised lines stops consuming.
+        let marker = raw.chars().next().unwrap_or(' ');
+        let body = if raw.is_empty() { "" } else { &raw[1..] };
         match marker {
-            ' ' => {
-                if (wanted_old && old_line == line) || (!wanted_old && new_line == line) {
+            '-' if old_remaining > 0 => {
+                if wanted_old && in_target_file && old_line == line {
                     found.get_or_insert(DiffAnchor {
-                        text: body,
+                        text: body.to_string(),
+                        kind: "deletion",
+                        old_line: Some(old_line),
+                        new_line: None,
+                    });
+                }
+                old_line += 1;
+                old_remaining -= 1;
+            }
+            '+' if new_remaining > 0 => {
+                if !wanted_old && in_target_file && new_line == line {
+                    found.get_or_insert(DiffAnchor {
+                        text: body.to_string(),
+                        kind: "addition",
+                        old_line: None,
+                        new_line: Some(new_line),
+                    });
+                }
+                new_line += 1;
+                new_remaining -= 1;
+            }
+            // A context line, including the bare empty line some generators
+            // emit for an unchanged blank line.
+            ' ' if old_remaining > 0 && new_remaining > 0 => {
+                if in_target_file
+                    && ((wanted_old && old_line == line) || (!wanted_old && new_line == line))
+                {
+                    found.get_or_insert(DiffAnchor {
+                        text: body.to_string(),
                         kind: "context",
                         old_line: Some(old_line),
                         new_line: Some(new_line),
@@ -778,31 +802,12 @@ fn locate_diff_line(
                 }
                 old_line += 1;
                 new_line += 1;
+                old_remaining -= 1;
+                new_remaining -= 1;
             }
-            '-' => {
-                if wanted_old && old_line == line {
-                    found.get_or_insert(DiffAnchor {
-                        text: body,
-                        kind: "deletion",
-                        old_line: Some(old_line),
-                        new_line: None,
-                    });
-                }
-                old_line += 1;
-            }
-            '+' => {
-                if !wanted_old && new_line == line {
-                    found.get_or_insert(DiffAnchor {
-                        text: body,
-                        kind: "addition",
-                        old_line: None,
-                        new_line: Some(new_line),
-                    });
-                }
-                new_line += 1;
-            }
-            // `\ No newline at end of file` and anything else a generator
-            // adds belong to neither side's numbering.
+            // `\ No newline at end of file` belongs to neither side's count,
+            // and anything else here is a malformed body line we do not
+            // number rather than guess at.
             _ => {}
         }
     }
@@ -839,15 +844,45 @@ fn patch_path_matches(header: &str, path: &str) -> bool {
     stripped == path
 }
 
-fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
+/// One hunk's starting line and line count on each side.
+///
+/// The counts are what tell a hunk's *body* from the next file's headers. A
+/// deletion of `-- old title` is spelled `--- old title`, and an addition of
+/// `++ new title` is spelled `+++ new title`: read as headers, those end the
+/// hunk and rename the file being read. Counting the lines the header
+/// promised is the only way to know that they are content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HunkHeader {
+    old_start: u32,
+    old_count: u32,
+    new_start: u32,
+    new_count: u32,
+}
+
+fn parse_hunk_header(line: &str) -> Option<HunkHeader> {
     let inner = line.strip_prefix("@@ ")?;
     let inner = inner.split(" @@").next()?;
     let mut parts = inner.split_whitespace();
     let old = parts.next()?.strip_prefix('-')?;
     let new = parts.next()?.strip_prefix('+')?;
-    let old_start = old.split(',').next()?.parse::<u32>().ok()?;
-    let new_start = new.split(',').next()?.parse::<u32>().ok()?;
-    Some((old_start, new_start))
+    // `@@ -1 +1 @@` omits a count of one.
+    let side = |raw: &str| -> Option<(u32, u32)> {
+        let mut fields = raw.split(',');
+        let start = fields.next()?.parse::<u32>().ok()?;
+        let count = match fields.next() {
+            Some(value) => value.parse::<u32>().ok()?,
+            None => 1,
+        };
+        Some((start, count))
+    };
+    let (old_start, old_count) = side(old)?;
+    let (new_start, new_count) = side(new)?;
+    Some(HunkHeader {
+        old_start,
+        old_count,
+        new_start,
+        new_count,
+    })
 }
 
 fn resolve_graph_target(
@@ -1065,8 +1100,9 @@ mod tests {
 
     #[test]
     fn hunk_headers_give_both_starting_lines() {
-        assert_eq!(parse_hunk_header("@@ -10,4 +12,5 @@ ctx"), Some((10, 12)));
-        assert_eq!(parse_hunk_header("@@ -1 +1 @@"), Some((1, 1)));
+        let header = parse_hunk_header("@@ -10,4 +12,5 @@ ctx").unwrap();
+        assert_eq!((header.old_start, header.new_start), (10, 12));
+        assert_eq!((header.old_count, header.new_count), (4, 5));
         assert_eq!(parse_hunk_header("@@ nonsense"), None);
     }
 
@@ -1099,6 +1135,80 @@ mod tests {
                 .unwrap()
                 .text,
             "let removed = 2;"
+        );
+    }
+
+    /// A change from `-- old title` to `++ new title`. Git spells those body
+    /// lines `--- old title` and `+++ new title`, which are shaped exactly
+    /// like file headers.
+    const HEADER_SHAPED_PATCH: &str = concat!(
+        "diff --git a/doc.md b/doc.md\n",
+        "--- a/doc.md\n",
+        "+++ b/doc.md\n",
+        "@@ -1,3 +1,3 @@\n",
+        "-- old title\n",
+        "++ new title\n",
+        " body stays\n",
+    );
+
+    #[test]
+    fn header_shaped_body_lines_are_content_not_file_headers() {
+        // The deletion, on the old side.
+        let removed = locate_diff_line(HEADER_SHAPED_PATCH, "doc.md", "old", 1).unwrap();
+        assert_eq!(removed.kind, "deletion");
+        assert_eq!(removed.text, "- old title");
+
+        // The addition, on the new side.
+        let added = locate_diff_line(HEADER_SHAPED_PATCH, "doc.md", "new", 1).unwrap();
+        assert_eq!(added.kind, "addition");
+        assert_eq!(added.text, "+ new title");
+
+        // And the context line after them, which the old reader lost along
+        // with the file identity those two lines reset.
+        let context = locate_diff_line(HEADER_SHAPED_PATCH, "doc.md", "new", 2).unwrap();
+        assert_eq!(context.kind, "context");
+        assert_eq!(context.text, "body stays");
+        assert_eq!((context.old_line, context.new_line), (Some(2), Some(2)));
+    }
+
+    #[test]
+    fn a_hunk_body_ends_where_its_counts_run_out() {
+        // Two files, the first ending in a header-shaped addition. Without
+        // counts the second file's headers would be read as more body.
+        let patch = concat!(
+            "diff --git a/first.md b/first.md\n",
+            "--- a/first.md\n",
+            "+++ b/first.md\n",
+            "@@ -1 +1,2 @@\n",
+            " keep\n",
+            "+++ trailing\n",
+            "diff --git a/second.md b/second.md\n",
+            "--- a/second.md\n",
+            "+++ b/second.md\n",
+            "@@ -5,1 +5,1 @@\n",
+            "-gone\n",
+            "+here\n",
+        );
+        assert_eq!(
+            locate_diff_line(patch, "first.md", "new", 2).unwrap().text,
+            "++ trailing"
+        );
+        // The second file is still found, and numbered from its own header.
+        let second = locate_diff_line(patch, "second.md", "new", 5).unwrap();
+        assert_eq!(second.kind, "addition");
+        assert_eq!(second.text, "here");
+    }
+
+    #[test]
+    fn an_omitted_hunk_count_means_one_line() {
+        assert_eq!(
+            parse_hunk_header("@@ -1 +1 @@"),
+            Some(super::HunkHeader {
+                old_start: 1,
+                old_count: 1,
+                new_start: 1,
+                new_count: 1,
+            })
         );
     }
 

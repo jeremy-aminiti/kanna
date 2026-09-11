@@ -15,6 +15,8 @@ import type {
 } from "../stores/workflow";
 import {
   fetchDesktopTaskDetail,
+  listDesktopTaskDirectory,
+  readDesktopTaskFile,
   type DesktopTaskDetail,
 } from "../services/desktopServerClient";
 import { isBlockerResolved } from "../utils/blockerResolution";
@@ -153,6 +155,12 @@ function fileViewProps(tab: MainTab) {
     remoteContentLoader: modals?.activeTaskViewIsRemote.value
       ? modals.readRemoteTaskFile
       : undefined,
+    // A tab an agent opened reads through the server's contained resolution,
+    // so a symlink swapped in after validation cannot put outside content on
+    // screen under this task's name.
+    contentLoader: tab.containedTaskId
+      ? (path: string) => readDesktopTaskFile(tab.containedTaskId as string, path)
+      : undefined,
     ideCommand: props.views?.store.ideCommand,
     initialLine: tab.initialLine,
     initialMarkdownMode: modals?.currentPreviewMarkdownMode.value,
@@ -174,16 +182,22 @@ function shellCwd(tab: MainTab): string {
   return taskWorktreePath.value ?? scopeRepoPath.value;
 }
 
-function treeViewProps() {
+function treeViewProps(tab: MainTab) {
   const modals = props.views?.modals;
   const route = modals?.activeRemoteTaskRoute.value;
+  const containedTaskId = tab.containedTaskId;
   return {
     worktreePath: modals?.treeExplorerRoot.value ?? taskWorktreePath.value ?? scopeRepoPath.value,
     repoRoot: scopeRepoPath.value || (modals?.treeExplorerRoot.value ?? ""),
     homePath: modals?.homePath.value,
-    remoteDirectoryLoader: modals?.activeTaskViewIsRemote.value
-      ? modals.listRemoteTaskDirectory
-      : undefined,
+    // Same containment reason as the file view: the explorer asks the server
+    // rather than walking the worktree path itself.
+    remoteDirectoryLoader: containedTaskId
+      ? (path: string, showAllFiles: boolean) =>
+        listDesktopTaskDirectory(containedTaskId, path, showAllFiles)
+      : modals?.activeTaskViewIsRemote.value
+        ? modals.listRemoteTaskDirectory
+        : undefined,
     remoteDesktopId: route?.desktopId,
     remoteTaskId: route?.taskId,
     remoteTransport: route?.transport,
@@ -843,7 +857,7 @@ function dismissCommandHint() {
           v-else-if="tab.kind === 'tree'"
           :ref="(component) => setViewRef(tab.id, component)"
           v-show="activeTabId === tab.id"
-          v-bind="treeViewProps()"
+          v-bind="treeViewProps(tab)"
           embedded
           :active="activeTabId === tab.id"
           @open-file="(filePath: string) => views?.modals.openFilePreview(filePath)"
