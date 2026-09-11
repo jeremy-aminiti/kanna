@@ -17,6 +17,10 @@ pub(crate) fn prepared_task_id(prepared: &PreparedTaskSpawn) -> &str {
     &prepared.created_task.task_id
 }
 
+pub(crate) fn prepared_task_worktree(prepared: &PreparedTaskSpawn) -> (&str, &str) {
+    (&prepared.cwd, &prepared.branch)
+}
+
 pub(crate) fn rollback_prepared_task_for_api(
     db: &Db,
     prepared: &PreparedTaskSpawn,

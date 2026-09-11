@@ -15,7 +15,8 @@ use super::control;
 use super::finalize;
 use super::payload::{
     self, OutgoingTransferPayload, RepoAcquisitionMode, TransferBundlePayload,
-    TransferFinalizationState, TransferRepoPayload, TransferTaskPayload,
+    TransferFinalizationState, TransferHistoryRecordPayload, TransferInputLedgerPayload,
+    TransferRepoPayload, TransferTaskPayload,
 };
 use super::session;
 use crate::db::{Db, TransferWorkItem};
@@ -172,6 +173,7 @@ fn staging_dir() -> std::path::PathBuf {
 /// cannot keep is terminal on the first attempt rather than after the attempt
 /// budget runs out. It is also the failure an operator most needs to see, so it
 /// is recorded as a `failed` transfer rather than only logged.
+#[derive(Debug)]
 struct TerminalPush(String);
 
 /// Pushes a task to a peer.
@@ -315,11 +317,38 @@ async fn run_push(state: &Arc<AppState>, work: &Value) -> Result<(), Result<Stri
         .active_outgoing_transfer_for_source(&source_task_id)
         .map_err(|error| retriable(format!("db error: {error}")))?
     {
-        log::info!(
-            "task {source_task_id} already has active outgoing transfer {}; skipping duplicate push",
-            existing.id
-        );
-        return Ok(());
+        // A definitive outcome always settles the row below, so an active
+        // (pending/streaming) row found here can only be this same push's own
+        // prior unresolved attempt — never proof that a duplicate concurrent
+        // push has "already got it". Reporting success over it (as this used
+        // to) was silent data loss: the transfer never actually completed and
+        // nothing was left to repair it. Re-drive the *same* transfer id and
+        // payload the destination already has a reservation for, rather than
+        // starting a fresh one it would see as unrelated.
+        if existing.target_peer_id.as_deref() != Some(peer_id.as_str()) {
+            return Err(retriable(format!(
+                "task {source_task_id} already has an active outgoing transfer {} to a \
+                 different target; not redriving it",
+                existing.id
+            )));
+        }
+        let payload: Value = match existing.payload_json.as_deref() {
+            Some(json) => serde_json::from_str(json).map_err(|error| {
+                retriable(format!(
+                    "stored outgoing transfer payload for {} is invalid: {error}",
+                    existing.id
+                ))
+            })?,
+            None => {
+                return Err(retriable(format!(
+                    "active outgoing transfer {} has no payload to redrive",
+                    existing.id
+                )));
+            }
+        };
+        drop(db);
+        let outcome = control::commit(state, &existing.id, &payload).await;
+        return settle_commit_outcome(state, &existing.id, outcome).await;
     }
     let repo = db
         .get_repo(&source.item.repo_id)
@@ -376,10 +405,57 @@ async fn run_push(state: &Arc<AppState>, work: &Value) -> Result<(), Result<Stri
         target_desktop_id.as_deref(),
     )
     .await;
-    if result.is_err() {
-        release_reservation(state, &preflight.transfer_id).await;
+    match result {
+        // Nothing was durably committed on the destination for this attempt
+        // — either staging never reached the outgoing insert, or the insert
+        // itself lost a race (the loser's reservation is released here, per
+        // the comment at that call site). Safe to release unconditionally.
+        Err(error) => {
+            release_reservation(state, &preflight.transfer_id).await;
+            Err(retriable(error))
+        }
+        Ok(outcome) => settle_commit_outcome(state, &preflight.transfer_id, outcome).await,
     }
-    result.map_err(retriable)
+}
+
+/// Applies a [`control::CommitOutcome`] to the outgoing row and reservation.
+///
+/// This is the one place that decides whether a transfer attempt is settled.
+/// `Refused` is the only outcome that ever marks the row terminally failed or
+/// releases the sidecar reservation — every other outcome, including any
+/// error that is not an explicit, positively-decided refusal, leaves both
+/// alone so a delayed or replayed admission cannot race an abandonment (see
+/// docs/kanna-server-boundary.md item 3).
+async fn settle_commit_outcome(
+    state: &Arc<AppState>,
+    transfer_id: &str,
+    outcome: control::CommitOutcome,
+) -> Result<(), Result<String, TerminalPush>> {
+    let retriable = Ok::<String, TerminalPush>;
+    match outcome {
+        control::CommitOutcome::Admitted => Ok(()),
+        control::CommitOutcome::Refused(reason) => {
+            match state.transfer_work().open_db() {
+                Ok(db) => {
+                    if let Err(mark_error) = db.fail_outgoing_task_transfer(transfer_id, &reason) {
+                        log::error!("failed to persist terminal transfer refusal: {mark_error}");
+                    }
+                }
+                Err(mark_error) => {
+                    log::error!("failed to open transfer DB for terminal refusal: {mark_error}");
+                }
+            }
+            release_reservation(state, transfer_id).await;
+            Err(retriable(reason))
+        }
+        // Deliberately settles nothing and releases nothing: the destination
+        // may still be about to admit this exact payload (or already has,
+        // with the response lost on the way back), and releasing the
+        // reservation here would race that admission. The existing
+        // `pending_transfer_ttl` prune remains the only reaper for a row that
+        // never resolves — this adds no new timer or scheduler.
+        control::CommitOutcome::Unresolved(reason) => Err(retriable(reason)),
+    }
 }
 
 /// Hands a never-to-be-committed preflight reservation back to the sidecar.
@@ -407,46 +483,31 @@ async fn stage_and_commit(
     peer_id: &str,
     source_desktop_id: Option<&str>,
     target_desktop_id: Option<&str>,
-) -> Result<(), String> {
+) -> Result<control::CommitOutcome, String> {
     let transfer_id = preflight.transfer_id.as_str();
-    let remote_url = if preflight.target_has_repo {
-        None
-    } else {
-        let repo_path = repo_path.to_path_buf();
-        super::run_blocking("transfer remote url", move || {
-            Ok(super::git::remote_url(&repo_path))
-        })
-        .await?
-    };
-
-    let mut bundle = None;
-    if !preflight.target_has_repo && remote_url.is_none() {
-        let bundle_path = session::bundle_staging_path(&staging_dir(), transfer_id);
-        let ref_name = {
-            let (repo_path, bundle_path, branch, base_ref) = (
-                repo_path.to_path_buf(),
-                bundle_path.clone(),
-                source.item.branch.clone(),
-                source.item.base_ref.clone(),
-            );
-            super::run_blocking("transfer bundle create", move || {
-                super::git::create_bundle(
-                    &repo_path,
-                    &bundle_path,
-                    branch.as_deref(),
-                    base_ref.as_deref(),
-                )
-            })
-            .await?
-        };
-        let artifact_id = session::artifact_id(transfer_id, "repo-bundle");
-        control::stage_artifact(state, transfer_id, &artifact_id, &bundle_path, true).await?;
-        bundle = Some(TransferBundlePayload {
-            artifact_id,
-            filename: format!("{transfer_id}.bundle"),
-            ref_name,
-        });
-    }
+    let repo_path_for_remote = repo_path.to_path_buf();
+    let remote_url = super::run_blocking("transfer remote url", move || {
+        Ok(super::git::remote_url(&repo_path_for_remote)
+            .filter(|url| super::git::is_credential_free_clone_source(url)))
+    })
+    .await?;
+    let repository = stage_repository_bundle(
+        state,
+        source,
+        repo_path,
+        transfer_id,
+        "repo-bundle",
+        repo.default_branch.as_deref(),
+    )
+    .await?;
+    let input_ledger = stage_task_input_ledger(
+        state,
+        source,
+        transfer_id,
+        &preflight.source_peer_id,
+        "inputs",
+    )
+    .await?;
 
     let staged = stage_session_artifacts(state, source, transfer_id).await?;
     let payload = build_payload(
@@ -458,7 +519,8 @@ async fn stage_and_commit(
         source_desktop_id,
         target_desktop_id,
         remote_url.as_deref(),
-        bundle,
+        Some(repository),
+        Some(input_ledger),
         staged,
         TransferFinalizationState::clean(),
         // The push's payload is a placeholder the finalization rewrites; the
@@ -496,7 +558,116 @@ async fn stage_and_commit(
         Err(error) => return Err(format!("db error: {error}")),
     }
 
-    control::commit(state, transfer_id, &encoded).await
+    Ok(control::commit(state, transfer_id, &encoded).await)
+}
+
+async fn stage_repository_bundle(
+    state: &Arc<AppState>,
+    source: &SourceTask,
+    repo_path: &Path,
+    transfer_id: &str,
+    artifact_suffix: &str,
+    default_branch: Option<&str>,
+) -> Result<StagedRepositoryBundle, String> {
+    let db = state.transfer_work().open_db()?;
+    let tip = crate::task_creator::task_work_tip_for_transfer(
+        &db,
+        &repo_path.to_string_lossy(),
+        &source.item.id,
+        source.item.branch.as_deref(),
+    )?;
+    let base_label = source
+        .item
+        .base_ref
+        .as_deref()
+        .or(default_branch)
+        .ok_or_else(|| "transferred task has no committed review base to bundle".to_string())?;
+    let resolved_base = crate::git_refs::resolve_base_ref(repo_path, base_label)
+        .ok_or_else(|| format!("transferred task review base does not resolve: {base_label}"))?;
+    let bundle_path = session::bundle_staging_path(&staging_dir(), transfer_id);
+    let (ref_name, head_oid, base_ref_name, base_oid) = {
+        let (repo_path, bundle_path, tip_branch, tip_commit, base_ref) = (
+            repo_path.to_path_buf(),
+            bundle_path.clone(),
+            tip.branch.clone(),
+            tip.commit.clone(),
+            resolved_base.reference,
+        );
+        super::run_blocking("transfer bundle create", move || {
+            let (ref_name, resolved_head_oid) =
+                super::git::resolve_commit_ref(&repo_path, &tip_branch)?;
+            if resolved_head_oid != tip_commit {
+                return Err(format!(
+                    "task work tip moved while staging transfer: expected {tip_commit}, resolved {resolved_head_oid}"
+                ));
+            }
+            let (base_ref_name, base_oid) =
+                super::git::resolve_commit_ref(&repo_path, &base_ref)?;
+            let ref_name = super::git::create_bundle(
+                &repo_path,
+                &bundle_path,
+                Some(&ref_name),
+                Some(&base_ref_name),
+            )?
+            .ok_or_else(|| "transferred task bundle did not name its source ref".to_string())?;
+            Ok((ref_name, resolved_head_oid, base_ref_name, base_oid))
+        })
+        .await?
+    };
+    let artifact_id = session::artifact_id(transfer_id, artifact_suffix);
+    control::stage_artifact(state, transfer_id, &artifact_id, &bundle_path, true).await?;
+    Ok(StagedRepositoryBundle {
+        bundle: TransferBundlePayload {
+            artifact_id,
+            filename: format!("{transfer_id}.bundle"),
+            ref_name: Some(ref_name),
+            base_ref_name: Some(base_ref_name),
+        },
+        head_oid,
+        base_oid,
+        source_branch: tip.branch,
+        base_label: base_label.to_string(),
+    })
+}
+
+struct StagedRepositoryBundle {
+    bundle: TransferBundlePayload,
+    head_oid: String,
+    base_oid: String,
+    source_branch: String,
+    base_label: String,
+}
+
+async fn stage_task_input_ledger(
+    state: &Arc<AppState>,
+    source: &SourceTask,
+    transfer_id: &str,
+    source_peer_id: &str,
+    artifact_suffix: &str,
+) -> Result<TransferInputLedgerPayload, String> {
+    let records = state
+        .transfer_work()
+        .open_db()?
+        .list_all_task_inputs(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let encoded = payload::encode_task_input_ledger(&records, source_peer_id, &source.item.id)?;
+    let sha256 = payload::sha256_hex(&encoded);
+    let count = records.len() as u64;
+    let ledger_path = session::input_ledger_staging_path(&staging_dir(), transfer_id);
+    let write_path = ledger_path.clone();
+    super::run_blocking("transfer input ledger staging", move || {
+        std::fs::write(&write_path, encoded)
+            .map_err(|error| format!("failed to stage task input ledger: {error}"))
+    })
+    .await?;
+    let artifact_id = session::artifact_id(transfer_id, artifact_suffix);
+    control::stage_artifact(state, transfer_id, &artifact_id, &ledger_path, true).await?;
+    Ok(TransferInputLedgerPayload {
+        artifact_id,
+        filename: payload::TASK_INPUT_LEDGER_FILENAME.to_string(),
+        sha256,
+        count,
+    })
 }
 
 /// What a push will ship, plus the session it promises.
@@ -560,31 +731,117 @@ async fn build_payload(
     source_desktop_id: Option<&str>,
     target_desktop_id: Option<&str>,
     remote_url: Option<&str>,
-    bundle: Option<TransferBundlePayload>,
+    repository: Option<StagedRepositoryBundle>,
+    input_ledger: Option<TransferInputLedgerPayload>,
     staged: StagedSessionArtifacts,
     finalization: TransferFinalizationState,
     recovery: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
 ) -> Result<OutgoingTransferPayload, String> {
-    let mode = payload::choose_repo_acquisition_mode(remote_url, preflight.target_has_repo);
+    let mode = RepoAcquisitionMode::TaskBundle;
+    let context_db = state.transfer_work().open_db()?;
+    // This task may itself be a prior hop's destination: it can be re-transferred
+    // before it has finished a single local run of its own, in which case the
+    // local queries below all read `None` and the inherited context is all
+    // there is. Reading it first, once, means both the scalar fallbacks and
+    // the combined ordered history below agree on the same snapshot.
+    let inherited_context = context_db
+        .transferred_task_context(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let previous_stage_result = context_db
+        .latest_finished_stage_run_result(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?
+        .or_else(|| {
+            inherited_context
+                .as_ref()
+                .and_then(|context| context.2.clone())
+        });
+    let previous_main_result = context_db
+        .latest_finished_main_stage_run_result(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?
+        .or_else(|| {
+            inherited_context
+                .as_ref()
+                .and_then(|context| context.3.clone())
+        });
+    let revision_feedback = context_db
+        .latest_stage_run(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?
+        .and_then(|run| run.feedback)
+        .or_else(|| {
+            inherited_context
+                .as_ref()
+                .and_then(|context| context.4.clone())
+        });
+    let inherited_history = context_db
+        .transferred_task_history(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let own_history = context_db
+        .finished_stage_runs(&source.item.id)
+        .map_err(|error| format!("db error: {error}"))?;
+    let history = combine_transfer_history(
+        &inherited_history,
+        &own_history,
+        &preflight.source_peer_id,
+        &source.item.id,
+    );
     // `pipeline` is the legacy storage column name for the task's workflow.
     let workflow_name = source
         .item
         .pipeline
         .clone()
         .unwrap_or_else(|| "no-review".into());
+    let workflow_definition = source.item.pipeline_def.clone().or_else(|| {
+        crate::task_creator::resolve_task_workflow_snapshot(repo, &workflow_name)
+            .ok()
+            .map(|snapshot| snapshot.definition_json)
+    });
+    let cloud_task_id = source
+        .item
+        .cloud_task_id
+        .clone()
+        .unwrap_or_else(|| source.item.id.clone());
+    let stage = source
+        .item
+        .stage
+        .clone()
+        .unwrap_or_else(|| "in progress".into());
+    let head_oid = repository
+        .as_ref()
+        .map(|repository| repository.head_oid.clone());
+    let base_oid = repository
+        .as_ref()
+        .map(|repository| repository.base_oid.clone());
+    // Only computable once head/base are known, which every TaskBundle
+    // transfer this function ever builds has by the time it gets here — see
+    // the two call sites, both of which always pass `Some(repository)`.
+    let content_commitment = match (head_oid.as_deref(), base_oid.as_deref()) {
+        (Some(head_oid), Some(base_oid)) => Some(payload::transfer_content_commitment(
+            &payload::TransferContentCommitmentInput {
+                transfer_id: &preflight.transfer_id,
+                cloud_task_id: &cloud_task_id,
+                head_oid,
+                base_oid,
+                stage: &stage,
+                workflow_definition: workflow_definition.as_deref(),
+                input_ledger_sha256: input_ledger.as_ref().map(|ledger| ledger.sha256.as_str()),
+                history: &history,
+            },
+        )?),
+        _ => None,
+    };
     Ok(OutgoingTransferPayload {
         target_peer_id: peer_id.to_string(),
         target_desktop_id: target_desktop_id.map(str::to_string),
         task: TransferTaskPayload {
-            cloud_task_id: source
-                .item
-                .cloud_task_id
-                .clone()
-                .unwrap_or_else(|| source.item.id.clone()),
+            cloud_task_id,
             source_peer_id: preflight.source_peer_id.clone(),
             source_desktop_id: source_desktop_id.map(str::to_string),
             source_task_id: source.item.id.clone(),
-            local_task_id: Some(source.item.id.clone()),
+            // The destination task id is derived from the transfer identity;
+            // it is not the source task id. The source persists this expected
+            // value so the eventual proof-bearing receipt cannot name some
+            // other destination task.
+            local_task_id: Some(session::destination_task_id(&preflight.transfer_id)),
             // The staged plan wins: it is the only thing that knows an
             // OpenCode session id, and for every other provider it is the same
             // id the task's latest run carries.
@@ -593,16 +850,26 @@ async fn build_payload(
                 .clone()
                 .or_else(|| source.session.session_id.clone()),
             prompt: source.item.prompt.clone(),
-            stage: source
-                .item
-                .stage
-                .clone()
-                .unwrap_or_else(|| "in progress".into()),
-            branch: source.item.branch.clone(),
+            stage,
+            branch: repository
+                .as_ref()
+                .map(|repository| repository.source_branch.clone())
+                .or_else(|| source.item.branch.clone()),
+            head_oid,
+            base_oid,
+            content_commitment,
+            workflow_definition,
+            previous_stage_result,
+            previous_main_result,
+            revision_feedback,
+            history,
             workflow: workflow_name.clone(),
             legacy_pipeline: workflow_name,
             display_name: source.item.display_name.clone(),
-            base_ref: source.item.base_ref.clone(),
+            base_ref: repository
+                .as_ref()
+                .map(|repository| repository.base_label.clone())
+                .or_else(|| source.item.base_ref.clone()),
             agent_type: source.item.agent_type.clone(),
             // The provider the session shipped above belongs to, not the one
             // the task was created under: the destination spawns this CLI, and
@@ -620,10 +887,9 @@ async fn build_payload(
             path: Some(repo.path.clone()),
             name: Some(repo.name.clone()),
             default_branch: repo.default_branch.clone(),
-            bundle: (mode == RepoAcquisitionMode::BundleRepo)
-                .then_some(bundle)
-                .flatten(),
+            bundle: repository.map(|repository| repository.bundle),
         },
+        input_ledger,
         // Finalization photographs the terminal before it types the quit
         // command; there is nothing left to photograph afterwards. Only a path
         // that never ran the sequence — a headless session, or a push that has
@@ -635,6 +901,56 @@ async fn build_payload(
         artifacts: staged.artifacts,
         finalization,
     })
+}
+
+/// Builds the ordered history a payload's `task.history` carries: whatever
+/// this task itself inherited from an earlier hop, followed by the runs it
+/// has since finished locally, renumbered into one contiguous sequence.
+///
+/// A run in `own_runs` was executed on this machine under `source_task_id`,
+/// so it has never crossed a peer before; its origin is stamped as this
+/// export's own `(source_peer_id, source_task_id, run.id)`, exactly like
+/// [`super::payload::encode_task_input_ledger`] stamps a first-origin input.
+/// A record in `inherited` already carries the origin it was first exported
+/// under and is copied through unchanged — a second hop must never credit
+/// itself with work an earlier machine actually did.
+fn combine_transfer_history(
+    inherited: &[crate::db::TransferredHistoryRecord],
+    own_runs: &[crate::db::StageRun],
+    source_peer_id: &str,
+    source_task_id: &str,
+) -> Vec<TransferHistoryRecordPayload> {
+    let mut records: Vec<TransferHistoryRecordPayload> = inherited
+        .iter()
+        .map(|record| TransferHistoryRecordPayload {
+            sequence: 0,
+            origin_peer_id: record.origin_peer_id.clone(),
+            origin_task_id: record.origin_task_id.clone(),
+            origin_run_id: record.origin_run_id.clone(),
+            stage: record.stage.clone(),
+            kind: record.kind.clone(),
+            agent: record.agent.clone(),
+            result: record.result.clone(),
+            feedback: record.feedback.clone(),
+            finished_at: record.finished_at.clone(),
+        })
+        .collect();
+    records.extend(own_runs.iter().map(|run| TransferHistoryRecordPayload {
+        sequence: 0,
+        origin_peer_id: source_peer_id.to_string(),
+        origin_task_id: source_task_id.to_string(),
+        origin_run_id: run.id.clone(),
+        stage: run.stage.clone(),
+        kind: run.kind.clone(),
+        agent: run.agent.clone(),
+        result: run.result.clone(),
+        feedback: run.feedback.clone(),
+        finished_at: run.finished_at.clone(),
+    }));
+    for (index, record) in records.iter_mut().enumerate() {
+        record.sequence = index as u64;
+    }
+    records
 }
 
 /// The terminal snapshot the destination replays before the agent takes over.
@@ -827,16 +1143,38 @@ async fn run_finalization(
         staged.session_id.as_deref(),
         refreshed.session.provider.as_deref(),
     )?;
-    let remote_url = if existing.repo.mode == RepoAcquisitionMode::ReuseLocal {
-        None
-    } else {
-        let repo_path = std::path::PathBuf::from(&repo.path);
-        super::run_blocking("transfer remote url", move || {
-            Ok(super::git::remote_url(&repo_path))
-        })
-        .await?
-        .or(existing.repo.remote_url.clone())
-    };
+    let repo_path = std::path::PathBuf::from(&repo.path);
+    let repo_path_for_remote = repo_path.clone();
+    let remote_url = super::run_blocking("transfer remote url", move || {
+        Ok(super::git::remote_url(&repo_path_for_remote)
+            .filter(|url| super::git::is_credential_free_clone_source(url)))
+    })
+    .await?
+    .or(existing.repo.remote_url.clone());
+    // Rebuild both integrity artifacts after the source session has stopped.
+    // Their distinct ids leave the pre-finalization placeholders intact until
+    // the sidecar cleans the whole transfer, while the finalized payload can
+    // name only the post-finalization bytes.
+    let repository = stage_repository_bundle(
+        state,
+        &refreshed,
+        &repo_path,
+        transfer_id,
+        "repo-bundle-final",
+        repo.default_branch.as_deref(),
+    )
+    .await?;
+    let input_ledger = stage_task_input_ledger(
+        state,
+        &refreshed,
+        transfer_id,
+        transfer
+            .source_peer_id
+            .as_deref()
+            .unwrap_or(&existing.task.source_peer_id),
+        "inputs-final",
+    )
+    .await?;
     let finalization = match finalization_outcome.degraded_reason {
         Some(reason) => TransferFinalizationState::degraded(reason),
         None => TransferFinalizationState::clean(),
@@ -851,7 +1189,6 @@ async fn run_finalization(
                 .source_peer_id
                 .clone()
                 .unwrap_or(existing.task.source_peer_id.clone()),
-            target_has_repo: existing.repo.mode == RepoAcquisitionMode::ReuseLocal,
         },
         transfer
             .target_peer_id
@@ -866,7 +1203,8 @@ async fn run_finalization(
             .as_deref()
             .or(existing.target_desktop_id.as_deref()),
         remote_url.as_deref(),
-        existing.repo.bundle.clone(),
+        Some(repository),
+        Some(input_ledger),
         staged,
         finalization,
         finalization_outcome.recovery_snapshot,
@@ -890,6 +1228,90 @@ async fn run_finalization(
 // Commit acknowledgment
 // ---------------------------------------------------------------------------
 
+/// Refuses to authorize a source close unless the acknowledgment carries
+/// proof this source itself can check.
+///
+/// Two independent checks, matching the accepted two-half binding: Half A is
+/// the destination's content commitment, verified by exact-match against the
+/// commitment this source computed and persisted in its own outgoing payload
+/// at push time (never recomputed here — recomputing from `transfer` would
+/// make this a tautology). Half B is the destination's own reported repo and
+/// task identity, checked only for presence (and, when this source itself
+/// named an expected destination task id — the pull/repair case — for
+/// equality with it): the source has no independent way to verify a
+/// destination-allocated identity's *correctness*, only that the destination
+/// actually reported one rather than nothing.
+///
+/// Both fields are additive and absent from a pre-upgrade acknowledgment or
+/// a receipt persisted before this proof existed, so an old-destination or
+/// legacy-replay acknowledgment fails here rather than defaulting to trust.
+fn verify_outgoing_committed_proof(
+    event: &Value,
+    transfer: &crate::db::TaskTransfer,
+) -> Result<(), String> {
+    let expected_commitment = transfer
+        .payload_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<Value>(json).ok())
+        .and_then(|payload| {
+            payload
+                .get("task")?
+                .get("content_commitment")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .ok_or_else(|| {
+            format!(
+                "outgoing transfer {} has no persisted content commitment of its own to verify against",
+                transfer.id
+            )
+        })?;
+    let reported_commitment = string_field(event, "content_commitment").ok_or_else(|| {
+        format!(
+            "outgoing transfer {} acknowledgment carries no content commitment; refusing to close \
+             an unproven source (old destination server, or a pre-upgrade receipt replay)",
+            transfer.id
+        )
+    })?;
+    if reported_commitment != expected_commitment {
+        return Err(format!(
+            "outgoing transfer {} acknowledgment content commitment does not match what this \
+             source shipped; refusing to close",
+            transfer.id
+        ));
+    }
+
+    let destination_repo_id = string_field(event, "destination_repo_id").ok_or_else(|| {
+        format!(
+            "outgoing transfer {} acknowledgment carries no destination repo id; refusing to close",
+            transfer.id
+        )
+    })?;
+    if destination_repo_id.trim().is_empty() {
+        return Err(format!(
+            "outgoing transfer {} acknowledgment reports an empty destination repo id",
+            transfer.id
+        ));
+    }
+
+    let expected = session::destination_task_id(&transfer.id);
+    let reported = string_field(event, "destination_local_task_id").ok_or_else(|| {
+        format!(
+            "outgoing transfer {} acknowledgment carries no destination task id",
+            transfer.id
+        )
+    })?;
+    if reported != expected {
+        return Err(format!(
+            "outgoing transfer {} acknowledgment reports destination task {reported}, \
+             expected {expected}; refusing to close",
+            transfer.id
+        ));
+    }
+
+    Ok(())
+}
+
 /// The destination has imported the task; close the source copy.
 ///
 /// The close goes through the server's own close action — WIP snapshotting,
@@ -897,7 +1319,7 @@ async fn run_finalization(
 /// second implementation of it.
 pub async fn outgoing_committed(
     state: &Arc<AppState>,
-    work: &TransferWorkItem,
+    _work: &TransferWorkItem,
     event: &Value,
 ) -> Result<(), String> {
     let transfer_id = string_field(event, "transfer_id")
@@ -925,6 +1347,15 @@ pub async fn outgoing_committed(
         ));
     }
 
+    // Direction and source-task-id equality alone is exactly what a
+    // pre-upgrade acknowledgment (persisted on the destination sidecar
+    // before this proof existed, or replayed from one) still satisfies — the
+    // actual incident this exists to close. Closing requires the
+    // destination's own read-back proof, matched against what this source
+    // authored and persisted at push time, plus its own reported identity.
+    // See docs/kanna-server-boundary.md item 3.
+    verify_outgoing_committed_proof(event, &transfer)?;
+
     // Closing is single-flight for this work item: a retry after a partial
     // failure must not run a second close over a task that is already gone.
     //
@@ -934,26 +1365,32 @@ pub async fn outgoing_committed(
     // skip the close and go on to mark the transfer completed — the task would
     // stay open on the source forever, which is the state this whole
     // acknowledgment exists to end.
-    if db
-        .claim_transfer_work_phase(&work.id, "source-task-close")
+    let already_closed = db
+        .get_pipeline_item(&source_task_id)
         .map_err(|error| format!("db error: {error}"))?
-    {
+        .is_some_and(|item| item.closed_at.is_some());
+    if !already_closed {
         if let Err((status, message)) =
             crate::http_api::close_task_in_process(Arc::clone(state), source_task_id.clone()).await
         {
-            let already_closed = db
+            let closed_after_error = db
                 .get_pipeline_item(&source_task_id)
                 .map_err(|error| format!("db error: {error}"))?
                 .is_some_and(|item| item.closed_at.is_some());
-            if !already_closed {
-                db.release_transfer_work_phase(&work.id, "source-task-close")
-                    .map_err(|release| {
-                        format!("db error releasing the source-task-close claim: {release}")
-                    })?;
+            if !closed_after_error {
                 return Err(format!(
                     "failed to close source task for outgoing transfer {transfer_id}: {status} {message}"
                 ));
             }
+        }
+        let closed = db
+            .get_pipeline_item(&source_task_id)
+            .map_err(|error| format!("db error: {error}"))?
+            .is_some_and(|item| item.closed_at.is_some());
+        if !closed {
+            return Err(format!(
+                "source task remained open after outgoing transfer close: {source_task_id}"
+            ));
         }
     }
 
@@ -1005,6 +1442,109 @@ mod tests {
             started_at: "2026-08-21 00:00:00".into(),
             finished_at: None,
         }
+    }
+
+    fn finished_run(id: &str, kind: &str, result: &str, finished_at: &str) -> crate::db::StageRun {
+        crate::db::StageRun {
+            id: id.into(),
+            status: "succeeded".into(),
+            kind: kind.into(),
+            result: Some(result.into()),
+            finished_at: Some(finished_at.into()),
+            ..stage_run(Some("claude"), None)
+        }
+    }
+
+    fn inherited_record(
+        origin_task_id: &str,
+        origin_run_id: &str,
+        sequence: i64,
+    ) -> crate::db::TransferredHistoryRecord {
+        crate::db::TransferredHistoryRecord {
+            sequence,
+            origin_peer_id: "peer-hop0".into(),
+            origin_task_id: origin_task_id.into(),
+            origin_run_id: origin_run_id.into(),
+            stage: "in progress".into(),
+            kind: "main".into(),
+            agent: Some("implement".into()),
+            result: Some("{\"status\":\"succeeded\"}".into()),
+            feedback: None,
+            finished_at: Some("2026-09-08 00:00:00".into()),
+        }
+    }
+
+    /// A task that has never been transferred exports only its own local
+    /// runs, each freshly stamped with this hop's own peer/task/run identity
+    /// — the "first origin" case `encode_task_input_ledger` establishes for
+    /// inputs.
+    #[test]
+    fn combine_transfer_history_stamps_first_origin_for_a_never_transferred_task() {
+        let own = vec![
+            finished_run(
+                "run-1",
+                "main",
+                "{\"status\":\"succeeded\"}",
+                "2026-09-09 00:00:00",
+            ),
+            finished_run(
+                "run-2",
+                "post",
+                "{\"status\":\"succeeded\"}",
+                "2026-09-09 00:05:00",
+            ),
+        ];
+        let history = combine_transfer_history(&[], &own, "peer-source", "task-1");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].sequence, 0);
+        assert_eq!(history[0].origin_peer_id, "peer-source");
+        assert_eq!(history[0].origin_task_id, "task-1");
+        assert_eq!(history[0].origin_run_id, "run-1");
+        assert_eq!(history[0].kind, "main");
+        assert_eq!(history[1].sequence, 1);
+        assert_eq!(history[1].origin_run_id, "run-2");
+        assert_eq!(history[1].kind, "post");
+    }
+
+    /// The second-hop case the checkpoint exists for: a task that is itself
+    /// a prior hop's destination re-exports what it inherited *first*,
+    /// unchanged, followed by whatever it has since finished locally — never
+    /// crediting this machine with work an earlier one actually did.
+    #[test]
+    fn combine_transfer_history_orders_inherited_history_before_local_runs_and_renumbers_sequence()
+    {
+        let inherited = vec![
+            inherited_record("task-original", "run-original-1", 0),
+            inherited_record("task-original", "run-original-2", 1),
+        ];
+        let own = vec![finished_run(
+            "run-local-1",
+            "main",
+            "{\"status\":\"succeeded\"}",
+            "2026-09-09 12:00:00",
+        )];
+        let history = combine_transfer_history(&inherited, &own, "peer-hop1", "task-hop1");
+
+        assert_eq!(history.len(), 3);
+        // Inherited records keep their original origin untouched.
+        assert_eq!(history[0].origin_peer_id, "peer-hop0");
+        assert_eq!(history[0].origin_task_id, "task-original");
+        assert_eq!(history[0].origin_run_id, "run-original-1");
+        assert_eq!(history[1].origin_peer_id, "peer-hop0");
+        assert_eq!(history[1].origin_run_id, "run-original-2");
+        // This hop's own run is stamped with its own identity and placed last.
+        assert_eq!(history[2].origin_peer_id, "peer-hop1");
+        assert_eq!(history[2].origin_task_id, "task-hop1");
+        assert_eq!(history[2].origin_run_id, "run-local-1");
+        // Sequence is renumbered contiguously across the combined list, not
+        // preserved from either source independently.
+        assert_eq!(
+            history
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     /// The 2026-09-08 refusal.
@@ -1380,5 +1920,372 @@ mod tests {
         // The insert is a no-op for an id that already exists, so the row it
         // found is still the first one — one refusal, one row.
         assert_eq!(refreshed.error.as_deref(), Some(reason));
+    }
+
+    // -----------------------------------------------------------------
+    // Item 3: admission/refusal and the source-close proof
+    // -----------------------------------------------------------------
+
+    fn outgoing_transfer_with_payload(payload_json: &str) -> crate::db::TaskTransfer {
+        crate::db::TaskTransfer {
+            id: "transfer-proof".into(),
+            direction: "outgoing".into(),
+            status: "pending".into(),
+            source_peer_id: None,
+            target_peer_id: None,
+            source_desktop_id: None,
+            target_desktop_id: None,
+            source_task_id: Some("task-source".into()),
+            local_task_id: Some("task-source".into()),
+            started_at: None,
+            completed_at: None,
+            error: None,
+            payload_json: Some(payload_json.to_string()),
+            claim_owner_token: None,
+            claim_expires_at: None,
+            dismissed_at: None,
+        }
+    }
+
+    fn signed_payload_json(
+        content_commitment: &str,
+        destination_local_task_id: Option<&str>,
+    ) -> String {
+        serde_json::json!({
+            "task": {
+                "content_commitment": content_commitment,
+                "local_task_id": destination_local_task_id,
+            }
+        })
+        .to_string()
+    }
+
+    /// Both an old destination server (never computes a proof) and a
+    /// pre-upgrade persisted receipt replayed after a sidecar restart (never
+    /// carried one) produce exactly this shape at this function's boundary:
+    /// an acknowledgment event with no content commitment at all.
+    #[test]
+    fn an_acknowledgment_with_no_content_commitment_refuses_to_close() {
+        let transfer = outgoing_transfer_with_payload(&signed_payload_json("digest-1", None));
+        let event = serde_json::json!({
+            "transfer_id": "transfer-proof",
+            "source_task_id": "task-source",
+            "destination_local_task_id": "task-dest",
+        });
+        let error = verify_outgoing_committed_proof(&event, &transfer)
+            .expect_err("an acknowledgment with no proof must not authorize a close");
+        assert!(error.contains("no content commitment"), "{error}");
+    }
+
+    #[test]
+    fn a_mismatched_content_commitment_refuses_to_close() {
+        let transfer = outgoing_transfer_with_payload(&signed_payload_json("digest-1", None));
+        let event = serde_json::json!({
+            "transfer_id": "transfer-proof",
+            "source_task_id": "task-source",
+            "destination_local_task_id": "task-dest",
+            "content_commitment": "digest-2",
+            "destination_repo_id": "repo-dest",
+        });
+        let error = verify_outgoing_committed_proof(&event, &transfer)
+            .expect_err("a commitment that does not match what this source shipped must refuse");
+        assert!(error.contains("does not match"), "{error}");
+    }
+
+    #[test]
+    fn a_missing_destination_repo_id_refuses_to_close() {
+        let transfer = outgoing_transfer_with_payload(&signed_payload_json("digest-1", None));
+        let event = serde_json::json!({
+            "transfer_id": "transfer-proof",
+            "source_task_id": "task-source",
+            "destination_local_task_id": "task-dest",
+            "content_commitment": "digest-1",
+        });
+        let error = verify_outgoing_committed_proof(&event, &transfer)
+            .expect_err("a missing destination identity must refuse");
+        assert!(error.contains("destination repo id"), "{error}");
+    }
+
+    /// The destination task identity comes from the transfer id on both
+    /// machines, never from the source task id carried by older payloads.
+    #[test]
+    fn a_destination_task_id_mismatch_against_a_requested_repair_refuses_to_close() {
+        let transfer =
+            outgoing_transfer_with_payload(&signed_payload_json("digest-1", Some("task-source")));
+        let event = serde_json::json!({
+            "transfer_id": "transfer-proof",
+            "source_task_id": "task-source",
+            "destination_local_task_id": "task-different",
+            "content_commitment": "digest-1",
+            "destination_repo_id": "repo-dest",
+        });
+        let error = verify_outgoing_committed_proof(&event, &transfer).expect_err(
+            "a destination task id that does not match the one this source requested must refuse",
+        );
+        let expected = session::destination_task_id("transfer-proof");
+        assert!(
+            error.contains("task-different") && error.contains(&expected),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_fully_proven_acknowledgment_is_authorized() {
+        let transfer =
+            outgoing_transfer_with_payload(&signed_payload_json("digest-1", Some("task-source")));
+        let destination_task_id = session::destination_task_id("transfer-proof");
+        let event = serde_json::json!({
+            "transfer_id": "transfer-proof",
+            "source_task_id": "task-source",
+            "destination_local_task_id": destination_task_id,
+            "content_commitment": "digest-1",
+            "destination_repo_id": "repo-dest",
+        });
+        verify_outgoing_committed_proof(&event, &transfer)
+            .expect("a matching, complete proof must authorize the close");
+    }
+
+    fn sample_history() -> Vec<TransferHistoryRecordPayload> {
+        vec![TransferHistoryRecordPayload {
+            sequence: 0,
+            origin_peer_id: "peer-a".into(),
+            origin_task_id: "task-a".into(),
+            origin_run_id: "run-a".into(),
+            stage: "in progress".into(),
+            kind: "main".into(),
+            agent: Some("implement".into()),
+            result: Some("{\"status\":\"succeeded\"}".into()),
+            feedback: None,
+            finished_at: Some("2026-09-08 00:00:00".into()),
+        }]
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn content_commitment(
+        head_oid: &str,
+        base_oid: &str,
+        stage: &str,
+        workflow_definition: Option<&str>,
+        input_ledger_sha256: Option<&str>,
+        history: &[TransferHistoryRecordPayload],
+    ) -> String {
+        payload::transfer_content_commitment(&payload::TransferContentCommitmentInput {
+            transfer_id: "transfer-1",
+            cloud_task_id: "cloud-task-1",
+            head_oid,
+            base_oid,
+            stage,
+            workflow_definition,
+            input_ledger_sha256,
+            history,
+        })
+        .expect("digest")
+    }
+
+    /// Proves the digest actually covers every fact ITEM 3 requires it to —
+    /// head, base, stage, pinned workflow, the shipped ledger's checksum, and
+    /// the ordered foreign history — by showing each one independently
+    /// changes the result. This is what makes a destination's proof
+    /// meaningful: if any of these could differ without moving the digest, a
+    /// bad import on that dimension would slip through
+    /// `outgoing_committed`'s equality check.
+    #[test]
+    fn content_commitment_changes_when_any_covered_fact_differs() {
+        let history = sample_history();
+        let baseline = content_commitment(
+            "head-a",
+            "base-a",
+            "in progress",
+            Some("{}"),
+            Some("ledger-sha-a"),
+            &history,
+        );
+
+        let mut different_history = history.clone();
+        different_history[0].result = Some("{\"status\":\"failed\"}".into());
+
+        let variants = [
+            content_commitment(
+                "head-DIFFERENT",
+                "base-a",
+                "in progress",
+                Some("{}"),
+                Some("ledger-sha-a"),
+                &history,
+            ),
+            content_commitment(
+                "head-a",
+                "base-DIFFERENT",
+                "in progress",
+                Some("{}"),
+                Some("ledger-sha-a"),
+                &history,
+            ),
+            content_commitment(
+                "head-a",
+                "base-a",
+                "review",
+                Some("{}"),
+                Some("ledger-sha-a"),
+                &history,
+            ),
+            content_commitment(
+                "head-a",
+                "base-a",
+                "in progress",
+                Some("{\"different\":true}"),
+                Some("ledger-sha-a"),
+                &history,
+            ),
+            content_commitment(
+                "head-a",
+                "base-a",
+                "in progress",
+                Some("{}"),
+                Some("ledger-sha-DIFFERENT"),
+                &history,
+            ),
+            content_commitment(
+                "head-a",
+                "base-a",
+                "in progress",
+                Some("{}"),
+                Some("ledger-sha-a"),
+                &different_history,
+            ),
+        ];
+        for (index, variant) in variants.into_iter().enumerate() {
+            assert_ne!(
+                variant, baseline,
+                "changing covered fact #{index} did not change the digest"
+            );
+        }
+    }
+
+    #[test]
+    fn content_commitment_is_stable_for_identical_inputs() {
+        let history = sample_history();
+        let a = content_commitment(
+            "head-a",
+            "base-a",
+            "in progress",
+            Some("{}"),
+            Some("ledger-sha-a"),
+            &history,
+        );
+        let b = content_commitment(
+            "head-a",
+            "base-a",
+            "in progress",
+            Some("{}"),
+            Some("ledger-sha-a"),
+            &history,
+        );
+        assert_eq!(a, b);
+    }
+
+    fn insert_outgoing_transfer(db: &crate::db::Db, id: &str, source_task_id: &str) {
+        db.insert_task_transfer(&crate::db::NewTaskTransfer {
+            id: id.to_string(),
+            direction: "outgoing".into(),
+            status: "pending".into(),
+            source_peer_id: Some("peer-source".into()),
+            target_peer_id: Some("peer-target".into()),
+            source_desktop_id: None,
+            target_desktop_id: None,
+            source_task_id: Some(source_task_id.to_string()),
+            local_task_id: Some(source_task_id.to_string()),
+            error: None,
+            payload_json: Some("{}".into()),
+        })
+        .expect("seed outgoing transfer");
+    }
+
+    /// A definitive refusal settles the outgoing row terminally, so the next
+    /// push over the same source task converges on a fresh attempt instead of
+    /// finding a permanently "active" row and reporting phantom success.
+    #[tokio::test]
+    async fn a_refused_outcome_settles_the_row_so_retry_converges() {
+        let state = crate::http_api::test_state_with_seed(
+            "desktop-commit-outcome-refused",
+            "Refused Commit Outcome",
+            |db| insert_outgoing_transfer(db, "transfer-refused", "task-source-refused"),
+        );
+
+        let result = settle_commit_outcome(
+            &state,
+            "transfer-refused",
+            control::CommitOutcome::Refused("destination refused the payload".into()),
+        )
+        .await;
+        assert!(matches!(result, Err(Ok(reason)) if reason.contains("refused")));
+
+        let db = state.transfer_work().open_db().expect("db");
+        let transfer = db
+            .get_task_transfer("transfer-refused")
+            .expect("read")
+            .expect("row exists");
+        assert_eq!(transfer.status, "failed");
+        assert!(db
+            .active_outgoing_transfer_for_source("task-source-refused")
+            .expect("read active")
+            .is_none());
+    }
+
+    /// Unlike a refusal, an unresolved outcome must not settle the row: a
+    /// delayed or replayed admission can still land, and releasing the
+    /// reservation or marking the row terminally failed here would race it.
+    #[tokio::test]
+    async fn an_unresolved_outcome_settles_nothing_and_stays_retriable() {
+        let state = crate::http_api::test_state_with_seed(
+            "desktop-commit-outcome-unresolved",
+            "Unresolved Commit Outcome",
+            |db| insert_outgoing_transfer(db, "transfer-unresolved", "task-source-unresolved"),
+        );
+
+        let result = settle_commit_outcome(
+            &state,
+            "transfer-unresolved",
+            control::CommitOutcome::Unresolved(
+                "destination has not yet confirmed transfer admission".into(),
+            ),
+        )
+        .await;
+        assert!(matches!(result, Err(Ok(reason)) if reason.contains("not yet confirmed")));
+
+        let db = state.transfer_work().open_db().expect("db");
+        let transfer = db
+            .get_task_transfer("transfer-unresolved")
+            .expect("read")
+            .expect("row exists");
+        assert_eq!(transfer.status, "pending");
+        assert!(db
+            .active_outgoing_transfer_for_source("task-source-unresolved")
+            .expect("read active")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn an_admitted_outcome_settles_nothing_and_reports_success() {
+        let state = crate::http_api::test_state_with_seed(
+            "desktop-commit-outcome-admitted",
+            "Admitted Commit Outcome",
+            |db| insert_outgoing_transfer(db, "transfer-admitted", "task-source-admitted"),
+        );
+
+        settle_commit_outcome(
+            &state,
+            "transfer-admitted",
+            control::CommitOutcome::Admitted,
+        )
+        .await
+        .expect("an admitted outcome must report success");
+
+        let db = state.transfer_work().open_db().expect("db");
+        let transfer = db
+            .get_task_transfer("transfer-admitted")
+            .expect("read")
+            .expect("row exists");
+        assert_eq!(transfer.status, "pending");
     }
 }

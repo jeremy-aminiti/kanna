@@ -100,6 +100,28 @@ pub struct TaskInputRecord {
     pub source: String,
     pub message: String,
     pub delivered_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<TaskInputOrigin>,
+}
+
+/// Stable provenance for an input whose task has crossed machines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskInputOrigin {
+    pub peer_id: String,
+    pub task_id: String,
+    pub input_id: i64,
+    pub run_id: Option<String>,
+}
+
+/// One historical delivery to import before a transferred agent is spawned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedTaskInput {
+    pub stage: Option<String>,
+    pub source: String,
+    pub message: String,
+    pub delivered_at: String,
+    pub origin: TaskInputOrigin,
 }
 
 fn preview_of(message: &str) -> (String, bool) {
@@ -249,6 +271,7 @@ impl Db {
             source: source.to_string(),
             message: message.to_string(),
             delivered_at,
+            origin: None,
         }))
     }
 
@@ -282,13 +305,18 @@ impl Db {
         limit: i64,
     ) -> Result<Vec<TaskInputRecord>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, task_id, run_id, stage, source, message, delivered_at
+            "SELECT id, task_id, run_id, stage, source, message, delivered_at,
+                    origin_peer_id, origin_task_id, origin_input_id, origin_run_id
              FROM task_input
              WHERE task_id = ?
              ORDER BY id DESC
              LIMIT ?",
         )?;
         let rows = stmt.query_map(params![task_id, limit.max(1)], |row| {
+            let origin_peer_id: Option<String> = row.get(7)?;
+            let origin_task_id: Option<String> = row.get(8)?;
+            let origin_input_id: Option<i64> = row.get(9)?;
+            let origin_run_id: Option<String> = row.get(10)?;
             Ok(TaskInputRecord {
                 id: row.get(0)?,
                 task_id: row.get(1)?,
@@ -297,11 +325,89 @@ impl Db {
                 source: row.get(4)?,
                 message: row.get(5)?,
                 delivered_at: row.get(6)?,
+                origin: match (origin_peer_id, origin_task_id, origin_input_id) {
+                    (Some(peer_id), Some(task_id), Some(input_id)) => Some(TaskInputOrigin {
+                        peer_id,
+                        task_id,
+                        input_id,
+                        run_id: origin_run_id,
+                    }),
+                    _ => None,
+                },
             })
         })?;
         let mut records = rows.collect::<Result<Vec<_>, _>>()?;
         records.reverse();
         Ok(records)
+    }
+
+    /// The complete delivery history, in source order, for transfer staging.
+    pub fn list_all_task_inputs(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<TaskInputRecord>, rusqlite::Error> {
+        self.list_task_inputs(task_id, i64::MAX)
+    }
+
+    /// Import historical deliveries idempotently. Their source run ids belong
+    /// to another database and therefore live in `origin_run_id`, never in the
+    /// local `run_id` foreign key.
+    pub fn import_task_inputs(
+        &self,
+        task_id: &str,
+        inputs: &[ImportedTaskInput],
+    ) -> Result<(), rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            for input in inputs {
+                let inserted = db.conn.execute(
+                    "INSERT INTO task_input
+                     (task_id, run_id, stage, source, message, delivered_at,
+                      origin_peer_id, origin_task_id, origin_input_id, origin_run_id)
+                     VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ON CONFLICT(task_id, origin_peer_id, origin_task_id, origin_input_id)
+                     DO NOTHING",
+                    params![
+                        task_id,
+                        input.stage.as_deref(),
+                        &input.source,
+                        &input.message,
+                        &input.delivered_at,
+                        &input.origin.peer_id,
+                        &input.origin.task_id,
+                        input.origin.input_id,
+                        input.origin.run_id.as_deref(),
+                    ],
+                )?;
+                if inserted == 0 {
+                    let existing: (Option<String>, String, String, String, Option<String>) =
+                        db.conn.query_row(
+                            "SELECT stage, source, message, delivered_at, origin_run_id
+                             FROM task_input
+                             WHERE task_id = ? AND origin_peer_id = ? AND origin_task_id = ? AND origin_input_id = ?",
+                            params![
+                                task_id,
+                                &input.origin.peer_id,
+                                &input.origin.task_id,
+                                input.origin.input_id,
+                            ],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                        )?;
+                    let expected = (
+                        input.stage.clone(),
+                        input.source.clone(),
+                        input.message.clone(),
+                        input.delivered_at.clone(),
+                        input.origin.run_id.clone(),
+                    );
+                    if existing != expected {
+                        return Err(rusqlite::Error::InvalidParameterName(
+                            "conflicting transferred task input replay".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 
     /// How many inputs the task has received in total. Task detail reports

@@ -3931,6 +3931,7 @@ fn read_agent_definition_substitutes_repo_config_vars_in_agent_body() {
             task_prompt: None,
             prev_result: None,
             prev_main_result: None,
+            revision_feedback: None,
             branch: None,
             base_ref: Some("origin/main"),
             source_worktree: None,
@@ -3965,6 +3966,7 @@ fn build_stage_prompt_does_not_reexpand_reserved_tokens_in_var_values() {
             task_prompt: Some("actual task prompt"),
             prev_result: None,
             prev_main_result: None,
+            revision_feedback: None,
             branch: None,
             base_ref: None,
             source_worktree: None,
@@ -3990,6 +3992,7 @@ fn build_stage_prompt_leaves_unknown_vars_literal() {
             task_prompt: None,
             prev_result: None,
             prev_main_result: None,
+            revision_feedback: None,
             branch: None,
             base_ref: None,
             source_worktree: None,
@@ -4013,6 +4016,7 @@ fn build_stage_prompt_resolves_stage_trigger() {
             task_prompt: None,
             prev_result: None,
             prev_main_result: None,
+            revision_feedback: None,
             branch: None,
             base_ref: None,
             source_worktree: None,
@@ -4033,6 +4037,7 @@ fn build_stage_prompt_labels_agent_instructions_and_the_actual_task() {
             task_prompt: Some("Fix the buried task."),
             prev_result: None,
             prev_main_result: None,
+            revision_feedback: None,
             branch: None,
             base_ref: None,
             source_worktree: None,
@@ -4044,11 +4049,60 @@ fn build_stage_prompt_labels_agent_instructions_and_the_actual_task() {
 }
 
 #[test]
+fn build_stage_prompt_appends_imported_revision_feedback_without_template_opt_in() {
+    let prompt = build_stage_prompt(
+        "Generic agent guidance.",
+        Some("Original: $TASK_PROMPT\nPrevious: $PREV_RESULT\nPrevious main: $PREV_MAIN_RESULT"),
+        &PromptContext {
+            task_prompt: Some("Fix the transferred task."),
+            prev_result: Some("commit completed"),
+            prev_main_result: Some("implementation completed"),
+            revision_feedback: Some("Keep the imported reviewer directive distinct."),
+            branch: None,
+            base_ref: None,
+            source_worktree: None,
+            stage_trigger: "transfer",
+            vars: None,
+        },
+    );
+
+    assert_eq!(
+        prompt,
+        "## Agent Instructions\n\nGeneric agent guidance.\n\n## Your Task\n\nOriginal: Fix the transferred task.\nPrevious: commit completed\nPrevious main: implementation completed\n\n## Revision Feedback\n\nKeep the imported reviewer directive distinct."
+    );
+}
+
+#[test]
+fn build_stage_prompt_keeps_explicit_revision_feedback_placement_compatible() {
+    let prompt = build_stage_prompt(
+        "Generic agent guidance.",
+        Some("Review feedback in place: ${REVISION_FEEDBACK}"),
+        &PromptContext {
+            task_prompt: None,
+            prev_result: None,
+            prev_main_result: None,
+            revision_feedback: Some("An explicitly placed directive."),
+            branch: None,
+            base_ref: None,
+            source_worktree: None,
+            stage_trigger: "transfer",
+            vars: None,
+        },
+    );
+
+    assert_eq!(
+        prompt,
+        "## Agent Instructions\n\nGeneric agent guidance.\n\n## Your Task\n\nReview feedback in place: An explicitly placed directive."
+    );
+}
+
+#[test]
 fn build_stage_prompt_omits_empty_prompt_sections() {
     let context = PromptContext {
         task_prompt: Some("Ship it."),
         prev_result: None,
         prev_main_result: None,
+        revision_feedback: None,
         branch: None,
         base_ref: None,
         source_worktree: None,
@@ -4088,6 +4142,7 @@ fn build_stage_prompt_replaces_base_ref() {
             task_prompt: None,
             prev_result: None,
             prev_main_result: None,
+            revision_feedback: None,
             branch: Some("task-source"),
             base_ref: Some("origin/main"),
             source_worktree: Some("/tmp/repo/.kanna-worktrees/task-source"),
@@ -5535,6 +5590,7 @@ fn prepare_task_for_api_prints_transfer_import_summary_before_the_agent() {
                 source_machine: Some("Primary".to_string()),
                 repo_mode: Some("bundle-repo".to_string()),
                 session_restored: true,
+                ..Default::default()
             }),
             notify_task_id: None,
             review_context: None,

@@ -320,5 +320,7 @@ mod repo_commands;
 mod repo_definitions;
 mod revision_status;
 mod task_events;
+mod transfer_history_checkpoint;
+mod transfer_preparation_gate;
 mod transfers;
 mod workflow_switch;

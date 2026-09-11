@@ -50,6 +50,7 @@ pub(super) fn build_target_stage_prompt_with_instructions(
         task_prompt: Some(task_prompt),
         prev_result,
         prev_main_result,
+        revision_feedback: None,
         branch,
         base_ref,
         source_worktree: source_worktree.as_deref(),
@@ -98,6 +99,9 @@ pub(super) struct PromptContext<'a> {
     /// declares a post is the post's result; a stage that needs the previous
     /// stage agent's own report reads this instead.
     pub(super) prev_main_result: Option<&'a str>,
+    /// Review findings carried by an imported revision independently of the
+    /// previous run result.
+    pub(super) revision_feedback: Option<&'a str>,
     pub(super) branch: Option<&'a str>,
     pub(super) base_ref: Option<&'a str>,
     pub(super) source_worktree: Option<&'a str>,
@@ -117,6 +121,7 @@ const RESERVED_PROMPT_VARS: &[&str] = &[
     "KANNA_TASK_ID",
     "PREV_MAIN_RESULT",
     "PREV_RESULT",
+    "REVISION_FEEDBACK",
     "SOURCE_WORKTREE",
     "STAGE_TRIGGER",
     "TASK_PROMPT",
@@ -130,6 +135,7 @@ fn prompt_var_value<'a>(name: &str, context: &'a PromptContext<'_>) -> Option<&'
         "TASK_PROMPT" => Some(context.task_prompt.unwrap_or("")),
         "PREV_RESULT" => Some(context.prev_result.unwrap_or("")),
         "PREV_MAIN_RESULT" => Some(context.prev_main_result.unwrap_or("")),
+        "REVISION_FEEDBACK" => Some(context.revision_feedback.unwrap_or("")),
         "BRANCH" => Some(context.branch.unwrap_or("")),
         "BASE_REF" => Some(context.base_ref.unwrap_or("")),
         "SOURCE_WORKTREE" => Some(context.source_worktree.unwrap_or("")),
@@ -305,6 +311,25 @@ pub(super) fn build_stage_prompt(
     if let Some(stage_prompt) = stage_prompt {
         if let Some(section) = build_prompt_section("## Your Task", stage_prompt, context) {
             sections.push(section);
+        }
+    }
+    // Imported revisions must reach the first fresh destination session even
+    // when the pinned workflow predates `$REVISION_FEEDBACK`. Keep the token
+    // available for workflows that deliberately place the feedback, but give
+    // every other workflow an independent, explicitly labelled section rather
+    // than overloading `$PREV_RESULT` or `$PREV_MAIN_RESULT`.
+    let template_places_revision_feedback = agent_prompt.contains("$REVISION_FEEDBACK")
+        || agent_prompt.contains("${REVISION_FEEDBACK}")
+        || stage_prompt.is_some_and(|prompt| {
+            prompt.contains("$REVISION_FEEDBACK") || prompt.contains("${REVISION_FEEDBACK}")
+        });
+    if !template_places_revision_feedback {
+        if let Some(feedback) = context
+            .revision_feedback
+            .map(str::trim)
+            .filter(|feedback| !feedback.is_empty())
+        {
+            sections.push(format!("## Revision Feedback\n\n{feedback}"));
         }
     }
 

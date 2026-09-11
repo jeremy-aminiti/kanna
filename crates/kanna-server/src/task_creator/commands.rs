@@ -328,6 +328,7 @@ fn transfer_repo_mode_label(mode: &str) -> String {
         "reuse-local" => "reused this machine's existing clone".to_string(),
         "clone-remote" => "cloned from its remote".to_string(),
         "bundle-repo" => "restored from a transferred git bundle".to_string(),
+        "task-bundle" => "restored the exact task history from a verified git bundle".to_string(),
         other => other.to_string(),
     }
 }

@@ -493,6 +493,7 @@ async fn handle_connection(
                 committed: false,
                 event: None,
                 event_recorded: false,
+                refused_reason: None,
             };
             context
                 .replay_store
@@ -708,9 +709,87 @@ async fn handle_connection(
                             .try_send(RuntimeEvent::IncomingTransferRequest(event))
                             .map_err(|_| RuntimeError::IncomingEventChannelClosed)?;
                     }
-                    PeerResponse::SubmitTransferPayload {
-                        request_id,
-                        transfer_id,
+                    // Do not acknowledge merely storing opaque bytes. The
+                    // destination server must durably admit the payload first;
+                    // otherwise an old/new mismatch can look successful while
+                    // the source remains the only copy. `event_recorded` is
+                    // the pre-existing generic event-delivery marker (an old
+                    // server writes it for any payload it recognizes) — it is
+                    // not proof of *this* transfer's integrity contract, only
+                    // proof that queuing durably happened. A definitive
+                    // refusal is a distinct, contract-specific decision the
+                    // destination server can reach synchronously (a fast,
+                    // zero-I/O check of the payload's own shape); it is never
+                    // inferred from a timeout.
+                    enum Outcome {
+                        Admitted,
+                        Refused(String),
+                        Unresolved,
+                    }
+                    let mut outcome = Outcome::Unresolved;
+                    for _ in 0..100 {
+                        let reservation = context
+                            .incoming_reservations
+                            .lock()
+                            .await
+                            .get(&transfer_id)
+                            .cloned();
+                        match reservation {
+                            Some(reservation) if reservation.refused_reason.is_some() => {
+                                outcome = Outcome::Refused(
+                                    reservation.refused_reason.unwrap_or_default(),
+                                );
+                                break;
+                            }
+                            Some(reservation) if reservation.event_recorded => {
+                                outcome = Outcome::Admitted;
+                                break;
+                            }
+                            _ => {}
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    if matches!(outcome, Outcome::Unresolved) {
+                        let reservation = context
+                            .incoming_reservations
+                            .lock()
+                            .await
+                            .get(&transfer_id)
+                            .cloned();
+                        outcome = match reservation {
+                            Some(reservation) if reservation.refused_reason.is_some() => {
+                                Outcome::Refused(reservation.refused_reason.unwrap_or_default())
+                            }
+                            Some(reservation) if reservation.event_recorded => Outcome::Admitted,
+                            _ => Outcome::Unresolved,
+                        };
+                    }
+                    match outcome {
+                        Outcome::Admitted => PeerResponse::SubmitTransferPayload {
+                            request_id,
+                            transfer_id,
+                            admitted: true,
+                            refusal_reason: None,
+                        },
+                        Outcome::Refused(reason) => PeerResponse::SubmitTransferPayload {
+                            request_id,
+                            transfer_id,
+                            admitted: false,
+                            refusal_reason: Some(reason),
+                        },
+                        // Deliberately the *same* response shape as a refusal,
+                        // just with no reason: an old peer that only reads
+                        // `admitted` cannot tell this from a refusal, which is
+                        // the correct, honest degradation (see
+                        // docs/kanna-server-boundary.md item 3 — same-machine
+                        // sidecar skew must resolve unresolved, not failed).
+                        // A new peer distinguishes them by `refusal_reason`.
+                        Outcome::Unresolved => PeerResponse::SubmitTransferPayload {
+                            request_id,
+                            transfer_id,
+                            admitted: false,
+                            refusal_reason: None,
+                        },
                     }
                 }
                 Err(error) => PeerResponse::Error {
@@ -1265,6 +1344,19 @@ async fn handle_connection(
                         )
                     })?
                     .to_string();
+                // Additive: an old destination server never computes or sends
+                // these, and the sidecar carries them opaquely either way —
+                // only the source kanna-server's own `outgoing_committed`
+                // interprets them, refusing to close on their absence rather
+                // than trusting a receipt that carries no proof.
+                let content_commitment = payload
+                    .get("content_commitment")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let destination_repo_id = payload
+                    .get("destination_repo_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
 
                 if let Some(mut receipt) = existing_receipt {
                     if receipt.source_task_id != source_task_id
@@ -1309,6 +1401,8 @@ async fn handle_connection(
                     transport: reservation.transport,
                     source_task_id: source_task_id.clone(),
                     destination_local_task_id: destination_local_task_id.clone(),
+                    content_commitment,
+                    destination_repo_id,
                     created_at_unix_ms: unix_ms(),
                     applied: false,
                     event_queued: false,

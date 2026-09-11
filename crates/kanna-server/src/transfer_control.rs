@@ -47,6 +47,7 @@ const OPERATIONS: &[&str] = &[
     "mark-import-commit-applied",
     "nack-import-commit",
     "mark-incoming-event-recorded",
+    "mark-incoming-transfer-refused",
     "mark-import-ack-completed",
     "finalize-outgoing-transfer",
     "complete-outgoing-transfer-finalization",
@@ -442,6 +443,8 @@ pub async fn dispatch(
                         &params,
                         &["destinationLocalTaskId"],
                     )?,
+                    "content_commitment": optional_string(&params, &["contentCommitment"]),
+                    "destination_repo_id": optional_string(&params, &["destinationRepoId"]),
                 }),
             )
             .await
@@ -467,6 +470,17 @@ pub async fn dispatch(
                 client,
                 "mark_incoming_event_recorded",
                 json!({ "transfer_id": required_string(&params, &["transferId"])? }),
+            )
+            .await
+        }
+        "mark-incoming-transfer-refused" => {
+            transfer_id_reply(
+                client,
+                "mark_incoming_transfer_refused",
+                json!({
+                    "transfer_id": required_string(&params, &["transferId"])?,
+                    "reason": required_string(&params, &["reason"])?,
+                }),
             )
             .await
         }
@@ -559,18 +573,29 @@ async fn prepare_outgoing_transfer(
             }))
         }
         "commit" => {
-            transfer_id_reply(
-                client,
-                "prepare_transfer_commit",
-                json!({
-                    "transfer_id": required_string(payload, &["transferId", "transfer_id"])?,
-                    "payload": payload
-                        .get("payload")
-                        .cloned()
-                        .ok_or("prepare_outgoing_transfer commit payload missing payload")?,
-                }),
-            )
-            .await
+            // Not `transfer_id_reply`: that helper discards everything but
+            // the transfer id, which would silently throw away the
+            // admitted/refusal outcome this phase exists to report. See
+            // docs/kanna-server-boundary.md item 3 — `admitted: false` with
+            // no reason is unresolved, not a failure, and the caller needs
+            // both fields to tell the two apart.
+            let response = client
+                .request(
+                    "prepare_transfer_commit",
+                    json!({
+                        "transfer_id": required_string(payload, &["transferId", "transfer_id"])?,
+                        "payload": payload
+                            .get("payload")
+                            .cloned()
+                            .ok_or("prepare_outgoing_transfer commit payload missing payload")?,
+                    }),
+                )
+                .await?;
+            Ok(json!({
+                "transferId": required_string(&response, &["transfer_id", "transferId"])?,
+                "admitted": required_bool(&response, &["admitted"])?,
+                "refusalReason": optional_string(&response, &["refusal_reason", "refusalReason"]),
+            }))
         }
         other => Err(format!(
             "prepare_outgoing_transfer payload has unsupported phase {other}"
@@ -633,6 +658,12 @@ fn required_string(value: &Value, keys: &[&str]) -> Result<String, String> {
         "missing required string field {}",
         keys.join(" or ")
     ))
+}
+
+fn optional_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(key).and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 fn required_bool(value: &Value, keys: &[&str]) -> Result<bool, String> {

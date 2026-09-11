@@ -446,6 +446,34 @@ pub(super) async fn get_task_inputs(
     Ok(Json(inputs))
 }
 
+/// The full ordered foreign history a transfer carried in, with each
+/// record's original provenance — the durable place a reviewer, a manager,
+/// or a later hop re-exporting this task reads what a transferred task
+/// inherited, since the task's own prompt only ever carries the latest
+/// result of each kind.
+pub(super) async fn get_task_transfer_history(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(task_id): axum::extract::Path<String>,
+) -> Result<Json<crate::mobile_api::TaskTransferHistory>, (axum::http::StatusCode, String)> {
+    let db = Db::open(&state.config.db_path).map_err(|e| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db error: {}", e),
+        )
+    })?;
+    let api = MobileApi::new(state.config.clone(), db);
+    let history = api
+        .list_transfer_history(&task_id)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                format!("task not found: {task_id}"),
+            )
+        })?;
+    Ok(Json(history))
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UpdateTaskRequest {
@@ -843,17 +871,15 @@ pub(super) async fn put_task(
     create_task_with_requested_id(state, payload, Some(task_id)).await
 }
 
-/// Creates a task from inside the process, through the same creator the route
-/// serves.
-///
-/// The transfer engine's import path uses this so a transferred task gets the
-/// repo-config setup, worktree fork, `resumeSessionId` wiring, recovery
-/// snapshot and import banner every other task gets — the renderer used to
-/// reach the same code by calling `POST /v1/tasks` over loopback.
-pub(crate) async fn create_task_in_process(
+/// Transfer-only creation entry point. Historical inputs are persisted after
+/// the task/worktree preparation transaction and before the daemon spawn, so
+/// the resumed agent can read its complete directive record on its first turn.
+pub(crate) async fn create_transferred_task_in_process(
     state: Arc<AppState>,
     payload: crate::mobile_api::CreateTaskRequest,
     requested_task_id: String,
+    inputs: Vec<crate::db::ImportedTaskInput>,
+    transfer_payload: crate::transfer_engine::payload::OutgoingTransferPayload,
 ) -> Result<crate::mobile_api::CreateTaskResponse, (axum::http::StatusCode, String)> {
     validate_requested_task_id(&requested_task_id)?;
     let _flight = state
@@ -864,15 +890,78 @@ pub(crate) async fn create_task_in_process(
                 format!("task creation already in progress: {requested_task_id}"),
             )
         })?;
-    create_task_with_requested_id(state, payload, Some(requested_task_id))
-        .await
-        .map(|Json(response)| response)
+    create_task_with_requested_id_and_inputs(
+        state,
+        payload,
+        Some(requested_task_id),
+        inputs,
+        Some(transfer_payload),
+    )
+    .await
+    .map(|Json(response)| response)
 }
 
 pub(super) async fn create_task_with_requested_id(
     state: Arc<AppState>,
     payload: crate::mobile_api::CreateTaskRequest,
     requested_task_id: Option<String>,
+) -> Result<Json<crate::mobile_api::CreateTaskResponse>, (axum::http::StatusCode, String)> {
+    create_task_with_requested_id_and_inputs(state, payload, requested_task_id, Vec::new(), None)
+        .await
+}
+
+fn persist_transferred_task_context(
+    db: &Db,
+    task_id: &str,
+    context: Option<&crate::mobile_api::TransferImportSummary>,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    let Some(context) = context else {
+        return Ok(());
+    };
+    let (Some(transfer_id), Some(workflow_definition)) = (
+        context.transfer_id.as_deref(),
+        context.workflow_definition.as_deref(),
+    ) else {
+        return Ok(());
+    };
+    db.upsert_transferred_task_context(
+        task_id,
+        transfer_id,
+        workflow_definition,
+        context.previous_stage_result.as_deref(),
+        context.previous_main_result.as_deref(),
+        context.revision_feedback.as_deref(),
+    )
+    .map_err(|error| db_write_error("could not persist transferred task context", error))?;
+    if context.history.is_empty() {
+        return Ok(());
+    }
+    let records: Vec<crate::db::TransferredHistoryRecord> = context
+        .history
+        .iter()
+        .map(|record| crate::db::TransferredHistoryRecord {
+            sequence: record.sequence as i64,
+            origin_peer_id: record.origin_peer_id.clone(),
+            origin_task_id: record.origin_task_id.clone(),
+            origin_run_id: record.origin_run_id.clone(),
+            stage: record.stage.clone(),
+            kind: record.kind.clone(),
+            agent: record.agent.clone(),
+            result: record.result.clone(),
+            feedback: record.feedback.clone(),
+            finished_at: record.finished_at.clone(),
+        })
+        .collect();
+    db.import_transferred_task_history(task_id, &records)
+        .map_err(|error| db_write_error("could not persist transferred task history", error))
+}
+
+async fn create_task_with_requested_id_and_inputs(
+    state: Arc<AppState>,
+    payload: crate::mobile_api::CreateTaskRequest,
+    requested_task_id: Option<String>,
+    imported_inputs: Vec<crate::db::ImportedTaskInput>,
+    transfer_payload: Option<crate::transfer_engine::payload::OutgoingTransferPayload>,
 ) -> Result<Json<crate::mobile_api::CreateTaskResponse>, (axum::http::StatusCode, String)> {
     if let Some(task_id) = requested_task_id.as_deref() {
         validate_requested_task_id(task_id)?;
@@ -893,6 +982,12 @@ pub(super) async fn create_task_with_requested_id(
         transfer_import
             .validate()
             .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
+        if transfer_payload.is_none() {
+            return Err((
+                axum::http::StatusCode::FORBIDDEN,
+                "transferImport is reserved for the verified transfer lifecycle".to_string(),
+            ));
+        }
     }
     // Validated here, before anything is created: a review context that cannot
     // identify what is being reviewed must fail the request outright. Creating
@@ -908,10 +1003,12 @@ pub(super) async fn create_task_with_requested_id(
     };
 
     #[cfg(test)]
-    if let Some(task_creator) = state.task_creator.clone() {
-        return task_creator(payload)
-            .map(Json)
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+    if payload.transfer_import.is_none() {
+        if let Some(task_creator) = state.task_creator.clone() {
+            return task_creator(payload)
+                .map(Json)
+                .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e));
+        }
     }
 
     // Everything before the daemon spawn is synchronous git/SQLite work —
@@ -933,8 +1030,19 @@ pub(super) async fn create_task_with_requested_id(
             resolved_blocker_ids: Vec<String>,
         },
     }
+    let imported_inputs = Arc::new(imported_inputs);
+    let transfer_head_oid = payload
+        .transfer_import
+        .as_ref()
+        .and_then(|import| import.head_oid.clone());
+    let transfer_id_for_proof = payload
+        .transfer_import
+        .as_ref()
+        .and_then(|import| import.transfer_id.clone());
+    let transfer_import_for_gate = payload.transfer_import.clone();
     let outcome = {
         let state = Arc::clone(&state);
+        let imported_inputs = Arc::clone(&imported_inputs);
         super::blocking::run_handler_blocking("task create prepare", move || {
             if let Some(task_id) = requested_task_id.as_deref() {
                 let db = Db::open(&state.config.db_path).map_err(|e| {
@@ -946,6 +1054,73 @@ pub(super) async fn create_task_with_requested_id(
                 if let Some(existing) =
                     existing_create_task_response(&db, task_id, &payload.repo_id, &payload.prompt)?
                 {
+                    let bound_manifest = db
+                        .transferred_task_manifest_for_task(task_id)
+                        .map_err(|error| db_write_error("db error", error))?;
+                    if let Some((_, _, _, bound_task, state)) = bound_manifest.as_ref() {
+                        if bound_task.as_deref() == Some(task_id) && state != "prepared" {
+                            let owner_transfer_id = payload
+                                .transfer_import
+                                .as_ref()
+                                .and_then(|summary| summary.transfer_id.as_deref());
+                            let owner_manifest = match owner_transfer_id {
+                                Some(transfer_id) => db
+                                    .transferred_task_manifest(transfer_id)
+                                    .map_err(|error| db_write_error("db error", error))?,
+                                None => None,
+                            };
+                            let owns_import = owner_manifest.as_ref().is_some_and(
+                                |(repo_id, _, _, local_task_id, manifest_state)| {
+                                    *repo_id == payload.repo_id
+                                        && local_task_id.as_deref() == Some(task_id)
+                                        && manifest_state == "importing"
+                                },
+                            );
+                            if !owns_import {
+                                return Err((
+                                    axum::http::StatusCode::CONFLICT,
+                                    format!(
+                                        "transferred task {task_id} has no durable prepared proof"
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    if payload.transfer_import.is_some() {
+                        let transfer_id = payload
+                            .transfer_import
+                            .as_ref()
+                            .and_then(|summary| summary.transfer_id.as_deref())
+                            .ok_or_else(|| {
+                                (
+                                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                                    "transferred task is missing transfer identity".to_string(),
+                                )
+                            })?;
+                        let manifest = db
+                            .transferred_task_manifest(transfer_id)
+                            .map_err(|error| db_write_error("db error", error))?;
+                        let owned_for_task =
+                            manifest
+                                .as_ref()
+                                .is_some_and(|(_, _, _, local_task_id, state)| {
+                                    matches!(state.as_str(), "importing" | "prepared")
+                                        && local_task_id.as_deref() == Some(task_id)
+                                });
+                        if !owned_for_task {
+                            return Err((
+                                axum::http::StatusCode::CONFLICT,
+                                format!("transferred task {task_id} has no durable prepared proof"),
+                            ));
+                        }
+                    }
+                    persist_transferred_task_context(
+                        &db,
+                        task_id,
+                        payload.transfer_import.as_ref(),
+                    )?;
+                    db.import_task_inputs(task_id, &imported_inputs)
+                        .map_err(|error| db_write_error("could not import task inputs", error))?;
                     let existing_is_open = db
                         .get_pipeline_item(task_id)
                         .map_err(|e| db_write_error("db error", e))?
@@ -1091,6 +1266,7 @@ pub(super) async fn create_task_with_requested_id(
                 }
             }
 
+            let transfer_context = payload.transfer_import.clone();
             let prepared = {
                 let db = Db::open(&state.config.db_path).map_err(|e| {
                     (
@@ -1116,6 +1292,157 @@ pub(super) async fn create_task_with_requested_id(
                     }
                 }
             };
+            if let Err((status, reason)) = persist_transferred_task_context(
+                &Db::open(&state.config.db_path).map_err(|error| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {error}"),
+                    )
+                })?,
+                crate::task_creator::prepared_task_id(&prepared),
+                transfer_context.as_ref(),
+            ) {
+                let db = Db::open(&state.config.db_path).map_err(|error| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {error}"),
+                    )
+                })?;
+                let rollback = crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                return Err((
+                    status,
+                    match rollback {
+                        Ok(()) => reason,
+                        Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                    },
+                ));
+            }
+            if !imported_inputs.is_empty() {
+                let db = Db::open(&state.config.db_path).map_err(|e| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {e}"),
+                    )
+                })?;
+                if let Err(error) = db.import_task_inputs(
+                    crate::task_creator::prepared_task_id(&prepared),
+                    &imported_inputs,
+                ) {
+                    let reason = format!("could not import task inputs: {error}");
+                    let rollback =
+                        crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                    return Err((
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        match rollback {
+                            Ok(()) => reason,
+                            Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                        },
+                    ));
+                }
+            }
+            if let Some(import) = transfer_import_for_gate.as_ref() {
+                let db = Db::open(&state.config.db_path).map_err(|error| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("db error: {error}"),
+                    )
+                })?;
+                // Every failure below is discovered after `prepared` already
+                // created the task's pipeline_item row and git worktree, so
+                // (like the transfer-context and imported-inputs gates just
+                // above) each one must roll that artifact back rather than
+                // leaving an orphaned, never-admitted task behind.
+                let transfer_id = match import.transfer_id.as_deref() {
+                    Some(transfer_id) => transfer_id,
+                    None => {
+                        let reason = "transferred task is missing transfer identity".to_string();
+                        let rollback =
+                            crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                        return Err((
+                            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                            match rollback {
+                                Ok(()) => reason,
+                                Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                            },
+                        ));
+                    }
+                };
+                let expected_head = match import.head_oid.as_deref() {
+                    Some(expected_head) => expected_head,
+                    None => {
+                        let reason = "transferred task is missing committed head".to_string();
+                        let rollback =
+                            crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                        return Err((
+                            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                            match rollback {
+                                Ok(()) => reason,
+                                Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                            },
+                        ));
+                    }
+                };
+                let (worktree, branch) = crate::task_creator::prepared_task_worktree(&prepared);
+                let actual = match crate::transfer_engine::git::commit_oid(
+                    std::path::Path::new(worktree),
+                    branch,
+                ) {
+                    Ok(actual) => actual,
+                    Err(reason) => {
+                        let rollback =
+                            crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                        return Err((
+                            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                            match rollback {
+                                Ok(()) => reason,
+                                Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                            },
+                        ));
+                    }
+                };
+                if actual != expected_head {
+                    let reason = "transferred task head changed during preparation".to_string();
+                    let rollback =
+                        crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                    return Err((
+                        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        match rollback {
+                            Ok(()) => reason,
+                            Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                        },
+                    ));
+                }
+                let manifest = match db.transferred_task_manifest(transfer_id) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        let (status, reason) = db_write_error("db error", error);
+                        let rollback =
+                            crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                        return Err((
+                            status,
+                            match rollback {
+                                Ok(()) => reason,
+                                Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                            },
+                        ));
+                    }
+                };
+                if manifest.as_ref().is_none_or(|(_, _, _, task, state)| {
+                    task.as_deref() != Some(crate::task_creator::prepared_task_id(&prepared))
+                        || state != "importing"
+                }) {
+                    let reason = "transferred task lacks an importing manifest".to_string();
+                    let rollback =
+                        crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
+                    return Err((
+                        axum::http::StatusCode::CONFLICT,
+                        match rollback {
+                            Ok(()) => reason,
+                            Err(rollback) => format!("{reason}; rollback failed: {rollback}"),
+                        },
+                    ));
+                }
+            }
             if !resolved_blocker_ids.is_empty() || review_context.is_some() {
                 let db = Db::open(&state.config.db_path).map_err(|e| {
                     (
@@ -1153,6 +1480,62 @@ pub(super) async fn create_task_with_requested_id(
         })
         .await?
     };
+    if let Some(transfer_payload) = transfer_payload.as_ref() {
+        let task_id = match &outcome {
+            PreparedCreateOutcome::Done(existing)
+            | PreparedCreateOutcome::DormantCreated(existing)
+            | PreparedCreateOutcome::RepairFresh { existing, .. }
+            | PreparedCreateOutcome::RepairResume { existing, .. } => existing.task_id.as_str(),
+            PreparedCreateOutcome::Spawn { prepared, .. } => {
+                crate::task_creator::prepared_task_id(prepared)
+            }
+        };
+        let transfer_id = transfer_id_for_proof.as_deref().ok_or_else(|| {
+            (
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "transferred task is missing transfer identity".to_string(),
+            )
+        })?;
+        let db = Db::open(&state.config.db_path).map_err(|error| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("db error: {error}"),
+            )
+        })?;
+        let already_proved = db
+            .transferred_task_manifest_content_commitment(transfer_id)
+            .map_err(|error| db_write_error("db error", error))?
+            .is_some();
+        if already_proved {
+            let binding = db
+                .transferred_task_manifest(transfer_id)
+                .map_err(|error| db_write_error("db error", error))?;
+            if binding.as_ref().is_none_or(|(_, _, _, bound_task, state)| {
+                bound_task.as_deref() != Some(task_id) || state != "prepared"
+            }) {
+                return Err((
+                    axum::http::StatusCode::CONFLICT,
+                    format!("transferred task {task_id} has conflicting prepared proof"),
+                ));
+            }
+        } else {
+            drop(db);
+            crate::transfer_engine::import::verify_persisted_task_bundle(
+                &state,
+                transfer_payload,
+                task_id,
+                transfer_id,
+                Some(imported_inputs.as_ref()),
+            )
+            .await
+            .map_err(|error| {
+                (
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("transferred task preparation proof failed: {error:?}"),
+                )
+            })?;
+        }
+    }
     let (prepared, resolved_blocker_ids) = match outcome {
         PreparedCreateOutcome::Done(existing) => return Ok(Json(existing)),
         PreparedCreateOutcome::DormantCreated(created) => {
@@ -1253,7 +1636,27 @@ pub(super) async fn create_task_with_requested_id(
         PreparedCreateOutcome::Spawn {
             prepared,
             resolved_blocker_ids,
-        } => (prepared, resolved_blocker_ids),
+        } => {
+            // Transfer bundles are admitted only after the prepared worktree
+            // proves the pinned committed head.  This runs before the daemon
+            // is contacted, so no agent can execute an unverified import.
+            if let Some(expected_head) = transfer_head_oid.as_deref() {
+                let (worktree, branch) = crate::task_creator::prepared_task_worktree(&prepared);
+                let actual =
+                    crate::transfer_engine::git::commit_oid(std::path::Path::new(worktree), branch)
+                        .map_err(|error| {
+                            (
+                                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                                format!("transferred task head verification failed: {error}"),
+                            )
+                        })?;
+                if actual != expected_head {
+                    return Err((axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("transferred task head mismatch: expected {expected_head}, got {actual}")));
+                }
+            }
+            (prepared, resolved_blocker_ids)
+        }
     };
     let mut daemon = crate::daemon_client::DaemonClient::connect(&state.config.daemon_dir)
         .await

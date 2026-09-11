@@ -530,7 +530,7 @@ describe("cloud task ownership transfer", () => {
     expect(secondaryOpen).toHaveLength(0);
   }, 180_000);
 
-  it("acquires a missing clone-remote repo over the cloud relay before taking ownership", async () => {
+  it("acquires a missing task-bundle repo over the cloud relay before taking ownership", async () => {
     await waitForBidirectionalCloudReadiness();
     const repoName = `cloud-task-transfer-clone-${process.pid}`;
     const repoPath = await createFixtureRepo(repoName);
@@ -548,7 +548,7 @@ describe("cloud task ownership transfer", () => {
       repo?: { mode?: string; remote_url?: string | null };
     };
     expect(payload.repo).toMatchObject({
-      mode: "clone-remote",
+      mode: "task-bundle",
     });
     expect(typeof payload.repo?.remote_url).toBe("string");
   }, 180_000);
@@ -579,7 +579,7 @@ describe("cloud task ownership transfer", () => {
       };
     };
     expect(payload.repo).toMatchObject({
-      mode: "bundle-repo",
+      mode: "task-bundle",
     });
     expect(payload.repo?.bundle?.artifact_id).toBeTruthy();
     expect(payload.repo?.bundle?.filename).toContain(".bundle");

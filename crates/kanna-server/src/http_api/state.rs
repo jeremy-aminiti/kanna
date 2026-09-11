@@ -1096,6 +1096,27 @@ impl AppState {
         })
     }
 
+    /// Replaces the default (dead-by-construction) sidecar supervisor with an
+    /// already-constructed one — deliberately taking the value rather than a
+    /// builder closure, because a real subprocess sidecar's identity is read
+    /// from process-global env vars lazily, at its first `.control()` call;
+    /// the caller must finish spawning (and can eagerly force that spawn)
+    /// before those env vars are mutated again for another identity, which a
+    /// closure invoked synchronously inside `Self::new` cannot do in an
+    /// async test. For tests that need `run_import`'s real destination-DB /
+    /// sidecar control boundary (not the queue-drain path) rather than a
+    /// fake or a dead client. See
+    /// `transfer_sidecar::TransferSidecarSupervisor::with_binary_for_test`.
+    #[cfg(test)]
+    pub(crate) fn with_transfer_sidecar_for_test(
+        config: Config,
+        transfer_sidecar: crate::transfer_sidecar::TransferSidecarSupervisor,
+    ) -> Self {
+        let mut state = Self::new(config);
+        state.transfer_sidecar = Arc::new(transfer_sidecar);
+        state
+    }
+
     #[cfg(test)]
     pub(super) fn with_task_creator(config: Config, task_creator: TestTaskCreator) -> Self {
         let mut state = Self::new(config);

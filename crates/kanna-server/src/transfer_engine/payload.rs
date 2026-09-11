@@ -13,6 +13,11 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+
+pub const TASK_INPUT_LEDGER_FILENAME: &str = "task-inputs.json";
+const TASK_INPUT_LEDGER_VERSION: u8 = 1;
 
 /// How the destination gets the repository the task lives in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +26,13 @@ pub enum RepoAcquisitionMode {
     ReuseLocal,
     CloneRemote,
     BundleRepo,
+    /// A complete task handoff: the repository bundle is applied even when
+    /// the destination already has the repository, and the durable input
+    /// ledger is part of the import contract. Older servers do not recognize
+    /// this mode, so a rolling-version mismatch fails closed instead of
+    /// accepting a payload while silently substituting main or dropping
+    /// instructions.
+    TaskBundle,
 }
 
 impl RepoAcquisitionMode {
@@ -29,6 +41,7 @@ impl RepoAcquisitionMode {
             Self::ReuseLocal => "reuse-local",
             Self::CloneRemote => "clone-remote",
             Self::BundleRepo => "bundle-repo",
+            Self::TaskBundle => "task-bundle",
         }
     }
 
@@ -37,6 +50,7 @@ impl RepoAcquisitionMode {
             "reuse-local" => Ok(Self::ReuseLocal),
             "clone-remote" => Ok(Self::CloneRemote),
             "bundle-repo" => Ok(Self::BundleRepo),
+            "task-bundle" => Ok(Self::TaskBundle),
             other => Err(format!("unsupported repo acquisition mode {other}")),
         }
     }
@@ -189,6 +203,10 @@ pub struct TransferBundlePayload {
     pub artifact_id: String,
     pub filename: String,
     pub ref_name: Option<String>,
+    /// Full source-side ref that names the immutable review base included in
+    /// the bundle. TaskBundle requires this alongside `task.base_oid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -203,6 +221,43 @@ pub struct TransferTaskPayload {
     pub prompt: Option<String>,
     pub stage: String,
     pub branch: Option<String>,
+    /// Exact committed source tip the destination must import and prove before
+    /// it may acknowledge the transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_oid: Option<String>,
+    /// Exact source commit used as the transferred task's diff base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_oid: Option<String>,
+    /// The source's own commitment over the content it is shipping (head,
+    /// base, stage, workflow, input-ledger checksum, history) — see
+    /// [`transfer_content_commitment`]. Additive: an older peer that never
+    /// sends this is unaffected, since the destination recomputes its own
+    /// copy independently rather than trusting this one; the source instead
+    /// reads its own copy back from what it persisted here, later, to check
+    /// the destination's acknowledgment against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_commitment: Option<String>,
+    /// Immutable source workflow/context carried into the first destination
+    /// preparation. These are snapshots, never local stage-run rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_definition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_stage_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_main_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_feedback: Option<String>,
+    /// Ordered source stage/main/post/revision history, oldest first. Unlike
+    /// the three scalar snapshots above (each the *latest* value of its
+    /// kind), this carries every finished run so a destination that is later
+    /// transferred again (a second hop) can re-export what it inherited
+    /// instead of only its own local runs. Each record keeps the run
+    /// identity it was first produced under — never rewritten to credit an
+    /// intermediate machine — mirroring how [`TransferInputLedgerEntry`]
+    /// preserves first origin. Additive: an older peer that never sends this
+    /// is unaffected, since every consumer still has the three scalars.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<TransferHistoryRecordPayload>,
     /// The task's workflow name. Emitted under both `workflow` (canonical)
     /// and `pipeline` (legacy) so a peer running either naming can import it;
     /// parsing accepts either key.
@@ -219,6 +274,35 @@ pub struct TransferTaskPayload {
     pub agent_provider: String,
 }
 
+/// One historical stage/main/post/revision run, as carried in
+/// [`TransferTaskPayload::history`]. `origin_*` names where the run actually
+/// happened, which is not necessarily the immediate sender on a second hop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferHistoryRecordPayload {
+    /// Position in delivery order, 0-based and contiguous. Assigned fresh by
+    /// whichever machine exports this list, so it orders the *combined*
+    /// history (inherited plus this hop's own runs), not any one run's
+    /// original position.
+    pub sequence: u64,
+    pub origin_peer_id: String,
+    pub origin_task_id: String,
+    /// The run's own id on the machine that produced it. Kept separate from
+    /// any locally executable run id at the destination: this never becomes
+    /// a real `stage_run` row there.
+    pub origin_run_id: String,
+    pub stage: String,
+    /// `main` or `post`, matching `stage_run.kind`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferRepoPayload {
     pub mode: RepoAcquisitionMode,
@@ -229,12 +313,44 @@ pub struct TransferRepoPayload {
     pub bundle: Option<TransferBundlePayload>,
 }
 
+/// Out-of-band durable input ledger shipped with a task bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferInputLedgerPayload {
+    pub artifact_id: String,
+    pub filename: String,
+    pub sha256: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TransferInputLedger {
+    version: u8,
+    source_peer_id: String,
+    source_task_id: String,
+    inputs: Vec<TransferInputLedgerEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TransferInputLedgerEntry {
+    sequence: u64,
+    source: String,
+    stage: Option<String>,
+    message: String,
+    delivered_at: String,
+    origin_peer_id: String,
+    origin_task_id: String,
+    origin_input_id: i64,
+    origin_run_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutgoingTransferPayload {
     pub target_peer_id: String,
     pub target_desktop_id: Option<String>,
     pub task: TransferTaskPayload,
     pub repo: TransferRepoPayload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_ledger: Option<TransferInputLedgerPayload>,
     pub recovery: Option<crate::mobile_api::CreateTaskRecoverySnapshot>,
     #[serde(default)]
     pub artifacts: Vec<TransferArtifactPayload>,
@@ -281,19 +397,6 @@ impl std::fmt::Display for MissingSessionArtifact {
     }
 }
 
-pub fn choose_repo_acquisition_mode(
-    remote_url: Option<&str>,
-    target_has_repo: bool,
-) -> RepoAcquisitionMode {
-    if target_has_repo {
-        return RepoAcquisitionMode::ReuseLocal;
-    }
-    if normalize_optional(remote_url).is_some() {
-        return RepoAcquisitionMode::CloneRemote;
-    }
-    RepoAcquisitionMode::BundleRepo
-}
-
 /// The base branch a destination task forks from.
 ///
 /// A bundle carries the task's own branch, so the destination can fork from it
@@ -303,11 +406,188 @@ pub fn choose_repo_acquisition_mode(
 /// there is not one, so the destination falls back to its own repo default
 /// instead of forking from a ref that means something different here.
 pub fn resolve_incoming_base_branch(payload: &OutgoingTransferPayload) -> Option<String> {
-    if payload.repo.mode == RepoAcquisitionMode::BundleRepo {
+    if matches!(
+        payload.repo.mode,
+        RepoAcquisitionMode::BundleRepo | RepoAcquisitionMode::TaskBundle
+    ) {
         return normalize_optional(payload.task.branch.as_deref())
             .or_else(|| normalize_optional(payload.task.base_ref.as_deref()));
     }
     normalize_optional(payload.task.base_ref.as_deref())
+}
+
+fn validate_hex(value: &str, lengths: &[usize], label: &str) -> Result<String, String> {
+    if lengths.contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(value.to_string())
+    } else {
+        Err(format!("{label} is not a lowercase hexadecimal object id"))
+    }
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// The facts a transfer content commitment binds together: head, base,
+/// stage, pinned workflow, the shipped input ledger's checksum, and the
+/// ordered foreign history. Grouped into one type rather than passed as
+/// loose arguments so the source (authoring what it shipped) and the
+/// destination (reporting what it read back) construct the identical shape
+/// from two very differently sourced sets of values.
+#[derive(Serialize)]
+pub struct TransferContentCommitmentInput<'a> {
+    pub transfer_id: &'a str,
+    pub cloud_task_id: &'a str,
+    pub head_oid: &'a str,
+    pub base_oid: &'a str,
+    pub stage: &'a str,
+    pub workflow_definition: Option<&'a str>,
+    pub input_ledger_sha256: Option<&'a str>,
+    pub history: &'a [TransferHistoryRecordPayload],
+}
+
+/// A digest binding exactly the facts a destination must independently prove
+/// after import — head, base, stage, pinned workflow, the shipped input
+/// ledger's checksum, and the ordered foreign history — to this transfer and
+/// task's identity.
+///
+/// The source calls this once, at build time, over what it is authoring, and
+/// persists the result so it can later check an acknowledgment against its
+/// own copy. The destination calls this once, after `verify_persisted_task_bundle`
+/// has read every one of these values back out of its own Git/SQLite state —
+/// never out of the payload it received — so that an unimported destination
+/// has nothing it could echo to produce a matching digest. See
+/// docs/kanna-server-boundary.md item 3.
+pub fn transfer_content_commitment(
+    input: &TransferContentCommitmentInput<'_>,
+) -> Result<String, String> {
+    let bytes = serde_json::to_vec(input)
+        .map_err(|error| format!("failed to encode transfer content commitment: {error}"))?;
+    Ok(sha256_hex(&bytes))
+}
+
+/// Serializes the complete durable directive history. A row that has already
+/// crossed a machine keeps its first origin, so a second transfer does not
+/// rewrite history to claim the intermediate machine authored it.
+pub fn encode_task_input_ledger(
+    records: &[crate::db::TaskInputRecord],
+    source_peer_id: &str,
+    source_task_id: &str,
+) -> Result<Vec<u8>, String> {
+    let inputs = records
+        .iter()
+        .enumerate()
+        .map(|(sequence, record)| {
+            let origin = record.origin.clone().unwrap_or(crate::db::TaskInputOrigin {
+                peer_id: source_peer_id.to_string(),
+                task_id: source_task_id.to_string(),
+                input_id: record.id,
+                run_id: record.run_id.clone(),
+            });
+            TransferInputLedgerEntry {
+                sequence: sequence as u64,
+                source: record.source.clone(),
+                stage: record.stage.clone(),
+                message: record.message.clone(),
+                delivered_at: record.delivered_at.clone(),
+                origin_peer_id: origin.peer_id,
+                origin_task_id: origin.task_id,
+                origin_input_id: origin.input_id,
+                origin_run_id: origin.run_id,
+            }
+        })
+        .collect();
+    serde_json::to_vec(&TransferInputLedger {
+        version: TASK_INPUT_LEDGER_VERSION,
+        source_peer_id: source_peer_id.to_string(),
+        source_task_id: source_task_id.to_string(),
+        inputs,
+    })
+    .map_err(|error| format!("failed to encode task input ledger: {error}"))
+}
+
+/// Verifies and decodes a fetched directive ledger before any destination task
+/// exists. The digest binds sidecar artifact bytes to the finalized payload;
+/// sequence and origin checks keep retries and later transfers deterministic.
+pub fn decode_task_input_ledger(
+    bytes: &[u8],
+    metadata: &TransferInputLedgerPayload,
+    source_peer_id: &str,
+    source_task_id: &str,
+) -> Result<Vec<crate::db::ImportedTaskInput>, String> {
+    if sha256_hex(bytes) != metadata.sha256 {
+        return Err("transferred task input ledger checksum does not match its payload".into());
+    }
+    let ledger: TransferInputLedger = serde_json::from_slice(bytes)
+        .map_err(|error| format!("transferred task input ledger is invalid: {error}"))?;
+    if ledger.version != TASK_INPUT_LEDGER_VERSION {
+        return Err(format!(
+            "unsupported task input ledger version {}",
+            ledger.version
+        ));
+    }
+    if ledger.source_peer_id != source_peer_id || ledger.source_task_id != source_task_id {
+        return Err("transferred task input ledger source identity does not match its task".into());
+    }
+    if ledger.inputs.len() as u64 != metadata.count {
+        return Err("transferred task input ledger count does not match its payload".into());
+    }
+    let mut seen_origins = HashSet::with_capacity(ledger.inputs.len());
+    ledger
+        .inputs
+        .into_iter()
+        .enumerate()
+        .map(|(sequence, input)| {
+            if input.sequence != sequence as u64 {
+                return Err("transferred task input ledger is not in delivery order".into());
+            }
+            if !matches!(
+                input.source.as_str(),
+                "operator" | "manager" | "unspecified" | "engine" | "notify"
+            ) {
+                return Err(format!(
+                    "transferred task input has unsupported source {}",
+                    input.source
+                ));
+            }
+            if input.origin_input_id <= 0
+                || input.origin_peer_id.is_empty()
+                || input.origin_task_id.is_empty()
+                || input.delivered_at.is_empty()
+            {
+                return Err("transferred task input has incomplete origin provenance".into());
+            }
+            let origin_key = (
+                input.origin_peer_id.clone(),
+                input.origin_task_id.clone(),
+                input.origin_input_id,
+            );
+            if !seen_origins.insert(origin_key) {
+                return Err(
+                    "transferred task input ledger contains duplicate origin identity".into(),
+                );
+            }
+            Ok(crate::db::ImportedTaskInput {
+                stage: input.stage,
+                source: input.source,
+                message: input.message,
+                delivered_at: input.delivered_at,
+                origin: crate::db::TaskInputOrigin {
+                    peer_id: input.origin_peer_id,
+                    task_id: input.origin_task_id,
+                    input_id: input.origin_input_id,
+                    run_id: input.origin_run_id,
+                },
+            })
+        })
+        .collect()
 }
 
 fn normalize_optional(value: Option<&str>) -> Option<String> {
@@ -564,6 +844,93 @@ fn parse_codex_rollout_filename(
     Ok((year.to_string(), month.to_string(), day.to_string()))
 }
 
+/// Parses `task.history` (see [`TransferTaskPayload::history`]). Absent or
+/// `null` is a legacy/pre-history peer, not an error: it decodes as empty and
+/// every consumer falls back to the three scalar snapshots.
+fn parse_history_records(
+    task: &serde_json::Map<String, Value>,
+) -> Result<Vec<TransferHistoryRecordPayload>, String> {
+    let Some(value) = task.get("history").filter(|value| !value.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let entries = value
+        .as_array()
+        .ok_or_else(|| "task history must be an array".to_string())?;
+    let mut seen_origins = HashSet::new();
+    let mut records = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let record = object(entry, &format!("task history entry {index}"))?;
+        let sequence = record
+            .get("sequence")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("task history entry {index} missing sequence"))?;
+        if sequence != index as u64 {
+            return Err("transferred task history is not in delivery order".into());
+        }
+        let origin_peer_id = required_string(
+            record,
+            &["origin_peer_id", "originPeerId"],
+            &format!("task history entry {index} missing origin_peer_id"),
+        )?;
+        let origin_task_id = required_string(
+            record,
+            &["origin_task_id", "originTaskId"],
+            &format!("task history entry {index} missing origin_task_id"),
+        )?;
+        let origin_run_id = required_string(
+            record,
+            &["origin_run_id", "originRunId"],
+            &format!("task history entry {index} missing origin_run_id"),
+        )?;
+        if !seen_origins.insert((
+            origin_peer_id.clone(),
+            origin_task_id.clone(),
+            origin_run_id.clone(),
+        )) {
+            return Err("transferred task history has a duplicate origin run".into());
+        }
+        let kind = required_string(
+            record,
+            &["kind"],
+            &format!("task history entry {index} missing kind"),
+        )?;
+        if kind != "main" && kind != "post" {
+            return Err(format!(
+                "task history entry {index} has an unsupported kind"
+            ));
+        }
+        records.push(TransferHistoryRecordPayload {
+            sequence,
+            origin_peer_id,
+            origin_task_id,
+            origin_run_id,
+            stage: required_string(
+                record,
+                &["stage"],
+                &format!("task history entry {index} missing stage"),
+            )?,
+            kind,
+            agent: optional_string(record, &["agent"]),
+            result: nullable_string(
+                record,
+                &["result"],
+                &format!("task history entry {index} result must be a string or null"),
+            )?,
+            feedback: nullable_string(
+                record,
+                &["feedback"],
+                &format!("task history entry {index} feedback must be a string or null"),
+            )?,
+            finished_at: nullable_string(
+                record,
+                &["finished_at", "finishedAt"],
+                &format!("task history entry {index} finished_at must be a string or null"),
+            )?,
+        });
+    }
+    Ok(records)
+}
+
 fn parse_artifacts(
     value: Option<&Value>,
     task_provider: &str,
@@ -752,6 +1119,26 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
         None | Some(Value::Null) => None,
         Some(bundle) => {
             let bundle = object(bundle, "repo bundle")?;
+            let ref_name = nullable_string(
+                bundle,
+                &["ref_name", "refName"],
+                "repo bundle ref_name must be a string or null",
+            )?
+            .map(|reference| {
+                super::git::normalize_ref(Some(&reference))
+                    .ok_or_else(|| "repo bundle ref_name is not a safe git ref".to_string())
+            })
+            .transpose()?;
+            let base_ref_name = nullable_string(
+                bundle,
+                &["base_ref_name", "baseRefName"],
+                "repo bundle base_ref_name must be a string or null",
+            )?
+            .map(|reference| {
+                super::git::normalize_ref(Some(&reference))
+                    .ok_or_else(|| "repo bundle base_ref_name is not a safe git ref".to_string())
+            })
+            .transpose()?;
             Some(TransferBundlePayload {
                 artifact_id: validate_component(
                     &required_string(
@@ -765,16 +1152,73 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
                     &required_string(bundle, &["filename"], "repo bundle missing filename")?,
                     "transfer bundle filename",
                 )?,
-                ref_name: nullable_string(
-                    bundle,
-                    &["ref_name", "refName"],
-                    "repo bundle ref_name must be a string or null",
-                )?,
+                ref_name,
+                base_ref_name,
             })
         }
     };
-    if mode == RepoAcquisitionMode::BundleRepo && bundle.is_none() {
-        return Err("bundle-repo payload is missing bundle metadata".into());
+    if matches!(
+        mode,
+        RepoAcquisitionMode::BundleRepo | RepoAcquisitionMode::TaskBundle
+    ) && bundle.is_none()
+    {
+        return Err(format!(
+            "{} payload is missing bundle metadata",
+            mode.as_str()
+        ));
+    }
+
+    let input_ledger = match record.get("input_ledger") {
+        None | Some(Value::Null) => None,
+        Some(ledger) => {
+            let ledger = object(ledger, "input ledger")?;
+            let filename = validate_component(
+                &required_string(ledger, &["filename"], "input ledger missing filename")?,
+                "input ledger filename",
+            )?;
+            if filename != TASK_INPUT_LEDGER_FILENAME {
+                return Err("input ledger filename does not match its contract".into());
+            }
+            Some(TransferInputLedgerPayload {
+                artifact_id: validate_component(
+                    &required_string(
+                        ledger,
+                        &["artifact_id", "artifactId"],
+                        "input ledger missing artifact id",
+                    )?,
+                    "input ledger artifact id",
+                )?,
+                filename,
+                sha256: validate_hex(
+                    &required_string(ledger, &["sha256"], "input ledger missing sha256")?,
+                    &[64],
+                    "input ledger sha256",
+                )?,
+                count: ledger
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "input ledger count must be an unsigned integer".to_string())?,
+            })
+        }
+    };
+    if mode == RepoAcquisitionMode::TaskBundle && input_ledger.is_none() {
+        return Err("task-bundle payload is missing input ledger metadata".into());
+    }
+    if mode == RepoAcquisitionMode::TaskBundle
+        && bundle
+            .as_ref()
+            .and_then(|bundle| bundle.ref_name.as_ref())
+            .is_none()
+    {
+        return Err("task-bundle payload is missing its source ref".into());
+    }
+    if mode == RepoAcquisitionMode::TaskBundle
+        && bundle
+            .as_ref()
+            .and_then(|bundle| bundle.base_ref_name.as_ref())
+            .is_none()
+    {
+        return Err("task-bundle payload is missing its immutable base ref".into());
     }
 
     let artifacts = parse_artifacts(
@@ -782,6 +1226,41 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
         &agent_provider,
         resume_session_id.as_deref(),
     )?;
+    let head_oid = nullable_string(
+        task,
+        &["head_oid", "headOid"],
+        "task head_oid must be a string or null",
+    )?
+    .map(|oid| validate_hex(&oid, &[40, 64], "task head_oid"))
+    .transpose()?;
+    if mode == RepoAcquisitionMode::TaskBundle && head_oid.is_none() {
+        return Err("task-bundle payload is missing the exact task head".into());
+    }
+    let base_oid = nullable_string(
+        task,
+        &["base_oid", "baseOid"],
+        "task base_oid must be a string or null",
+    )?
+    .map(|oid| validate_hex(&oid, &[40, 64], "task base_oid"))
+    .transpose()?;
+    if mode == RepoAcquisitionMode::TaskBundle && base_oid.is_none() {
+        return Err("task-bundle payload is missing the exact review base".into());
+    }
+    // No mode requires this: it is a read-back proof anchor the destination
+    // computes for itself, not something the sender must supply.
+    let content_commitment = nullable_string(
+        task,
+        &["content_commitment", "contentCommitment"],
+        "task content_commitment must be a string or null",
+    )?;
+    let workflow_definition = nullable_string(
+        task,
+        &["workflow_definition", "workflowDefinition"],
+        "task workflow_definition must be a string or null",
+    )?;
+    if mode == RepoAcquisitionMode::TaskBundle && workflow_definition.is_none() {
+        return Err("task-bundle payload is missing its pinned workflow definition".into());
+    }
 
     Ok(OutgoingTransferPayload {
         target_peer_id: required_string(
@@ -805,6 +1284,26 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
             prompt: nullable_string(task, &["prompt"], "task prompt must be a string or null")?,
             stage: required_string(task, &["stage"], "task missing stage")?,
             branch: nullable_string(task, &["branch"], "task branch must be a string or null")?,
+            head_oid,
+            base_oid,
+            content_commitment,
+            workflow_definition,
+            previous_stage_result: nullable_string(
+                task,
+                &["previous_stage_result", "previousStageResult"],
+                "task previous_stage_result must be a string or null",
+            )?,
+            previous_main_result: nullable_string(
+                task,
+                &["previous_main_result", "previousMainResult"],
+                "task previous_main_result must be a string or null",
+            )?,
+            revision_feedback: nullable_string(
+                task,
+                &["revision_feedback", "revisionFeedback"],
+                "task revision_feedback must be a string or null",
+            )?,
+            history: parse_history_records(task)?,
             workflow: workflow_name.clone(),
             legacy_pipeline: workflow_name,
             display_name: nullable_string(
@@ -840,6 +1339,7 @@ pub fn parse_outgoing_transfer_payload(value: &Value) -> Result<OutgoingTransfer
             )?,
             bundle,
         },
+        input_ledger,
         recovery: parse_recovery(record.get("recovery"))?,
         artifacts,
         finalization: parse_finalization(record.get("finalization"))?,
@@ -869,7 +1369,7 @@ mod tests {
     fn payload_with(artifacts: Value) -> Value {
         json!({
             "target_peer_id": "peer-destination",
-            "task": {
+        "task": {
                 "source_peer_id": "peer-source",
                 "source_task_id": "task-source",
                 "resume_session_id": SESSION_ID,
@@ -877,6 +1377,7 @@ mod tests {
                 "pipeline": "single-reviewer",
                 "agent_type": "pty",
                 "agent_provider": "claude",
+                "workflow_definition": "{\"stages\":[{\"name\":\"in progress\"}]}",
             },
             "repo": { "mode": "reuse-local", "path": "/repo" },
             "artifacts": artifacts,
@@ -1025,6 +1526,138 @@ mod tests {
         payload["repo"] = json!({ "mode": "bundle-repo" });
         let error = parse_outgoing_transfer_payload(&payload).expect_err("bundle metadata missing");
         assert!(error.contains("bundle metadata"), "{error}");
+    }
+
+    #[test]
+    fn task_bundle_requires_exact_head_bundle_ref_and_input_ledger() {
+        let mut value = payload_with(json!([]));
+        value["repo"] = json!({
+            "mode": "task-bundle",
+            "bundle": {
+                "artifact_id": "transfer-repo-bundle",
+                "filename": "transfer.bundle",
+                "ref_name": "refs/heads/task-source",
+                "base_ref_name": "refs/heads/main",
+            },
+        });
+        assert!(parse_outgoing_transfer_payload(&value)
+            .unwrap_err()
+            .contains("input ledger"));
+
+        value["input_ledger"] = json!({
+            "artifact_id": "transfer-inputs",
+            "filename": TASK_INPUT_LEDGER_FILENAME,
+            "sha256": "a".repeat(64),
+            "count": 0,
+        });
+        value["task"]["base_oid"] = json!("a".repeat(40));
+        assert!(parse_outgoing_transfer_payload(&value)
+            .unwrap_err()
+            .contains("exact task head"));
+
+        value["task"]["head_oid"] = json!("b".repeat(40));
+        let parsed = parse_outgoing_transfer_payload(&value).expect("complete task bundle");
+        assert_eq!(parsed.repo.mode, RepoAcquisitionMode::TaskBundle);
+    }
+
+    #[test]
+    fn task_input_ledger_round_trip_keeps_order_attribution_and_first_origin() {
+        let records = vec![
+            crate::db::TaskInputRecord {
+                id: 7,
+                task_id: "task-source".into(),
+                run_id: Some("run-one".into()),
+                stage: Some("in progress".into()),
+                source: "operator".into(),
+                message: "first".into(),
+                delivered_at: "2026-09-09 01:00:00".into(),
+                origin: None,
+            },
+            crate::db::TaskInputRecord {
+                id: 12,
+                task_id: "task-source".into(),
+                run_id: None,
+                stage: Some("review".into()),
+                source: "manager".into(),
+                message: "second".into(),
+                delivered_at: "2026-09-09 02:00:00".into(),
+                origin: Some(crate::db::TaskInputOrigin {
+                    peer_id: "peer-original".into(),
+                    task_id: "task-original".into(),
+                    input_id: 3,
+                    run_id: Some("run-original".into()),
+                }),
+            },
+        ];
+        let bytes = encode_task_input_ledger(&records, "peer-source", "task-source")
+            .expect("encode ledger");
+        let metadata = TransferInputLedgerPayload {
+            artifact_id: "inputs".into(),
+            filename: TASK_INPUT_LEDGER_FILENAME.into(),
+            sha256: sha256_hex(&bytes),
+            count: 2,
+        };
+        let decoded = decode_task_input_ledger(&bytes, &metadata, "peer-source", "task-source")
+            .expect("decode ledger");
+
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|input| (
+                    input.source.as_str(),
+                    input.stage.as_deref(),
+                    input.message.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("operator", Some("in progress"), "first"),
+                ("manager", Some("review"), "second"),
+            ]
+        );
+        assert_eq!(decoded[0].origin.peer_id, "peer-source");
+        assert_eq!(decoded[0].origin.task_id, "task-source");
+        assert_eq!(decoded[0].origin.input_id, 7);
+        assert_eq!(decoded[0].origin.run_id.as_deref(), Some("run-one"));
+        assert_eq!(decoded[1].origin.peer_id, "peer-original");
+        assert_eq!(decoded[1].origin.task_id, "task-original");
+        assert_eq!(decoded[1].origin.input_id, 3);
+        assert_eq!(decoded[1].origin.run_id.as_deref(), Some("run-original"));
+    }
+
+    #[test]
+    fn task_input_ledger_rejects_conflicting_duplicate_origins() {
+        let entry = TransferInputLedgerEntry {
+            sequence: 0,
+            source: "manager".into(),
+            stage: Some("review".into()),
+            message: "directive".into(),
+            delivered_at: "2026-09-09 01:00:00".into(),
+            origin_peer_id: "peer-studio".into(),
+            origin_task_id: "task-source".into(),
+            origin_input_id: 7,
+            origin_run_id: Some("run-1".into()),
+        };
+        let duplicate = TransferInputLedgerEntry {
+            sequence: 1,
+            message: "different directive".into(),
+            ..entry.clone()
+        };
+        let bytes = serde_json::to_vec(&TransferInputLedger {
+            version: TASK_INPUT_LEDGER_VERSION,
+            source_peer_id: "peer-studio".into(),
+            source_task_id: "task-source".into(),
+            inputs: vec![entry, duplicate],
+        })
+        .expect("ledger json");
+        let metadata = TransferInputLedgerPayload {
+            artifact_id: "ledger".into(),
+            filename: TASK_INPUT_LEDGER_FILENAME.into(),
+            sha256: sha256_hex(&bytes),
+            count: 2,
+        };
+        let error = decode_task_input_ledger(&bytes, &metadata, "peer-studio", "task-source")
+            .expect_err("duplicate origin must be refused");
+        assert!(error.contains("duplicate origin"), "{error}");
     }
 
     #[test]
@@ -1215,5 +1848,94 @@ mod tests {
         payload.task.base_ref = None;
         payload.repo.default_branch = Some("main".into());
         assert_eq!(resolve_incoming_base_branch(&payload), None);
+    }
+
+    fn history_entry(
+        sequence: u64,
+        origin_task_id: &str,
+        origin_run_id: &str,
+        kind: &str,
+    ) -> Value {
+        json!({
+            "sequence": sequence,
+            "origin_peer_id": "peer-original",
+            "origin_task_id": origin_task_id,
+            "origin_run_id": origin_run_id,
+            "stage": "in progress",
+            "kind": kind,
+            "agent": "implement",
+            "result": format!("{{\"status\":\"succeeded\"}}"),
+        })
+    }
+
+    /// A payload with no `history` key at all is a pre-history sender, not a
+    /// malformed one: it decodes as an empty list rather than an error, and
+    /// every scalar-snapshot consumer is unaffected.
+    #[test]
+    fn a_payload_without_history_decodes_as_empty() {
+        let parsed = parse_outgoing_transfer_payload(&payload_with(json!([])))
+            .expect("a payload with no history key should still parse");
+        assert!(parsed.task.history.is_empty());
+
+        let encoded = encode_outgoing_transfer_payload(&parsed).expect("re-encode");
+        assert!(
+            encoded["task"].get("history").is_none(),
+            "an empty history must not appear on the wire at all"
+        );
+    }
+
+    #[test]
+    fn ordered_task_history_round_trips_with_provenance_intact() {
+        let mut payload = payload_with(json!([]));
+        payload["task"]["history"] = json!([
+            history_entry(0, "task-original", "run-one", "main"),
+            history_entry(1, "task-original", "run-two", "post"),
+        ]);
+        let parsed = parse_outgoing_transfer_payload(&payload).expect("valid ordered history");
+        assert_eq!(parsed.task.history.len(), 2);
+        assert_eq!(parsed.task.history[0].sequence, 0);
+        assert_eq!(parsed.task.history[0].kind, "main");
+        assert_eq!(parsed.task.history[0].origin_run_id, "run-one");
+        assert_eq!(parsed.task.history[1].sequence, 1);
+        assert_eq!(parsed.task.history[1].kind, "post");
+        assert_eq!(parsed.task.history[1].origin_run_id, "run-two");
+
+        // Re-encoding and re-parsing (what a second hop's importer round-trips
+        // through) must reproduce exactly the same ordered, attributed list.
+        let encoded = encode_outgoing_transfer_payload(&parsed).expect("re-encode");
+        let reparsed =
+            parse_outgoing_transfer_payload(&encoded).expect("re-parse the re-encoded payload");
+        assert_eq!(reparsed.task.history, parsed.task.history);
+    }
+
+    #[test]
+    fn task_history_out_of_delivery_order_is_refused() {
+        let mut payload = payload_with(json!([]));
+        payload["task"]["history"] = json!([
+            history_entry(1, "task-original", "run-one", "main"),
+            history_entry(0, "task-original", "run-two", "post"),
+        ]);
+        let error = parse_outgoing_transfer_payload(&payload).expect_err("reordered history");
+        assert!(error.contains("not in delivery order"), "{error}");
+    }
+
+    #[test]
+    fn task_history_rejects_a_duplicate_origin_run() {
+        let mut payload = payload_with(json!([]));
+        payload["task"]["history"] = json!([
+            history_entry(0, "task-original", "run-one", "main"),
+            history_entry(1, "task-original", "run-one", "post"),
+        ]);
+        let error = parse_outgoing_transfer_payload(&payload).expect_err("duplicate origin run");
+        assert!(error.contains("duplicate origin run"), "{error}");
+    }
+
+    #[test]
+    fn task_history_rejects_an_unsupported_kind() {
+        let mut payload = payload_with(json!([]));
+        payload["task"]["history"] =
+            json!([history_entry(0, "task-original", "run-one", "revision")]);
+        let error = parse_outgoing_transfer_payload(&payload).expect_err("unsupported kind");
+        assert!(error.contains("unsupported kind"), "{error}");
     }
 }

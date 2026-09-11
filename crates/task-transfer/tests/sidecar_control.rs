@@ -642,6 +642,7 @@ fn control_response_id(response: &ControlResponse) -> &str {
         | ControlResponse::CompleteOutgoingTransferFinalization { request_id, .. }
         | ControlResponse::AcknowledgeImportCommitted { request_id, .. }
         | ControlResponse::MarkIncomingEventRecorded { request_id, .. }
+        | ControlResponse::MarkIncomingTransferRefused { request_id, .. }
         | ControlResponse::MarkImportCommitApplied { request_id, .. }
         | ControlResponse::NackImportCommit { request_id, .. }
         | ControlResponse::MarkImportAckCompleted { request_id, .. } => request_id,

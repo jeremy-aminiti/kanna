@@ -358,11 +358,39 @@ fn outgoing_transfer_committed_event_roundtrips() {
         transfer_id: "transfer-1".into(),
         source_task_id: "task-source".into(),
         destination_local_task_id: "task-dest".into(),
+        content_commitment: Some("digest-1".into()),
+        destination_repo_id: Some("repo-1".into()),
     };
 
     let json = serde_json::to_string(&event).unwrap();
     let parsed: SidecarEvent = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed, event);
+}
+
+/// An old destination server never computes a proof, so the field an old
+/// sidecar's `SidecarEvent` never sends must decode as `None` on a new
+/// source rather than failing to parse — see docs/kanna-server-boundary.md
+/// item 3.
+#[test]
+fn outgoing_transfer_committed_event_without_proof_decodes_as_none() {
+    let json = serde_json::json!({
+        "type": "outgoing_transfer_committed",
+        "transfer_id": "transfer-1",
+        "source_task_id": "task-source",
+        "destination_local_task_id": "task-dest",
+    })
+    .to_string();
+    let parsed: SidecarEvent = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        parsed,
+        SidecarEvent::OutgoingTransferCommitted {
+            transfer_id: "transfer-1".into(),
+            source_task_id: "task-source".into(),
+            destination_local_task_id: "task-dest".into(),
+            content_commitment: None,
+            destination_repo_id: None,
+        }
+    );
 }
 
 #[test]
@@ -404,6 +432,8 @@ fn control_and_peer_message_roundtrips_with_request_ids() {
     let peer_response = PeerResponse::SubmitTransferPayload {
         request_id: "req-4".into(),
         transfer_id: "transfer-4".into(),
+        admitted: true,
+        refusal_reason: None,
     };
 
     let peer_response_json = serde_json::to_string(&peer_response).unwrap();
@@ -824,6 +854,8 @@ fn wire_messages_use_expected_json_shapes() {
     let peer_response = PeerResponse::SubmitTransferPayload {
         request_id: "req-4".into(),
         transfer_id: "transfer-4".into(),
+        admitted: true,
+        refusal_reason: None,
     };
     assert_eq!(
         serde_json::to_value(&peer_response).unwrap(),
@@ -831,6 +863,7 @@ fn wire_messages_use_expected_json_shapes() {
             "type": "submit_transfer_payload",
             "request_id": "req-4",
             "transfer_id": "transfer-4",
+            "admitted": true,
         })
     );
 
@@ -957,6 +990,8 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
     let commit_response = ControlResponse::PrepareTransferCommit {
         request_id: "req-8".into(),
         transfer_id: "transfer-8".into(),
+        admitted: true,
+        refusal_reason: None,
     };
     assert_eq!(
         serde_json::to_value(&commit_response).unwrap(),
@@ -964,6 +999,7 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
             "type": "prepare_transfer_commit",
             "request_id": "req-8",
             "transfer_id": "transfer-8",
+            "admitted": true,
         })
     );
 
@@ -1050,6 +1086,8 @@ fn remaining_protocol_variants_use_expected_json_shapes() {
         transfer_id: "transfer-13".into(),
         source_task_id: "task-source".into(),
         destination_local_task_id: "task-dest".into(),
+        content_commitment: None,
+        destination_repo_id: None,
     };
     assert_eq!(
         serde_json::to_value(&outgoing_event).unwrap(),

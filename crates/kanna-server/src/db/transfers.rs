@@ -1,4 +1,5 @@
 use super::Db;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 const TASK_TRANSFER_COLUMNS: &str = "SELECT id, direction, status, source_peer_id, target_peer_id,
@@ -109,7 +110,318 @@ pub struct NewTaskTransferProvenance {
     pub source_machine_task_label: Option<String>,
 }
 
+/// One row of `transferred_task_history`: a foreign stage/main/post/revision
+/// run this task inherited from a transfer, in the order it was exported.
+/// `origin_*` is the run's identity on the machine that actually produced it,
+/// preserved unchanged across however many hops it has crossed since.
+///
+/// Serializable so [`crate::mobile_api::TaskTransferHistory`] can hand a
+/// caller the exact durable record — the same "read what was actually
+/// persisted" contract [`crate::db::TaskInputRecord`] gives
+/// `kanna_task_inputs`, rather than a summary derived from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferredHistoryRecord {
+    pub sequence: i64,
+    pub origin_peer_id: String,
+    pub origin_task_id: String,
+    pub origin_run_id: String,
+    pub stage: String,
+    pub kind: String,
+    pub agent: Option<String>,
+    pub result: Option<String>,
+    pub feedback: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+pub type TransferredTaskManifest = (String, String, String, Option<String>, String);
+pub type TransferredTaskContext = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 impl Db {
+    pub fn upsert_transferred_task_manifest(
+        &self,
+        transfer_id: &str,
+        repo_id: &str,
+        local_task_id: Option<&str>,
+        head_oid: &str,
+        base_oid: &str,
+    ) -> Result<(), rusqlite::Error> {
+        if let Some((existing_repo, existing_head, existing_base, existing_task, _)) =
+            self.transferred_task_manifest(transfer_id)?
+        {
+            if existing_repo != repo_id
+                || existing_head != head_oid
+                || existing_base != base_oid
+                || existing_task
+                    .as_deref()
+                    .zip(local_task_id)
+                    .is_some_and(|(existing, requested)| existing != requested)
+            {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "conflicting transferred task manifest".into(),
+                ));
+            }
+        }
+        self.conn.execute(
+            "INSERT INTO transferred_task_manifest
+             (transfer_id,repo_id,local_task_id,head_oid,base_oid,state)
+             VALUES (?,?,?,?,?,'importing')
+             ON CONFLICT(transfer_id) DO UPDATE SET
+               local_task_id=COALESCE(transferred_task_manifest.local_task_id, excluded.local_task_id)",
+            (transfer_id, repo_id, local_task_id, head_oid, base_oid),
+        )?;
+        Ok(())
+    }
+
+    pub fn transferred_task_manifest(
+        &self,
+        transfer_id: &str,
+    ) -> Result<Option<TransferredTaskManifest>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT repo_id,head_oid,base_oid,local_task_id,state FROM transferred_task_manifest WHERE transfer_id=?",
+            [transfer_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))
+            .optional()
+    }
+
+    #[cfg(test)]
+    pub fn mark_transferred_task_manifest_prepared(
+        &self,
+        transfer_id: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        Ok(self.conn.execute("UPDATE transferred_task_manifest SET state='prepared', prepared_at=datetime('now') WHERE transfer_id=? AND state='importing'", [transfer_id])? == 1)
+    }
+
+    pub fn transferred_task_manifest_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<TransferredTaskManifest>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT repo_id,head_oid,base_oid,local_task_id,state FROM transferred_task_manifest WHERE local_task_id=?",
+            [task_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).optional()
+    }
+
+    /// The destination-computed proof for this transfer, once `state` has
+    /// reached `prepared` — see [`Self::set_transferred_task_manifest_content_commitment`].
+    /// `None` either because the manifest itself does not exist, or because
+    /// it has not yet been proven.
+    pub fn transferred_task_manifest_content_commitment(
+        &self,
+        transfer_id: &str,
+    ) -> Result<Option<String>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT content_commitment FROM transferred_task_manifest WHERE transfer_id=?",
+                [transfer_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
+    /// Records the digest `verify_persisted_task_bundle` computed from its
+    /// own read-back Git/SQLite values — never from the payload the
+    /// destination merely received, which would let an unimported
+    /// destination echo the source's own commitment back as proof of
+    /// something it never did. Settable only once the manifest is genuinely
+    /// `prepared`, and only once: a later call is a no-op rather than
+    /// overwriting a proof already relied on.
+    #[cfg(test)]
+    pub fn set_transferred_task_manifest_content_commitment(
+        &self,
+        transfer_id: &str,
+        content_commitment: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        Ok(self.conn.execute(
+            "UPDATE transferred_task_manifest
+             SET content_commitment = ?
+             WHERE transfer_id = ? AND state = 'prepared' AND content_commitment IS NULL",
+            (content_commitment, transfer_id),
+        )? == 1)
+    }
+
+    /// Atomically makes a transfer eligible to execute and records the
+    /// destination-computed proof that justified that transition. A manifest
+    /// is never observably `prepared` without its immutable commitment.
+    pub fn complete_transferred_task_manifest_preparation(
+        &self,
+        transfer_id: &str,
+        content_commitment: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        Ok(self.conn.execute(
+            "UPDATE transferred_task_manifest
+             SET state = 'prepared', prepared_at = datetime('now'), content_commitment = ?
+             WHERE transfer_id = ? AND state = 'importing' AND content_commitment IS NULL",
+            (content_commitment, transfer_id),
+        )? == 1)
+    }
+    /// Stores the source-pinned workflow/context before a transferred task's
+    /// first agent spawn. Replays must carry the same transfer identity.
+    pub fn upsert_transferred_task_context(
+        &self,
+        task_id: &str,
+        transfer_id: &str,
+        workflow_definition: &str,
+        previous_stage_result: Option<&str>,
+        previous_main_result: Option<&str>,
+        revision_feedback: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO transferred_task_context
+             (task_id, transfer_id, workflow_definition, previous_stage_result,
+              previous_main_result, revision_feedback)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(task_id) DO UPDATE SET
+               transfer_id = excluded.transfer_id,
+               workflow_definition = excluded.workflow_definition,
+               previous_stage_result = excluded.previous_stage_result,
+               previous_main_result = excluded.previous_main_result,
+               revision_feedback = excluded.revision_feedback
+             WHERE transferred_task_context.transfer_id = excluded.transfer_id",
+            (
+                task_id,
+                transfer_id,
+                workflow_definition,
+                previous_stage_result,
+                previous_main_result,
+                revision_feedback,
+            ),
+        )?;
+        Ok(())
+    }
+
+    pub fn transferred_task_context(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<TransferredTaskContext>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT transfer_id, workflow_definition, previous_stage_result,
+                        previous_main_result, revision_feedback
+                 FROM transferred_task_context WHERE task_id = ?",
+                [task_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+    }
+
+    /// Imports the ordered foreign history a transfer carried, oldest first.
+    /// Idempotent on `(task_id, origin_peer_id, origin_task_id,
+    /// origin_run_id)`: a retry that re-sends the same records converges
+    /// rather than duplicating, and a genuine conflict (same origin,
+    /// different content) is refused loudly rather than silently kept or
+    /// overwritten.
+    pub fn import_transferred_task_history(
+        &self,
+        task_id: &str,
+        records: &[TransferredHistoryRecord],
+    ) -> Result<(), rusqlite::Error> {
+        self.with_immediate_transaction(|db| {
+            for record in records {
+                let inserted = db.conn.execute(
+                    "INSERT INTO transferred_task_history
+                     (task_id, sequence, origin_peer_id, origin_task_id, origin_run_id,
+                      stage, kind, agent, result, feedback, finished_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ON CONFLICT(task_id, origin_peer_id, origin_task_id, origin_run_id)
+                     DO NOTHING",
+                    params![
+                        task_id,
+                        record.sequence,
+                        &record.origin_peer_id,
+                        &record.origin_task_id,
+                        &record.origin_run_id,
+                        &record.stage,
+                        &record.kind,
+                        record.agent.as_deref(),
+                        record.result.as_deref(),
+                        record.feedback.as_deref(),
+                        record.finished_at.as_deref(),
+                    ],
+                )?;
+                if inserted == 0 {
+                    let existing: TransferredHistoryRecord = db.conn.query_row(
+                        "SELECT sequence, origin_peer_id, origin_task_id, origin_run_id,
+                                stage, kind, agent, result, feedback, finished_at
+                         FROM transferred_task_history
+                         WHERE task_id = ? AND origin_peer_id = ? AND origin_task_id = ? AND origin_run_id = ?",
+                        params![
+                            task_id,
+                            &record.origin_peer_id,
+                            &record.origin_task_id,
+                            &record.origin_run_id,
+                        ],
+                        |row| {
+                            Ok(TransferredHistoryRecord {
+                                sequence: row.get(0)?,
+                                origin_peer_id: row.get(1)?,
+                                origin_task_id: row.get(2)?,
+                                origin_run_id: row.get(3)?,
+                                stage: row.get(4)?,
+                                kind: row.get(5)?,
+                                agent: row.get(6)?,
+                                result: row.get(7)?,
+                                feedback: row.get(8)?,
+                                finished_at: row.get(9)?,
+                            })
+                        },
+                    )?;
+                    if existing != *record {
+                        return Err(rusqlite::Error::InvalidParameterName(
+                            "conflicting transferred task history replay".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// The full ordered foreign history imported for this task, oldest
+    /// first. Empty for a task that was never transferred, or whose sender
+    /// predated this record.
+    pub fn transferred_task_history(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<TransferredHistoryRecord>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sequence, origin_peer_id, origin_task_id, origin_run_id, stage, kind,
+                    agent, result, feedback, finished_at
+             FROM transferred_task_history
+             WHERE task_id = ?
+             ORDER BY sequence ASC",
+        )?;
+        let rows = stmt.query_map([task_id], |row| {
+            Ok(TransferredHistoryRecord {
+                sequence: row.get(0)?,
+                origin_peer_id: row.get(1)?,
+                origin_task_id: row.get(2)?,
+                origin_run_id: row.get(3)?,
+                stage: row.get(4)?,
+                kind: row.get(5)?,
+                agent: row.get(6)?,
+                result: row.get(7)?,
+                feedback: row.get(8)?,
+                finished_at: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     pub fn insert_task_transfer(&self, transfer: &NewTaskTransfer) -> Result<(), rusqlite::Error> {
         self.conn.execute(
             "INSERT INTO task_transfer

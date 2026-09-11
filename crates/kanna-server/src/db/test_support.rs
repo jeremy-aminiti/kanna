@@ -309,9 +309,15 @@ impl Db {
                 stage TEXT,
                 source TEXT NOT NULL,
                 message TEXT NOT NULL,
-                delivered_at TEXT NOT NULL DEFAULT (datetime('now'))
+                delivered_at TEXT NOT NULL DEFAULT (datetime('now')),
+                origin_peer_id TEXT,
+                origin_task_id TEXT,
+                origin_input_id INTEGER,
+                origin_run_id TEXT
             );
             CREATE INDEX idx_task_input_task_id ON task_input(task_id, id);
+            CREATE UNIQUE INDEX idx_task_input_transfer_origin
+            ON task_input(task_id, origin_peer_id, origin_task_id, origin_input_id);
 
             CREATE TABLE task_transfer (
                 id TEXT PRIMARY KEY,
@@ -338,6 +344,14 @@ impl Db {
               AND source_task_id IS NOT NULL
               AND status IN ('pending', 'streaming');
 
+            CREATE TABLE task_transfer_provenance (
+              pipeline_item_id TEXT PRIMARY KEY REFERENCES pipeline_item(id) ON DELETE CASCADE,
+              source_peer_id TEXT NOT NULL,
+              source_task_id TEXT NOT NULL,
+              source_machine_task_label TEXT,
+              imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE transfer_work (
                 id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -360,6 +374,46 @@ impl Db {
                 value TEXT,
                 PRIMARY KEY (work_id, phase)
             );
+
+            CREATE TABLE transferred_task_context (
+                task_id TEXT PRIMARY KEY REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                transfer_id TEXT NOT NULL UNIQUE,
+                workflow_definition TEXT NOT NULL,
+                previous_stage_result TEXT,
+                previous_main_result TEXT,
+                revision_feedback TEXT,
+                recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE transferred_task_manifest (
+                transfer_id TEXT PRIMARY KEY,
+                repo_id TEXT NOT NULL,
+                local_task_id TEXT,
+                head_oid TEXT NOT NULL,
+                base_oid TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN ('importing','prepared','failed')),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                prepared_at TEXT,
+                content_commitment TEXT
+            );
+
+            CREATE TABLE transferred_task_history (
+                task_id TEXT NOT NULL REFERENCES pipeline_item(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL,
+                origin_peer_id TEXT NOT NULL,
+                origin_task_id TEXT NOT NULL,
+                origin_run_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                agent TEXT,
+                result TEXT,
+                feedback TEXT,
+                finished_at TEXT,
+                recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (task_id, origin_peer_id, origin_task_id, origin_run_id)
+            );
+            CREATE INDEX idx_transferred_task_history_task_sequence
+                ON transferred_task_history(task_id, sequence);
             "#,
         )?;
         create_blocker_revision_triggers(&self.conn)?;

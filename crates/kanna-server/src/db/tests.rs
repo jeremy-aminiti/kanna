@@ -229,7 +229,10 @@ fn open_creates_and_migrates_fresh_profile_database() {
             |row| row.get(0),
         )
         .expect("latest migration");
-    assert_eq!(latest_migration, "072_human_review_decision");
+    assert_eq!(
+        latest_migration,
+        "076_transferred_task_manifest_content_commitment"
+    );
     assert_eq!(
         index_columns(&db.conn, "idx_pipeline_item_parent_created_id"),
         vec!["parent_task_id", "created_at", "id"],
@@ -4069,6 +4072,132 @@ fn task_inputs_read_back_in_delivery_order_with_every_source() {
     let _ = std::fs::remove_file(path);
 }
 
+#[test]
+fn transferred_task_inputs_keep_origin_and_are_idempotent() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-destination",
+        "repo-1",
+        "Transferred task",
+        Some("Transferred task"),
+        "review",
+        "2026-09-09 04:00:00",
+    )
+    .expect("task");
+    let inputs = vec![super::ImportedTaskInput {
+        stage: Some("in progress".into()),
+        source: "operator".into(),
+        message: "keep the compact interaction".into(),
+        delivered_at: "2026-09-08 23:59:00".into(),
+        origin: super::TaskInputOrigin {
+            peer_id: "peer-studio".into(),
+            task_id: "task-source".into(),
+            input_id: 41,
+            run_id: Some("run-source".into()),
+        },
+    }];
+
+    db.import_task_inputs("task-destination", &inputs)
+        .expect("first import");
+    db.import_task_inputs("task-destination", &inputs)
+        .expect("retry import");
+
+    let mut conflicting = inputs.clone();
+    conflicting[0].message = "different directive".into();
+    assert!(db
+        .import_task_inputs("task-destination", &conflicting)
+        .is_err());
+
+    let imported = db
+        .list_all_task_inputs("task-destination")
+        .expect("read imported inputs");
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0].run_id, None);
+    assert_eq!(imported[0].stage.as_deref(), Some("in progress"));
+    assert_eq!(imported[0].source, "operator");
+    assert_eq!(imported[0].message, "keep the compact interaction");
+    assert_eq!(imported[0].delivered_at, "2026-09-08 23:59:00");
+    assert_eq!(imported[0].origin.as_ref(), Some(&inputs[0].origin));
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
+/// The [`super::TransferredHistoryRecord`] analog of the task-input ledger
+/// test above: ordered stage/main/post history imports idempotently, keeps
+/// each record's original origin identity, and refuses a retry that reuses
+/// the same origin with different content instead of silently keeping
+/// either version.
+#[test]
+fn transferred_task_history_keeps_order_and_origin_and_is_idempotent() {
+    let path = temp_db_path();
+    let db = Db::open_migrated(path.to_str().expect("utf8 path")).expect("open migrated db");
+    db.insert_test_repo("repo-1", "Repo One").expect("repo");
+    db.insert_test_pipeline_item(
+        "task-destination",
+        "repo-1",
+        "Transferred task",
+        Some("Transferred task"),
+        "review",
+        "2026-09-09 04:00:00",
+    )
+    .expect("task");
+
+    let records = vec![
+        super::TransferredHistoryRecord {
+            sequence: 0,
+            origin_peer_id: "peer-studio".into(),
+            origin_task_id: "task-source".into(),
+            origin_run_id: "run-implement".into(),
+            stage: "in progress".into(),
+            kind: "main".into(),
+            agent: Some("implement".into()),
+            result: Some("{\"status\":\"succeeded\"}".into()),
+            feedback: None,
+            finished_at: Some("2026-09-08 23:00:00".into()),
+        },
+        super::TransferredHistoryRecord {
+            sequence: 1,
+            origin_peer_id: "peer-studio".into(),
+            origin_task_id: "task-source".into(),
+            origin_run_id: "run-commit".into(),
+            stage: "in progress".into(),
+            kind: "post".into(),
+            agent: Some("commit".into()),
+            result: Some("{\"status\":\"succeeded\"}".into()),
+            feedback: None,
+            finished_at: Some("2026-09-08 23:05:00".into()),
+        },
+    ];
+
+    db.import_transferred_task_history("task-destination", &records)
+        .expect("first import");
+    db.import_transferred_task_history("task-destination", &records)
+        .expect("retry import converges");
+
+    let mut conflicting = records.clone();
+    conflicting[0].result = Some("{\"status\":\"failed\"}".into());
+    assert!(db
+        .import_transferred_task_history("task-destination", &conflicting)
+        .is_err());
+
+    let imported = db
+        .transferred_task_history("task-destination")
+        .expect("read imported history");
+    assert_eq!(imported.len(), 2);
+    assert_eq!(imported[0], records[0]);
+    assert_eq!(imported[1], records[1]);
+    assert!(
+        imported[0].sequence < imported[1].sequence,
+        "history must read back in delivery order"
+    );
+
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}
+
 /// The row is the record; the event only announces it. A watcher gets the
 /// source and a bounded preview, and is told when the preview was cut so it
 /// never mistakes a prefix for the whole directive.
@@ -4498,4 +4627,131 @@ fn recording_delivery_leaves_the_decision_itself_untouched() {
 
     drop(db);
     let _ = std::fs::remove_file(path);
+}
+
+/// The invariant item 4's retry gate (`transfer_engine::import::run_import`)
+/// depends on: once `verify_persisted_task_bundle` has proven a transfer and
+/// recorded its content commitment, nothing may recompute or clear it — a
+/// later call, even with a genuinely different (attacker- or bug-produced)
+/// value, must be a no-op, and the original value must survive.
+#[test]
+fn a_persisted_content_commitment_is_set_once_and_never_overwritten() {
+    let path = temp_db_path();
+    let path_string = path.to_string_lossy().to_string();
+    let db = Db::open_for_tests(&path_string).expect("open test db");
+    db.insert_test_repo("repo-1", "Repo One")
+        .expect("insert repo");
+    db.insert_test_pipeline_item(
+        "task-1",
+        "repo-1",
+        "resume the transferred agent",
+        None,
+        "in progress",
+        "2026-09-09T00:00:00Z",
+    )
+    .expect("insert pipeline item");
+
+    // Not settable before the manifest is genuinely `prepared`.
+    db.upsert_transferred_task_manifest(
+        "transfer-1",
+        "repo-1",
+        Some("task-1"),
+        &"a".repeat(40),
+        &"b".repeat(40),
+    )
+    .expect("upsert manifest");
+    assert!(
+        !db.set_transferred_task_manifest_content_commitment("transfer-1", "too-early")
+            .expect("attempt commitment before prepared"),
+        "an `importing` manifest must not accept a content commitment"
+    );
+    assert_eq!(
+        db.transferred_task_manifest_content_commitment("transfer-1")
+            .expect("read commitment"),
+        None,
+    );
+
+    assert!(db
+        .mark_transferred_task_manifest_prepared("transfer-1")
+        .expect("mark prepared"));
+
+    assert!(
+        db.set_transferred_task_manifest_content_commitment("transfer-1", "first-proof")
+            .expect("first commitment write"),
+        "the first write against a prepared, unset manifest must succeed"
+    );
+    assert_eq!(
+        db.transferred_task_manifest_content_commitment("transfer-1")
+            .expect("read commitment"),
+        Some("first-proof".to_string()),
+    );
+
+    // A second call — whether a genuine re-verification recomputing the same
+    // digest, or a different value entirely — must be a no-op. This is the
+    // guard a retry's skip-path relies on never being loosened: the recorded
+    // proof is what makes it safe to skip re-fetching artifacts at all.
+    assert!(
+        !db.set_transferred_task_manifest_content_commitment("transfer-1", "second-proof")
+            .expect("second commitment write attempt"),
+        "a manifest with an already-persisted commitment must refuse to overwrite it"
+    );
+    assert_eq!(
+        db.transferred_task_manifest_content_commitment("transfer-1")
+            .expect("read commitment"),
+        Some("first-proof".to_string()),
+        "the original proof must survive an attempted overwrite unchanged"
+    );
+}
+
+#[test]
+fn transferred_manifest_acquisition_and_task_bindings_are_immutable() {
+    let path = temp_db_path();
+    let db = Db::open_for_tests(&path.to_string_lossy()).expect("open test db");
+    for repo_id in ["repo-a", "repo-b"] {
+        db.insert_test_repo(repo_id, repo_id).expect("insert repo");
+    }
+    let head = "a".repeat(40);
+    let base = "b".repeat(40);
+    db.upsert_transferred_task_manifest("transfer-binding", "repo-a", Some("task-a"), &head, &base)
+        .expect("establish binding");
+    db.upsert_transferred_task_manifest("transfer-binding", "repo-a", Some("task-a"), &head, &base)
+        .expect("identical retry");
+
+    for (repo_id, task_id) in [("repo-b", "task-a"), ("repo-a", "task-b")] {
+        let error = db
+            .upsert_transferred_task_manifest(
+                "transfer-binding",
+                repo_id,
+                Some(task_id),
+                &head,
+                &base,
+            )
+            .expect_err("a transfer must not rebind repository or task identity");
+        assert!(error
+            .to_string()
+            .contains("conflicting transferred task manifest"));
+    }
+
+    let (repo_id, _, _, task_id, state) = db
+        .transferred_task_manifest("transfer-binding")
+        .expect("read manifest")
+        .expect("manifest exists");
+    assert_eq!(repo_id, "repo-a");
+    assert_eq!(task_id.as_deref(), Some("task-a"));
+    assert_eq!(state, "importing");
+
+    assert!(db
+        .complete_transferred_task_manifest_preparation("transfer-binding", "atomic-proof")
+        .expect("complete preparation"));
+    let (_, _, _, _, state) = db
+        .transferred_task_manifest("transfer-binding")
+        .expect("read prepared manifest")
+        .expect("manifest exists");
+    assert_eq!(state, "prepared");
+    assert_eq!(
+        db.transferred_task_manifest_content_commitment("transfer-binding")
+            .expect("read proof")
+            .as_deref(),
+        Some("atomic-proof")
+    );
 }

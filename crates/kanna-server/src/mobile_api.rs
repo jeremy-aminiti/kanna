@@ -391,6 +391,23 @@ pub struct TaskInputs {
     pub inputs: Vec<crate::db::TaskInputRecord>,
 }
 
+/// A transferred task's full inherited stage/main/post/revision history, in
+/// delivery order, with each record's original run identity intact.
+///
+/// The task's prompt only ever carries the *latest* result of each kind
+/// (`$PREV_RESULT`/`$PREV_MAIN_RESULT`) — this is the durable record of
+/// everything before that, the [`TaskInputs`] of foreign run provenance: a
+/// reviewer, a manager, or a later hop re-exporting this task must read it
+/// here rather than conclude from an unread prompt that no prior work
+/// existed. Empty for a task that was never transferred, or whose sender
+/// predated this record — never an error.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskTransferHistory {
+    pub task_id: String,
+    pub history: Vec<crate::db::TransferredHistoryRecord>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskChild {
@@ -463,6 +480,10 @@ impl CreateTaskRecoverySnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferImportSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_id: Option<String>,
     #[serde(default)]
     pub source_machine: Option<String>,
     /// Raw acquisition mode from the transfer payload: `reuse-local`,
@@ -472,13 +493,56 @@ pub struct TransferImportSummary {
     pub repo_mode: Option<String>,
     #[serde(default)]
     pub session_restored: bool,
+    /// Source-pinned workflow/context snapshots. These are not local runs;
+    /// they seed the first destination prompt and remain attributable to the
+    /// source transfer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_definition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_stage_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_main_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_feedback: Option<String>,
+    /// Ordered source stage/main/post/revision history, oldest first,
+    /// carried through from [`crate::transfer_engine::payload::TransferTaskPayload::history`]
+    /// so the destination can persist and re-export it. Not itself part of
+    /// the display banner; a second hop reads it back from
+    /// `transferred_task_history` rather than from this in-flight request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<TransferredHistoryRecordSummary>,
+}
+
+/// [`TransferImportSummary::history`]'s entry shape — a copy of
+/// [`crate::transfer_engine::payload::TransferHistoryRecordPayload`] on the
+/// request-internal side of the wire/internal boundary, the same duplication
+/// already used for `previous_stage_result` and friends above.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferredHistoryRecordSummary {
+    pub sequence: u64,
+    pub origin_peer_id: String,
+    pub origin_task_id: String,
+    pub origin_run_id: String,
+    pub stage: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
 }
 
 impl TransferImportSummary {
     const MAX_FIELD_CHARS: usize = 200;
+    const MAX_CONTENT_BYTES: usize = 4 * 1024 * 1024;
 
     pub fn validate(&self) -> Result<(), String> {
         for (label, value) in [
+            ("transferId", self.transfer_id.as_deref()),
             ("sourceMachine", self.source_machine.as_deref()),
             ("repoMode", self.repo_mode.as_deref()),
         ] {
@@ -493,6 +557,39 @@ impl TransferImportSummary {
                     "transferImport.{label} must not contain control characters"
                 ));
             }
+        }
+        for (label, value) in [
+            ("previousStageResult", self.previous_stage_result.as_deref()),
+            ("previousMainResult", self.previous_main_result.as_deref()),
+            ("revisionFeedback", self.revision_feedback.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.len() > Self::MAX_CONTENT_BYTES) {
+                return Err(format!(
+                    "transferImport.{label} exceeds {} bytes",
+                    Self::MAX_CONTENT_BYTES
+                ));
+            }
+            if value.is_some_and(|value| {
+                value
+                    .chars()
+                    .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+            }) {
+                return Err(format!(
+                    "transferImport.{label} contains an unsupported control character"
+                ));
+            }
+        }
+        if self
+            .workflow_definition
+            .as_deref()
+            .is_some_and(|value| value.len() > Self::MAX_CONTENT_BYTES)
+        {
+            return Err("transferImport.workflowDefinition exceeds 4 MiB".into());
+        }
+        if let Some(definition) = self.workflow_definition.as_deref() {
+            serde_json::from_str::<serde_json::Value>(definition).map_err(|error| {
+                format!("transferImport.workflowDefinition must be valid JSON: {error}")
+            })?;
         }
         Ok(())
     }
@@ -1091,6 +1188,28 @@ impl MobileApi {
             total,
             inputs,
         }))
+    }
+
+    /// The task's full inherited transfer history, oldest first.
+    /// `Ok(None)` means the task does not exist; an existing task that was
+    /// never transferred (or was transferred by a sender that predates this
+    /// record) is an empty list.
+    pub fn list_transfer_history(
+        &self,
+        task_or_branch_id: &str,
+    ) -> Result<Option<TaskTransferHistory>, String> {
+        let Some(task_id) = self
+            ._db
+            .resolve_pipeline_item_id(task_or_branch_id)
+            .map_err(|e| format!("db error: {}", e))?
+        else {
+            return Ok(None);
+        };
+        let history = self
+            ._db
+            .transferred_task_history(&task_id)
+            .map_err(|e| format!("db error: {}", e))?;
+        Ok(Some(TaskTransferHistory { task_id, history }))
     }
 
     /// The parent's direct children, oldest first, with each child's latest
@@ -1865,6 +1984,7 @@ mod tests {
             source_machine: Some("Primary Mac".to_string()),
             repo_mode: Some("bundle-repo".to_string()),
             session_restored: true,
+            ..Default::default()
         };
         assert_eq!(valid.validate(), Ok(()));
 
@@ -1877,6 +1997,43 @@ mod tests {
                 .validate()
                 .is_err_and(|error| error.contains("control characters")));
         }
+    }
+
+    #[test]
+    fn transfer_import_summary_accepts_full_results_feedback_and_formatted_workflow_json() {
+        let long_result = serde_json::json!({ "summary": "x".repeat(500) }).to_string();
+        let summary = TransferImportSummary {
+            workflow_definition: Some("{\n  \"name\": \"single-reviewer\"\n}\n".into()),
+            previous_stage_result: Some(long_result.clone()),
+            previous_main_result: Some(long_result),
+            revision_feedback: Some("first line\nsecond line".into()),
+            ..Default::default()
+        };
+        assert_eq!(summary.validate(), Ok(()));
+    }
+
+    #[test]
+    fn transfer_import_summary_rejects_invalid_workflow_json_and_oversized_content() {
+        let invalid = TransferImportSummary {
+            workflow_definition: Some("{ not json }".into()),
+            ..Default::default()
+        };
+        assert!(invalid.validate().unwrap_err().contains("valid JSON"));
+
+        let oversized = TransferImportSummary {
+            revision_feedback: Some("x".repeat(TransferImportSummary::MAX_CONTENT_BYTES + 1)),
+            ..Default::default()
+        };
+        assert!(oversized.validate().unwrap_err().contains("exceeds"));
+
+        let unsafe_feedback = TransferImportSummary {
+            revision_feedback: Some("feedback\u{1b}]2;spoof\u{7}".into()),
+            ..Default::default()
+        };
+        assert!(unsafe_feedback
+            .validate()
+            .unwrap_err()
+            .contains("unsupported control character"));
     }
 
     #[test]

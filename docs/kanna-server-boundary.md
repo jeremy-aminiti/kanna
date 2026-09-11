@@ -1287,6 +1287,23 @@ These things are contract rather than convenience:
   the response says so rather than downgrading silently. A cloud-routed *pull* additionally depends on the source
   machine's own credential, which this machine cannot see; the tool description
   says so.
+- **Completion means the exact task crossed.** Current senders use the
+  `task-bundle` payload mode for every repository shape, including when the
+  destination already has a matching clone or could clone the remote. The
+  finalized payload names the source task's exact commit id and two staged
+  artifacts: a git bundle containing that ref and a checksum-bound JSON ledger
+  containing every durable delivered input in delivery order. The receiver
+  fetches the task ref into `refs/kanna/transfers/<commit>`, proves that object
+  id before forking, persists the ledger before spawning the resumed agent,
+  and proves the destination branch still contains the transferred commit
+  before acknowledging import. Imported input rows keep the original declared
+  source, stage, delivery time, source run id, source task/input ids, and first
+  source peer; their local `run_id` is null because a foreign database's run id
+  is not a local foreign key. The origin tuple makes retry imports idempotent.
+  A server that predates this contract cannot recognize `task-bundle`, and a
+  current receiver refuses legacy payloads before source finalization. Either
+  rolling-upgrade direction therefore leaves the source task recoverable
+  instead of reporting success with main or an empty instruction history.
 
 ### Source finalization
 

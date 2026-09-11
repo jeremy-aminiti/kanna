@@ -155,7 +155,7 @@ impl TransferRuntime {
         &self,
         transfer_id: &str,
         payload: Value,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<super::events::TransferCommitOutcome, RuntimeError> {
         let reservation = {
             let mut transfers = self.outgoing_transfers.lock().await;
             for expired in
@@ -204,6 +204,8 @@ impl TransferRuntime {
             PeerResponse::SubmitTransferPayload {
                 request_id: response_request_id,
                 transfer_id: response_transfer_id,
+                admitted,
+                refusal_reason,
             } => {
                 if response_request_id != request_id {
                     return Err(RuntimeError::Protocol(format!(
@@ -219,7 +221,16 @@ impl TransferRuntime {
                     )));
                 }
 
-                Ok(())
+                // `admitted: false` with no reason is unresolved, not an
+                // error: the destination has not (yet) proven a decision
+                // either way, and treating it as a hard failure here is
+                // exactly the "uncertainty collapsed into refusal" defect
+                // this type exists to prevent. Only a definitive refusal
+                // reason is a decided outcome.
+                Ok(super::events::TransferCommitOutcome {
+                    admitted,
+                    refusal_reason,
+                })
             }
             PeerResponse::StartPairing { .. } => Err(RuntimeError::Protocol(
                 "unexpected pairing response during transfer commit".into(),
@@ -583,6 +594,8 @@ impl TransferRuntime {
         transfer_id: &str,
         source_task_id: &str,
         destination_local_task_id: &str,
+        content_commitment: Option<&str>,
+        destination_repo_id: Option<&str>,
     ) -> Result<(), RuntimeError> {
         let source_peer_id = {
             let mut reservations = self.incoming_reservations.lock().await;
@@ -618,6 +631,8 @@ impl TransferRuntime {
             &serde_json::json!({
                 "source_task_id": source_task_id,
                 "destination_local_task_id": destination_local_task_id,
+                "content_commitment": content_commitment,
+                "destination_repo_id": destination_repo_id,
             }),
         )?;
         let request_id = self.next_request_id("import-committed");
@@ -877,6 +892,35 @@ impl TransferRuntime {
         self.replay_store
             .save_incoming_reservation(transfer_id, &recorded)?;
         *reservation = recorded;
+        Ok(())
+    }
+
+    /// Records a definitive, contract-specific refusal for an incoming
+    /// transfer — distinct from [`Self::mark_incoming_event_recorded`], which
+    /// only proves an event was processed, not that it was admitted under
+    /// this transfer's integrity contract. Idempotent: the first refusal
+    /// reason recorded for a transfer id wins, and a later call is a no-op
+    /// rather than overwriting it with a second reason.
+    pub async fn mark_incoming_transfer_refused(
+        &self,
+        transfer_id: &str,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        let mut reservations = self.incoming_reservations.lock().await;
+        let reservation = reservations.get_mut(transfer_id).ok_or_else(|| {
+            RuntimeError::Protocol(format!(
+                "missing incoming transfer reservation {}",
+                transfer_id
+            ))
+        })?;
+        if reservation.refused_reason.is_some() {
+            return Ok(());
+        }
+        let mut refused = reservation.clone();
+        refused.refused_reason = Some(reason.to_string());
+        self.replay_store
+            .save_incoming_reservation(transfer_id, &refused)?;
+        *reservation = refused;
         Ok(())
     }
 

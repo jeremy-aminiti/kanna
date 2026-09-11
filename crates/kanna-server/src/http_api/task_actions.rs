@@ -34,6 +34,20 @@ fn resume_action_error_status(error: &str) -> axum::http::StatusCode {
     }
 }
 
+fn reject_unprepared_transfer(db: &crate::db::Db, task_id: &str) -> Result<(), String> {
+    if let Some((_, _, _, bound_task, state)) = db
+        .transferred_task_manifest_for_task(task_id)
+        .map_err(|e| format!("db error: {e}"))?
+    {
+        if bound_task.as_deref() == Some(task_id) && state != "prepared" {
+            return Err(format!(
+                "transferred task {task_id} has no durable prepared proof"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct AdvanceStageRequest {
@@ -1017,6 +1031,21 @@ pub(super) async fn advance_stage(
     )
     .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
     let task_id = resolve_task_id_for_mutation(&state, &task_id).await?;
+    {
+        let state = Arc::clone(&state);
+        let guarded_task_id = task_id.clone();
+        super::blocking::run_handler_blocking("stage advance transfer proof check", move || {
+            let db = Db::open(&state.config.db_path).map_err(|e| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("db error: {e}"),
+                )
+            })?;
+            reject_unprepared_transfer(&db, &guarded_task_id)
+                .map_err(|e| (axum::http::StatusCode::CONFLICT, e))
+        })
+        .await?;
+    }
     let response = crate::mobile_api::TaskActionResponse {
         task_id: task_id.clone(),
         follow_task: None,
@@ -1449,6 +1478,8 @@ pub(super) async fn resume_task(
                     format!("db error: {error}"),
                 )
             })?;
+            reject_unprepared_transfer(&db, &task_id)
+                .map_err(|error| (axum::http::StatusCode::CONFLICT, error))?;
             crate::task_creator::prepare_resume_task_for_api(&db, &state.config, &task_id)
                 .map_err(|error| (resume_action_error_status(&error), error))
         })
@@ -1495,6 +1526,8 @@ pub(super) async fn rerun_stage(
                     format!("db error: {}", e),
                 )
             })?;
+            reject_unprepared_transfer(&db, &task_id)
+                .map_err(|error| (axum::http::StatusCode::CONFLICT, error))?;
             crate::task_creator::prepare_rerun_stage_for_api(&db, &state.config, &task_id)
                 .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
         })

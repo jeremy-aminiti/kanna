@@ -667,8 +667,16 @@ pub(crate) fn previous_stage_result(
     source_task_id: &str,
     _source_task: &TaskStageSource,
 ) -> Result<Option<String>, String> {
-    db.latest_finished_stage_run_result(source_task_id)
-        .map_err(|e| format!("db error: {}", e))
+    if let Some(result) = db
+        .latest_finished_stage_run_result(source_task_id)
+        .map_err(|e| format!("db error: {}", e))?
+    {
+        return Ok(Some(result));
+    }
+    Ok(db
+        .transferred_task_context(source_task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .and_then(|context| context.2))
 }
 
 /// Result of the previous stage agent's own run, skipping posts. A stage
@@ -680,8 +688,16 @@ pub(crate) fn previous_main_stage_result(
     db: &Db,
     source_task_id: &str,
 ) -> Result<Option<String>, String> {
-    db.latest_finished_main_stage_run_result(source_task_id)
-        .map_err(|e| format!("db error: {}", e))
+    if let Some(result) = db
+        .latest_finished_main_stage_run_result(source_task_id)
+        .map_err(|e| format!("db error: {}", e))?
+    {
+        return Ok(Some(result));
+    }
+    Ok(db
+        .transferred_task_context(source_task_id)
+        .map_err(|e| format!("db error: {}", e))?
+        .and_then(|context| context.3))
 }
 
 /// The feedback a revision actually runs on.
@@ -716,6 +732,13 @@ fn resolve_revision_feedback(
             .map(str::to_string)
             .or_else(|| stage_run_result_summary(run.result.as_deref()))
     });
+    let recorded = match recorded {
+        Some(value) => Some(value),
+        None => db
+            .transferred_task_context(source_task_id)
+            .map_err(|error| format!("db error: {error}"))?
+            .and_then(|context| context.4),
+    };
     match recorded {
         Some(feedback) => {
             log::warn!(
