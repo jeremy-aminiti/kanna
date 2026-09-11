@@ -246,7 +246,6 @@ fn builds_camel_case_task_request_payload() {
         review_context: None,
         agent: Some("review-security".to_string()),
         agent_provider: Some("claude".to_string()),
-        agent_type: Some("agent".to_string()),
         model: Some("sonnet".to_string()),
         effort: Some("high".to_string()),
         permission_mode: Some("dontAsk".to_string()),
@@ -265,7 +264,6 @@ fn builds_camel_case_task_request_payload() {
             "baseRef": "origin/main",
             "agent": "review-security",
             "agentProvider": "claude",
-            "agentType": "agent",
             "model": "sonnet",
             "effort": "high",
             "permissionMode": "dontAsk",
@@ -288,7 +286,7 @@ fn builds_block_task_payload() {
 }
 
 #[test]
-fn builds_task_request_defaults_to_pty_agent_type_when_flag_absent() {
+fn builds_task_request_without_exposing_agent_type() {
     let request = build_create_task_request(TaskCreateOptions {
         repo_id: "repo-1".to_string(),
         prompt: "Use the saved default provider".to_string(),
@@ -299,7 +297,6 @@ fn builds_task_request_defaults_to_pty_agent_type_when_flag_absent() {
         review_context: None,
         agent: None,
         agent_provider: None,
-        agent_type: None,
         model: None,
         effort: None,
         permission_mode: None,
@@ -313,7 +310,6 @@ fn builds_task_request_defaults_to_pty_agent_type_when_flag_absent() {
         json!({
             "repoId": "repo-1",
             "prompt": "Use the saved default provider",
-            "agentType": "pty",
         })
     );
 }

@@ -599,6 +599,27 @@ fn parses_new_repo_and_task_subcommands() {
 }
 
 #[test]
+fn task_create_rejects_the_removed_agent_type_option() {
+    let error = match crate::Cli::try_parse_from([
+        "kanna-cli",
+        "task",
+        "create",
+        "--repo-id",
+        "repo-1",
+        "--prompt",
+        "Ship it",
+        "--agent-type",
+        "agent",
+    ]) {
+        Ok(_) => panic!("the retired SDK execution option must not remain on the CLI"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    assert!(error.to_string().contains("--agent-type"));
+}
+
+#[test]
 fn parses_generic_tool_subcommands() {
     let cli = crate::Cli::try_parse_from(["kanna-cli", "tool", "list"]).unwrap();
     assert!(matches!(
@@ -874,7 +895,6 @@ fn typed_create_body_matches_catalog_create_task_body() {
         review_context: None,
         agent: Some("review-security".to_string()),
         agent_provider: Some("claude".to_string()),
-        agent_type: Some("agent".to_string()),
         model: Some("sonnet".to_string()),
         effort: Some("high".to_string()),
         permission_mode: Some("acceptEdits".to_string()),
@@ -895,7 +915,6 @@ fn typed_create_body_matches_catalog_create_task_body() {
             "base_ref": "origin/main",
             "agent": "review-security",
             "agent_provider": "claude",
-            "agent_type": "agent",
             "model": "sonnet",
             "effort": "high",
             "permission_mode": "acceptEdits",

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { mount } from "@vue/test-utils";
-import { AGENT_PROVIDERS, AGENT_PROVIDER_SPECS } from "@kanna/agent-protocol";
+import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import NewTaskModal from "../NewTaskModal.vue";
@@ -261,7 +261,7 @@ describe("NewTaskModal", () => {
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
 
-    expect(selectedAgentLabel(wrapper)).toBe("claude sdk");
+    expect(selectedAgentLabel(wrapper)).toBe("antigravity");
   });
 
   it("includes Antigravity in the agent cycle when agy is installed", async () => {
@@ -290,16 +290,8 @@ describe("NewTaskModal", () => {
     expect(selectedAgentLabel(wrapper)).toBe("antigravity");
   });
 
-  it("offers every installed PTY provider and every headless-capable provider", async () => {
+  it("offers each installed provider once in terminal mode", async () => {
     const sortedProviders = [...AGENT_PROVIDERS].sort((a, b) => a.localeCompare(b));
-    const sortedHeadlessProviders = AGENT_PROVIDER_SPECS
-      .filter((spec) => spec.supports_headless)
-      .map((spec) => spec.id)
-      .sort((a, b) => a.localeCompare(b));
-    const expectedChoices = [
-      ...sortedProviders,
-      ...sortedHeadlessProviders.map((provider) => `${provider} sdk`),
-    ];
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: sortedProviders[0],
@@ -312,20 +304,19 @@ describe("NewTaskModal", () => {
     await flushPromises();
 
     const choices: string[] = [];
-    for (let index = 0; index < expectedChoices.length; index += 1) {
+    for (let index = 0; index < sortedProviders.length; index += 1) {
       choices.push(selectedAgentLabel(wrapper));
       await wrapper.get(".agent-provider").trigger("click");
       await flushPromises();
     }
 
-    expect(choices).toEqual(expectedChoices);
+    expect(choices).toEqual(sortedProviders);
   });
 
-  it("keeps OpenCode selectable in headless agent mode", async () => {
+  it("submits OpenCode in terminal mode", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: "opencode",
-        defaultAgentType: "agent",
         availableAgentProviders: ["opencode"],
         baseBranches: ["main"],
         defaultBaseBranch: "main",
@@ -336,14 +327,14 @@ describe("NewTaskModal", () => {
     await flushPromises();
     await flushPromises();
 
-    expect(selectedAgentLabel(wrapper)).toBe("opencode sdk");
+    expect(selectedAgentLabel(wrapper)).toBe("opencode");
     expect(wrapper.find('[data-testid="model-select"]').exists()).toBe(false);
 
-    await wrapper.get("textarea").setValue("Use OpenCode headlessly");
+    await wrapper.get("textarea").setValue("Use OpenCode");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
     expect(wrapper.emitted("submit")?.[0]).toEqual([
-      "Use OpenCode headlessly", "opencode", "no-review", "main", "agent", [],
+      "Use OpenCode", "opencode", "no-review", "main", "pty", [],
     ]);
   });
 
@@ -360,9 +351,6 @@ describe("NewTaskModal", () => {
     await flushPromises();
 
     expect(selectedAgentLabel(wrapper)).toBe("opencode");
-    await wrapper.get(".agent-provider").trigger("click");
-    await flushPromises();
-    expect(selectedAgentLabel(wrapper)).toBe("opencode sdk");
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
     expect(selectedAgentLabel(wrapper)).toBe("opencode");
@@ -389,7 +377,7 @@ describe("NewTaskModal", () => {
     expect(wrapper.emitted("submit")).toBeUndefined();
   });
 
-  it("orders agent choices by most recent exact usage", async () => {
+  it("orders terminal choices by most recent terminal usage", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: "claude",
@@ -414,17 +402,17 @@ describe("NewTaskModal", () => {
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
 
-    expect(selectedAgentLabel(wrapper)).toBe("codex sdk");
-
-    await wrapper.get(".agent-provider").trigger("click");
-    await flushPromises();
-
     expect(selectedAgentLabel(wrapper)).toBe("claude");
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
 
     expect(selectedAgentLabel(wrapper)).toBe("codex");
+
+    await wrapper.get(".agent-provider").trigger("click");
+    await flushPromises();
+
+    expect(selectedAgentLabel(wrapper)).toBe("opencode");
   });
 
   it("prevents mouse down default on the agent indicator so focus stays on the prompt", async () => {
@@ -588,7 +576,7 @@ describe("NewTaskModal", () => {
     expect(wrapper.emitted("submit")).toEqual([["Ship workflow picker", "claude", "review", "origin/main", "pty", []]]);
   });
 
-  it("uses combined chat and CLI agent choices when submitting", async () => {
+  it("submits only terminal agent choices", async () => {
     const wrapper = mount(NewTaskModal, {
       props: {
         defaultAgentProvider: "claude",
@@ -626,21 +614,21 @@ describe("NewTaskModal", () => {
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
-    expect(selectedAgentLabel(wrapper)).toBe("claude sdk");
+    expect(selectedAgentLabel(wrapper)).toBe("antigravity");
 
-    await wrapper.get("textarea").setValue("Use claude chat");
+    await wrapper.get("textarea").setValue("Use antigravity");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
-    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use claude chat", "claude", "default", "origin/main", "agent", []]);
+    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use antigravity", "antigravity", "default", "origin/main", "pty", []]);
 
     await wrapper.get(".agent-provider").trigger("click");
     await flushPromises();
-    expect(selectedAgentLabel(wrapper)).toBe("codex sdk");
+    expect(selectedAgentLabel(wrapper)).toBe("claude");
 
-    await wrapper.get("textarea").setValue("Use codex chat");
+    await wrapper.get("textarea").setValue("Use claude");
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", metaKey: true });
 
-    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use codex chat", "codex", "default", "origin/main", "agent", []]);
+    expect(wrapper.emitted("submit")?.at(-1)).toEqual(["Use claude", "claude", "default", "origin/main", "pty", []]);
   });
 
   it("supports keyboard navigation in the workflow picker and returns focus to the toggle", async () => {
