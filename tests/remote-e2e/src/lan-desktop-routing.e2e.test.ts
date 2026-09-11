@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { localProcessFetch } from "@kanna/local-process-fetch";
 import { claimDesktopPairingSession } from "./desktopPairing";
@@ -12,7 +14,12 @@ import {
   OTHER_ACCOUNT_UID,
   signInWithPassword
 } from "./firebaseAuth";
-import { startRemoteHarness, type RemoteDesktop, type RemoteHarness } from "./harness";
+import {
+  remoteHarnessKannaCliPath,
+  startRemoteHarness,
+  type RemoteDesktop,
+  type RemoteHarness
+} from "./harness";
 import { waitForCondition } from "./terminalFlowTestUtils";
 
 /**
@@ -38,17 +45,18 @@ import { waitForCondition } from "./terminalFlowTestUtils";
  * behavior in `relay.rs`'s reconnection loop.
  */
 describe("LAN-first desktop-to-desktop routing E2E", () => {
+  const execFileAsync = promisify(execFile);
   let harness: RemoteHarness;
 
   beforeAll(async () => {
-    // Real discovery (`lan_discovery::routable_lan_addresses`) advertises
-    // this host's actual routable interface address, never loopback - the
-    // same address a genuine second machine on the LAN would need. A real
-    // desktop's own config generator binds its LAN listener to "0.0.0.0"
-    // unconditionally (apps/desktop/src-tauri/src/commands/mobile/config.rs),
-    // never the harness's own "127.0.0.1" default, so this suite must match
-    // that or the discovered candidate is structurally unreachable no
-    // matter how correct bootstrap/trust is.
+    // Native DNS-SD registers the default host and observes its routable
+    // interface address, which is the address a genuine second machine on
+    // the LAN would use. A real desktop's config generator binds its LAN
+    // listener to "0.0.0.0" unconditionally
+    // (apps/desktop/src-tauri/src/commands/mobile/config.rs), never the
+    // harness's "127.0.0.1" default, so this suite must match that or the
+    // discovered candidate is structurally unreachable regardless of
+    // bootstrap/trust correctness.
     harness = await startRemoteHarness({ lanHost: "0.0.0.0" });
     await signInDesktopAsBuffy(harness, harness.desktopId);
     await harness.waitForDesktop(harness.desktopId);
@@ -99,6 +107,27 @@ describe("LAN-first desktop-to-desktop routing E2E", () => {
           60_000,
           `${peer.desktopId} never reached ${harness.desktopId} over LAN`
         );
+
+        const { stdout } = await execFileAsync(
+          remoteHarnessKannaCliPath(harness.repoRoot),
+          [
+            "tool",
+            "call",
+            "kanna_info",
+            "--machine-id",
+            peer.desktopId,
+            "--server-url",
+            harness.lanBaseUrl
+          ],
+          { cwd: harness.repoRoot, timeout: 30_000 }
+        );
+        const info = JSON.parse(String(stdout)) as {
+          connection: { routing: { kind: string; machineId: string } };
+        };
+        expect(info.connection.routing).toMatchObject({
+          kind: "lan",
+          machineId: peer.desktopId
+        });
       } finally {
         await peer.stop();
       }
@@ -112,9 +141,8 @@ describe("LAN-first desktop-to-desktop routing E2E", () => {
    * `state.invoke_relay_desktop`, not `lan_candidate_for` or any Bonjour
    * state. This is deliberately a separate, narrower test from the one
    * above: it proves the real bootstrap-over-relay production path
-   * (currently held: LAN discovery in this environment - see the
-   * checkpoint/commit history) independent of whether real mDNS discovery
-   * ever resolves a candidate. It reads the actual on-disk
+   * independent of whether discovery has resolved a candidate yet. It reads
+   * the actual on-disk
    * machine-trust.json each side wrote, never seeding it.
    */
   it(
@@ -166,10 +194,9 @@ describe("LAN-first desktop-to-desktop routing E2E", () => {
    * desktops with a real `desktop_secret` (see `startSameAccountPeer`) is
    * what makes this provable at all: without it, `signed_out_or_rejected`
    * in `relay.rs`'s reconnection loop is unconditionally true, wiping trust
-   * on every reconnect regardless of whether it was a real sign-out - see
-   * the checkpoint history for that trace. Not gated by the LAN-discovery
-   * defect: this only checks the trust store's own persisted state, never
-   * an actual LAN dial.
+   * on every reconnect regardless of whether it was a real sign-out. The
+   * assertion below also performs an actual routed call while the relay is
+   * stopped, so persisted state alone cannot satisfy this scenario.
    */
   it(
     "keeps an already-established outbound grant through a relay outage",
@@ -203,6 +230,9 @@ describe("LAN-first desktop-to-desktop routing E2E", () => {
                 grant.targetDesktopId === peer.desktopId && grant.accountUid === BUFFY_UID
             ) ?? false;
           expect(stillHasGrant).toBe(true);
+          const routed = await invokeMachine(harness, peer.desktopId, "/v1/status");
+          expect(routed.status).toBe(200);
+          expect(routed.route).toBe("lan");
         } finally {
           await harness.startRelay();
           // Leave the harness's own server actually reconnected before this

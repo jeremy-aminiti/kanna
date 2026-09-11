@@ -261,9 +261,13 @@ async fn main() {
     // Discovery only ever populates AppState::lan_candidates - an address
     // hint invoke_desktop's own pinned-TLS client independently
     // authenticates before trusting anything; nothing here grants trust.
-    if let Err(error) = lan_discovery::start_discovery(Arc::clone(&http_state)) {
-        log::warn!("LAN routing discovery unavailable: {error}");
-    }
+    let _lan_discovery = match lan_discovery::start_discovery(Arc::clone(&http_state)) {
+        Ok(discovery) => Some(discovery),
+        Err(error) => {
+            log::warn!("LAN routing discovery unavailable: {error}");
+            None
+        }
+    };
     let session_replacements = http_state.session_replacements();
     let detached_terminals = http_state
         .terminal_attachments()
