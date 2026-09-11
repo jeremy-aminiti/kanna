@@ -24,24 +24,29 @@ The real blocker, for the two scenarios that remain: `lan_discovery.rs`'s
 host, and a matched, same-interface fixture
 (`lan_discovery::tests::matched_single_interface_explicit_vs_auto_publish_comparison`,
 using `mdns-sd`'s own existing `send_to` trace-log seam, not packet
-capture) isolated the exact cause: every multicast send on this host's
-routable interface (`en1`) fails at the OS socket layer with
+capture) isolated the exact failure point: every multicast send on this
+host's routable interface (`en1`) fails at the OS socket layer with
 `EHOSTUNREACH` ("No route to host", errno 65) - identically for IPv4 and
-IPv6, for both explicit-address and `enable_addr_auto()` publish. This
-reproduces regardless of which mdns-sd API is used, so no in-crate
-correction exists for it; the OS routing table for that destination looks
-ordinary on direct inspection (no reject/blackhole flag), so the deeper
-reason for the errno is an open host/OS-network question, not a code
-defect this task can fix without packet capture or host network changes
-(both out of scope for this task). Whether native macOS DNS-SD
-(`bonjour.rs`'s existing libSystem seam) would fare any better here is
-also unproven either way: the only native controls exercised
-(`dns-sd -G`/`-L`/`-R` round trips) are same-host queries mDNSResponder
-can answer from its own local view, which do not distinguish "native
-multicast egress works on this interface" from "it has the identical
-condition, just never exercised by a same-host query." See
-`.tmp/lan-revision-checkpoint.md` (task-local, not committed) for the full
-evidence chain.
+IPv6, for both explicit-address and `enable_addr_auto()` publish, *and*
+for `start_discovery`'s own browse-side query send (confirmed by
+extending the same fixture with a third, interface-restricted
+`daemon.browse()` case using the identical send-trace seam - browse and
+publish both funnel through the same `send_dns_outgoing_impl` ->
+`multicast_on_intf` code path in `mdns-sd`). This reproduces regardless of
+which mdns-sd API is used; the deeper OS reason for the errno remains open
+(the routing table for that destination looks ordinary on direct
+inspection), and pursuing it further would need packet capture or host
+network changes, both out of scope for this task.
+
+A conditionally-authorized native-advertisement adapter (reusing
+`bonjour.rs`'s existing libSystem seam) was assessed and **not
+implemented**, even though its narrow authorizing criterion (a matched
+native control succeeding where correctly-configured mdns-sd fails, same
+interface/family/port) is met: since the *browse* side fails identically
+and for the same reason, and browsing is not authorized to change, a
+publish-side-only native adapter would not achieve real end-to-end
+discovery on this host regardless. See `.tmp/lan-revision-checkpoint.md`
+(task-local, not committed) for the full evidence chain and reasoning.
 
 Neither remaining scenario can be made testable by seeding a candidate
 explicitly the way the three retracted ones were: both are specifically
@@ -68,7 +73,13 @@ Narrower/equivalent coverage added instead, all real production paths:
   `a_candidate_presenting_a_different_desktops_real_identity_is_rejected_before_dispatch`
   (a real raw TLS responder presenting a different desktop's real, validly
   -issued identity, proving pinned-TLS rejection before any application
-  byte crosses, through the full `attempt_lan_invoke` path).
+  byte crosses, through the full `attempt_lan_invoke` path), and
+  `a_real_lan_invoke_completes_while_relay_is_genuinely_unreachable` (relay
+  pointed at a real, actively-refused address rather than merely
+  unconfigured, proving an actual LAN dial completes regardless - the
+  existing E2E "keeps an already-established outbound grant through a
+  relay outage" scenario only reads persisted trust-store state, never
+  dials).
 - `lan-desktop-routing.e2e.test.ts` › "establishes a real trust grant over
   relay-based bootstrap, independent of LAN candidate discovery" and
   "keeps an already-established outbound grant through a relay outage" -
