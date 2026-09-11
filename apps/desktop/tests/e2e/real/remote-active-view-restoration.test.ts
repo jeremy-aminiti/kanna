@@ -303,11 +303,12 @@ async function terminalControlTrace(
 async function captureHandbackDiagnostics(
   taskId: string,
   focus: FocusObservation,
+  phase = "owner-handback",
 ): Promise<void> {
   const directory = process.env.KANNA_E2E_SCREENSHOT_DIR;
   if (!directory) return;
   await mkdir(directory, { recursive: true });
-  await writeFile(join(directory, "owner-handback-control-trace.json"), `${JSON.stringify({
+  await writeFile(join(directory, `${phase}-control-trace.json`), `${JSON.stringify({
     taskId,
     focus,
     primaryOutboundControl: await terminalControlTrace(primary, taskId),
@@ -400,7 +401,14 @@ async function createOwnerTask(): Promise<string> {
     `),
     { timeout: 30_000, interval: 150 },
   ).toBe(true);
-  await focusTerminal(primary, created.taskId, "owner-initial");
+  const ownerInitialFocus = await focusTerminal(primary, created.taskId, "owner-initial");
+  try {
+    await waitForOwnerAndRenderer(primary, created.taskId, "owner");
+  } catch (error) {
+    await capture(primary, "owner-initial-failure.png");
+    await captureHandbackDiagnostics(created.taskId, ownerInitialFocus, "owner-initial");
+    throw error;
+  }
   return created.taskId;
 }
 
