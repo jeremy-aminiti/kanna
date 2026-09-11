@@ -44,6 +44,7 @@ pub(crate) struct RoutedInvokeResponse {
 /// (no candidate, or a failure proven to have happened before any
 /// application byte was sent) may ever fall back to relay; the other two
 /// variants are terminal and must never trigger one.
+#[derive(Debug)]
 enum LanAttemptOutcome {
     /// No trusted+reachable candidate, or the attempt failed at or before
     /// establishing the connection - nothing reached the peer, so falling
@@ -888,6 +889,479 @@ mod tests {
             1,
             "a redirect must never trigger a second request"
         );
+    }
+
+    /// Dropped-reply-exactly-once, over a real socket. A real pinned-TLS
+    /// handshake completes, the target genuinely receives the dispatched
+    /// request, then the connection is closed with zero response bytes
+    /// written - simulating a peer crash or network drop *after* dispatch,
+    /// never before it. `dial_lan_invoke`'s own contract
+    /// (`error.is_connect()` is false once the handshake succeeded, so this
+    /// is deliberately classified `PostDispatchUncertain`, not
+    /// `PreDispatch`) must report this as `delivery_uncertain` and must
+    /// never fall back to relay - replaying a mutation the peer may already
+    /// have applied is exactly the risk that contract exists to avoid. This
+    /// does not depend on real mDNS discovery resolving anything: like the
+    /// redirect test above, it seeds an explicit candidate at a real raw
+    /// TLS socket, the same production dial/pinning code every other real
+    /// test here exercises.
+    #[tokio::test]
+    async fn a_dropped_reply_after_a_real_dispatch_is_delivery_uncertain_and_never_replayed_to_relay(
+    ) {
+        use tokio::io::AsyncReadExt;
+
+        let target_config = lan_e2e_test_config("desktop-dropped-reply-target");
+        let target_identity_path = target_config.lan_tls_identity_path().unwrap();
+        let target_identity = crate::lan_tls_identity::load_or_create(
+            &target_identity_path,
+            &target_config.desktop_id,
+            &target_config.environment,
+        )
+        .expect("create target identity");
+        let server_config = crate::lan_tls::server_config(&target_identity).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind minimal dropped-reply responder");
+        let addr = listener.local_addr().unwrap();
+        let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let request_count_for_server = Arc::clone(&request_count);
+        let bytes_received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bytes_received_for_server = Arc::clone(&bytes_received);
+        tokio::spawn(async move {
+            let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
+            while let Ok((stream, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                let request_count = Arc::clone(&request_count_for_server);
+                let bytes_received = Arc::clone(&bytes_received_for_server);
+                tokio::spawn(async move {
+                    request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Ok(mut tls) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    // Drain whatever the real client actually sent - proof
+                    // the request was genuinely dispatched, not dropped
+                    // before it ever reached the peer - then close without
+                    // writing a single response byte.
+                    let mut buf = [0_u8; 4096];
+                    let mut total = 0_usize;
+                    while let Ok(Ok(n)) = tokio::time::timeout(
+                        std::time::Duration::from_millis(300),
+                        tls.read(&mut buf),
+                    )
+                    .await
+                    {
+                        if n == 0 {
+                            break;
+                        }
+                        total += n;
+                    }
+                    bytes_received.store(total, std::sync::atomic::Ordering::SeqCst);
+                    // Deliberately no write_all/shutdown with a response -
+                    // just drop the stream, closing the connection with
+                    // nothing sent back.
+                });
+            }
+        });
+
+        let source_config = lan_e2e_test_config("desktop-dropped-reply-source");
+        let source_state = Arc::new(AppState::new(source_config.clone()));
+        source_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+        source_state.set_lan_candidate(
+            "desktop-dropped-reply-target".to_string(),
+            std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                addr.port(),
+            ),
+        );
+        let now_ms = crate::machine_trust::unix_time_ms().unwrap();
+        let source_store_path = source_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            store
+                .pending_or_create(
+                    "desktop-dropped-reply-target",
+                    "uid-1",
+                    "development",
+                    &source_config.desktop_id,
+                    || Ok("the-bearer-secret".to_string()),
+                    now_ms,
+                )
+                .expect("prepare pending");
+            store
+                .confirm_outbound(
+                    "desktop-dropped-reply-target",
+                    "the-bearer-secret",
+                    &source_config.desktop_id,
+                    Some(target_identity.ca_certificate_pem.clone()),
+                    now_ms + 1000,
+                )
+                .expect("confirm outbound grant");
+            store.save(&source_store_path).expect("seed source trust");
+        }
+
+        let routed = invoke_desktop(
+            Arc::clone(&source_state),
+            "desktop-dropped-reply-target".to_string(),
+            "GET".to_string(),
+            "/v1/status".to_string(),
+            serde_json::Value::Null,
+        )
+        .await
+        .expect(
+            "invoke_desktop must complete with a terminal uncertain result, not an error \
+             (which would mean it fell back to relay - relay is unconfigured in this test, so \
+             a fallback attempt would itself fail)",
+        );
+
+        assert!(
+            bytes_received.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the target must have genuinely received the dispatched request before its reply \
+             was dropped, not merely refused the connection"
+        );
+        assert_eq!(routed.route, RouteProvenance::Lan, "{:?}", routed.response);
+        assert_eq!(routed.response.status, 0, "{:?}", routed.response);
+        assert_eq!(
+            routed.response.error.as_deref(),
+            Some("delivery_uncertain"),
+            "a reply dropped after real dispatch must be reported as delivery_uncertain: {:?}",
+            routed.response
+        );
+        assert_eq!(
+            request_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an uncertain delivery must never be retried automatically on the same LAN route - \
+             exactly once, no replay"
+        );
+    }
+
+    /// Fake-discovery/pinned-TLS rejection, through the full production
+    /// dial path (`attempt_lan_invoke`/`dial_lan_invoke`), not just
+    /// `lan_tls`'s own lower-level handshake unit tests
+    /// (`a_client_pinned_to_an_unrelated_ca_is_rejected_before_any_application_byte`).
+    /// A discovered candidate address is never itself trusted - it is only
+    /// ever "where to try connecting" - so a real socket at that address
+    /// presenting a genuinely different desktop's real, valid TLS identity
+    /// (simulating an impersonator discovered where the real target was
+    /// expected, e.g. a spoofed or stale candidate) must be rejected before
+    /// any application byte crosses, and the rejection must surface as an
+    /// ordinary `PreDispatch` - safe to fall back to relay - never a
+    /// `Definite` or `PostDispatchUncertain` result. Uses `attempt_lan_invoke`
+    /// directly (as `no_outbound_grant_triggers_a_real_background_bootstrap_attempt`
+    /// does) rather than the full `invoke_desktop` wrapper, since relay is
+    /// unconfigured in these tests and this assertion is about the LAN
+    /// attempt's own outcome, not the relay fallback.
+    #[tokio::test]
+    async fn a_candidate_presenting_a_different_desktops_real_identity_is_rejected_before_dispatch()
+    {
+        let real_target_config = lan_e2e_test_config("desktop-fake-discovery-real-target");
+        let real_target_identity_path = real_target_config.lan_tls_identity_path().unwrap();
+        let real_target_identity = crate::lan_tls_identity::load_or_create(
+            &real_target_identity_path,
+            &real_target_config.desktop_id,
+            &real_target_config.environment,
+        )
+        .expect("create real target identity");
+
+        // A genuinely different desktop's own real, validly-issued identity -
+        // not a corrupt cert, not `dangerous()`, a real impersonator with a
+        // real (but wrong) CA, exactly what a spoofed/stale discovered
+        // candidate would actually look like on the wire.
+        let impersonator_config = lan_e2e_test_config("desktop-fake-discovery-impersonator");
+        let impersonator_identity_path = impersonator_config.lan_tls_identity_path().unwrap();
+        let impersonator_identity = crate::lan_tls_identity::load_or_create(
+            &impersonator_identity_path,
+            &impersonator_config.desktop_id,
+            &impersonator_config.environment,
+        )
+        .expect("create impersonator identity");
+        let impersonator_server_config =
+            crate::lan_tls::server_config(&impersonator_identity).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind impersonator responder");
+        let addr = listener.local_addr().unwrap();
+        let application_bytes_reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let application_bytes_reached_for_server = Arc::clone(&application_bytes_reached);
+        tokio::spawn(async move {
+            let acceptor = tokio_rustls::TlsAcceptor::from(impersonator_server_config);
+            while let Ok((stream, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                let application_bytes_reached = Arc::clone(&application_bytes_reached_for_server);
+                tokio::spawn(async move {
+                    // The handshake itself is expected to fail (the client
+                    // pins to the *real* target's CA, not this
+                    // impersonator's) - if it were ever to succeed and any
+                    // byte were read afterward, that is exactly the failure
+                    // this test exists to catch.
+                    if let Ok(mut tls) = acceptor.accept(stream).await {
+                        use tokio::io::AsyncReadExt;
+                        let mut buf = [0_u8; 4096];
+                        if let Ok(n) = tls.read(&mut buf).await {
+                            if n > 0 {
+                                application_bytes_reached
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        let source_config = lan_e2e_test_config("desktop-fake-discovery-source");
+        let source_state = Arc::new(AppState::new(source_config.clone()));
+        source_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+        // The candidate address is where the impersonator actually listens -
+        // exactly what a spoofed/stale discovery result would hand this
+        // desktop; discovery supplies only the address, never the identity.
+        source_state.set_lan_candidate(
+            "desktop-fake-discovery-real-target".to_string(),
+            std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                addr.port(),
+            ),
+        );
+        let now_ms = crate::machine_trust::unix_time_ms().unwrap();
+        let source_store_path = source_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            store
+                .pending_or_create(
+                    "desktop-fake-discovery-real-target",
+                    "uid-1",
+                    "development",
+                    &source_config.desktop_id,
+                    || Ok("the-bearer-secret".to_string()),
+                    now_ms,
+                )
+                .expect("prepare pending");
+            store
+                .confirm_outbound(
+                    "desktop-fake-discovery-real-target",
+                    "the-bearer-secret",
+                    &source_config.desktop_id,
+                    // The attested CA is the *real* target's - never the
+                    // impersonator's - exactly what a relay bootstrap
+                    // would actually have attested for the real desktop_id.
+                    Some(real_target_identity.ca_certificate_pem.clone()),
+                    now_ms + 1000,
+                )
+                .expect("confirm outbound grant");
+            store.save(&source_store_path).expect("seed source trust");
+        }
+
+        let outcome = attempt_lan_invoke(
+            &source_state,
+            "desktop-fake-discovery-real-target",
+            "GET",
+            "/v1/status",
+            &serde_json::Value::Null,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, LanAttemptOutcome::PreDispatch(_)),
+            "a candidate presenting a different desktop's real identity must be rejected as an \
+             ordinary pre-dispatch failure (safe to fall back to relay), not treated as a \
+             successful or uncertain result: {outcome:?}"
+        );
+        // Give the impersonator's own accept task a moment to have read
+        // anything, if the handshake had wrongly succeeded.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !application_bytes_reached.load(std::sync::atomic::Ordering::SeqCst),
+            "no application byte must ever reach an impersonating candidate"
+        );
+    }
+
+    /// A transparent byte-level pass-through in front of the *real* target
+    /// listener - it never terminates TLS itself, only relays whatever
+    /// bytes arrive in each direction while capturing a copy - so a real
+    /// TLS handshake and the real application dispatch happen end to end
+    /// between the genuine client path and the genuine `lan_listener`,
+    /// with this proxy sitting exactly where a network intermediary (a
+    /// switch, a captor on the LAN segment) would. Also does not depend on
+    /// real mDNS discovery: the candidate is an explicit address, as in
+    /// every other real-socket test in this module.
+    async fn spawn_capturing_tcp_proxy(
+        target_addr: std::net::SocketAddr,
+    ) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<u8>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capturing proxy");
+        let proxy_addr = listener.local_addr().unwrap();
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_for_task = Arc::clone(&captured);
+        tokio::spawn(async move {
+            while let Ok((mut client_stream, _)) = listener.accept().await {
+                let captured = Arc::clone(&captured_for_task);
+                tokio::spawn(async move {
+                    let Ok(mut target_stream) = tokio::net::TcpStream::connect(target_addr).await
+                    else {
+                        return;
+                    };
+                    let (mut client_r, mut client_w) = client_stream.split();
+                    let (mut target_r, mut target_w) = target_stream.split();
+                    let client_to_target = async {
+                        let mut buf = [0_u8; 4096];
+                        loop {
+                            let n = client_r.read(&mut buf).await.unwrap_or(0);
+                            if n == 0 {
+                                break;
+                            }
+                            captured
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .extend_from_slice(&buf[..n]);
+                            if target_w.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                    };
+                    let target_to_client = async {
+                        let mut buf = [0_u8; 4096];
+                        loop {
+                            let n = target_r.read(&mut buf).await.unwrap_or(0);
+                            if n == 0 {
+                                break;
+                            }
+                            captured
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .extend_from_slice(&buf[..n]);
+                            if client_w.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                        }
+                    };
+                    tokio::join!(client_to_target, target_to_client);
+                });
+            }
+        });
+        (proxy_addr, captured)
+    }
+
+    /// Encrypted-proxy-bytes: every byte a network intermediary in front of
+    /// a real LAN dial ever observes must be TLS ciphertext - the bearer
+    /// secret this dial's own header carries, the wrapped path, and the
+    /// device-secret header name itself must never appear on the wire in
+    /// the clear. Proven over the real production listener
+    /// (`lan_listener::spawn_for_test`, the same one the passing
+    /// end-to-end test uses) with a transparent capturing proxy
+    /// (`spawn_capturing_tcp_proxy`) standing in for the candidate address,
+    /// rather than by asserting anything about TLS in the abstract.
+    #[tokio::test]
+    async fn every_byte_a_lan_proxy_observes_is_encrypted_never_plaintext_secrets_or_paths() {
+        let target_config = lan_e2e_test_config("desktop-encrypted-proxy-target");
+        let target_identity_path = target_config.lan_tls_identity_path().unwrap();
+        let target_identity = crate::lan_tls_identity::load_or_create(
+            &target_identity_path,
+            &target_config.desktop_id,
+            &target_config.environment,
+        )
+        .expect("create target identity");
+        let target_state = Arc::new(AppState::new(target_config.clone()));
+        target_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+
+        let now_ms = crate::machine_trust::unix_time_ms().unwrap();
+        let target_store_path = target_config.machine_trust_store_path().unwrap();
+        let bearer_secret = "the-encrypted-proxy-bearer-secret";
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            let hash = crate::pairing::hash_device_secret(bearer_secret);
+            store.accept_inbound(
+                "desktop-encrypted-proxy-source",
+                &hash,
+                "uid-1",
+                "development",
+                &target_config.desktop_id,
+                now_ms,
+            );
+            store.save(&target_store_path).expect("seed target trust");
+        }
+
+        let listener_addr =
+            super::super::lan_listener::spawn_for_test(Arc::clone(&target_state)).await;
+        let (proxy_addr, captured) = spawn_capturing_tcp_proxy(std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            listener_addr.port(),
+        ))
+        .await;
+
+        let source_config = lan_e2e_test_config("desktop-encrypted-proxy-source");
+        let source_state = Arc::new(AppState::new(source_config.clone()));
+        source_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+        source_state.set_lan_candidate("desktop-encrypted-proxy-target".to_string(), proxy_addr);
+        let source_store_path = source_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            store
+                .pending_or_create(
+                    "desktop-encrypted-proxy-target",
+                    "uid-1",
+                    "development",
+                    &source_config.desktop_id,
+                    || Ok(bearer_secret.to_string()),
+                    now_ms,
+                )
+                .expect("prepare pending");
+            store
+                .confirm_outbound(
+                    "desktop-encrypted-proxy-target",
+                    bearer_secret,
+                    &source_config.desktop_id,
+                    Some(target_identity.ca_certificate_pem.clone()),
+                    now_ms + 1000,
+                )
+                .expect("confirm outbound grant");
+            store.save(&source_store_path).expect("seed source trust");
+        }
+
+        let routed = invoke_desktop(
+            Arc::clone(&source_state),
+            "desktop-encrypted-proxy-target".to_string(),
+            "GET".to_string(),
+            "/v1/status".to_string(),
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("invoke_desktop should complete through the capturing proxy");
+
+        assert_eq!(routed.route, RouteProvenance::Lan, "{:?}", routed.response);
+        assert_eq!(routed.response.status, 200, "{:?}", routed.response);
+
+        let wire_bytes = captured
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(
+            !wire_bytes.is_empty(),
+            "the proxy must have actually observed real traffic, not an empty capture"
+        );
+        for plaintext_secret in [
+            bearer_secret,
+            super::super::lan_trust::DEVICE_SECRET_HEADER,
+            "/v1/status",
+        ] {
+            assert!(
+                !contains_subsequence(&wire_bytes, plaintext_secret.as_bytes()),
+                "found {plaintext_secret:?} verbatim in {} bytes the proxy observed on the wire - \
+                 the LAN dial is not actually encrypted",
+                wire_bytes.len()
+            );
+        }
+    }
+
+    fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
+        if needle.is_empty() || haystack.len() < needle.len() {
+            return false;
+        }
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
     }
 
     /// Finding #2's production wiring, proven through the actual routing
