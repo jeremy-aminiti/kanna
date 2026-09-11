@@ -29,6 +29,8 @@ interface RenderedTerminal extends Dimensions {
   viewport: Dimensions;
 }
 
+type TerminalRole = "owner" | "remote";
+
 interface FocusObservation {
   appActivation: unknown;
   documentHasFocus: boolean;
@@ -105,11 +107,13 @@ async function ownerDimensions(taskId: string): Promise<Dimensions> {
 async function renderedDimensions(
   client: WebDriverClient,
   taskId: string,
+  role: TerminalRole,
 ): Promise<RenderedTerminal> {
   const dimensions = await client.executeSync<RenderedTerminal | null>(`
     const hook = window.__KANNA_E2E__?.terminalBuffers;
-    const remoteId = "remote:" + ${JSON.stringify(taskId)};
-    const id = hook?.sessionIds?.().includes(remoteId) ? remoteId : ${JSON.stringify(taskId)};
+    const id = ${JSON.stringify(role)} === "owner"
+      ? "local:" + ${JSON.stringify(taskId)}
+      : "remote:" + ${JSON.stringify(taskId)};
     const cursor = hook?.cursor?.(id);
     const viewport = hook?.viewport?.(id);
     const terminal = hook?.element?.(id);
@@ -140,6 +144,7 @@ async function renderedDimensions(
 async function waitForOwnerAndRenderer(
   client: WebDriverClient,
   taskId: string,
+  role: TerminalRole,
   expected?: Dimensions,
 ): Promise<Dimensions> {
   let latest: unknown = null;
@@ -148,7 +153,7 @@ async function waitForOwnerAndRenderer(
       try {
         const [daemon, rendered] = await Promise.all([
           ownerDimensions(taskId),
-          renderedDimensions(client, taskId),
+          renderedDimensions(client, taskId, role),
         ]);
         latest = { daemon, rendered };
         const marker = `ACTIVE_VIEW:${daemon.cols}x${daemon.rows}`;
@@ -390,7 +395,7 @@ async function createOwnerTask(): Promise<string> {
   await primary.waitForElement(".main-panel .terminal-container .xterm-helper-textarea", 30_000);
   await expect.poll(
     () => primary.executeSync<boolean>(`
-      return window.__KANNA_E2E__?.terminalBuffers?.lines(${JSON.stringify(created.taskId)})
+      return window.__KANNA_E2E__?.terminalBuffers?.lines(${JSON.stringify(`local:${created.taskId}`)})
         ?.some((line) => line.includes("ACTIVE_VIEW:")) ?? false;
     `),
     { timeout: 30_000, interval: 150 },
@@ -447,7 +452,7 @@ describe("remote active-view restoration", () => {
 
   it("gives sizing to the foreground remote view and restores the owner view without input", async () => {
     ownerTaskId = await createOwnerTask();
-    const ownerInitial = await waitForOwnerAndRenderer(primary, ownerTaskId);
+    const ownerInitial = await waitForOwnerAndRenderer(primary, ownerTaskId, "owner");
     expect(ownerInitial.cols).toBeGreaterThan(80);
     expect(ownerInitial.rows).toBeGreaterThan(24);
 
@@ -455,7 +460,7 @@ describe("remote active-view restoration", () => {
     await secondary.setWindowRect({ width: 1600, height: 900, x: 80, y: 80 });
     await selectRemoteTask(remoteItemId, ownerTaskId);
     await focusTerminal(secondary, ownerTaskId, "remote");
-    const remoteActive = await waitForOwnerAndRenderer(secondary, ownerTaskId);
+    const remoteActive = await waitForOwnerAndRenderer(secondary, ownerTaskId, "remote");
     expect(remoteActive.cols).toBeLessThan(ownerInitial.cols);
     expect(remoteActive.rows).toBeLessThan(ownerInitial.rows);
     await capture(secondary, "remote-active-view-controls-grid.png");
@@ -465,7 +470,7 @@ describe("remote active-view restoration", () => {
     const ownerHandbackFocus = await focusTerminal(primary, ownerTaskId, "owner-handback");
     let ownerRestored: Dimensions;
     try {
-      ownerRestored = await waitForOwnerAndRenderer(primary, ownerTaskId, ownerInitial);
+      ownerRestored = await waitForOwnerAndRenderer(primary, ownerTaskId, "owner", ownerInitial);
     } catch (error) {
       await capture(primary, "owner-handback-failure.png");
       await captureHandbackDiagnostics(ownerTaskId, ownerHandbackFocus);

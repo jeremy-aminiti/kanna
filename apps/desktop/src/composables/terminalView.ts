@@ -247,12 +247,23 @@ export function initializeTerminalView(params: {
     term,
     () => params.fitAddon.proposeDimensions?.(),
   )
+  // Keep a role-qualified observation key for real two-desktop tests. A
+  // CloudTerminalView can mirror the same task ID in this window, so the raw
+  // task key alone does not identify the owner's local terminal.
+  const unregisterLocalE2ETerminalBuffer = registerE2ETerminalBuffer(
+    `local:${params.sessionId}`,
+    term,
+    () => params.fitAddon.proposeDimensions?.(),
+  )
 
   return {
     term,
     cleanupContainerEvents,
     stopThemeWatch,
-    unregisterE2ETerminalBuffer,
+    unregisterE2ETerminalBuffer: () => {
+      unregisterE2ETerminalBuffer()
+      unregisterLocalE2ETerminalBuffer()
+    },
     unregisterFileLinkProvider,
     stopFileLinkAvailabilityWatch,
     fileLinkProvider,
