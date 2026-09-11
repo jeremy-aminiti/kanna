@@ -11,8 +11,17 @@ import type {
   RemoteTaskDiffContent,
   RemoteTaskDiffRequest,
 } from "../services/desktopRemoteTaskClient";
+import type {
+  DesktopViewOpenCommand,
+  DesktopViewOpenOutcome,
+} from "../composables/desktopViewOpen";
 
 const modalRef = ref<HTMLElement | null>(null);
+const diffViewRef = ref<{
+  revealDesktopViewTarget?: (
+    command: DesktopViewOpenCommand,
+  ) => Promise<DesktopViewOpenOutcome>;
+} | null>(null);
 
 const props = defineProps<EmbeddableViewProps & {
   repoPath: string;
@@ -68,7 +77,18 @@ const tearOff = useModalTearOff({
   onTornOff: () => emit("close"),
 });
 
-defineExpose({ zIndex, bringToFront });
+/** The tab host asks the modal; the view underneath is what can answer. */
+async function revealDesktopViewTarget(
+  command: DesktopViewOpenCommand,
+): Promise<DesktopViewOpenOutcome> {
+  const reveal = diffViewRef.value?.revealDesktopViewTarget;
+  if (!reveal) {
+    return { opened: false, code: "renderer_failed", message: "the diff view is not mounted" };
+  }
+  return await reveal(command);
+}
+
+defineExpose({ zIndex, bringToFront, revealDesktopViewTarget });
 
 // Escape is handled by the centralized dismiss handler in useKeyboardShortcuts
 // (capture phase), which respects modal priority (e.g. closes shortcuts menu first).
@@ -93,6 +113,7 @@ onMounted(() => {
       @pointercancel="tearOff.onPointerCancel"
     >
       <DiffView
+        ref="diffViewRef"
         :repo-path="repoPath"
         :worktree-path="worktreePath"
         :initial-scope="initialScope"

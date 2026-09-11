@@ -1,4 +1,4 @@
-import { ref, shallowRef, watch, type Ref, computed } from "vue";
+import { nextTick, ref, shallowRef, watch, type Ref, computed } from "vue";
 import { computedAsync, refDebounced } from "@vueuse/core";
 import { invoke } from "../invoke";
 
@@ -474,8 +474,47 @@ export function useTreeExplorer(
     error.value = null;
   }
 
+  /**
+   * Put the cursor on one worktree-relative path, opening the directories on
+   * the way to it.
+   *
+   * This is the explorer's half of `kanna_open_view`'s `tree` target: an agent
+   * names a path, and the reader's cursor ends up on it rather than at the
+   * root with the file somewhere below. Returns false when the path is not
+   * there after the directories it names have loaded — a file that was deleted
+   * between the server resolving it and the explorer reading it — so the
+   * caller can say so instead of claiming the reveal worked.
+   *
+   * `isDirectory` decides where the cursor lands: on a directory it is the
+   * directory's *contents* that the reader wants to be looking at, and on a
+   * file it is the file inside its parent.
+   */
+  async function revealPath(relativePath: string, isDirectory: boolean): Promise<boolean> {
+    const parts = relativePath.split("/").filter((part) => part.length > 0 && part !== ".");
+    if (parts.length === 0) {
+      breadcrumb.value = [];
+      requestedCursor.value = 0;
+      return true;
+    }
+    filterText.value = "";
+    filtering.value = false;
+    // A path an agent chose may well be gitignored — a build output it wants
+    // read — and the explorer hides those by default.
+    showAllFiles.value = true;
+    breadcrumb.value = isDirectory ? parts : parts.slice(0, -1);
+    requestedCursor.value = isDirectory ? 0 : parts[parts.length - 1];
+    await nextTick();
+    const deadline = Date.now() + 5_000;
+    while (loading.value && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (isDirectory) return true;
+    return currentEntries.value.some((entry) => entry.name === parts[parts.length - 1]);
+  }
+
   return {
     state,
+    revealPath,
     showAllFiles,
     filterText,
     filtering,

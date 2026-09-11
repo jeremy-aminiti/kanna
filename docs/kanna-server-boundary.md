@@ -2543,31 +2543,82 @@ surface today.
 
 ## Desktop View Commands
 
-`POST /v1/desktop/views/open` (`kanna_open_file`) asks whichever desktop windows
-are running to open one of a task's files in that task's main content area, as a
-tab beside its agent session. It exists because an agent could already *read* a
-task's files but had no way to put one in front of the person watching that
-task, short of pasting it into the terminal.
+`POST /v1/desktop/views/open` (`kanna_open_view`, `kanna-cli task open-view`)
+shows one of a task's read-only views to the person watching Kanna on this
+machine. It exists because an agent could already *read* a task's files, diff
+and commit graph but had no way to take the reviewer to one — which is exactly
+what a "read these first" finding needs.
 
-The path is resolved through the same task-workspace resolution
-`/v1/tasks/{task_id}/files/content` uses, before anything is queued: a path
-outside the task's workspace, a missing file, one over 1 MiB, or one that is not
-UTF-8 text is refused with that reason, so a mistyped path is an error the
-caller can act on rather than a window that quietly opens nothing. The content
-read on the way is discarded — the desktop opens the file from the worktree
-itself.
+The request is four fields: `taskId`, `view`, an optional `target`, and the
+usual `machine_id` routing. The view is a whitelist —
+`agent`, `file`, `diff`, `tree`, `graph`, `analytics` — not "any main tab":
+`shell` runs commands, `image` takes an arbitrary URL, and `preferences` is not
+a view of a task. Adding a view means adding its target shape, its renderer
+handler, its readiness contract and its tests; the action never accepts a tab
+id, a component name, a URL, a filesystem root, a shell command, or serialized
+UI state.
 
-**A requested view is not a shown view.** The response says `requested: true`,
-never that a window displayed anything, and the command is advisory in the same
-way a pairing prompt is: it is appended to a bounded in-memory lane, not to a
-durable table, because nothing about the task depends on it and a request nobody
-saw is correctly forgotten. It writes no `task_input` row — this is not an
-instruction to the agent, and the durable instruction history must not read as
-though it were. The desktop long-polls `GET /v1/desktop/view-commands`
-(loopback-only, single-consumer, same `cursor`/`streamId` contract as the
-transfer advisory lanes) and opens the file in that task's own tab set. It never
-changes which task the operator has selected: the tab is simply there when they
-look at that task.
+Each view fixes the shape of its `target`, and an unknown key in it is refused
+rather than ignored:
+
+| view | target |
+|---|---|
+| `agent`, `analytics` | none |
+| `file` | `{ path, line?, column?, endLine?, endColumn? }` — 1-based, inclusive, counted in characters |
+| `tree` | `{ path? }` — a file or directory to reveal, else the worktree root |
+| `diff` | `{ scope?, path?, side?, line?, excerpt? }` |
+| `graph` | `{ commit }` — a full 40-character object id |
+
+A diff anchor is a path plus a side plus a line, never a hunk ordinal: hunk
+numbering shifts with every commit, so an ordinal a reviewer recorded is
+pointing somewhere else by the time a human clicks it. The server walks the
+patch, finds the hunk containing the anchored line, and the viewer opens that
+hunk. The optional `excerpt` guards against a stale anchor — when the anchored
+line no longer contains it, the open is refused rather than aimed at whatever
+has taken that line's place. The command the window receives carries the
+resolved `anchorKind`, `oldLine` and `newLine`, because the rendered diff
+numbers each row by its own side and a context line's two numbers are otherwise
+indistinguishable in the DOM.
+
+**A queued command is not an opened view.** The route registers the request,
+appends the command to the bounded in-memory lane the desktop long-polls, and
+then *waits*: `opened: true` is returned only after a window answers
+`POST /v1/desktop/views/ack` (loopback-only, like the command lane it answers)
+to say the view and its target are on screen. Nothing acknowledging within the
+timeout answers `opened: false, code: "desktop_unavailable"`, which is the
+honest report for a closed desktop or a machine that is not this one. Every
+other expected failure is `opened: false` with its own code —
+`task_not_found`, `stale_branch_alias`, `workspace_unavailable`,
+`invalid_path`, `file_not_found`, `file_too_large`, `unsupported_content`,
+`invalid_range`, `invalid_target`, `unsupported_view`, `unsupported_target`,
+`diff_target_not_found`, `diff_target_ambiguous`, `diff_target_stale`,
+`commit_not_found`, `renderer_failed` — so one field, `opened`, is the whole
+answer to "is it on their screen?".
+
+**Every target is resolved against the task's own current worktree**, which the
+database owns; a caller never supplies a filesystem root. File paths go through
+the same descriptor-relative resolution `/v1/tasks/{task_id}/files/content`
+uses, so an absolute path, a traversal, an intermediate or final symlink, or a
+mid-flight swap is refused before anything is queued, as are a missing file,
+one over 1 MiB, one that is not UTF-8 text, a range past the end of it, a diff
+anchor that is not in the diff, and a commit that is not in the task's graph. A
+`taskId` may also be the task's *current* branch name; an older workspace
+branch the task has left answers `stale_branch_alias` rather than "not found",
+because that task is right there under a newer branch.
+
+Only one window is asked. The native poller picks the focused window, else the
+first visible one, shows and focuses it, and emits the command there alone —
+fanning it out would have every window racing to answer for a screen one of
+them is showing, and opening tabs nobody asked for in the rest. Unlike the
+views a window opens for itself, this one *does* move the operator's selection:
+the point of the action is to take the person watching to what they were asked
+to read.
+
+It navigates and nothing else. No task state changes, the agent is sent
+nothing, and no `task_input` row is written — this is not an instruction, and
+the durable instruction history must not read as though it were. The desktop
+long-polls `GET /v1/desktop/view-commands` (loopback-only, single-consumer,
+same `cursor`/`streamId` contract as the transfer advisory lanes).
 
 ## Mobile Notification Delivery
 

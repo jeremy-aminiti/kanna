@@ -20,7 +20,7 @@
 
 use serde_json::Value;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 fn forwarded_event_name(value: &Value) -> Option<&'static str> {
     match value.get("type").and_then(Value::as_str) {
@@ -138,9 +138,17 @@ pub fn spawn_transfer_companion_event_poller(app: AppHandle) {
     });
 }
 
-/// Long-poll the desktop view command lane and emit each command to every
-/// window as `desktop-view-open`. A lane of its own so a burst of terminal
-/// frames cannot delay a file the operator was just asked to look at.
+/// Long-poll the desktop view command lane and hand each command to exactly
+/// one window as `desktop-view-open`. A lane of its own so a burst of terminal
+/// frames cannot delay a view the operator was just asked to look at.
+///
+/// Unlike the advisory lanes, this is not a fan-out. An open is answered — the
+/// route waits for one acknowledgement and reports it as `opened` — so every
+/// window honouring the same command would race to answer for a screen only
+/// one of them is showing, and the others would open tabs nobody asked for.
+/// The command goes to the window the operator is looking at, and otherwise to
+/// the first visible one; with no window at all, nothing acknowledges and the
+/// route reports the desktop as unavailable, which is the truth.
 pub fn spawn_desktop_view_command_poller(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         crate::commands::mobile::wait_for_server_started(&app).await;
@@ -158,7 +166,7 @@ pub fn spawn_desktop_view_command_poller(app: AppHandle) {
                 Ok(batch) => {
                     for event in batch.events {
                         if forwarded_event_name(&event) == Some("desktop-view-open") {
-                            let _ = app.emit("desktop-view-open", &event);
+                            dispatch_desktop_view_open(&app, &event);
                         } else {
                             eprintln!("[desktop-view-commands] unhandled command: {event}");
                         }
@@ -175,6 +183,54 @@ pub fn spawn_desktop_view_command_poller(app: AppHandle) {
             }
         }
     });
+}
+
+/// Bring the chosen window to the operator and give it the command.
+///
+/// Showing, unminimizing and focusing happen here rather than in the renderer
+/// because a minimized or hidden window cannot put anything in front of
+/// anyone, and the point of the action is that the person watching is taken to
+/// the view. A window that refuses to come forward still gets the command: the
+/// renderer's acknowledgement is about the view being ready, and a window
+/// manager declining a raise is not a reason to report the open as failed.
+fn dispatch_desktop_view_open(app: &AppHandle, event: &Value) {
+    let Some(window) = choose_desktop_view_window(app) else {
+        eprintln!(
+            "[desktop-view-commands] no window is available to open a view;              the request will be reported as unavailable"
+        );
+        return;
+    };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    if let Err(error) = app.emit_to(
+        tauri::EventTarget::webview_window(window.label()),
+        "desktop-view-open",
+        event,
+    ) {
+        eprintln!(
+            "[desktop-view-commands] failed to hand the command to {}: {error}",
+            window.label()
+        );
+    }
+}
+
+/// The window the operator is looking at, else the first visible one, else the
+/// first window there is. Ordered by label so the fallback does not change
+/// from one command to the next for no reason.
+fn choose_desktop_view_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    let mut windows: Vec<(String, tauri::WebviewWindow)> = app.webview_windows().into_iter().collect();
+    windows.sort_by(|(left, _), (right, _)| left.cmp(right));
+    windows
+        .iter()
+        .find(|(_, window)| window.is_focused().unwrap_or(false))
+        .or_else(|| {
+            windows.iter().find(|(_, window)| {
+                window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false)
+            })
+        })
+        .or_else(|| windows.first())
+        .map(|(_, window)| window.clone())
 }
 
 /// A cursor is only meaningful within the server incarnation that issued it,

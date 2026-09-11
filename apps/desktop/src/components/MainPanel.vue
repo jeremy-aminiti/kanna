@@ -32,6 +32,10 @@ import AnalyticsModal from "./AnalyticsModal.vue";
 import ImageUrlPreviewModal from "./ImageUrlPreviewModal.vue";
 import PreferencesPanel from "./PreferencesPanel.vue";
 import { AGENT_TAB_ID, type MainTab } from "../composables/useMainTabs";
+import type {
+  DesktopViewOpenCommand,
+  DesktopViewOpenOutcome,
+} from "../composables/desktopViewOpen";
 import type { MainTabViewsController } from "./MainPanel.types";
 import type { BranchInclude, DiffScope, DiffScrollPositions } from "../composables/useAppModals";
 import type { MarkdownPreviewMode } from "../stores/markdownPreviewMode";
@@ -203,6 +207,15 @@ function onMarkdownModeChange(mode: MarkdownPreviewMode) {
 
 interface DismissableView {
   dismiss?: () => boolean;
+  /**
+   * Show the view's content and whatever the command aimed it at, and say
+   * whether that succeeded. The contract every whitelisted view implements for
+   * `kanna_open_view`: the route reports `opened` to the agent that asked, so
+   * "rendered" here means rendered, not "mounted and loading".
+   */
+  revealDesktopViewTarget?: (
+    command: DesktopViewOpenCommand,
+  ) => Promise<DesktopViewOpenOutcome>;
 }
 
 const viewRefs = new Map<string, DismissableView>();
@@ -213,6 +226,47 @@ function setViewRef(id: string, component: Element | ComponentPublicInstance | n
   } else {
     viewRefs.delete(id);
   }
+}
+
+/**
+ * Aim one tab at what an agent asked a human to look at.
+ *
+ * The tab must be the one in front — a view that is behind another one is not
+ * showing anybody anything — and then the view itself decides when its content
+ * and target are up. Views with nothing to load and nothing to aim (the agent
+ * session, analytics) are ready as soon as they are the active tab.
+ */
+async function revealTabTarget(
+  tabId: string,
+  command: DesktopViewOpenCommand,
+): Promise<DesktopViewOpenOutcome> {
+  const controller = props.views?.tabs;
+  if (!controller) {
+    return {
+      opened: false,
+      code: "renderer_failed",
+      message: "this window is not hosting task views",
+    };
+  }
+  controller.activateTab(tabId);
+  await nextTick();
+  if (controller.activeTabId.value !== tabId) {
+    return {
+      opened: false,
+      code: "renderer_failed",
+      message: `the ${command.view} view could not be brought to the front`,
+    };
+  }
+  const reveal = viewRefs.get(tabId)?.revealDesktopViewTarget;
+  if (!reveal) {
+    if (command.target === undefined) return { opened: true };
+    return {
+      opened: false,
+      code: "unsupported_target",
+      message: `this window's ${command.view} view cannot be aimed at a target`,
+    };
+  }
+  return await reveal(command);
 }
 
 /**
@@ -584,6 +638,7 @@ function cyclePreferencesSection(direction: -1 | 1) {
 defineExpose({
   recheckClis: checkAllClis,
   dismissActiveTab,
+  revealTabTarget,
   cyclePreferencesSection,
   onTabClosed,
 });
@@ -746,6 +801,7 @@ function dismissCommandHint() {
       <template v-for="tab in openViewTabs" :key="tabKey(tab)">
         <DiffModal
           v-if="tab.kind === 'diff' && diffViewProps"
+          :ref="(component) => setViewRef(tab.id, component)"
           v-show="activeTabId === tab.id"
           v-bind="diffViewProps"
           embedded
@@ -799,6 +855,7 @@ function dismissCommandHint() {
         />
         <AnalyticsModal
           v-else-if="tab.kind === 'analytics'"
+          :ref="(component) => setViewRef(tab.id, component)"
           v-show="activeTabId === tab.id"
           :repo-id="scopeRepoId"
           embedded

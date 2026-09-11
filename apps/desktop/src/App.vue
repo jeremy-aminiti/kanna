@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, toRef, watch, type Ref } from "vue";
+import { computed, inject, nextTick, toRef, watch, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { type BlockerDisplayItem, type DbHandle } from "./types/kanna";
 import type { TaskUiSlot } from "./types/taskUi";
@@ -15,6 +15,11 @@ import { useToast } from "./composables/useToast";
 import { useAppUpdate } from "./composables/useAppUpdate";
 import { useAppCloudWorkspace } from "./composables/useAppCloudWorkspace";
 import { useAppLifecycle } from "./composables/useAppLifecycle";
+import {
+  performDesktopViewOpen,
+  type DesktopViewOpenCommand,
+} from "./composables/desktopViewOpen";
+import { acknowledgeDesktopViewOpen } from "./services/desktopServerClient";
 import { useAppModals } from "./composables/useAppModals";
 import {
   mainTabScopeKeyForApp,
@@ -182,16 +187,43 @@ const mainTabScopeKey = computed(() => {
 });
 
 /**
- * An agent asked this desktop to show a file. It lands in that task's own tab
- * set, whether or not this window is currently on that task: the operator's
- * selection is theirs, and the tab is simply waiting when they look.
+ * An agent asked this desktop to show a view of a task, and is waiting to be
+ * told whether it reached the screen.
+ *
+ * This one *does* move the operator's selection, unlike the views a window
+ * opens for itself: the point of the action is to take the person watching to
+ * what they were asked to read, and the native side has already brought this
+ * window forward for it. What it never does is touch the task — no state, no
+ * message to the agent, no input record.
  */
-function openTaskFileView(taskId: string, filePath: string, line?: number): void {
-  mainTabs.openTabInScope(mainTabScopeKeyForTask(taskId), {
-    kind: "file",
-    filePath,
-    initialLine: line,
+async function openTaskView(command: DesktopViewOpenCommand): Promise<void> {
+  const outcome = await performDesktopViewOpen(command, {
+    findTaskSlotId: (taskId) =>
+      sidebarItems.value.find((item) => item.task_id === taskId || item.slot_id === taskId)
+        ?.slot_id ?? null,
+    refreshTasks: () => store.reloadSnapshot(),
+    selectTask: (slotId) => selectSidebarItemById(slotId),
+    openTab: (scopeKey, descriptor) => mainTabs.openTabInScope(scopeKey, descriptor),
+    revealTab: async (tabId, revealCommand) => {
+      await nextTick();
+      const panel = mainPanelRef.value;
+      if (!panel?.revealTabTarget) {
+        return {
+          opened: false,
+          code: "renderer_failed",
+          message: "this window has no main panel to show the view in",
+        };
+      }
+      return await panel.revealTabTarget(tabId, revealCommand);
+    },
   });
+  try {
+    await acknowledgeDesktopViewOpen(command.requestId, outcome);
+  } catch (error: unknown) {
+    // The caller times out and reports the desktop as unavailable, which is
+    // wrong but not harmful; there is nothing else this window can do.
+    console.error("[App] acknowledging a desktop view open failed:", error);
+  }
 }
 const mainTabs = useMainTabs({
   scopeKey: mainTabScopeKey,
@@ -484,7 +516,7 @@ const {
   initializeDesktopLanTaskSync,
   openFilePreview,
   openImageUrlPreview,
-  openTaskFileView,
+  openTaskView,
   preferences,
   remoteTaskDiagnostics,
   restoreMainTabs: mainTabPersistence.hydrate,

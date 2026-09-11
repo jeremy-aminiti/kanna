@@ -662,6 +662,29 @@ export interface DesktopOperatorEventInput {
   repoId?: string | null;
 }
 
+/**
+ * Tell the server whether a `kanna_open_view` command reached the screen.
+ *
+ * The route that issued the command is still waiting on this: it reports
+ * `opened` to the agent that asked, and answers "the desktop is unavailable"
+ * when nothing arrives. So a window that failed must say so rather than stay
+ * quiet — a silent failure reads to the caller as a closed desktop.
+ */
+export async function acknowledgeDesktopViewOpen(
+  requestId: string,
+  outcome: { opened: boolean; code?: string; message?: string },
+): Promise<void> {
+  await requestJson<{ acknowledged: boolean }>("/v1/desktop/views/ack", {
+    method: "POST",
+    body: {
+      requestId,
+      opened: outcome.opened,
+      ...(outcome.code === undefined ? {} : { code: outcome.code }),
+      ...(outcome.message === undefined ? {} : { message: outcome.message }),
+    },
+  });
+}
+
 export async function postDesktopOperatorEvents(events: DesktopOperatorEventInput[]): Promise<void> {
   if (clientHandlersForTests?.postOperatorEvents) {
     await clientHandlersForTests.postOperatorEvents(events);

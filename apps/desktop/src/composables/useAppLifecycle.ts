@@ -29,6 +29,10 @@ import {
   type WorkspaceWindowState,
 } from "../windowWorkspace";
 import { scheduleStartupBackup, startPeriodicBackup } from "./useBackup";
+import {
+  parseDesktopViewOpenCommand,
+  type DesktopViewOpenCommand,
+} from "./desktopViewOpen";
 import type { KeyboardActions } from "./useKeyboardShortcuts";
 import type { useAppPreferences } from "./useAppPreferences";
 import { parseRecentAgentChoices } from "../utils/agentChoiceUsage";
@@ -62,10 +66,11 @@ interface UseAppLifecycleOptions {
   openFilePreview: (filePath: string, initialLine?: number, remoteContent?: string) => void;
   openImageUrlPreview: (imageUrl: string) => void;
   /**
-   * Honour a `kanna_open_file` request from an agent: put the file in the
-   * named task's own tab set. It never changes what this window has selected.
+   * Honour a `kanna_open_view` command from an agent: select the named task,
+   * open the requested view of it, and answer the waiting caller with whether
+   * it reached the screen.
    */
-  openTaskFileView: (taskId: string, filePath: string, line?: number) => void;
+  openTaskView: (command: DesktopViewOpenCommand) => Promise<void>;
   preferences: AppPreferences;
   remoteTaskDiagnostics: Ref<unknown>;
   restoreMainTabs: () => Promise<void>;
@@ -84,29 +89,6 @@ interface UseAppLifecycleOptions {
 
 function eventPayload(event: unknown): unknown {
   return (event as { payload?: unknown })?.payload ?? event;
-}
-
-interface DesktopViewOpenCommand {
-  taskId: string;
-  path: string;
-  line?: number;
-}
-
-function parseDesktopViewOpenEvent(payload: unknown): DesktopViewOpenCommand {
-  const command = payload as Partial<DesktopViewOpenCommand> & { view?: string } | null;
-  if (
-    !command
-    || typeof command.taskId !== "string"
-    || typeof command.path !== "string"
-    || (command.view !== undefined && command.view !== "file")
-  ) {
-    throw new Error("malformed desktop view open command");
-  }
-  return {
-    taskId: command.taskId,
-    path: command.path,
-    line: typeof command.line === "number" ? command.line : undefined,
-  };
 }
 
 function focusAgentTerminal() {
@@ -128,7 +110,7 @@ export function useAppLifecycle({
   initializeDesktopLanTaskSync,
   openFilePreview,
   openImageUrlPreview,
-  openTaskFileView,
+  openTaskView,
   preferences,
   remoteTaskDiagnostics,
   restoreMainTabs,
@@ -397,12 +379,20 @@ export function useAppLifecycle({
 
     try {
       const unlistenDesktopViewOpen = await listen("desktop-view-open", (event: unknown) => {
+        let command: DesktopViewOpenCommand;
         try {
-          const command = parseDesktopViewOpenEvent(eventPayload(event));
-          openTaskFileView(command.taskId, command.path, command.line);
+          command = parseDesktopViewOpenCommand(eventPayload(event));
         } catch (e: unknown) {
-          console.error("[App] failed to handle desktop view open command:", e);
+          // Nothing to acknowledge with: a command this window cannot read
+          // carries no request id to answer. The caller learns of it as an
+          // unavailable desktop, which is as close to the truth as this
+          // window can get.
+          console.error("[App] failed to read a desktop view open command:", e);
+          return;
         }
+        void openTaskView(command).catch((e: unknown) => {
+          console.error("[App] failed to handle desktop view open command:", e);
+        });
       });
       appUnlisteners.push(unlistenDesktopViewOpen);
     } catch (e: unknown) {

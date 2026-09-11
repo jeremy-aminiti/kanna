@@ -60,6 +60,12 @@ pub struct AppState {
     /// honour it: nothing about the task changes, and a request nobody saw is
     /// correctly forgotten.
     desktop_view_commands: Arc<crate::transfer_sidecar::TransferEventLog>,
+    /// The opens still waiting for a window to say the view is on screen.
+    desktop_view_acks: Arc<super::desktop_views::DesktopViewAcks>,
+    /// How long an open waits for that acknowledgement. A field rather than a
+    /// constant so a test can prove the absent-desktop answer without
+    /// spending the real timeout on it.
+    desktop_view_open_timeout_ms: Arc<AtomicU64>,
     transfer_work: Arc<crate::transfer_engine::queue::TransferWorkQueue>,
     cloud_transfer_proxies: crate::cloud_transfer_proxy::CloudTransferProxyState,
     pub(super) preview_sessions: super::preview::PreviewSessions,
@@ -354,6 +360,22 @@ impl AppState {
         Arc::clone(&self.desktop_view_commands)
     }
 
+    /// The in-flight desktop view opens. One process owns one server, so the
+    /// window answering an id is answering the server that issued it.
+    pub(super) fn desktop_view_acks(&self) -> Arc<super::desktop_views::DesktopViewAcks> {
+        Arc::clone(&self.desktop_view_acks)
+    }
+
+    pub(super) fn desktop_view_open_timeout_ms(&self) -> u64 {
+        self.desktop_view_open_timeout_ms.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_desktop_view_open_timeout_ms(&self, millis: u64) {
+        self.desktop_view_open_timeout_ms
+            .store(millis, Ordering::Relaxed);
+    }
+
     /// The transfer engine's durable work queue. Held here so an HTTP intent
     /// (push a task, approve or reject an incoming transfer) and the sidecar's
     /// own event reader append to the same queue the drain loop consumes.
@@ -410,6 +432,10 @@ impl AppState {
             local_task_events_token,
             transfer_sidecar,
             desktop_view_commands: Arc::new(crate::transfer_sidecar::TransferEventLog::default()),
+            desktop_view_acks: Arc::new(super::desktop_views::DesktopViewAcks::default()),
+            desktop_view_open_timeout_ms: Arc::new(AtomicU64::new(
+                super::desktop_views::DEFAULT_OPEN_TIMEOUT_MS,
+            )),
             transfer_work,
             cloud_transfer_proxies: Arc::new(Mutex::new(HashMap::new())),
             preview_sessions: super::preview::PreviewSessions::default(),

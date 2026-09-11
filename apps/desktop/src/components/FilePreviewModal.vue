@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type MarkdownIt from "markdown-it";
-import type { BundledLanguage, ShikiTransformer } from "shiki";
+import type { BundledLanguage, DecorationItem, ShikiTransformer } from "shiki";
 import { ref, computed, onMounted, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "../invoke";
@@ -20,6 +20,12 @@ import { getSyntaxLanguageForPath } from "../utils/syntaxLanguage";
 import { getShikiTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
 import { metaOrControlHint } from "../composables/shortcutPlatform";
+import {
+  fileViewTarget,
+  waitForViewReady,
+  type DesktopViewOpenCommand,
+  type DesktopViewOpenOutcome,
+} from "../composables/desktopViewOpen";
 import {
   DEFAULT_MARKDOWN_PREVIEW_MODE,
   type MarkdownPreviewMode,
@@ -249,7 +255,32 @@ let prevContent = "";
 let prevLang = "";
 let prevTheme = shikiTheme.value;
 
-async function renderHighlighted(raw: string, lang: string, decos: typeof searchDecorations.value) {
+/**
+ * A range an agent asked a human to read, as a shiki decoration.
+ *
+ * Positions rather than offsets: the command's line and column already mean
+ * "line and character", so converting to a byte offset and back would be a
+ * place for the two to disagree about what a character is.
+ */
+const revealRange = ref<{
+  start: { line: number; character: number };
+  end: { line: number; character: number };
+} | null>(null);
+
+/**
+ * Shiki refuses overlapping decorations, and a search match may sit inside the
+ * revealed range. The search is the reader's own live intent, so it wins: the
+ * revealed range steps aside while a search is running and comes back when it
+ * is closed.
+ */
+const decorations = computed<DecorationItem[]>(() => {
+  if (searchDecorations.value.length > 0) return searchDecorations.value;
+  const range = revealRange.value;
+  if (!range) return [];
+  return [{ start: range.start, end: range.end, properties: { class: "reveal-hl" } }];
+});
+
+async function renderHighlighted(raw: string, lang: string, decos: DecorationItem[]) {
   if (!raw) { highlighted.value = ""; return; }
   try {
     const hl = await getHighlighter();
@@ -272,7 +303,7 @@ async function renderHighlighted(raw: string, lang: string, decos: typeof search
   }
 }
 
-watch([content, currentLang, searchDecorations, effectiveCodeTheme], ([raw, lang, decos]) => {
+watch([content, currentLang, decorations, effectiveCodeTheme], ([raw, lang, decos]) => {
   if (highlightTimer) clearTimeout(highlightTimer);
   const theme = shikiTheme.value;
   // Content, language, or theme changed — render immediately
@@ -406,7 +437,72 @@ function dismiss(): boolean {
   return true;
 }
 
-defineExpose({ zIndex, bringToFront, dismiss });
+/**
+ * Put an agent's chosen file range in front of the reader, and say whether it
+ * is actually there.
+ *
+ * The route that asked is waiting on this answer, so nothing here reports
+ * success optimistically: a file still loading is waited for, a file that
+ * failed to load is a failure, and a line whose element never rendered is a
+ * failure rather than a scroll that quietly went nowhere.
+ */
+async function revealDesktopViewTarget(
+  command: DesktopViewOpenCommand,
+): Promise<DesktopViewOpenOutcome> {
+  const target = fileViewTarget(command);
+  if (!target) {
+    return { opened: false, code: "invalid_target", message: "no file path to open" };
+  }
+  const settled = await waitForViewReady(() => !loading.value);
+  if (!settled) {
+    return { opened: false, code: "renderer_failed", message: `${props.filePath} is still loading` };
+  }
+  if (error.value) {
+    return { opened: false, code: "renderer_failed", message: error.value };
+  }
+  if (target.line === undefined) {
+    revealRange.value = null;
+    return { opened: true };
+  }
+
+  const lines = content.value.split("\n");
+  const startLine = Math.min(target.line, lines.length) - 1;
+  const endLine = Math.min(target.endLine ?? target.line, lines.length) - 1;
+  revealRange.value = {
+    start: { line: startLine, character: (target.column ?? 1) - 1 },
+    end: {
+      line: endLine,
+      character: target.endColumn !== undefined
+        ? target.endColumn - 1
+        : (lines[endLine]?.length ?? 0),
+    },
+  };
+  showLineNumbers.value = true;
+  // The reader is being taken somewhere deliberately, so the one-shot latch
+  // that keeps an ordinary reopen from re-scrolling does not apply.
+  scrolledToLine = true;
+
+  const rendered = await waitForViewReady(() =>
+    contentRef.value?.querySelector(`[data-line="${target.line}"]`) != null
+  );
+  await nextTick();
+  const element = contentRef.value?.querySelector(
+    `[data-line="${target.line}"]`,
+  ) as HTMLElement | null;
+  const scrollContainer = contentRef.value;
+  if (!rendered || !element || !scrollContainer) {
+    return {
+      opened: false,
+      code: "renderer_failed",
+      message: `line ${target.line} of ${props.filePath} did not render`,
+    };
+  }
+  scrollContainer.scrollTop = element.offsetTop - scrollContainer.clientHeight / 2;
+  element.classList.add("line-highlight-flash");
+  return { opened: true };
+}
+
+defineExpose({ zIndex, bringToFront, dismiss, revealDesktopViewTarget });
 
 onMounted(() => {
   loadFile();
@@ -841,6 +937,12 @@ watch(
 }
 
 /* Search highlight styles (inside v-html, needs :deep) */
+/* A range an agent asked the reader to look at. Quieter than a search match:
+   it marks where to start reading, it is not a hit to step through. */
+.preview-content :deep(.reveal-hl) {
+  background: color-mix(in srgb, var(--kn-accent) 24%, transparent);
+  border-radius: 2px;
+}
 .preview-content :deep(.search-hl) {
   background: rgba(255, 200, 0, 0.25);
   border-radius: 2px;

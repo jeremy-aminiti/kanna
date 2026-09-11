@@ -14,6 +14,13 @@ import DiffContentPane from "./DiffContentPane.vue";
 import DiffToolbar from "./DiffToolbar.vue";
 import DiffSearchBar from "./DiffSearchBar.vue";
 import { metaOrControlHint } from "../composables/shortcutPlatform";
+import {
+  diffViewTarget,
+  waitForViewReady,
+  type DesktopViewOpenCommand,
+  type DesktopViewOpenOutcome,
+  type DiffViewTarget,
+} from "../composables/desktopViewOpen";
 import type {
   RemoteTaskDiffContent,
   RemoteTaskDiffRequest,
@@ -772,7 +779,87 @@ onUnmounted(() => {
   cleanupInstance();
 });
 
-defineExpose({ refresh: loadDiff });
+/**
+ * The rendered row for a diff anchor the server resolved.
+ *
+ * The renderer numbers every row by its own side, so a context line carries
+ * one side's number as `data-line` and the other's as `data-alt-line` — which
+ * is why the command carries both. Preferring the row that matches *both*
+ * numbers keeps an anchor from landing on some other context line that happens
+ * to share one of them.
+ */
+function findRevealedDiffLine(target: DiffViewTarget): HTMLElement | null {
+  if (!target.path) return null;
+  const wrapper = getFileWrapper(target.path);
+  if (!wrapper) return null;
+  const expectedType = target.anchorKind === "addition"
+    ? "change-addition"
+    : target.anchorKind === "deletion"
+      ? "change-deletion"
+      : "context";
+  const old = target.oldLine === undefined ? null : String(target.oldLine);
+  const fresh = target.newLine === undefined ? null : String(target.newLine);
+  const preferred = target.side === "old" ? old : fresh;
+
+  let fallback: HTMLElement | null = null;
+  for (const candidate of getRenderedCodeLines(wrapper)) {
+    const type = candidate.getAttribute("data-line-type");
+    if (type !== null && type !== expectedType) continue;
+    const own = candidate.getAttribute("data-line");
+    const alt = candidate.getAttribute("data-alt-line");
+    if (old !== null && fresh !== null) {
+      if ((own === old && alt === fresh) || (own === fresh && alt === old)) return candidate;
+    }
+    if (fallback === null && preferred !== null && (own === preferred || alt === preferred)) {
+      fallback = candidate;
+    }
+  }
+  return fallback;
+}
+
+/**
+ * Take the reader to the hunk an agent anchored, and say whether it is there.
+ *
+ * The diff the server checked the anchor against and the diff on screen are
+ * two reads of a working tree that moves, so an anchor that is no longer
+ * rendered is reported as missing rather than scrolled past. The scope is
+ * switched first, because an anchor in the branch diff means nothing while the
+ * view is showing uncommitted changes.
+ */
+async function revealDesktopViewTarget(
+  command: DesktopViewOpenCommand,
+): Promise<DesktopViewOpenOutcome> {
+  const target = diffViewTarget(command);
+  if (scope.value !== target.scope) {
+    await setScope(target.scope);
+  }
+  const settled = await waitForViewReady(() => !loading.value);
+  if (!settled) {
+    return { opened: false, code: "renderer_failed", message: "the diff is still loading" };
+  }
+  if (!target.path) return { opened: true };
+
+  await waitForViewReady(() => findRevealedDiffLine(target) !== null);
+  const line = findRevealedDiffLine(target);
+  if (!line) {
+    return {
+      opened: false,
+      code: "diff_target_not_found",
+      message: `${target.path} ${target.side ?? ""} line ${target.newLine ?? target.oldLine} is not in the rendered diff`,
+    };
+  }
+  line.scrollIntoView({ block: "center" });
+  // The row lives in the diff renderer's shadow DOM, where this component's
+  // stylesheet does not reach, so the flash is written onto the element.
+  const previousOutline = line.style.outline;
+  line.style.outline = "2px solid var(--kn-accent)";
+  setTimeout(() => {
+    line.style.outline = previousOutline;
+  }, 1_500);
+  return { opened: true };
+}
+
+defineExpose({ refresh: loadDiff, revealDesktopViewTarget });
 </script>
 
 <template>

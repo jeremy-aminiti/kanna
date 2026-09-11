@@ -20,6 +20,10 @@ import {
 import { useAnalytics } from "../composables/useAnalytics";
 import { getChartTheme } from "../theme/theme";
 import { useThemeRuntime } from "../theme/runtime";
+import {
+  waitForViewReady,
+  type DesktopViewOpenOutcome,
+} from "../composables/desktopViewOpen";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
 
@@ -29,7 +33,19 @@ const props = defineProps<EmbeddableViewProps & {
 
 const { zIndex, bringToFront, overlayClass, overlayStyle, dismissOnScrimClick } =
   useEmbeddableView(props);
-defineExpose({ zIndex, bringToFront });
+/**
+ * Analytics takes no target, so being open is the whole of being ready — but
+ * "open and still loading" is not something to report as shown, so the answer
+ * waits for the numbers.
+ */
+async function revealDesktopViewTarget(): Promise<DesktopViewOpenOutcome> {
+  const settled = await waitForViewReady(() => !loading.value);
+  return settled
+    ? { opened: true }
+    : { opened: false, code: "renderer_failed", message: "analytics is still loading" };
+}
+
+defineExpose({ zIndex, bringToFront, revealDesktopViewTarget });
 const emit = defineEmits<{ (e: "close"): void }>();
 
 const { t } = useI18n();

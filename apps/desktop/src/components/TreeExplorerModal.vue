@@ -12,6 +12,10 @@ import {
 } from "../composables/useEmbeddableView";
 import { useModalTearOff } from "../composables/useModalTearOff";
 import type { RemoteTaskViewTransport } from "../modalTearOff";
+import type {
+  DesktopViewOpenCommand,
+  DesktopViewOpenOutcome,
+} from "../composables/desktopViewOpen";
 
 registerContextShortcuts("tree", [
   { label: "Filter", display: "/", groupKey: "shortcuts.groupSearch" },
@@ -55,7 +59,28 @@ const {
   dismissOnScrimClick,
   focusWhenBrought,
 } = useEmbeddableView(props, { context: "tree" });
-defineExpose({ zIndex, bringToFront, dismiss });
+/**
+ * Put the reader's cursor on the path an agent named, and say whether it is
+ * there. A path the explorer cannot find after loading is reported rather than
+ * left as a cursor sitting at the root of a tree nobody asked for.
+ */
+async function revealDesktopViewTarget(
+  command: DesktopViewOpenCommand,
+): Promise<DesktopViewOpenOutcome> {
+  const path = command.target?.path;
+  if (typeof path !== "string" || path.length === 0) return { opened: true };
+  const revealed = await revealPath(path, command.target?.kind === "directory");
+  if (!revealed) {
+    return {
+      opened: false,
+      code: "file_not_found",
+      message: `${path} is not in the worktree the explorer is showing`,
+    };
+  }
+  return { opened: true };
+}
+
+defineExpose({ zIndex, bringToFront, dismiss, revealDesktopViewTarget });
 
 const rootLabel = computed(() => {
   if (props.homePath && props.worktreePath === props.homePath) return "~";
@@ -90,6 +115,7 @@ const tearOff = useModalTearOff({
 
 const {
   state,
+  revealPath,
   showAllFiles,
   filterText,
   filtering,

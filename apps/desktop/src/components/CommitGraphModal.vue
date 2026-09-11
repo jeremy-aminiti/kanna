@@ -2,6 +2,10 @@
 import { ref, onMounted, nextTick } from "vue";
 import CommitGraphView from "./CommitGraphView.vue";
 import type { RemoteTaskGraphContent } from "../services/desktopRemoteTaskClient";
+import type {
+  DesktopViewOpenCommand,
+  DesktopViewOpenOutcome,
+} from "../composables/desktopViewOpen";
 import {
   useEmbeddableView,
   type EmbeddableViewProps,
@@ -21,7 +25,18 @@ function dismiss(): boolean {
   return graphViewRef.value?.dismiss() ?? true;
 }
 
-defineExpose({ zIndex, bringToFront, dismiss });
+/** The tab host asks the modal; the graph underneath is what can answer. */
+async function revealDesktopViewTarget(
+  command: DesktopViewOpenCommand,
+): Promise<DesktopViewOpenOutcome> {
+  const reveal = graphViewRef.value?.revealDesktopViewTarget;
+  if (!reveal) {
+    return { opened: false, code: "renderer_failed", message: "the commit graph is not mounted" };
+  }
+  return await reveal(command);
+}
+
+defineExpose({ zIndex, bringToFront, dismiss, revealDesktopViewTarget });
 
 const modalRef = ref<HTMLElement | null>(null);
 

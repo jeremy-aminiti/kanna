@@ -11,7 +11,7 @@ import { callVueMethod, getVueState, tauriInvoke } from "../helpers/vue";
 /**
  * The main content area hosts a task's views as tabs: the agent session plus
  * whichever of the diff, a file, and the task shell the operator (or an agent
- * through `kanna_open_file`) has opened. These are the boundary-crossing parts
+ * through `kanna_open_view`) has opened. These are the boundary-crossing parts
  * that unit tests cannot prove — the real keyboard path, the real xterm buffer
  * surviving a tab switch, and a server route reaching a live window.
  */
@@ -156,7 +156,7 @@ describe("main content area tabs", () => {
        const db = ctx.db.value || ctx.db;
        db.execute("INSERT INTO pipeline_item (id, repo_id, prompt, stage, branch, agent_type) VALUES (?, ?, ?, ?, ?, ?)",
          ["${id}", "${repoId}", "${prompt}", "in progress", "${branch}", "agent"])
-         // kanna_open_file resolves the file through the task's recorded
+         // kanna_open_view resolves the file through the task's recorded
          // workspace, so the row has to exist as well as the directory.
          .then(function() {
            return db.execute("INSERT INTO worktree (id, pipeline_item_id, path, branch) VALUES (?, ?, ?, ?)",
@@ -489,34 +489,67 @@ describe("main content area tabs", () => {
     await waitForActiveTab(client, "agent");
   });
 
-  it("opens a file an agent asked for through kanna_open_file", async () => {
+  it("takes the operator to the view an agent opened, and only calls it opened once it is", async () => {
+    // Start on the *other* task: the action has to bring this window to the
+    // task the agent named, not decorate whichever one happened to be up.
+    await selectTask(secondTaskId);
+    await closeViewTabs(client);
     await selectTask(taskId);
     await closeViewTabs(client);
-    await waitForActiveTab(client, "agent");
+    await selectTask(secondTaskId);
 
     const server = await resolveAppKannaServer(client);
-    const response = await localProcessFetch(`${server.baseUrl}/v1/desktop/views/open`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ taskId, path: "README.md" }),
-    });
-    expect(response.ok).toBe(true);
-    // Requested, never shown: the response says only that a window was asked.
-    expect(await response.json()).toMatchObject({ requested: true, path: "README.md" });
+    const openView = async (body: Record<string, unknown>) => {
+      const response = await localProcessFetch(`${server.baseUrl}/v1/desktop/views/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.ok).toBe(true);
+      return await response.json() as { opened: boolean; code?: string };
+    };
 
-    await waitForActiveTab(client, "file:README.md");
+    const file = await openView({
+      taskId,
+      view: "file",
+      target: { path: "README.md", line: 1 },
+    });
+    // `opened` is a statement about the screen: the route did not answer until
+    // this window had the file rendered.
+    expect(file).toMatchObject({ opened: true });
+    expect(await activeTabId(client)).toBe("file:README.md");
     await client.waitForText(".preview-modal .file-path", "README.md", 8_000);
 
-    const refused = await localProcessFetch(`${server.baseUrl}/v1/desktop/views/open`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ taskId, path: "../outside.txt" }),
-    });
-    // A path outside the task's workspace fails at the route, so a mistyped
-    // path is an error the agent can act on rather than a silent no-op.
-    expect(refused.ok).toBe(false);
+    // Re-aiming the same file focuses the tab that is already showing it.
+    expect(await openView({
+      taskId,
+      view: "file",
+      target: { path: "README.md" },
+    })).toMatchObject({ opened: true });
+    expect(await openTabIds(client)).toEqual(["agent", "file:README.md"]);
 
-    await pressShortcut(client, { key: "Escape" });
+    // The other views the action may open.
+    expect(await openView({ taskId, view: "diff" })).toMatchObject({ opened: true });
+    await waitForActiveTab(client, "diff");
+    expect(await openView({ taskId, view: "graph" })).toMatchObject({ opened: true });
+    await waitForActiveTab(client, "graph");
+    expect(await openView({ taskId, view: "agent" })).toMatchObject({ opened: true });
+    await waitForActiveTab(client, "agent");
+
+    // A path outside the task's workspace is refused at the route, so a
+    // mistyped path is an error the agent can act on rather than a silent
+    // no-op — and nothing reaches a window.
+    expect(await openView({
+      taskId,
+      view: "file",
+      target: { path: "../outside.txt" },
+    })).toMatchObject({ opened: false, code: "invalid_path" });
+
+    // Neither a shell nor anything else outside the whitelist is reachable.
+    expect(await openView({ taskId, view: "shell" }))
+      .toMatchObject({ opened: false, code: "unsupported_view" });
+
+    await closeViewTabs(client);
     await waitForActiveTab(client, "agent");
     expect(await openTabIds(client)).toEqual(["agent"]);
   });

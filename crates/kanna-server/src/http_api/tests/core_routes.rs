@@ -5089,6 +5089,37 @@ impl TaskFileRouteFixture {
         }
     }
 
+    /// The same fixture, with its worktree made into a git repository holding
+    /// one committed file and one uncommitted change.
+    ///
+    /// The diff routes shell out to git, so an anchor can only be checked
+    /// against a real diff. Returns `None` where git is unavailable rather
+    /// than failing a suite for the environment it runs in.
+    fn new_with_git_worktree() -> Option<Self> {
+        let fixture = Self::new();
+        fixture.write("src/main.rs", b"fn main() {}\n");
+        let git = |args: &[&str]| -> bool {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&fixture.worktree)
+                .env("GIT_AUTHOR_NAME", "Fixture")
+                .env("GIT_AUTHOR_EMAIL", "fixture@example.com")
+                .env("GIT_COMMITTER_NAME", "Fixture")
+                .env("GIT_COMMITTER_EMAIL", "fixture@example.com")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "--initial-branch=main"])
+            || !git(&["add", "."])
+            || !git(&["commit", "-m", "base"])
+        {
+            return None;
+        }
+        fixture.write("src/main.rs", b"fn main() {}\nlet added = 1;\n");
+        Some(fixture)
+    }
+
     fn write(&self, path: &str, content: &[u8]) {
         let target = self.worktree.join(path);
         if let Some(parent) = target.parent() {
@@ -7116,74 +7147,256 @@ async fn paired_lan_client_pages_a_real_task_worktree_fixture() {
     let _ = std::fs::remove_file(pairing_path);
 }
 
-#[tokio::test]
-async fn opening_a_desktop_view_queues_the_resolved_path_for_the_windows() {
-    let fixture = TaskFileRouteFixture::new();
-    fixture.write("src/main.rs", b"fn main() {}\n");
+/// Post an open request without waiting for it, and hand back the pending
+/// response together with the command the window is meant to honour.
+///
+/// The route deliberately does not answer until a window acknowledges, so
+/// every test of a successful open has to play the window.
+async fn start_desktop_view_open(
+    fixture: &TaskFileRouteFixture,
+    body: serde_json::Value,
+) -> (
+    tokio::task::JoinHandle<serde_json::Value>,
+    serde_json::Value,
+) {
+    let app = fixture.app.clone();
+    let pending = tokio::spawn(async move {
+        let response = app
+            .oneshot(
+                Request::post("/v1/desktop/views/open")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    });
 
+    for _ in 0..200 {
+        let batch = fixture.state.desktop_view_commands().read(None, None, 10);
+        if let Some(event) = batch.events.first() {
+            return (pending, event["event"].clone());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("no desktop view command was queued");
+}
+
+async fn acknowledge_desktop_view(
+    fixture: &TaskFileRouteFixture,
+    request_id: &str,
+    opened: bool,
+    code: Option<&str>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({ "requestId": request_id, "opened": opened });
+    if let Some(code) = code {
+        body["code"] = serde_json::json!(code);
+        body["message"] = serde_json::json!("the window says so");
+    }
+    let mut request = Request::post("/v1/desktop/views/ack")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            49152,
+        ))));
+    let response = fixture.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+async fn open_desktop_view_expecting_refusal(
+    fixture: &TaskFileRouteFixture,
+    body: serde_json::Value,
+) -> serde_json::Value {
     let response = fixture
         .app
         .clone()
         .oneshot(
             Request::post("/v1/desktop/views/open")
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "taskId": "task-file",
-                        "path": "./src/main.rs",
-                        "line": 12,
-                    })
-                    .to_string(),
-                ))
+                .body(Body::from(body.to_string()))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body: serde_json::Value = from_slice(
+    from_slice(
         &axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap(),
     )
-    .unwrap();
-    // Requested, never shown: no window is known to have honoured it.
-    assert_eq!(body["requested"], serde_json::json!(true));
-    assert_eq!(body["path"], serde_json::json!("src/main.rs"));
-
-    let batch = fixture.state.desktop_view_commands().read(None, None, 10);
-    assert_eq!(batch.events.len(), 1);
-    let command = &batch.events[0]["event"];
-    assert_eq!(command["type"], serde_json::json!("desktop_view_open"));
-    assert_eq!(command["view"], serde_json::json!("file"));
-    assert_eq!(command["taskId"], serde_json::json!("task-file"));
-    // The path the desktop opens is the resolved one, not what was typed.
-    assert_eq!(command["path"], serde_json::json!("src/main.rs"));
-    assert_eq!(command["line"], serde_json::json!(12));
+    .unwrap()
 }
 
 #[tokio::test]
-async fn a_desktop_view_for_an_unreachable_file_queues_nothing() {
+async fn a_desktop_view_is_opened_only_once_a_window_says_it_is_showing() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn main() {}\nlet x = 1;\n");
+
+    let (pending, command) = start_desktop_view_open(
+        &fixture,
+        serde_json::json!({
+            "taskId": "task-file",
+            "view": "file",
+            "target": { "path": "./src/main.rs", "line": 2, "column": 5 },
+        }),
+    )
+    .await;
+
+    // The window is told the resolved path, not what was typed.
+    assert_eq!(command["type"], serde_json::json!("desktop_view_open"));
+    assert_eq!(command["view"], serde_json::json!("file"));
+    assert_eq!(command["taskId"], serde_json::json!("task-file"));
+    assert_eq!(command["target"]["path"], serde_json::json!("src/main.rs"));
+    assert_eq!(command["target"]["line"], serde_json::json!(2));
+
+    // Until it answers, nothing has been opened and the caller is still
+    // waiting: a queued command is not a shown view.
+    assert!(!pending.is_finished());
+
+    let request_id = command["requestId"].as_str().expect("a correlated request");
+    let ack = acknowledge_desktop_view(&fixture, request_id, true, None).await;
+    assert_eq!(ack["acknowledged"], serde_json::json!(true));
+
+    let body = pending.await.unwrap();
+    assert_eq!(body["opened"], serde_json::json!(true));
+    assert_eq!(body["view"], serde_json::json!("file"));
+    assert_eq!(body["target"]["path"], serde_json::json!("src/main.rs"));
+
+    // A second answer has nothing left to answer.
+    let repeat = acknowledge_desktop_view(&fixture, request_id, true, None).await;
+    assert_eq!(repeat["acknowledged"], serde_json::json!(false));
+}
+
+#[tokio::test]
+async fn a_window_that_could_not_show_the_view_says_so_instead_of_staying_quiet() {
     let fixture = TaskFileRouteFixture::new();
     fixture.write("src/main.rs", b"fn main() {}\n");
 
-    for (path, expected) in [
-        ("../outside.rs", StatusCode::BAD_REQUEST),
-        ("src/missing.rs", StatusCode::NOT_FOUND),
+    let (pending, command) = start_desktop_view_open(
+        &fixture,
+        serde_json::json!({
+            "taskId": "task-file",
+            "view": "file",
+            "target": { "path": "src/main.rs" },
+        }),
+    )
+    .await;
+    let request_id = command["requestId"].as_str().unwrap().to_string();
+    acknowledge_desktop_view(&fixture, &request_id, false, Some("renderer_failed")).await;
+
+    let body = pending.await.unwrap();
+    assert_eq!(body["opened"], serde_json::json!(false));
+    assert_eq!(body["code"], serde_json::json!("renderer_failed"));
+}
+
+#[tokio::test]
+async fn a_desktop_nobody_is_running_is_reported_as_unavailable_rather_than_as_opened() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn main() {}\n");
+    // Deterministic rather than real-timed: the point is the answer, not how
+    // long a caller waits for it.
+    fixture.state.set_desktop_view_open_timeout_ms(50);
+
+    let body = open_desktop_view_expecting_refusal(
+        &fixture,
+        serde_json::json!({
+            "taskId": "task-file",
+            "view": "file",
+            "target": { "path": "src/main.rs" },
+        }),
+    )
+    .await;
+    assert_eq!(body["opened"], serde_json::json!(false));
+    assert_eq!(body["code"], serde_json::json!("desktop_unavailable"));
+
+    // The command still reached the lane; it is the acknowledgement that did
+    // not come back, and a late one finds nothing waiting.
+    let batch = fixture.state.desktop_view_commands().read(None, None, 10);
+    let request_id = batch.events[0]["event"]["requestId"].as_str().unwrap();
+    let late = acknowledge_desktop_view(&fixture, request_id, true, None).await;
+    assert_eq!(late["acknowledged"], serde_json::json!(false));
+}
+
+#[tokio::test]
+async fn a_view_target_that_cannot_be_resolved_never_reaches_a_window() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn main() {}\n");
+    fixture.state.set_desktop_view_open_timeout_ms(50);
+
+    for (request, expected_code) in [
+        (
+            serde_json::json!({ "taskId": "task-file", "view": "file", "target": { "path": "../outside.rs" } }),
+            "invalid_path",
+        ),
+        (
+            serde_json::json!({ "taskId": "task-file", "view": "file", "target": { "path": "/etc/passwd" } }),
+            "invalid_path",
+        ),
+        (
+            serde_json::json!({ "taskId": "task-file", "view": "file", "target": { "path": "src/missing.rs" } }),
+            "file_not_found",
+        ),
+        (
+            serde_json::json!({ "taskId": "task-file", "view": "file", "target": { "path": "src/main.rs", "line": 900 } }),
+            "invalid_range",
+        ),
+        (
+            serde_json::json!({ "taskId": "task-file", "view": "file", "target": { "path": "src/main.rs", "line": 1, "endLine": 0 } }),
+            "invalid_range",
+        ),
+        (
+            serde_json::json!({ "taskId": "task-file", "view": "file", "target": { "path": "src/main.rs", "colunm": 3 } }),
+            "invalid_target",
+        ),
+        (
+            serde_json::json!({ "taskId": "task-file", "view": "file" }),
+            "invalid_target",
+        ),
+        (
+            serde_json::json!({ "taskId": "task-file", "view": "shell" }),
+            "unsupported_view",
+        ),
+        (
+            serde_json::json!({ "taskId": "task-file", "view": "agent", "target": { "path": "src/main.rs" } }),
+            "unsupported_target",
+        ),
+        (
+            serde_json::json!({ "taskId": "task-file", "view": "graph", "target": { "commit": "abc123" } }),
+            "invalid_target",
+        ),
+        (
+            serde_json::json!({ "taskId": "task-file", "view": "diff", "target": { "path": "src/main.rs", "line": 3 } }),
+            "invalid_target",
+        ),
+        (
+            serde_json::json!({ "taskId": "nobody", "view": "agent" }),
+            "task_not_found",
+        ),
+        (
+            serde_json::json!({ "taskId": "task-file-no-workspace", "view": "file", "target": { "path": "src/main.rs" } }),
+            "workspace_unavailable",
+        ),
     ] {
-        let response = fixture
-            .app
-            .clone()
-            .oneshot(
-                Request::post("/v1/desktop/views/open")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({ "taskId": "task-file", "path": path }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), expected, "path {path}");
+        let body = open_desktop_view_expecting_refusal(&fixture, request.clone()).await;
+        assert_eq!(body["opened"], serde_json::json!(false), "{request}");
+        assert_eq!(body["code"], serde_json::json!(expected_code), "{request}");
     }
 
     let batch = fixture.state.desktop_view_commands().read(None, None, 10);
@@ -7195,22 +7408,161 @@ async fn a_desktop_view_for_an_unreachable_file_queues_nothing() {
 }
 
 #[tokio::test]
+async fn a_branch_the_task_has_left_is_named_as_stale_rather_than_missing() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn main() {}\n");
+    fixture.state.set_desktop_view_open_timeout_ms(50);
+    {
+        let db = Db::open(fixture.db_path.to_str().unwrap()).unwrap();
+        db.upsert_worktree(
+            "wt-task-file-old",
+            "task-file",
+            fixture.worktree.to_str().unwrap(),
+            "task-file-1",
+        )
+        .unwrap();
+    }
+
+    let body = open_desktop_view_expecting_refusal(
+        &fixture,
+        serde_json::json!({ "taskId": "task-file-1", "view": "agent" }),
+    )
+    .await;
+    assert_eq!(body["code"], serde_json::json!("stale_branch_alias"));
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("task-file"),
+        "the message names the task that is still there: {}",
+        body["message"]
+    );
+}
+
+#[tokio::test]
+async fn a_symlink_out_of_the_worktree_is_refused_like_any_other_escape() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.state.set_desktop_view_open_timeout_ms(50);
+    let outside = fixture._temp_dir.path().join("outside.rs");
+    std::fs::write(&outside, b"secret\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, fixture.worktree.join("escape.rs")).unwrap();
+
+    #[cfg(unix)]
+    {
+        for view in ["file", "tree"] {
+            let body = open_desktop_view_expecting_refusal(
+                &fixture,
+                serde_json::json!({
+                    "taskId": "task-file",
+                    "view": view,
+                    "target": { "path": "escape.rs" },
+                }),
+            )
+            .await;
+            assert_eq!(body["opened"], serde_json::json!(false), "view {view}");
+            assert_eq!(body["code"], serde_json::json!("invalid_path"), "view {view}");
+        }
+        let batch = fixture.state.desktop_view_commands().read(None, None, 10);
+        assert!(batch.events.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_tree_target_may_be_a_directory_or_a_file_inside_the_worktree() {
+    let fixture = TaskFileRouteFixture::new();
+    fixture.write("src/main.rs", b"fn main() {}\n");
+
+    for (path, kind) in [("src", "directory"), ("src/main.rs", "file")] {
+        let (pending, command) = start_desktop_view_open(
+            &fixture,
+            serde_json::json!({
+                "taskId": "task-file",
+                "view": "tree",
+                "target": { "path": path },
+            }),
+        )
+        .await;
+        assert_eq!(command["target"]["kind"], serde_json::json!(kind), "{path}");
+        assert_eq!(command["target"]["path"], serde_json::json!(path));
+        let request_id = command["requestId"].as_str().unwrap().to_string();
+        acknowledge_desktop_view(&fixture, &request_id, true, None).await;
+        assert_eq!(pending.await.unwrap()["opened"], serde_json::json!(true));
+        fixture.state.desktop_view_commands().read(None, None, 10);
+    }
+}
+
+#[tokio::test]
+async fn a_diff_anchor_is_checked_against_the_diff_before_a_window_is_asked() {
+    let Some(fixture) = TaskFileRouteFixture::new_with_git_worktree() else {
+        eprintln!("git is unavailable; skipping the diff anchor route test");
+        return;
+    };
+    fixture.state.set_desktop_view_open_timeout_ms(50);
+
+    let (pending, command) = start_desktop_view_open(
+        &fixture,
+        serde_json::json!({
+            "taskId": "task-file",
+            "view": "diff",
+            "target": {
+                "scope": "working",
+                "path": "src/main.rs",
+                "side": "new",
+                "line": 2,
+                "excerpt": "added",
+            },
+        }),
+    )
+    .await;
+    // Both sides' numbering travels with the anchor, because the rendered diff
+    // numbers each row by its own side.
+    assert_eq!(command["target"]["anchorKind"], serde_json::json!("addition"));
+    assert_eq!(command["target"]["newLine"], serde_json::json!(2));
+    let request_id = command["requestId"].as_str().unwrap().to_string();
+    acknowledge_desktop_view(&fixture, &request_id, true, None).await;
+    assert_eq!(pending.await.unwrap()["opened"], serde_json::json!(true));
+    fixture.state.desktop_view_commands().read(None, None, 10);
+
+    for (target, expected_code) in [
+        (
+            serde_json::json!({ "scope": "working", "path": "src/main.rs", "side": "new", "line": 900 }),
+            "diff_target_not_found",
+        ),
+        (
+            serde_json::json!({ "scope": "working", "path": "src/absent.rs", "side": "new", "line": 1 }),
+            "diff_target_not_found",
+        ),
+        (
+            serde_json::json!({ "scope": "working", "path": "src/main.rs", "side": "new", "line": 2, "excerpt": "not what it says" }),
+            "diff_target_stale",
+        ),
+    ] {
+        let body = open_desktop_view_expecting_refusal(
+            &fixture,
+            serde_json::json!({ "taskId": "task-file", "view": "diff", "target": target }),
+        )
+        .await;
+        assert_eq!(body["code"], serde_json::json!(expected_code));
+    }
+    let batch = fixture.state.desktop_view_commands().read(None, None, 10);
+    assert!(batch.events.is_empty());
+}
+
+#[tokio::test]
 async fn the_desktop_drains_view_commands_through_its_loopback_lane() {
     let fixture = TaskFileRouteFixture::new();
     fixture.write("src/main.rs", b"fn main() {}\n");
-    fixture
-        .app
-        .clone()
-        .oneshot(
-            Request::post("/v1/desktop/views/open")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({ "taskId": "task-file", "path": "src/main.rs" }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    fixture.state.set_desktop_view_open_timeout_ms(50);
+    open_desktop_view_expecting_refusal(
+        &fixture,
+        serde_json::json!({
+            "taskId": "task-file",
+            "view": "file",
+            "target": { "path": "src/main.rs" },
+        }),
+    )
+    .await;
 
     let mut request = Request::get("/v1/desktop/view-commands?timeoutSecs=1")
         .body(Body::empty())
@@ -7231,7 +7583,7 @@ async fn the_desktop_drains_view_commands_through_its_loopback_lane() {
     .unwrap();
     assert_eq!(body["waitOutcome"], serde_json::json!("events"));
     assert_eq!(
-        body["events"][0]["event"]["path"],
+        body["events"][0]["event"]["target"]["path"],
         serde_json::json!("src/main.rs")
     );
 }
