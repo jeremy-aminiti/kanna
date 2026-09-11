@@ -2396,7 +2396,8 @@ kinds of claim:
 
 - **`task_review_context`** — which pull request a review task is about: URL,
   head repo/ref, head SHA, base ref and SHA, the producing task when one is
-  known, and triage's rank and overlap set. Supplied by an agent, at
+  known, and the PR review manager's rank and overlap set. The stored
+  `triageRank` and `triageParentTaskId` names remain for compatibility. Supplied by an agent, at
   `kanna_create_task` or in `kanna_complete_stage` metadata, so it is candidate
   information about the forge and authorizes nothing. It exists because nothing
   about a review child names its PR: the child forks from `pull/<n>/head` into
@@ -2422,9 +2423,10 @@ commit nobody saw. A decision already `delivered` is not re-sent, and an
 already hold the request, and a duplicate reads as a second authorization.
 
 The wire line keeps the compact `MERGE` form and adds `HUMAN-REVIEW-DECISION`,
-`HUMAN-AUTHORIZATION`, and optional `PRODUCING-TASK`, `TRIAGE-RANK` and
+`HUMAN-AUTHORIZATION`, and optional `PRODUCING-TASK`, `TRIAGE-RANK` (a retained
+legacy wire name for the accepted PR review order) and
 `RELATED-PR` lines, so a merge master on another machine — the singleton is
-account-wide — resolves everything without a living review or triage session.
+account-wide — resolves everything without a living review or manager session.
 `pipeline_item.merge_signaled_at` is deliberately untouched: that stamp answers
 the approve post's "does this task still owe one handoff?", which is a
 different question on a different workflow, and reusing it as per-head decision
@@ -2448,7 +2450,7 @@ already delivered decisions. Neither sends again. A strict ledger write failure
 after daemon acknowledgment records `uncertain`, because the MERGE already
 reached the PTY. Refusals are reported and reconciled, never blindly retried.
 Queueing requires a live or resumed review conversation (`kanna_resume_task`),
-not a living triage parent. The decision authorizes *queueing only*: it
+not a living PR review manager. The decision authorizes *queueing only*: it
 submits no GitHub review, changes no labels, and does not close the review task.
 See [pr-review-dispatch.md](./specs/pr-review-dispatch.md#the-humans-route-to-the-merge-queue).
 

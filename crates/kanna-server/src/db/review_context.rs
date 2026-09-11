@@ -38,7 +38,7 @@ use serde_json::json;
 /// What a review task is reviewing, as the forge identifies it.
 ///
 /// Every field except `pr_url`, `head_sha` and `base_ref` is optional because
-/// a standalone review — one created without the triage dispatcher — knows
+/// a standalone review — one created without the PR review manager — knows
 /// less than a dispatched child does, and refusing to record the part it knows
 /// would leave the reviewer unable to identify the PR.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,15 +68,17 @@ pub struct ReviewContextInput {
     /// The machine that owns `producing_task_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producing_machine_id: Option<String>,
-    /// The triage task that dispatched this review, when one did.
+    /// The PR review manager task that dispatched this review, when one did.
+    /// The field name is retained for storage and API compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triage_parent_task_id: Option<String>,
-    /// Triage's position for this PR in its proposed read order. Durable
-    /// advice; it is not an authorization list and it is not a queue.
+    /// The PR review manager's position for this PR in its proposed read
+    /// order. Durable advice only; it is not an authorization list or queue.
+    /// The field name is retained for storage and API compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub triage_rank: Option<i64>,
-    /// Other open PRs triage found touching overlapping files, or that this
-    /// PR is stacked on. Shown to the operator before they decide and passed
+    /// Other open PRs the PR review manager found touching overlapping files,
+    /// or that this PR is stacked on. Shown to the operator before they decide and passed
     /// to the merge master as ordering advice.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub related_pr_urls: Vec<String>,

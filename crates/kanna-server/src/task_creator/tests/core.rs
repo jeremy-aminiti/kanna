@@ -2131,11 +2131,11 @@ fn legacy_builtin_workflow_names_still_resolve_for_committed_repo_config() {
 }
 
 /// The dispatched PR review pair: an operator picks `pr-review` to start a
-/// triage session, and `pr-triage` binds `pr-review-single` for each child it
+/// review-management session, and `pr-review-manager` binds `pr-review-single` for each child it
 /// fans out. Both stages are manual — the human is the reviewer, so nothing
 /// advances or closes on its own.
 #[test]
-fn builtin_pr_review_workflows_bind_the_triage_and_reviewer_agents() {
+fn builtin_pr_review_workflows_bind_the_manager_and_reviewer_agents() {
     let repo_root = init_git_repo_without_provider_fixtures("definitions-pr-review");
     std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
     publish_origin_main(&repo_root, "publish repo without workflows");
@@ -2145,8 +2145,11 @@ fn builtin_pr_review_workflows_bind_the_triage_and_reviewer_agents() {
     let session = definitions.workflow("pr-review").unwrap();
     assert_eq!(session.visibility, DefinitionVisibility::Public);
     assert_eq!(session.stages.len(), 1);
-    assert_eq!(session.stages[0].name, "triage");
-    assert_eq!(session.stages[0].agent.as_deref(), Some("pr-triage"));
+    assert_eq!(session.stages[0].name, "PR review");
+    assert_eq!(
+        session.stages[0].agent.as_deref(),
+        Some("pr-review-manager")
+    );
     assert_eq!(
         session.stages[0].policy.transition,
         WorkflowStageTransition::Manual
@@ -2162,29 +2165,34 @@ fn builtin_pr_review_workflows_bind_the_triage_and_reviewer_agents() {
         WorkflowStageTransition::Manual
     );
 
-    for agent in ["pr-triage", "pr-reviewer"] {
+    for agent in ["pr-review-manager", "pr-reviewer"] {
         let resolved = definitions
             .agent(agent)
             .unwrap_or_else(|error| panic!("built-in `{agent}` must resolve: {error}"));
         assert_eq!(resolved.name, agent);
         assert!(!resolved.prompt.trim().is_empty());
     }
+    let legacy_manager = definitions
+        .agent("pr-triage")
+        .expect("the retired manager name must remain resolvable for pinned workflows");
+    assert_eq!(legacy_manager.name, "pr-review-manager");
+    assert!(legacy_manager.prompt.contains("Resolve Review Scope"));
 
     let _ = std::fs::remove_dir_all(repo_root);
 }
 
-/// Review scope is deliberately undefined in the built-in triage agent: "my
+/// Review scope is deliberately undefined in the built-in PR review manager: "my
 /// own PRs" and "every open PR" are both correct depending on who is asking,
 /// so the built-in states the question and a repo answers it by extension.
 #[test]
-fn pr_triage_scope_is_asked_by_the_builtin_and_answered_by_a_repo_extension() {
-    let repo_root = init_git_repo_without_provider_fixtures("definitions-pr-triage-scope");
+fn pr_review_scope_is_asked_by_the_builtin_and_answered_by_a_repo_extension() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-pr-review-scope");
     std::fs::create_dir_all(repo_root.join(".kanna")).unwrap();
     publish_origin_main(&repo_root, "publish repo without agent overrides");
 
     let bundled = RepoDefinitions::resolve(&definition_repo(&repo_root, "main"))
         .unwrap()
-        .agent("pr-triage")
+        .agent("pr-review-manager")
         .unwrap();
     assert!(
         bundled.prompt.contains("Resolve Review Scope"),
@@ -2195,9 +2203,9 @@ fn pr_triage_scope_is_asked_by_the_builtin_and_answered_by_a_repo_extension() {
         "the built-in must not carry a repo's answer"
     );
 
-    std::fs::create_dir_all(repo_root.join(".kanna/agents/pr-triage")).unwrap();
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/pr-review-manager")).unwrap();
     std::fs::write(
-        repo_root.join(".kanna/agents/pr-triage/EXTEND.md"),
+        repo_root.join(".kanna/agents/pr-review-manager/EXTEND.md"),
         "## Scope\n\nSCOPE ANSWERED FOR THIS REPO: review every open PR.\n",
     )
     .unwrap();
@@ -2205,13 +2213,89 @@ fn pr_triage_scope_is_asked_by_the_builtin_and_answered_by_a_repo_extension() {
 
     let extended = RepoDefinitions::resolve(&definition_repo(&repo_root, "main"))
         .unwrap()
-        .agent("pr-triage")
+        .agent("pr-review-manager")
         .unwrap();
     assert!(extended.prompt.contains("Resolve Review Scope"));
     assert!(
         extended.prompt.contains("SCOPE ANSWERED FOR THIS REPO"),
         "the repo's answer must layer onto the built-in without replacing it"
     );
+    let legacy_selector = RepoDefinitions::resolve(&definition_repo(&repo_root, "main"))
+        .unwrap()
+        .agent("pr-triage")
+        .unwrap();
+    assert!(
+        legacy_selector
+            .prompt
+            .contains("SCOPE ANSWERED FOR THIS REPO"),
+        "an old pinned workflow must see the current extension path"
+    );
+
+    let _ = std::fs::remove_dir_all(repo_root);
+}
+
+/// Existing tasks may pin the old stage/agent names, and existing repositories
+/// may still keep the manager override, extension, and provider preference at
+/// `pr-triage`. They remain inputs, but never return to the public agent list.
+#[test]
+fn legacy_pr_triage_pins_and_repo_overrides_resolve_through_pr_review_manager() {
+    let repo_root = init_git_repo_without_provider_fixtures("definitions-pr-review-compat");
+    std::fs::create_dir_all(repo_root.join(".kanna/agents/pr-triage")).unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/pr-triage/AGENT.md"),
+        "---\nname: pr-triage\ndescription: Legacy repo manager\nagent_provider: claude\n---\nLEGACY_MANAGER_BODY\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/agents/pr-triage/EXTEND.md"),
+        "LEGACY_MANAGER_EXTENSION\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo_root.join(".kanna/config.json"),
+        serde_json::json!({ "agentProviders": { "pr-triage": "codex" } }).to_string(),
+    )
+    .unwrap();
+    publish_origin_main(&repo_root, "publish legacy PR review customization");
+
+    let definitions = RepoDefinitions::resolve(&definition_repo(&repo_root, "main")).unwrap();
+    for selector in ["pr-review-manager", "pr-triage"] {
+        let resolved = definitions.agent(selector).unwrap();
+        assert!(resolved.prompt.contains("LEGACY_MANAGER_BODY"));
+        assert!(resolved.prompt.contains("LEGACY_MANAGER_EXTENSION"));
+    }
+    assert_eq!(
+        definitions
+            .config()
+            .agent_provider_preference(Some("pr-review-manager"))
+            .unwrap()
+            .providers,
+        vec!["codex"]
+    );
+    let listed = definitions
+        .agents()
+        .unwrap()
+        .into_iter()
+        .map(|agent| agent.name)
+        .collect::<Vec<_>>();
+    assert!(listed.contains(&"pr-review-manager".to_string()));
+    assert!(!listed.contains(&"pr-triage".to_string()));
+
+    let pinned = serde_json::json!({
+        "name": "pr-review",
+        "stages": [{
+            "name": "triage",
+            "agent": "pr-triage",
+            "prompt": "$TASK_PROMPT",
+            "policy": { "transition": "manual" }
+        }]
+    })
+    .to_string();
+    let workflow = definitions
+        .task_workflow("pr-review", Some(&pinned))
+        .unwrap();
+    assert_eq!(workflow.stages[0].name, "triage");
+    assert_eq!(workflow.stages[0].agent.as_deref(), Some("pr-triage"));
 
     let _ = std::fs::remove_dir_all(repo_root);
 }

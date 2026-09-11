@@ -1167,6 +1167,8 @@ export function TaskScreen({
         >
           <Text
             accessible={false}
+            maxFontSizeMultiplier={1.5}
+            numberOfLines={1}
             style={[styles.stageLabel, { color: stageTheme.chipLabel }]}
           >
             {model.stageLabel}

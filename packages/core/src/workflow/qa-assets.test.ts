@@ -706,8 +706,8 @@ describe("QA workflow assets", () => {
 
   it("keeps the dispatched PR reviewers off a required task-spec artifact", () => {
     const reviewer = readRepoPhrases(".kanna/agents/pr-reviewer/AGENT.md");
-    const triage = readRepoPhrases(".kanna/agents/pr-triage/AGENT.md");
-    const scopeAnswer = readRepoPhrases(".kanna/agents/pr-triage/EXTEND.md");
+    const manager = readRepoPhrases(".kanna/agents/pr-review-manager/AGENT.md");
+    const scopeAnswer = readRepoPhrases(".kanna/agents/pr-review-manager/EXTEND.md");
 
     // These two read a *reviewed* task's terms the same way the deciding
     // reviewers above do: the original prompt plus the durable delivered
@@ -715,7 +715,7 @@ describe("QA workflow assets", () => {
     // task usually lives on another machine, so the lookup needs `machine_id`.
     for (const [name, body] of [
       ["pr-reviewer", reviewer],
-      ["pr-triage/EXTEND.md", scopeAnswer],
+      ["pr-review-manager/EXTEND.md", scopeAnswer],
     ] as const) {
       expect(body, name).toContain("kanna_get_task");
       expect(body, name).toContain("kanna_task_inputs");
@@ -727,8 +727,8 @@ describe("QA workflow assets", () => {
     // reviewer that required one would flag every present-day Kanna PR.
     for (const [name, body] of [
       ["pr-reviewer", reviewer],
-      ["pr-triage", triage],
-      ["pr-triage/EXTEND.md", scopeAnswer],
+      ["pr-review-manager", manager],
+      ["pr-review-manager/EXTEND.md", scopeAnswer],
     ] as const) {
       expect(body, name).not.toContain("missing spec");
       expect(body, name).not.toContain("stale spec");
@@ -739,19 +739,19 @@ describe("QA workflow assets", () => {
     // pr-reviewer may still mention the file, but only to disclaim it.
     expect(reviewer).toContain("Never require one");
     expect(reviewer).toContain("never make its absence a finding");
-    expect(triage).not.toContain("docs/task-specs/");
+    expect(manager).not.toContain("docs/task-specs/");
     expect(scopeAnswer).not.toContain("docs/task-specs/");
   });
 
   it("permits explicit conversation relay without inferred approval", () => {
     const reviewer = readRepoPhrases(".kanna/agents/pr-reviewer/AGENT.md");
-    const triage = readRepoPhrases(".kanna/agents/pr-triage/AGENT.md");
+    const manager = readRepoPhrases(".kanna/agents/pr-review-manager/AGENT.md");
     const mergeAgent = readRepoPhrases(".kanna/agents/merge/AGENT.md");
 
     // Only the explicit queue instruction may be relayed; an agent verdict is never authority.
     for (const [name, body] of [
       ["pr-reviewer", reviewer],
-      ["pr-triage", triage],
+      ["pr-review-manager", manager],
     ] as const) {
       expect(body, name).toContain("kanna_queue_reviewed_pr");
       expect(body, name).not.toContain("Queue for merge");
@@ -764,8 +764,8 @@ describe("QA workflow assets", () => {
     expect(reviewer).toContain("operator-relayed");
     expect(reviewer).toContain("never fabricate one");
     expect(reviewer).toContain("never retried automatically");
-    expect(triage).toContain("Do not queue anything for merge");
-    expect(triage).toContain("not** join, aggregate, or auto-close");
+    expect(manager).toContain("Do not queue anything for merge");
+    expect(manager).toContain("not** join, aggregate, or auto-close");
 
     // A standalone review has no dispatcher to have carried the PR identity,
     // so the reviewer publishes it — as candidate information, never approval,
@@ -774,11 +774,11 @@ describe("QA workflow assets", () => {
     expect(reviewer).toContain("Publishing this authorizes nothing");
     expect(reviewer).toContain("never from this task's branch name");
 
-    // Triage dispatches the identity and its ordering advice, and is explicit
+    // The manager dispatches the identity and its ordering advice, and is explicit
     // that a local `pr/<n>` ref is not a mergeable head.
-    expect(triage).toContain("review_context");
-    expect(triage).toContain("candidate information, not an approval");
-    expect(triage).toContain("never `pr/<n>` and never the child's `task-*` branch");
+    expect(manager).toContain("review_context");
+    expect(manager).toContain("candidate information, not an approval");
+    expect(manager).toContain("never `pr/<n>` and never the child's `task-*` branch");
 
     // The merge master's side of the same contract.
     expect(mergeAgent).toContain("HUMAN-REVIEW-DECISION");
@@ -789,7 +789,7 @@ describe("QA workflow assets", () => {
     // Queue authorization only: no GitHub approval, no label mutation.
     expect(mergeAgent).toContain("It is not a GitHub approving review");
     expect(mergeAgent).toContain("never evidence that a human approved anything");
-    // Triage rank is advice, not a second queue.
+    // The accepted PR review rank is advice, not a second queue.
     expect(mergeAgent).toContain("Topology and dependencies first");
     expect(mergeAgent).toContain("advice**, not an authorization list");
   });

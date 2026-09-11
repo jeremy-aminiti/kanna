@@ -76,6 +76,7 @@ describe("resolveTaskStageTheme", () => {
 
   it.each([
     "in progress",
+    "PR review",
     "review",
     "pr",
     "consultation",

@@ -5567,7 +5567,7 @@ async fn complete_stage_route_finishes_latest_running_stage_run() {
     assert_eq!(item.pr_number, Some(41));
 }
 
-/// A review created without the triage dispatcher has no `kanna_create_task`
+/// A review created without the PR review manager has no `kanna_create_task`
 /// call that could have carried the pull request's identity, so the reviewer
 /// publishes it with its verdict. Without this, an independent review is
 /// permanently un-queueable and the operator's only recourse would be to

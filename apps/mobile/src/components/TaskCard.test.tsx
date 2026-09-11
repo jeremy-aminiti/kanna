@@ -330,6 +330,10 @@ describe("TaskCard", () => {
       expect(flattenStyle(stageLabel?.props?.style).color).toBe(
         theme.chipLabel
       );
+      expect(stageLabel?.props).toMatchObject({
+        maxFontSizeMultiplier: 1.5,
+        numberOfLines: 1
+      });
     }
   );
 

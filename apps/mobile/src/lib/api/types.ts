@@ -402,7 +402,7 @@ export interface TaskLatestRun {
 /**
  * What a review task is reviewing, as the forge identifies it.
  *
- * Candidate information published by the review or triage agent — never an
+ * Candidate information published by the reviewer or PR review manager — never an
  * approval. It is what lets this app name the pull request and show the
  * operator the exact commit their decision is pinned to.
  */
