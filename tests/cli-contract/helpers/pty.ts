@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -24,62 +24,8 @@ const BRIDGE = join(HERE, "pty-bridge.py");
 /** Mirrors LOGICAL_INPUT_SUBMIT_DELAY_MS in crates/daemon/src/session.rs. */
 export const SUBMIT_ENTER_DELAY_MS = 150;
 
-/**
- * {@link PtySession.submit}'s "write text, wait, then write CR separately"
- * policy is what the daemon's logical-input writer did before task d2eb7fa0
- * (PR #1369, "Always submit delivered task input; remove the draft-protection
- * hold", 2026-09-08) removed the settle-wait fence entirely. It no longer
- * matches what kanna-server puts on the wire and must not be read as
- * evidence about current submission behavior — see
- * docs/2026-09-10-mobile-connection-flicker-e2e-note.md. {@link submit} is
- * left as-is for whatever it currently happens to cover; new coverage of
- * real submission behavior should use {@link logicalMessageBytes} /
- * {@link PtySession.submitLogical} below instead.
- */
-
-const BRACKETED_PASTE_BEGIN = "\x1b[200~";
-const BRACKETED_PASTE_END = "\x1b[201~";
-
-/** Mirrors PASTE_FRAMING_MIN_LEN in crates/daemon/src/session.rs. */
-export const PASTE_FRAMING_MIN_LEN = 256;
-
-/**
- * Mirrors `crates/daemon/src/session.rs::logical_message_bytes` (plus the
- * trailing-newline trim `crates/kanna-server/src/http_api/task_input.rs::
- * task_input_message` applies before handing the daemon anything) exactly:
- * one PTY write containing the text — bracket-paste-framed when the
- * terminal supports it and the trimmed message is >=256 bytes or carries a
- * newline — with its `\r` submission boundary appended in the same buffer.
- * No wait, no separate write: this is what a real logical-input delivery
- * (kanna_send_task_input, the mobile composer's ordinary Send, a stage
- * prompt) puts on the wire today, byte for byte.
- */
-export function logicalMessageBytes(text: string, bracketedPasteMode: boolean): string {
-  const trimmed = text.replace(/[\r\n]+$/, "");
-  if (trimmed.length === 0) {
-    return "\r";
-  }
-  const hasNewline = /[\r\n]/.test(trimmed);
-  const byteLength = Buffer.byteLength(trimmed, "utf8");
-  if (!bracketedPasteMode || (!hasNewline && byteLength < PASTE_FRAMING_MIN_LEN)) {
-    return `${trimmed}\r`;
-  }
-  return `${BRACKETED_PASTE_BEGIN}${trimmed}${BRACKETED_PASTE_END}\r`;
-}
-
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Whether `pid` is still alive, checked by exact pid (`kill -0`) — never a
- * name/command match. */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** Strip ANSI/OSC noise so TUI output can be pattern-matched. */
@@ -126,32 +72,6 @@ export class PtySession {
     return stripAnsi(this.raw);
   }
 
-  /** The complete, un-stripped byte stream received so far — every ANSI/OSC
-   * escape sequence intact. {@link output} is a lossy derived view (this
-   * bridge concatenates and strips; it does not emulate a terminal grid,
-   * see PtySession's own class doc); this is the actual wire evidence
-   * underneath it, for a test that needs to retain the full record rather
-   * than a rendered guess. */
-  get rawOutput(): string {
-    return this.raw;
-  }
-
-  /**
-   * Whether this PTY session's own output has, at any point, sent DECSET
-   * 2004h (`\x1b[?2004h`) — the terminal-capability announcement that
-   * enables bracketed paste. Mirrors exactly what the daemon itself keys
-   * framing on: `crates/daemon/src/session.rs`'s headless terminal tracks
-   * this same sequence and `Session::bracketed_paste_mode()` reads it back
-   * before `logical_message_bytes` decides whether to frame. A test must
-   * observe this from the real session before choosing `bracketedPasteMode`
-   * for {@link submitLogical} — asserting `true` unconditionally would be
-   * testing a framing decision the daemon itself would never have made for
-   * a CLI that never advertised the mode.
-   */
-  sawBracketedPasteEnable(): boolean {
-    return this.raw.includes("\x1b[?2004h");
-  }
-
   /**
    * {@link output} with all whitespace removed. TUIs place each word with
    * cursor-movement escapes rather than spaces, so "Do you trust the contents"
@@ -183,18 +103,6 @@ export class PtySession {
       await sleep(SUBMIT_ENTER_DELAY_MS);
     }
     this.write("\r");
-  }
-
-  /**
-   * Deliver a logical message the way the daemon actually does today: one
-   * write, framed per {@link logicalMessageBytes}, no intervening wait. Use
-   * this — not {@link submit} — to test whether a real CLI's own input
-   * parser treats the trailing CR as submission; `bracketedPasteMode` should
-   * match whatever the target CLI actually advertises (the daemon frames a
-   * message only when the terminal itself has advertised the mode).
-   */
-  async submitLogical(text: string, bracketedPasteMode: boolean): Promise<void> {
-    this.write(logicalMessageBytes(text, bracketedPasteMode));
   }
 
   /** Write text one character at a time, the way a person types it. */
@@ -241,69 +149,8 @@ export class PtySession {
     return this.exitCode;
   }
 
-  /** pid of the PTY-bridge process itself — not the real agent CLI, which
-   * `pty.fork()` makes a direct child of the bridge, not of this Node
-   * process. See {@link killTreeAndVerify}. */
-  get pid(): number | undefined {
-    return this.child.pid;
-  }
-
   kill(): void {
     if (!this.closed) this.child.kill("SIGKILL");
-  }
-
-  /**
-   * Kills this session's PTY-bridge process, then verifies — rather than
-   * assumes — that the real agent CLI process died with it. `pty-bridge.py`
-   * uses `pty.fork()`, which makes the agent CLI a direct child of the
-   * bridge process, not of this one; closing the PTY master when the bridge
-   * dies usually delivers a SIGHUP that takes the CLI down too, but "usually"
-   * is not verified. This finds the bridge's direct children by exact pid
-   * (`pgrep -P <bridgePid>`, never a name/command match), kills the bridge,
-   * gives the hang-up a moment to propagate, and force-kills by exact pid
-   * anything still alive afterward — so cleanup never depends on an assumed
-   * signal cascade.
-   */
-  async killTreeAndVerify(graceMs = 500): Promise<{
-    bridgePid: number | undefined;
-    childPids: number[];
-    forceKilled: number[];
-    stillAlive: number[];
-  }> {
-    const bridgePid = this.child.pid;
-    let childPids: number[] = [];
-    if (bridgePid !== undefined) {
-      try {
-        childPids = execFileSync("pgrep", ["-P", String(bridgePid)], { encoding: "utf8" })
-          .split("\n")
-          .map((line) => line.trim())
-          .filter((line) => line.length > 0)
-          .map((line) => Number(line));
-      } catch {
-        // pgrep exits non-zero when the bridge has no children left — the
-        // common, healthy case, not an error.
-        childPids = [];
-      }
-    }
-
-    this.kill();
-    await sleep(graceMs);
-
-    const forceKilled: number[] = [];
-    for (const pid of childPids) {
-      if (isPidAlive(pid)) {
-        try {
-          process.kill(pid, "SIGKILL");
-          forceKilled.push(pid);
-        } catch {
-          // Exited between the liveness check and the kill — fine.
-        }
-      }
-    }
-    if (forceKilled.length > 0) await sleep(150);
-
-    const stillAlive = childPids.filter((pid) => isPidAlive(pid));
-    return { bridgePid, childPids, forceKilled, stillAlive };
   }
 }
 
