@@ -24,7 +24,9 @@ interface Dimensions {
 }
 
 interface RenderedTerminal extends Dimensions {
-  markerRendered: boolean;
+  bufferMarker: string | null;
+  renderedMarker: string | null;
+  viewport: Dimensions;
 }
 
 interface FocusObservation {
@@ -109,33 +111,30 @@ async function renderedDimensions(
     const remoteId = "remote:" + ${JSON.stringify(taskId)};
     const id = hook?.sessionIds?.().includes(remoteId) ? remoteId : ${JSON.stringify(taskId)};
     const cursor = hook?.cursor?.(id);
+    const viewport = hook?.viewport?.(id);
     const terminal = hook?.element?.(id);
     const host = terminal?.closest?.(".cloud-terminal-cache-entry, .terminal-container")
       ?? terminal;
     const screen = host?.querySelector?.(".xterm-screen");
     const rect = screen?.getBoundingClientRect() ?? host?.getBoundingClientRect();
     const rows = screen?.querySelector?.(".xterm-rows");
-    const markerRendered = Array.from(rows?.children ?? []).some(
-      (row) => row.textContent?.includes("ACTIVE_VIEW:"),
-    );
-    return cursor && rect && rect.width > 0 && rect.height > 0
-      ? { cols: cursor.columns, rows: cursor.rows, markerRendered }
+    const marker = /^ACTIVE_VIEW:\d+x\d+$/;
+    const renderedMarkers = Array.from(rows?.children ?? [])
+      .map((row) => row.textContent?.trim() ?? "")
+      .filter((line) => marker.test(line));
+    const bufferMarkers = (hook?.lines?.(id) ?? []).filter((line) => marker.test(line));
+    return cursor && viewport && rect && rect.width > 0 && rect.height > 0
+      ? {
+        bufferMarker: bufferMarkers.at(-1) ?? null,
+        cols: cursor.columns,
+        renderedMarker: renderedMarkers.at(-1) ?? null,
+        rows: cursor.rows,
+        viewport: { cols: viewport.availableCols, rows: viewport.availableRows },
+      }
       : null;
   `);
   if (!dimensions) throw new Error(`rendered dimensions unavailable for ${taskId}`);
   return dimensions;
-}
-
-async function refreshRenderedTerminal(client: WebDriverClient, taskId: string): Promise<void> {
-  await client.executeSync(`
-    const hook = window.__KANNA_E2E__?.terminalBuffers;
-    const remoteId = "remote:" + ${JSON.stringify(taskId)};
-    const id = hook?.sessionIds?.().includes(remoteId) ? remoteId : ${JSON.stringify(taskId)};
-    hook?.refresh?.(id);
-  `);
-  // xterm's private synchronous refresh schedules DOM-row painting; let that
-  // paint land before reading the actual row cells or taking a screenshot.
-  await sleep(250);
 }
 
 async function waitForOwnerAndRenderer(
@@ -147,14 +146,15 @@ async function waitForOwnerAndRenderer(
   try {
     await expect.poll(async () => {
       try {
-        await refreshRenderedTerminal(client, taskId);
         const [daemon, rendered] = await Promise.all([
           ownerDimensions(taskId),
           renderedDimensions(client, taskId),
         ]);
         latest = { daemon, rendered };
+        const marker = `ACTIVE_VIEW:${daemon.cols}x${daemon.rows}`;
         return daemon.cols === rendered.cols && daemon.rows === rendered.rows
-          && rendered.markerRendered
+          && daemon.cols === rendered.viewport.cols && daemon.rows === rendered.viewport.rows
+          && rendered.bufferMarker === marker && rendered.renderedMarker === marker
           && (!expected || (daemon.cols === expected.cols && daemon.rows === expected.rows));
       } catch (error) {
         latest = error instanceof Error ? error.message : String(error);

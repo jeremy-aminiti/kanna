@@ -38,6 +38,14 @@ interface KannaTerminalBuffersE2EApi {
     columns: number;
     rows: number;
   };
+  viewport: (sessionId: string) => {
+    availableCols: number;
+    availableRows: number;
+    cellHeight: number;
+    cellWidth: number;
+    viewportHeight: number;
+    viewportWidth: number;
+  } | null;
   cellAttributes: (
     sessionId: string,
     row: number,

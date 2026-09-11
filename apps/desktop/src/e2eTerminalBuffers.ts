@@ -26,6 +26,15 @@ export interface TerminalCursorPosition {
   rows: number;
 }
 
+export interface TerminalViewportMetrics {
+  availableCols: number;
+  availableRows: number;
+  cellHeight: number;
+  cellWidth: number;
+  viewportHeight: number;
+  viewportWidth: number;
+}
+
 export interface TerminalCellAttributes {
   bold: boolean;
   inverse: boolean;
@@ -49,6 +58,7 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     element: getTerminalElement,
     findTextCell: findTerminalTextCell,
     cursor: getTerminalCursorPosition,
+    viewport: getTerminalViewportMetrics,
     cellAttributes: getTerminalCellAttributes,
     selectText: selectTerminalBufferText,
   };
@@ -58,6 +68,31 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     if (current === terminal) {
       terminals.delete(sessionId);
     }
+  };
+}
+
+/**
+ * A DEV/E2E observation of the renderer's independently measured viewport.
+ * It deliberately does not fit or resize the terminal; callers use it to
+ * verify the grid which the production FitAddon would propose.
+ */
+function getTerminalViewportMetrics(sessionId: string): TerminalViewportMetrics | null {
+  const terminal = terminals.get(sessionId);
+  if (!terminal?.element) return null;
+  const dimensions = (terminal as unknown as {
+    _core?: { _renderService?: { dimensions?: { css?: { cell?: { width?: number; height?: number } } } } };
+  })._core?._renderService?.dimensions?.css?.cell;
+  const cellWidth = dimensions?.width;
+  const cellHeight = dimensions?.height;
+  const viewport = terminal.element.getBoundingClientRect();
+  if (!cellWidth || !cellHeight || viewport.width <= 0 || viewport.height <= 0) return null;
+  return {
+    availableCols: Math.floor(viewport.width / cellWidth),
+    availableRows: Math.floor(viewport.height / cellHeight),
+    cellHeight,
+    cellWidth,
+    viewportHeight: viewport.height,
+    viewportWidth: viewport.width,
   };
 }
 
