@@ -479,10 +479,14 @@ function registerTerminalBufferForE2E() {
   unregisterE2ETerminalBuffer?.();
   unregisterRemoteE2ETerminalBuffer?.();
   unregisterE2ETerminalBuffer = terminal
-    ? registerE2ETerminalBuffer(props.ownerTaskId, terminal)
+    ? registerE2ETerminalBuffer(props.ownerTaskId, terminal, () => fitAddon?.proposeDimensions?.())
     : null;
   unregisterRemoteE2ETerminalBuffer = terminal
-    ? registerE2ETerminalBuffer(`remote:${props.ownerTaskId}`, terminal)
+    ? registerE2ETerminalBuffer(
+      `remote:${props.ownerTaskId}`,
+      terminal,
+      () => fitAddon?.proposeDimensions?.(),
+    )
     : null;
 }
 

@@ -242,7 +242,11 @@ export function initializeTerminalView(params: {
   const stopThemeWatch = watch(params.effectiveCodeTheme, (theme) => {
     term.options.theme = getTerminalTheme(theme)
   })
-  const unregisterE2ETerminalBuffer = registerE2ETerminalBuffer(params.sessionId, term)
+  const unregisterE2ETerminalBuffer = registerE2ETerminalBuffer(
+    params.sessionId,
+    term,
+    () => params.fitAddon.proposeDimensions?.(),
+  )
 
   return {
     term,

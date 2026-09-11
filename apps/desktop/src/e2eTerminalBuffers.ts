@@ -43,11 +43,17 @@ export interface TerminalCellAttributes {
 }
 
 const terminals = new Map<string, Terminal>();
+const viewportProposals = new Map<string, () => { cols: number; rows: number } | undefined>();
 
-export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal): () => void {
+export function registerE2ETerminalBuffer(
+  sessionId: string,
+  terminal: Terminal,
+  getViewportProposal?: () => { cols: number; rows: number } | undefined,
+): () => void {
   if (!import.meta.env.DEV || !window.__KANNA_E2E__) return () => {};
 
   terminals.set(sessionId, terminal);
+  if (getViewportProposal) viewportProposals.set(sessionId, getViewportProposal);
   window.__KANNA_E2E__.terminalBuffers ??= {
     stats: getTerminalBufferStats,
     lines: getTerminalBufferLines,
@@ -67,6 +73,7 @@ export function registerE2ETerminalBuffer(sessionId: string, terminal: Terminal)
     const current = terminals.get(sessionId);
     if (current === terminal) {
       terminals.delete(sessionId);
+      viewportProposals.delete(sessionId);
     }
   };
 }
@@ -85,10 +92,14 @@ function getTerminalViewportMetrics(sessionId: string): TerminalViewportMetrics 
   const cellWidth = dimensions?.width;
   const cellHeight = dimensions?.height;
   const viewport = terminal.element.getBoundingClientRect();
-  if (!cellWidth || !cellHeight || viewport.width <= 0 || viewport.height <= 0) return null;
+  const proposal = viewportProposals.get(sessionId)?.();
+  if (!cellWidth || !cellHeight || viewport.width <= 0 || viewport.height <= 0 || !proposal) return null;
   return {
-    availableCols: Math.floor(viewport.width / cellWidth),
-    availableRows: Math.floor(viewport.height / cellHeight),
+    // FitAddon is xterm's canonical viewport/cell measurement. Calling its
+    // proposal API is observation-only; it does not call fit() or resize the
+    // session, unlike approximating a possibly clipped terminal element.
+    availableCols: proposal.cols,
+    availableRows: proposal.rows,
     cellHeight,
     cellWidth,
     viewportHeight: viewport.height,
