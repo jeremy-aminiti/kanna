@@ -167,7 +167,9 @@ pub(crate) fn eligible_lan_desktop_ids(state: &Arc<AppState>) -> Vec<String> {
 /// `machine_stats`'s `machine_errors`), and one (`signal_agent`'s singleton
 /// resolution) must fail closed on it when the merged id list is also empty,
 /// so no caller can be made silently to swallow a real relay fault.
-pub(crate) async fn relay_and_lan_desktop_ids(state: &Arc<AppState>) -> (Vec<String>, Option<String>) {
+pub(crate) async fn relay_and_lan_desktop_ids(
+    state: &Arc<AppState>,
+) -> (Vec<String>, Option<String>) {
     let (mut ids, error) = match state.list_active_relay_desktops().await {
         Ok(ids) => (ids, None),
         Err(error) => (Vec::new(), Some(error)),
@@ -567,6 +569,124 @@ mod tests {
         assert_eq!(routed.response.status, 200, "{:?}", routed.response);
         let body = routed.response.body.expect("status response body");
         assert_eq!(body["desktopId"], "desktop-target");
+    }
+
+    /// Qualifies the pinned-TLS chain at the *same* real, routable interface
+    /// address the LAN listener reachability test
+    /// (`lan_listener::tests::listener_bound_to_all_interfaces_is_reachable_on_a_real_routable_address`)
+    /// and the discovery investigation both used - not loopback. That
+    /// listener-reachability test proves only a raw TCP connect succeeds at
+    /// the real address; the test directly above proves the full pinned-TLS
+    /// chain but only over loopback. Neither, nor the two together,
+    /// substitutes for the other: loopback traverses the kernel's loopback
+    /// fast path and never exercises the real network stack/interface a
+    /// discovered candidate's dial actually would. Pinned-TLS identity here
+    /// (`server_name_for_desktop`) is derived purely from `desktop_id`, never
+    /// from the IP dialed, and `dial_lan_invoke`'s `TcpStream::connect`
+    /// takes whatever `SocketAddr` the candidate carries - so retargeting
+    /// the exact same chain at a real interface address, instead of
+    /// loopback, is a faithful, minimal same-address qualification, not a
+    /// different mechanism. A no-op (not a failure) on a host with no real
+    /// non-loopback interface, matching the listener-reachability test's own
+    /// portability rule.
+    #[tokio::test]
+    async fn a_real_lan_invoke_completes_over_a_real_tls_socket_on_the_same_real_routable_address()
+    {
+        let Some(real_ip) = if_addrs::get_if_addrs().ok().and_then(|interfaces| {
+            interfaces
+                .into_iter()
+                .map(|interface| interface.addr.ip())
+                .find(crate::lan_discovery::is_routable_lan_address)
+        }) else {
+            eprintln!(
+                "skipping: no non-loopback interface on this host to qualify same-address pinned TLS on"
+            );
+            return;
+        };
+
+        let mut target_config = lan_e2e_test_config("desktop-target-real-addr");
+        target_config.lan_host = "0.0.0.0".to_string();
+        let target_identity_path = target_config.lan_tls_identity_path().unwrap();
+        let target_identity = crate::lan_tls_identity::load_or_create(
+            &target_identity_path,
+            &target_config.desktop_id,
+            &target_config.environment,
+        )
+        .expect("create target identity");
+
+        let target_state = Arc::new(AppState::new(target_config.clone()));
+        target_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+
+        let now_ms = crate::machine_trust::unix_time_ms().unwrap();
+        let target_store_path = target_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            let hash = crate::pairing::hash_device_secret("the-bearer-secret");
+            store.accept_inbound(
+                "desktop-source-real-addr",
+                &hash,
+                "uid-1",
+                "development",
+                &target_config.desktop_id,
+                now_ms,
+            );
+            store.save(&target_store_path).expect("seed target trust");
+        }
+
+        let listener_addr =
+            super::super::lan_listener::spawn_for_test(Arc::clone(&target_state)).await;
+        // The one deliberate difference from the loopback test above: the
+        // real, routable interface address, not `Ipv4Addr::LOCALHOST`.
+        let candidate = std::net::SocketAddr::new(real_ip, listener_addr.port());
+
+        let source_config = lan_e2e_test_config("desktop-source-real-addr");
+        let source_state = Arc::new(AppState::new(source_config.clone()));
+        source_state.set_authenticated_account_uid(Some("uid-1".to_string()));
+        source_state.set_lan_candidate("desktop-target-real-addr".to_string(), candidate);
+        let source_store_path = source_config.machine_trust_store_path().unwrap();
+        {
+            let mut store = crate::machine_trust::MachineTrustStore::default();
+            store
+                .pending_or_create(
+                    "desktop-target-real-addr",
+                    "uid-1",
+                    "development",
+                    &source_config.desktop_id,
+                    || Ok("the-bearer-secret".to_string()),
+                    now_ms,
+                )
+                .expect("prepare pending");
+            store
+                .confirm_outbound(
+                    "desktop-target-real-addr",
+                    "the-bearer-secret",
+                    &source_config.desktop_id,
+                    Some(target_identity.ca_certificate_pem.clone()),
+                    now_ms + 1000,
+                )
+                .expect("confirm outbound grant");
+            store.save(&source_store_path).expect("seed source trust");
+        }
+
+        let routed = invoke_desktop(
+            Arc::clone(&source_state),
+            "desktop-target-real-addr".to_string(),
+            "GET".to_string(),
+            "/v1/status".to_string(),
+            serde_json::Value::Null,
+        )
+        .await
+        .expect("invoke_desktop should complete");
+
+        assert_eq!(
+            routed.route,
+            RouteProvenance::Lan,
+            "same-address pinned-TLS dial to {candidate} did not route over LAN: {:?}",
+            routed.response
+        );
+        assert_eq!(routed.response.status, 200, "{:?}", routed.response);
+        let body = routed.response.body.expect("status response body");
+        assert_eq!(body["desktopId"], "desktop-target-real-addr");
     }
 
     /// A real TLS handshake can succeed (the client trusts the target's
@@ -992,10 +1112,7 @@ mod tests {
 
         let (ids, error) = relay_and_lan_desktop_ids(&state).await;
 
-        assert!(
-            error.is_some(),
-            "relay's own outage must still be reported"
-        );
+        assert!(error.is_some(), "relay's own outage must still be reported");
         assert_eq!(
             ids,
             vec!["desktop-lan-peer".to_string()],

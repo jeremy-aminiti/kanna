@@ -22,17 +22,16 @@
 //! responder independently of anything this module observed.
 //!
 //! One filtering decision does live here rather than at advertise time:
-//! `LanRoutingAdvertisement::start` publishes through `mdns-sd`'s
-//! unrestricted `enable_addr_auto()` only - both an explicit address list
-//! and an explicit interface restriction (`set_interfaces`) are real,
-//! reproduced defects on some hosts (their announcement silently never
-//! reaches the wire; see this module's own real-mDNS tests). That means a
-//! resolved candidate's address list may include loopback/link-local
-//! addresses alongside a real routable one, so `start_discovery` itself
-//! now picks the first *routable* address from that list - still just
-//! "which of this hint's addresses is even worth recording," not a trust
-//! decision, and the same routability rule `LanRoutingAdvertisement::start`
-//! used to apply before publishing.
+//! `start_discovery` picks the first *routable* address from a resolved
+//! candidate's address list, rather than trusting an arbitrary first entry -
+//! see `select_routable_address`. `LanRoutingAdvertisement::start` itself
+//! still publishes explicit routable addresses (falling back to
+//! `enable_addr_auto()` only when none are found), matching
+//! `bonjour.rs`'s own mobile advertisement; no publish-side correction has
+//! been made or shown necessary as of this comment - see the task
+//! checkpoint (`.tmp/lan-revision-checkpoint.md`, not committed) for the
+//! current, precise state of that investigation, which this comment does
+//! not attempt to restate and risk going stale again.
 
 use crate::http_api::AppState;
 #[cfg(test)]
@@ -437,6 +436,18 @@ mod tests {
     struct NativeBrowseObserver {
         child: std::process::Child,
         lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        reader: Option<std::thread::JoinHandle<()>>,
+    }
+
+    /// Termination provenance for a [`NativeBrowseObserver`]: killing the
+    /// child alone proves nothing about whether its reader thread actually
+    /// drained every buffered line before `captured_text()` was read - see
+    /// architect `57d246ec`'s own finding that incremental reading "doesn't
+    /// force child flush" and this struct previously "never
+    /// drains/joins" its reader.
+    struct NativeObserverTermination {
+        child_wait: std::io::Result<std::process::ExitStatus>,
+        reader_joined: std::thread::Result<()>,
     }
 
     impl NativeBrowseObserver {
@@ -451,7 +462,7 @@ mod tests {
             let stdout = child.stdout.take().expect("piped stdout");
             let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let lines_for_reader = std::sync::Arc::clone(&lines);
-            std::thread::spawn(move || {
+            let reader = std::thread::spawn(move || {
                 use std::io::BufRead;
                 for line in std::io::BufReader::new(stdout)
                     .lines()
@@ -463,7 +474,11 @@ mod tests {
                         .push(line);
                 }
             });
-            Self { child, lines }
+            Self {
+                child,
+                lines,
+                reader: Some(reader),
+            }
         }
 
         fn captured_text(&self) -> String {
@@ -473,10 +488,234 @@ mod tests {
                 .join("\n")
         }
 
-        fn stop(mut self) {
+        /// Kills the child, waits for its real exit status, then explicitly
+        /// joins the reader thread - which only returns once the pipe's
+        /// `BufReader::lines()` iterator sees EOF, i.e. once every byte the
+        /// kernel ever delivered has been drained into `lines`. Only after
+        /// this returns is `captured_text()` (read separately, since this
+        /// consumes `self`) guaranteed final rather than a snapshot of
+        /// whatever the reader thread happened to have processed so far.
+        fn stop(mut self) -> NativeObserverTermination {
             let _ = self.child.kill();
-            let _ = self.child.wait();
+            let child_wait = self.child.wait();
+            let reader_joined = self
+                .reader
+                .take()
+                .expect("reader thread present until stop")
+                .join();
+            NativeObserverTermination {
+                child_wait,
+                reader_joined,
+            }
         }
+    }
+
+    /// Captures `mdns-sd`'s own `log::Log` output during a bounded window -
+    /// specifically to retain its `multicast_on_intf` trace lines
+    /// (`"sent out {n} bytes on interface ..."` on `send_to` success,
+    /// `"Failed to send to ... via ..."` on failure), the crate's own
+    /// existing send-result seam architect `57d246ec` identified
+    /// (`service_daemon.rs` ~4266) - `announce_service_on_intf` itself
+    /// (~4437) returns `true` once `send_dns_outgoing` is *called*,
+    /// regardless of whether the underlying `send_to` actually succeeded,
+    /// so this is the one API-level signal available (short of packet
+    /// capture, out of scope) that distinguishes "queued/attempted" from
+    /// "the OS socket call itself reported success or failure." A process
+    /// may install only one `log::Log`, so a test using this must run in
+    /// isolation (a single `--exact` test name) - never alongside
+    /// `relay.rs`'s own test-only logger in the same test binary
+    /// invocation.
+    struct MdnsSendTraceLogger;
+
+    static MDNS_TRACE_LOGGER: MdnsSendTraceLogger = MdnsSendTraceLogger;
+    static MDNS_TRACE_LOGGER_INIT: std::sync::Once = std::sync::Once::new();
+    static MDNS_TRACE_LOG_ACTIVE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static MDNS_TRACE_LOG_LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    impl log::Log for MdnsSendTraceLogger {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            MDNS_TRACE_LOG_ACTIVE.load(std::sync::atomic::Ordering::Acquire)
+                && metadata.target().starts_with("mdns_sd")
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                MDNS_TRACE_LOG_LINES
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(format!(
+                        "{} {}: {}",
+                        record.target(),
+                        record.level(),
+                        record.args()
+                    ));
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    fn start_mdns_trace_capture() {
+        MDNS_TRACE_LOGGER_INIT.call_once(|| {
+            log::set_logger(&MDNS_TRACE_LOGGER).expect(
+                "install mdns-sd trace-capture logger (run this test in isolation, not \
+                 alongside another test-only logger in the same process)",
+            );
+            log::set_max_level(log::LevelFilter::Trace);
+        });
+        MDNS_TRACE_LOG_LINES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        MDNS_TRACE_LOG_ACTIVE.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn finish_mdns_trace_capture() -> Vec<String> {
+        MDNS_TRACE_LOG_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+        std::mem::take(
+            &mut *MDNS_TRACE_LOG_LINES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    /// The architect `57d246ec` acceptance-criterion-1 fixture: one owned
+    /// comparison of explicit-address vs. `enable_addr_auto()` publish,
+    /// both restricted to the *same single* real, routable interface via
+    /// the daemon-level `enable_interface`/`disable_interface` controls -
+    /// which are a distinct mechanism from `ServiceInfo::set_interfaces`
+    /// (a per-service filter the daemon still applies its own, unrestricted
+    /// interface enumeration around). Every previous comparison in this
+    /// module compared a single-interface explicit run against a
+    /// multi-interface auto run - not apples to apples. Retains, for each
+    /// case: the daemon's own `monitor()` events, its own `send_to`
+    /// success/failure trace lines (see `MdnsSendTraceLogger`), and a
+    /// robust native observer's result with explicit termination
+    /// provenance (see `NativeBrowseObserver::stop`). Deliberately
+    /// assertion-free (diagnostic only) - the point is retaining rigorous,
+    /// exact raw evidence for independent review, not asserting a
+    /// conclusion this one run cannot by itself support. Must run in
+    /// isolation: `cargo test -p kanna-server --bin kanna-server -- \
+    /// --exact lan_discovery::tests::matched_single_interface_explicit_vs_auto_publish_comparison \
+    /// --nocapture`.
+    #[tokio::test]
+    async fn matched_single_interface_explicit_vs_auto_publish_comparison() {
+        let Some((if_name, if_addr)) = if_addrs::get_if_addrs().ok().and_then(|interfaces| {
+            interfaces.into_iter().find_map(|interface| {
+                is_routable_lan_address(&interface.addr.ip())
+                    .then(|| (interface.name.clone(), interface.addr.ip()))
+            })
+        }) else {
+            eprintln!(
+                "skipping: no non-loopback interface on this host to run a matched comparison on"
+            );
+            return;
+        };
+        eprintln!("DIAG_MATCHED_FIXTURE interface={if_name} address={if_addr}");
+
+        start_mdns_trace_capture();
+
+        async fn run_case(
+            case: &str,
+            if_name: &str,
+            if_addr: IpAddr,
+            auto_addr: bool,
+        ) -> (Vec<String>, String, NativeObserverTermination) {
+            let unique = format!(
+                "diag-matched-{case}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+            );
+            // RFC 6763 section 7.2 limits a service *type* label to 15
+            // bytes (see this module's own top-of-file comment) - unlike
+            // the instance name above, which has no such limit and stays
+            // fully unique. A fresh, never-before-used service type per
+            // case rules out mDNSResponder cache/rate-limit carryover from
+            // this session's own heavy prior testing on `_kanna-lan._tcp` -
+            // the same control `fresh-service-type-run1.log` already
+            // established, kept short enough this time to actually pass
+            // mdns-sd's own length check (an earlier version of this
+            // exact test did not, and both cases below failed at
+            // registration with "Service name length must be <= 15 bytes"
+            // before ever reaching the wire - retained as
+            // `matched-fixture-run1.log`, a real methodological bug in the
+            // fixture, not evidence about the underlying defect).
+            let short_suffix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+                % 0x1000;
+            let service_type = format!("_dm{case}{short_suffix:x}._tcp.local.");
+
+            let daemon = ServiceDaemon::new().expect("start mDNS daemon");
+            daemon
+                .disable_interface(IfKind::All)
+                .expect("disable all interfaces");
+            daemon
+                .enable_interface(IfKind::Name(if_name.to_string()))
+                .expect("enable only the target interface");
+
+            let monitor = daemon.monitor().expect("monitor before registration");
+
+            let no_txt: &[(&str, String)] = &[];
+            let mut service = ServiceInfo::new(
+                &service_type,
+                &unique,
+                &format!("{unique}.local."),
+                &if_addr.to_string()[..],
+                61_000,
+                no_txt,
+            )
+            .expect("build service info");
+            if auto_addr {
+                service = service.enable_addr_auto();
+            }
+            daemon.register(service).expect("register service");
+
+            let browse_type = service_type
+                .strip_suffix(".local.")
+                .expect("service_type ends with .local.");
+            let native_browse = NativeBrowseObserver::start(browse_type);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            let mut monitor_events = Vec::new();
+            while std::time::Instant::now() < deadline {
+                if let Ok(event) = monitor.try_recv() {
+                    monitor_events.push(format!("{event:?}"));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            let native_text = native_browse.captured_text();
+            let termination = native_browse.stop();
+            let _ = daemon.shutdown();
+            (monitor_events, native_text, termination)
+        }
+
+        let (explicit_monitor, explicit_native, explicit_termination) =
+            run_case("explicit", &if_name, if_addr, false).await;
+        let (auto_monitor, auto_native, auto_termination) =
+            run_case("auto", &if_name, if_addr, true).await;
+
+        let trace_lines = finish_mdns_trace_capture();
+
+        eprintln!("DIAG_MATCHED_EXPLICIT_MONITOR {explicit_monitor:?}");
+        eprintln!("DIAG_MATCHED_EXPLICIT_NATIVE stdout={explicit_native:?}");
+        eprintln!(
+            "DIAG_MATCHED_EXPLICIT_TERMINATION child_wait={:?} reader_joined_ok={}",
+            explicit_termination.child_wait,
+            explicit_termination.reader_joined.is_ok()
+        );
+        eprintln!("DIAG_MATCHED_AUTO_MONITOR {auto_monitor:?}");
+        eprintln!("DIAG_MATCHED_AUTO_NATIVE stdout={auto_native:?}");
+        eprintln!(
+            "DIAG_MATCHED_AUTO_TERMINATION child_wait={:?} reader_joined_ok={}",
+            auto_termination.child_wait,
+            auto_termination.reader_joined.is_ok()
+        );
+        eprintln!("DIAG_MATCHED_MDNS_SEND_TRACE {trace_lines:?}");
     }
 
     #[test]
@@ -661,7 +900,12 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         let stdout = native_browse.captured_text();
-        native_browse.stop();
+        let termination = native_browse.stop();
+        eprintln!(
+            "DIAG_NATIVE_OBSERVER_TERMINATION child_wait={:?} reader_joined_ok={}",
+            termination.child_wait,
+            termination.reader_joined.is_ok()
+        );
         let _ = daemon.shutdown();
 
         eprintln!("DIAG_CORRELATED monitor_events={monitor_events:?}\nnative_stdout=\n{stdout}");
@@ -704,7 +948,12 @@ mod tests {
         let native_browse = NativeBrowseObserver::start(service_type_without_domain());
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         let stdout = native_browse.captured_text();
-        native_browse.stop();
+        let termination = native_browse.stop();
+        eprintln!(
+            "DIAG_NATIVE_OBSERVER_TERMINATION child_wait={:?} reader_joined_ok={}",
+            termination.child_wait,
+            termination.reader_joined.is_ok()
+        );
         let _ = daemon.shutdown();
 
         assert!(
@@ -749,7 +998,12 @@ mod tests {
         let native_browse = NativeBrowseObserver::start(service_type_without_domain());
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         let stdout = native_browse.captured_text();
-        native_browse.stop();
+        let termination = native_browse.stop();
+        eprintln!(
+            "DIAG_NATIVE_OBSERVER_TERMINATION child_wait={:?} reader_joined_ok={}",
+            termination.child_wait,
+            termination.reader_joined.is_ok()
+        );
         let _ = daemon.shutdown();
 
         assert!(
@@ -826,7 +1080,12 @@ mod tests {
         let native_browse = NativeBrowseObserver::start(service_type_without_domain());
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         let stdout = native_browse.captured_text();
-        native_browse.stop();
+        let termination = native_browse.stop();
+        eprintln!(
+            "DIAG_NATIVE_OBSERVER_TERMINATION child_wait={:?} reader_joined_ok={}",
+            termination.child_wait,
+            termination.reader_joined.is_ok()
+        );
         let _ = daemon.shutdown();
 
         eprintln!(
