@@ -848,14 +848,11 @@ async function revealDesktopViewTarget(
       message: `${target.path} ${target.side ?? ""} line ${target.newLine ?? target.oldLine} is not in the rendered diff`,
     };
   }
+  // Centred, and deliberately not decorated. The row lives inside the diff
+  // renderer's shadow DOM, and a mark written in there could not be shown to
+  // render in a real window — so it is not claimed. Finding the row is what
+  // makes the answer truthful; centring it is what the reader sees.
   line.scrollIntoView({ block: "center" });
-  // The row lives in the diff renderer's shadow DOM, where this component's
-  // stylesheet does not reach, so the flash is written onto the element.
-  const previousOutline = line.style.outline;
-  line.style.outline = "2px solid var(--kn-accent)";
-  setTimeout(() => {
-    line.style.outline = previousOutline;
-  }, 1_500);
   return { opened: true };
 }
 
