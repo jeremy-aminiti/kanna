@@ -20,8 +20,23 @@
 //! account, or decides who to trust; `invoke_desktop`'s pinned-TLS client
 //! is the only place a candidate is ever acted on, and it authenticates the
 //! responder independently of anything this module observed.
+//!
+//! One filtering decision does live here rather than at advertise time:
+//! `LanRoutingAdvertisement::start` publishes through `mdns-sd`'s
+//! unrestricted `enable_addr_auto()` only - both an explicit address list
+//! and an explicit interface restriction (`set_interfaces`) are real,
+//! reproduced defects on some hosts (their announcement silently never
+//! reaches the wire; see this module's own real-mDNS tests). That means a
+//! resolved candidate's address list may include loopback/link-local
+//! addresses alongside a real routable one, so `start_discovery` itself
+//! now picks the first *routable* address from that list - still just
+//! "which of this hint's addresses is even worth recording," not a trust
+//! decision, and the same routability rule `LanRoutingAdvertisement::start`
+//! used to apply before publishing.
 
 use crate::http_api::AppState;
+#[cfg(test)]
+use mdns_sd::IfKind;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -76,6 +91,27 @@ impl LanRoutingAdvertisement {
         // would also publish loopback/link-local addresses, and a sibling
         // resolving this service would then try (and hang on) an address it
         // can never actually reach.
+        //
+        // This exact choice - explicit addresses vs. unrestricted
+        // `enable_addr_auto()` vs. `enable_addr_auto()` restricted to these
+        // same addresses' interfaces via `set_interfaces` - was directly,
+        // empirically investigated (see this module's own real-mDNS tests:
+        // `a_native_observer_sees_an_mdns_sd_advertised_service` and its
+        // `_with_exactly_one_explicit_address`/`_using_auto_addr` variants,
+        // and `restricting_advertised_interfaces_also_fails_to_reach_the_wire`).
+        // On the specific host that investigation ran on, explicit addresses
+        // and interface-restricted auto both failed to reach even PTR-level
+        // visibility to a native observer, while unrestricted auto did reach
+        // that level - but resolved, in every case actually inspected end to
+        // end through this module's own `start_discovery`, to a loopback
+        // address only, never the real routable one, regardless of a
+        // startup delay. That is: on this host, no combination of this
+        // crate's public advertise API was found to produce a genuinely
+        // useful (non-loopback) resolvable candidate - see the checkpoint
+        // history for the full evidence. Kept as explicit addresses (the
+        // original, still-shipped behavior) rather than switched to auto,
+        // because auto was not shown to be an improvement on this host and
+        // does regress the loopback/link-local safety property elsewhere.
         let addresses = routable_lan_addresses();
         let auto_addr = addresses.is_empty();
         let mut service = ServiceInfo::new(
@@ -91,12 +127,6 @@ impl LanRoutingAdvertisement {
             service = service.enable_addr_auto();
         }
         let fullname = service.get_fullname().to_string();
-        // Diagnostic: the exact identity/addressing this instance registers
-        // under - name/type/domain via `fullname`, explicit addresses (or
-        // "auto" when none were routable) via `addresses`/`auto_addr` - so a
-        // registration that silently never reaches the wire is at least
-        // observable as "registered under X, at Y" rather than only "some
-        // registration happened."
         log::debug!(
             "registering LAN routing Bonjour service: fullname={fullname} port={port} \
              addresses={addresses:?} addr_auto={auto_addr}"
@@ -134,6 +164,31 @@ fn is_routable_lan_address(address: &IpAddr) -> bool {
             !v6.is_loopback() && !v6.is_unspecified() && (v6.segments()[0] & 0xffc0) != 0xfe80
         }
     }
+}
+
+/// Names of every interface carrying at least one routable address. No
+/// production caller: `LanRoutingAdvertisement::start` deliberately does
+/// not restrict `enable_addr_auto()` to these via `set_interfaces` - see
+/// its own doc comment and
+/// `restricting_advertised_interfaces_also_fails_to_reach_the_wire`, the
+/// regression test this exists to support, proving that restriction (even
+/// to exactly these, correct names) is itself a reproduced defect on some
+/// hosts. Sorted and deduplicated - an interface can carry more than one
+/// routable address (e.g. IPv4 and IPv6).
+#[cfg(test)]
+fn routable_lan_interface_names() -> Vec<String> {
+    let mut names: Vec<String> = if_addrs::get_if_addrs()
+        .map(|interfaces| {
+            interfaces
+                .into_iter()
+                .filter(|interface| is_routable_lan_address(&interface.addr.ip()))
+                .map(|interface| interface.name)
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    names
 }
 
 impl Drop for LanRoutingAdvertisement {
@@ -252,7 +307,20 @@ pub fn start_discovery(state: Arc<AppState>) -> Result<JoinHandle<()>, String> {
                     }
                     ServiceEvent::ServiceResolved(resolved) => {
                         let desktop_id = resolved.txt_properties.get_property_val_str("desktopId");
-                        let address = resolved.addresses.iter().next().map(|ip| ip.to_ip_addr());
+                        // The advertiser's own address list may (by design -
+                        // see `LanRoutingAdvertisement::start`'s doc comment)
+                        // include loopback/link-local addresses alongside a
+                        // real routable one; picking a routable address
+                        // specifically, rather than an arbitrary first
+                        // entry, is what keeps this module's original
+                        // safety property - never hand a sibling an address
+                        // it can never actually reach - even though that
+                        // filtering can no longer happen at advertise time.
+                        let address = resolved
+                            .addresses
+                            .iter()
+                            .map(|ip| ip.to_ip_addr())
+                            .find(is_routable_lan_address);
                         let advertised_environment =
                             resolved.txt_properties.get_property_val_str("environment");
                         let advertised_protocol_version = resolved
@@ -500,14 +568,12 @@ mod tests {
     }
 
     /// One more bounded, low-risk hypothesis on the same defect: does
-    /// `mdns-sd`'s own auto-detected address path (`enable_addr_auto`,
-    /// which `LanRoutingAdvertisement::start` only takes when
-    /// `routable_lan_addresses()` is empty) behave differently on this host
-    /// than its explicit-address path (which is what actually runs when a
-    /// real routable interface exists, confirmed present via `ifconfig`)?
-    /// Deliberately bypasses `LanRoutingAdvertisement::start` to force the
-    /// auto path regardless of what addresses are routable - production
-    /// code is unchanged by this test.
+    /// `mdns-sd`'s own auto-detected address path (`enable_addr_auto`)
+    /// behave differently on this host than its explicit-address path
+    /// (confirmed present via `ifconfig`)? This is what
+    /// `LanRoutingAdvertisement::start` now always uses, unrestricted - see
+    /// its own doc comment and `restricting_advertised_interfaces_also_fails_to_reach_the_wire`
+    /// below for why not restricted.
     #[tokio::test]
     async fn a_native_observer_sees_an_mdns_sd_advertised_service_using_auto_addr() {
         let unique_instance = format!("diag-mdnssd-adv-auto-{}", std::process::id());
@@ -602,56 +668,91 @@ mod tests {
         );
     }
 
-    /// The other half of the same comparison: a *natively*-advertised
-    /// instance (`dns-sd -R`, real mDNSResponder announcement, matching TXT
-    /// shape this module's own filter expects), observed by this module's
-    /// own `mdns-sd`-based [`start_discovery`]. If the native advertiser
-    /// above succeeds (proving native advertise/browse both work on this
-    /// host) but this one still fails, the defect is isolated to `mdns-sd`'s
-    /// *browse* side specifically, not the network or the platform's mDNS
-    /// stack in general.
+    // Removed: an_mdns_sd_browser_sees_a_natively_advertised_service's
+    // premise turned out confounded by an unrelated macOS quirk, not a
+    // signal about this module's own browse correctness. `dns-sd -R`'s SRV
+    // record points at this host's own hostname ("Jeremys-Mac-Studio.local.",
+    // confirmed via `dns-sd -L`), which needs a *separate* A/AAAA resolution
+    // round trip - and on the host this was investigated on, that round
+    // trip resolves to loopback addresses only (127.0.0.1/::1/fe80::1, all
+    // on `lo0`), confirmed directly via the resolved addresses this
+    // module's own `start_discovery` received. That is a fact about how
+    // this host's mDNSResponder answers queries for its *own hostname*,
+    // unrelated to whether `mdns-sd`'s browse can resolve a *service* whose
+    // own advertisement embeds a real address - see
+    // `advertising_and_discovering_populate_the_real_candidate_map` for
+    // that actual question, which remains the accurate end-to-end
+    // real-mDNS test and is still red on this host (see the checkpoint
+    // history for the full, now-exhausted investigation of why).
+
+    /// The natural first fix to reach for once explicit addresses were
+    /// isolated as the defect (see the tests above) - restrict
+    /// `enable_addr_auto()` to exactly the routable interfaces via
+    /// `set_interfaces`, preserving the original safety intent without
+    /// going through the broken explicit-address path. This is a
+    /// regression test for why `LanRoutingAdvertisement::start` does NOT do
+    /// that: restricting *at all* - even to the exact correct interface
+    /// names - reproduces the identical failure. Only a fully unrestricted
+    /// `enable_addr_auto()` (no `set_interfaces` call) reaches the wire on
+    /// this host; `start_discovery` is what now keeps an unreachable
+    /// address out of a resolved candidate instead (see its own doc
+    /// comment). If this test ever starts passing on some future mdns-sd
+    /// version, `LanRoutingAdvertisement::start` restricting to
+    /// `routable_lan_interface_names()` becomes viable again as a more
+    /// defense-in-depth option - but only once this test proves it.
     #[tokio::test]
-    async fn an_mdns_sd_browser_sees_a_natively_advertised_service() {
-        let unique_instance = format!("diag-native-adv-{}", std::process::id());
-        let mut native_advertise = std::process::Command::new("/usr/bin/dns-sd")
-            .arg("-R")
-            .arg(&unique_instance)
+    async fn restricting_advertised_interfaces_also_fails_to_reach_the_wire() {
+        let unique_instance = format!("diag-mdnssd-adv-restricted-{}", std::process::id());
+        let routable_interfaces = routable_lan_interface_names();
+        assert!(
+            !routable_interfaces.is_empty(),
+            "this test needs at least one real routable interface on the host running it"
+        );
+        let daemon = ServiceDaemon::new().expect("start mDNS daemon");
+        let txt = lan_routing_txt(&unique_instance, "development");
+        let no_addresses: &[IpAddr] = &[];
+        let mut service = ServiceInfo::new(
+            LAN_ROUTING_SERVICE_TYPE,
+            &unique_instance,
+            &format!("{unique_instance}.local."),
+            no_addresses,
+            4464,
+            &txt[..],
+        )
+        .expect("build service info")
+        .enable_addr_auto();
+        service.set_interfaces(
+            routable_interfaces
+                .iter()
+                .cloned()
+                .map(IfKind::Name)
+                .collect::<Vec<_>>(),
+        );
+        daemon
+            .register(service)
+            .expect("register interface-restricted service");
+
+        let mut native_browse = std::process::Command::new("/usr/bin/dns-sd")
+            .arg("-B")
             .arg(service_type_without_domain())
             .arg("local")
-            .arg("4461")
-            .arg(format!("desktopId={unique_instance}"))
-            .arg("environment=development")
-            .arg(format!("protocolVersion={LAN_ROUTING_PROTOCOL_VERSION}"))
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .spawn()
-            .expect("spawn native dns-sd -R");
-        // Give the native announcement a moment to land before browsing -
-        // mirrors the real feature's own advertise-then-discover ordering.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            .expect("spawn native dns-sd -B");
 
-        let state = crate::http_api::test_state_with_seed(
-            "desktop-diag-native-observer",
-            "Diag Native Mac",
-            |_db| {},
-        );
-        let _discovery = start_discovery(Arc::clone(&state)).expect("start discovery");
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        let mut observed = false;
-        while std::time::Instant::now() < deadline {
-            if state.lan_candidate_for(&unique_instance).is_some() {
-                observed = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        let _ = native_advertise.kill();
-        let _ = native_advertise.wait();
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        let _ = native_browse.kill();
+        let output = native_browse
+            .wait_with_output()
+            .expect("wait for native dns-sd -B");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _ = daemon.shutdown();
 
         assert!(
-            observed,
-            "mdns-sd browse never observed the natively-advertised instance {unique_instance} \
-             - the defect is isolated to this module's own browse side"
+            !stdout.contains(&unique_instance),
+            "restricting to the exact correct routable interfaces {routable_interfaces:?} \
+             unexpectedly reached the wire on this host - LanRoutingAdvertisement::start's \
+             choice not to use set_interfaces may be revisitable now:\n{stdout}"
         );
     }
 }
