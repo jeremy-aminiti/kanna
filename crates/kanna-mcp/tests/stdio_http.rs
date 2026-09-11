@@ -406,37 +406,11 @@ fn machine_stats_tool_uses_the_aggregate_server_route() {
     let response_body = json!({
         "machines": [{
             "machineId": "desktop-local",
-            "loadAverages": { "one": 0.5, "five": 0.75, "fifteen": 1.0 },
-            "cpuCoreCount": 8,
-            "memory": {
-                "totalBytes": 16_u64, "usedBytes": 8_u64,
-                "freeBytes": 4_u64, "availableBytes": 8_u64,
-                "pressure": "normal"
-            },
-            "heavyProcessCount": 1,
-            "heavyProcesses": {
-                "bazel": 0, "cargo": 1, "nodeTestRunner": 0,
-                "rustc": 0, "vitest": 0, "xcodebuild": 0
-            },
-            "busyTaskCount": 1,
-            "sampledAt": 1788967790000_u64,
-            "collectionWindowMs": 600, "cacheAgeMs": 0,
-            "logicalCoreCount": 10, "physicalCoreCount": 10,
-            "cpu": {
-                "busyPercent": 99.8, "idlePercent": 0.2,
-                "userPercent": 45.8, "systemPercent": 54.0,
-                "sampleStartedAt": 1788967789400_u64,
-                "sampledAt": 1788967789900_u64,
-                "sampleWindowMs": 500, "source": "host_statistics/HOST_CPU_LOAD_INFO"
-            },
-            "processes": {
-                "topProcesses": [{"pid": 30750, "parentPid": 83312, "name": "QEMULauncher", "cpuPercent": 424.0, "sampleWindowMs": 502, "residentBytes": 1000000000}],
-                "observedProcessCount": 1000, "sampledProcessCount": 800,
-                "unavailableProcessCount": 200, "truncated": false
-            },
-            "collectionErrors": ["process coverage is partial"]
+            "loadAverages": { "five": 0.75, "fifteen": 1.0 },
+            "availableMemoryBytes": 8_u64,
+            "freeDiskBytes": 4_u64
         }],
-        "machineErrors": [{"machineId": "unreachable-peer", "error": "machine-stats request timed out"}]
+        "machineErrors": [{"machineId": "unreachable-peer", "error": "unreachable: stats request timed out"}]
     });
     let (base_url, server) = start_http_fixture(vec![ExpectedRequest {
         method: "GET",

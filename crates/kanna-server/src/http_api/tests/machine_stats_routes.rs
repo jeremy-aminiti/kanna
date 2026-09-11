@@ -32,7 +32,7 @@ async fn machine_stats_http_relay_keeps_native_peer_when_local_collection_fails(
             panic!("expected invoke")
         };
         assert_eq!(desktop_id, "stats-native-peer");
-        assert_eq!(path, "/v1/machine-stats?localOnly=true");
+        assert_eq!(path, "/v1/machine-stats?localOnly=true&detailed=true");
         response
             .send(Ok(crate::http_api::dispatch_authenticated_http_invoke(
                 remote, &method, &path, body,
@@ -51,7 +51,7 @@ async fn machine_stats_http_relay_keeps_native_peer_when_local_collection_fails(
         .unwrap();
     });
     let response = reqwest::Client::new()
-        .get(format!("http://{address}/v1/machine-stats"))
+        .get(format!("http://{address}/v1/machine-stats?detailed=true"))
         .send()
         .await;
     let response = match response {
@@ -154,7 +154,7 @@ async fn machine_stats_browser_requests_still_require_credentials() {
 async fn machine_stats_concurrent_http_requests_share_sample_provenance() {
     let app = test_router("stats-shared", "Shared stats");
     let request = || {
-        Request::get("/v1/machine-stats?localOnly=true")
+        Request::get("/v1/machine-stats?localOnly=true&detailed=true")
             .body(Body::empty())
             .unwrap()
     };

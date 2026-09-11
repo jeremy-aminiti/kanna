@@ -26,6 +26,33 @@ const TOP_PER_RESOURCE: usize = 5;
 pub(super) struct MachineStatsQuery {
     #[serde(default)]
     local_only: bool,
+    #[serde(default)]
+    detailed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactLoadAverages {
+    five: Option<f64>,
+    fifteen: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactMachineStats {
+    machine_id: String,
+    load_averages: CompactLoadAverages,
+    available_memory_bytes: Option<u64>,
+    free_disk_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompactMachineStatsResponse {
+    machines: Vec<CompactMachineStats>,
+    machine_errors: Vec<MachineError>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -259,6 +286,11 @@ pub(super) struct CachedStats {
     result: Result<MachineStats, String>,
 }
 
+pub(super) struct CachedCompactStats {
+    finished: Instant,
+    result: CompactMachineStats,
+}
+
 // The worker owns the guard, even if every HTTP caller disconnects/times out.
 // Thus there can be only one OS collector per server, including a stalled syscall.
 // No permanent sampling task; a request starts a two-point sample on cache miss.
@@ -298,7 +330,13 @@ async fn cached_local_stats(
 pub(super) async fn machine_stats(
     State(state): State<Arc<AppState>>,
     Query(query): Query<MachineStatsQuery>,
-) -> Json<MachineStatsResponse> {
+) -> Json<serde_json::Value> {
+    if !query.detailed {
+        return Json(
+            serde_json::to_value(compact_machine_stats(state, query.local_only).await)
+                .expect("compact machine stats serialize"),
+        );
+    }
     let peers = async {
         if query.local_only {
             return MachineStatsResponse {
@@ -306,7 +344,7 @@ pub(super) async fn machine_stats(
                 machine_errors: vec![],
             };
         }
-        gather_remote_stats(&state).await
+        gather_remote_detailed_stats(&state).await
     };
     let (local, mut response) = tokio::join!(local_stats(Arc::clone(&state)), peers);
     match local {
@@ -319,10 +357,285 @@ pub(super) async fn machine_stats(
     response
         .machines
         .sort_by(|a, b| a.machine_id.cmp(&b.machine_id));
-    Json(response)
+    Json(serde_json::to_value(response).expect("detailed machine stats serialize"))
 }
 
-async fn gather_remote_stats(state: &Arc<AppState>) -> MachineStatsResponse {
+async fn compact_machine_stats(
+    state: Arc<AppState>,
+    local_only: bool,
+) -> CompactMachineStatsResponse {
+    let peers = async {
+        if local_only {
+            CompactMachineStatsResponse {
+                machines: vec![],
+                machine_errors: vec![],
+            }
+        } else {
+            gather_remote_compact_stats(&state).await
+        }
+    };
+    let (local, mut response) = tokio::join!(cached_compact_local_stats(&state), peers);
+    response.machines.push(local);
+    response
+        .machines
+        .sort_by(|a, b| a.machine_id.cmp(&b.machine_id));
+    response
+}
+
+async fn cached_compact_local_stats(state: &Arc<AppState>) -> CompactMachineStats {
+    let cache = Arc::clone(&state.compact_machine_stats_cache);
+    let state = Arc::clone(state);
+    let fallback_id = state.config.desktop_id.clone();
+    tokio::time::timeout(LOCAL_STATS_TIMEOUT, async {
+        let mut cache = cache.lock_owned().await;
+        if let Some(cached) = cache
+            .as_ref()
+            .filter(|cached| cached.finished.elapsed() < CACHE_TTL)
+        {
+            return cached.result.clone();
+        }
+        tokio::task::spawn_blocking(move || {
+            let result = gather_local_compact_stats(&state);
+            *cache = Some(CachedCompactStats {
+                finished: Instant::now(),
+                result: result.clone(),
+            });
+            result
+        })
+        .await
+        .unwrap_or_else(|_| CompactMachineStats {
+            machine_id: fallback_id.clone(),
+            load_averages: CompactLoadAverages {
+                five: None,
+                fifteen: None,
+            },
+            available_memory_bytes: None,
+            free_disk_bytes: None,
+            errors: vec!["local stats collector stopped unexpectedly".into()],
+        })
+    })
+    .await
+    .unwrap_or_else(|_| CompactMachineStats {
+        machine_id: fallback_id,
+        load_averages: CompactLoadAverages {
+            five: None,
+            fifteen: None,
+        },
+        available_memory_bytes: None,
+        free_disk_bytes: None,
+        errors: vec!["local stats timed out; load, memory, and disk are unavailable".into()],
+    })
+}
+
+fn gather_local_compact_stats(state: &AppState) -> CompactMachineStats {
+    let load = System::load_average();
+    let mut errors = Vec::new();
+    let available_memory_bytes = match native::memory() {
+        Ok(memory) => Some(memory.available_bytes),
+        Err(error) => {
+            errors.push(format!("memory unavailable: {error}"));
+            None
+        }
+    };
+    let free_disk_bytes = match Db::open(&state.config.db_path) {
+        Ok(db) => {
+            let storage = storage::collect(&db, &mut errors);
+            storage::least_available_bytes(&storage)
+        }
+        Err(error) => {
+            errors.push(format!(
+                "disk unavailable: database could not be opened: {error}"
+            ));
+            None
+        }
+    };
+    if free_disk_bytes.is_none()
+        && !errors
+            .iter()
+            .any(|error| error.starts_with("disk unavailable"))
+    {
+        errors.push("disk unavailable: no backing volume could be measured".into());
+    }
+    compact_errors(&mut errors);
+    CompactMachineStats {
+        machine_id: state.config.desktop_id.clone(),
+        load_averages: CompactLoadAverages {
+            five: load.five.is_finite().then_some(load.five),
+            fifteen: load.fifteen.is_finite().then_some(load.fifteen),
+        },
+        available_memory_bytes,
+        free_disk_bytes,
+        errors,
+    }
+}
+
+async fn gather_remote_compact_stats(state: &Arc<AppState>) -> CompactMachineStatsResponse {
+    let mut output = CompactMachineStatsResponse {
+        machines: vec![],
+        machine_errors: vec![],
+    };
+    let listing =
+        tokio::time::timeout(REMOTE_STATS_TIMEOUT, state.list_active_relay_desktops()).await;
+    let mut machine_ids = match listing {
+        Ok(Ok(ids)) => ids,
+        result => {
+            let error = match result {
+                Ok(Err(error)) => error,
+                _ => "peer listing timed out; remote machine availability is unknown".into(),
+            };
+            output.machine_errors.push(MachineError {
+                machine_id: None,
+                error: bounded_text(&error, 160),
+            });
+            return output;
+        }
+    };
+    machine_ids.sort();
+    machine_ids.dedup();
+    machine_ids.retain(|id| id != &state.config.desktop_id);
+    if machine_ids.len() > MAX_PEERS {
+        output.machine_errors.push(MachineError {
+            machine_id: None,
+            error: format!(
+                "{} remote machines omitted (limit {MAX_PEERS})",
+                machine_ids.len() - MAX_PEERS
+            ),
+        });
+        machine_ids.truncate(MAX_PEERS);
+    }
+    let mut requests = FuturesUnordered::new();
+    for machine_id in machine_ids {
+        requests.push(async move {
+            let result = tokio::time::timeout(
+                REMOTE_STATS_TIMEOUT,
+                state.invoke_relay_desktop(
+                    machine_id.clone(),
+                    "GET".into(),
+                    "/v1/machine-stats?localOnly=true".into(),
+                    serde_json::Value::Null,
+                ),
+            )
+            .await;
+            let result = match result {
+                Err(_) => Err("unreachable: stats request timed out".into()),
+                Ok(Err(error)) => Err(error),
+                Ok(Ok(response)) if response.status == 200 => response
+                    .body
+                    .ok_or_else(|| "unavailable: stats response had no body".into())
+                    .and_then(|body| decode_remote_compact(&machine_id, body)),
+                Ok(Ok(response)) => Err(response
+                    .error
+                    .unwrap_or_else(|| format!("unavailable: HTTP {}", response.status))),
+            };
+            (machine_id, result)
+        });
+    }
+    while let Some((machine_id, result)) = requests.next().await {
+        match result {
+            Ok(mut remote) => {
+                output.machines.append(&mut remote.machines);
+                output.machine_errors.append(&mut remote.machine_errors);
+            }
+            Err(error) => output.machine_errors.push(MachineError {
+                machine_id: Some(bounded_text(&machine_id, 128)),
+                error: bounded_text(&error, 160),
+            }),
+        }
+    }
+    output
+}
+
+fn decode_remote_compact(
+    machine_id: &str,
+    body: serde_json::Value,
+) -> Result<CompactMachineStatsResponse, String> {
+    let is_compact = body
+        .get("machines")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|machines| machines.first())
+        .is_some_and(|machine| machine.get("availableMemoryBytes").is_some());
+    let mut remote = if is_compact {
+        serde_json::from_value::<CompactMachineStatsResponse>(body)
+            .map_err(|error| format!("invalid compact stats response: {error}"))?
+    } else {
+        let detailed = decode_remote(machine_id, body)?;
+        CompactMachineStatsResponse {
+            machines: detailed
+                .machines
+                .into_iter()
+                .map(compact_from_detailed)
+                .collect(),
+            machine_errors: detailed.machine_errors,
+        }
+    };
+    if remote.machines.len() > 1
+        || remote
+            .machines
+            .iter()
+            .any(|machine| machine.machine_id != machine_id)
+    {
+        return Err("invalid localOnly machine-stats machine identity/count".into());
+    }
+    if remote.machines.is_empty() && remote.machine_errors.is_empty() {
+        return Err("machine-stats response contained neither a snapshot nor an error".into());
+    }
+    for machine in &mut remote.machines {
+        machine.machine_id = bounded_text(&machine.machine_id, 128);
+        compact_errors(&mut machine.errors);
+    }
+    for error in &mut remote.machine_errors {
+        error.machine_id = Some(bounded_text(machine_id, 128));
+        error.error = bounded_text(&error.error, 160);
+    }
+    Ok(remote)
+}
+
+fn compact_from_detailed(machine: MachineStats) -> CompactMachineStats {
+    let mut errors = machine.collection_errors.unwrap_or_default();
+    errors.extend(machine.memory.collection_errors.clone().unwrap_or_default());
+    let free_disk_bytes = machine
+        .storage
+        .as_deref()
+        .and_then(storage::least_available_bytes);
+    if free_disk_bytes.is_none() {
+        errors.push("disk unavailable: peer returned no storage measurement".into());
+    }
+    compact_errors(&mut errors);
+    CompactMachineStats {
+        machine_id: machine.machine_id,
+        load_averages: CompactLoadAverages {
+            five: machine
+                .load_averages
+                .five
+                .is_finite()
+                .then_some(machine.load_averages.five),
+            fifteen: machine
+                .load_averages
+                .fifteen
+                .is_finite()
+                .then_some(machine.load_averages.fifteen),
+        },
+        available_memory_bytes: Some(machine.memory.available_bytes),
+        free_disk_bytes,
+        errors,
+    }
+}
+
+fn compact_errors(errors: &mut Vec<String>) {
+    errors.retain(|error| !error.trim().is_empty());
+    if errors.len() > 4 {
+        let omitted = errors.len() - 3;
+        errors.truncate(3);
+        errors.push(format!(
+            "{omitted} additional errors omitted; use detailed=true"
+        ));
+    }
+    for error in errors {
+        *error = bounded_text(error, 160);
+    }
+}
+
+async fn gather_remote_detailed_stats(state: &Arc<AppState>) -> MachineStatsResponse {
     let mut output = MachineStatsResponse {
         machines: vec![],
         machine_errors: vec![],
@@ -364,7 +677,7 @@ async fn gather_remote_stats(state: &Arc<AppState>) -> MachineStatsResponse {
                 state.invoke_relay_desktop(
                     machine_id.clone(),
                     "GET".into(),
-                    "/v1/machine-stats?localOnly=true".into(),
+                    "/v1/machine-stats?localOnly=true&detailed=true".into(),
                     serde_json::Value::Null,
                 ),
             )

@@ -67,6 +67,10 @@ pub(super) fn collect(db: &Db, errors: &mut Vec<String>) -> Vec<StorageStats> {
     volumes.into_values().collect()
 }
 
+pub(super) fn least_available_bytes(rows: &[StorageStats]) -> Option<u64> {
+    rows.iter().map(|row| row.available_bytes).min()
+}
+
 fn existing_ancestor(path: &Path) -> std::io::Result<PathBuf> {
     for ancestor in path.ancestors() {
         match std::fs::canonicalize(ancestor) {

@@ -478,8 +478,16 @@ pub(crate) async fn run_machine(command: MachineCommands) {
         MachineCommands::List { server_url } => {
             ("kanna_list_machines", serde_json::json!({}), server_url)
         }
-        MachineCommands::Stats { server_url } => {
-            ("kanna_machine_stats", serde_json::json!({}), server_url)
+        MachineCommands::Stats {
+            detailed,
+            server_url,
+        } => {
+            let args = if detailed {
+                serde_json::json!({ "detailed": true })
+            } else {
+                serde_json::json!({})
+            };
+            ("kanna_machine_stats", args, server_url)
         }
         MachineCommands::TransferPeers {
             machine_id,
