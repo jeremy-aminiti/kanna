@@ -90,6 +90,39 @@ import, keyboard shortcuts, preferences. Real suites cover the process
 boundaries listed above. Tests reach Vue internals via
 `__vue_app__._instance.setupState`, which only exists in dev builds.
 
+### Mandatory target identity for desktop UI testing
+
+Manual agent QA and computer-use sessions must meet the same identity bar as
+the canonical E2E runner. Before any click, key, scroll, activation, or visual
+evidence capture:
+
+1. Resolve the task id, current worktree, branch and commit being tested.
+   Start only its canonical dev stack or isolated E2E instance.
+2. Select its explicitly identified running process/window or task-owned
+   WebDriver endpoint. Do not look up or launch generic `Kanna` / `build.kanna`:
+   macOS can resolve that name to installed production Kanna. A rejected raw
+   executable selection is a targeting failure, not a reason to try the name.
+3. Read the **native window title** and require the exact expected task id;
+   also verify the worktree and build identity. A task id in sidebar content,
+   a URL's selected task, a display name, or a successful connection is not
+   this check. Missing or mismatched identity stops interaction. Repeat the
+   check when the target changes or the app/tool session restarts or reconnects.
+4. Preserve the observed title, worktree/commit and process or endpoint with
+   the verification result. For multiple app instances, verify each separately.
+
+Reuse `apps/desktop/tests/e2e/helpers/windowIdentity.ts`:
+`assertNativeWindowIdentity` checks build metadata and the exact native title.
+Do not weaken or bypass it to make a test run. Computer-use tools that cannot
+select and inspect the correct running window are unavailable for that test;
+use the canonical isolated driver where appropriate or report the limitation.
+
+Installed production/staging apps are not fallback test targets. Only an
+explicit human request naming that environment authorizes testing them. If
+automation selects the wrong app, stop that automation, record which reads,
+focus actions or mutations actually occurred, and report the incident. Leave
+the operator's app, daemon and server alone; clean up only verified test-owned
+resources.
+
 ### E2E app instances never take focus
 
 Every desktop E2E lane launches real macOS app instances — one for the whole

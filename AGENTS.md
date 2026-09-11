@@ -324,6 +324,29 @@ not a cosmetic difference.
 
 ## Working on the codebase
 
+**Verify the dev window before touching the UI.** For agent testing and visual
+verification, the native Kanna window title MUST contain the exact task id
+being tested. Before clicking, typing, scrolling, activating, or collecting
+visual evidence, verify that title and the expected worktree/build identity.
+Recheck after an app/window switch, restart, reconnect, or tool-session reset.
+A selected task inside the app is not the app's own identity. An empty,
+missing, stale, or mismatched native title means STOP UI interaction and resolve
+the target; it is never permission to try another generic Kanna window.
+
+Start the dev app through `./kd dev up` or the canonical E2E runner. Never use
+a generic app name or bundle id (`Kanna`, `build.kanna`, `open -a Kanna`, or a
+computer-use equivalent) to discover, launch, or activate the test target:
+that lookup can launch installed production Kanna before any title check.
+Use an explicitly identified running worktree process/window or the isolated
+runner's WebDriver endpoint. If the tool cannot select that target, stop that
+UI path and report the limitation; do not fall back to `/Applications/Kanna.app`
+or Kanna Staging. Testing an installed app requires a separate explicit human
+request naming that environment. Routine review/testing permission does not
+grant it. On a wrong-app selection, stop the owned automation, preserve its
+actual actions and target evidence, and report the incident; do not quit or
+kill the operator's app or its daemon/server as cleanup. See
+`docs/dev/testing.md` for the identity-check procedure.
+
 **Trace before you touch.** Before changing a feature, trace its complete data
 flow — DB → server → store → component → composable → daemon — and read every
 file in the path. A fix that only looks at one layer breaks another. A task
