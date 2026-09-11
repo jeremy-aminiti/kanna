@@ -159,6 +159,33 @@ async function renderedDimensions(
   return dimensions;
 }
 
+async function renderedMarkerDiagnostics(
+  client: WebDriverClient,
+  taskId: string,
+  role: TerminalRole,
+): Promise<Record<string, unknown>> {
+  return client.executeSync<Record<string, unknown>>(`
+    const hook = window.__KANNA_E2E__?.terminalBuffers;
+    const id = ${JSON.stringify(role)} === "owner"
+      ? "local:" + ${JSON.stringify(taskId)}
+      : "remote:" + ${JSON.stringify(taskId)};
+    const terminal = hook?.element?.(id);
+    const host = terminal?.closest?.(".cloud-terminal-cache-entry, .terminal-container") ?? terminal;
+    const rows = host?.querySelector?.(".xterm-screen .xterm-rows");
+    const allBufferLines = hook?.lines?.(id) ?? [];
+    return {
+      id,
+      bufferActiveViewLines: allBufferLines.filter((line) => line.includes("ACTIVE_VIEW")),
+      bufferTail: allBufferLines.slice(-12),
+      renderedActiveViewLines: Array.from(rows?.children ?? [])
+        .map((row) => row.textContent?.trim() ?? "")
+        .filter((line) => line.includes("ACTIVE_VIEW")),
+      renderedTail: Array.from(rows?.children ?? []).slice(-12)
+        .map((row) => row.textContent?.trim() ?? ""),
+    };
+  `);
+}
+
 async function waitForOwnerAndRenderer(
   client: WebDriverClient,
   taskId: string,
@@ -330,6 +357,7 @@ async function captureHandbackDiagnostics(
     taskId,
     focus,
     daemonRecovery: await ownerRecoveryDiagnostics(taskId),
+    primaryRenderedMarkerDiagnostics: await renderedMarkerDiagnostics(primary, taskId, "owner"),
     primaryOutboundControl: await terminalControlTrace(primary, taskId),
     primaryActiveViewTrace: await primary.executeSync(`
       return (window.__KANNA_E2E__?.activeViewTrace ?? [])
