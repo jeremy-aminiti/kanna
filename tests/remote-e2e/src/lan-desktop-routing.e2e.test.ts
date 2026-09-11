@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { localProcessFetch } from "@kanna/local-process-fetch";
-import { BUFFY_UID } from "./firebaseAuth";
+import {
+  BUFFY_UID,
+  OTHER_ACCOUNT_EMAIL,
+  OTHER_ACCOUNT_PASSWORD,
+  OTHER_ACCOUNT_UID,
+  signInWithPassword
+} from "./firebaseAuth";
 import { startRemoteHarness, type RemoteDesktop, type RemoteHarness } from "./harness";
 import { waitForCondition } from "./terminalFlowTestUtils";
 
@@ -198,7 +204,79 @@ describe("LAN-first desktop-to-desktop routing E2E", () => {
           expect(stillHasGrant).toBe(true);
         } finally {
           await harness.startRelay();
+          // Leave the harness's own server actually reconnected before this
+          // test returns - the reconnection loop backs off for several
+          // seconds after `stopRelay()`, and a later test dialing through
+          // `harness.lanBaseUrl` during that window gets a raw transport
+          // failure ("Connection refused") instead of the logical relay
+          // response it expects, which is a test-ordering artifact of this
+          // outage simulation, not anything the next test is actually
+          // proving.
+          const logOffset = harness.serverLogs().length;
+          await waitForCondition(
+            async () => harness.serverLogs().slice(logOffset).includes("Authenticated with relay"),
+            30_000,
+            `${harness.desktopId} never reconnected to relay after this test's simulated outage`
+          );
         }
+      } finally {
+        await peer.stop();
+      }
+    },
+    60_000
+  );
+
+  /**
+   * Wrong-account rejection. `services/relay/src/router.ts`'s `routeMessage`
+   * looks up `connections.get(userId)` before doing anything else - a
+   * desktop authenticated as a different account lives in a completely
+   * separate `pair.desktops` map, structurally invisible to a same-account
+   * caller's routing regardless of desktop_id. No Firebase Auth signup is
+   * needed to prove this: `services/relay/src/auth.ts`'s
+   * `readDesktopCredentials` resolves account identity purely from the
+   * `desktopCredentials` Firestore document's own `uid` field, matched
+   * against the presented `desktop_secret` hash - so a real, differently-
+   * uid'd credential document is what actually determines which account a
+   * desktop authenticates as, independent of whether that uid has ever
+   * signed into anything.
+   */
+  it(
+    "never routes to, or lists, a desktop authenticated under a different account",
+    async () => {
+      const peer = await startPeerForAccount(harness, "wrong-account");
+      try {
+        // Real relay routing, not a fabricated assertion: an actual invoke
+        // attempt against a real desktop_id relay itself will never find
+        // in the caller's own account pair.
+        const response = await localProcessFetch(
+          `${harness.lanBaseUrl}/v1/cloud/desktops/${encodeURIComponent(peer.desktopId)}/invoke`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ method: "GET", path: "/v1/status", body: null })
+          }
+        );
+        // `invoke_desktop` returns `Err(String)` (a plain-text, non-2xx HTTP
+        // response) for a transport-level relay failure, and `Ok` (200,
+        // JSON body carrying its own embedded `status`) for a relay-level
+        // rejection like "Desktop offline" - both shapes are "did not
+        // succeed," so only parse JSON when the outer response claims 2xx.
+        if (response.ok) {
+          const body = await response.json() as { status: number; error: string | null };
+          // invoke_relay_desktop surfaces relay's "Desktop offline" as a
+          // definite, non-2xx result - the same shape a genuinely offline
+          // desktop would produce, which is exactly the point: this account
+          // has no way to distinguish "wrong account" from "not connected,"
+          // because the desktop is never in its own routing table at all.
+          expect(body.status).not.toBe(200);
+        }
+
+        // Confirm the negative from the other observable direction too:
+        // the wrong-account desktop must never appear in this account's own
+        // active-desktop listing, the same enumeration eligible_lan_desktop_ids
+        // and every fan-out consumer in finding #1 reads.
+        const activeIds = await harness.client.listActiveDesktopIds();
+        expect(Array.from(activeIds)).not.toContain(peer.desktopId);
       } finally {
         await peer.stop();
       }
@@ -287,23 +365,26 @@ function firestoreBaseUrl(harness: RemoteHarness): string {
   return `http://127.0.0.1:${harness.ports.firestore}/v1/projects/kanna-local/databases/(default)/documents`;
 }
 
-/** Publishes a real `desktopCredentials` Firestore document for
- * `desktopId`, uid Buffy - the same shape and same emulator write
- * `associateDesktopCloudCredential` performs in production, verified
- * against the existing proven pattern in
- * cloud-pairing-auth-discovery.e2e.test.ts's `publishDesktopCredentialAsBuffy`. */
-async function publishDesktopCredentialAsBuffy(
+/** Publishes a real `desktopCredentials` Firestore document for `desktopId`
+ * under `uid` - the same shape and same emulator write
+ * `associateDesktopCloudCredential` performs in production, verified against
+ * the existing proven pattern in
+ * cloud-pairing-auth-discovery.e2e.test.ts's `publishDesktopCredentialAsBuffy`.
+ * `idToken` must belong to `uid`: the emulator's own Firestore rules require
+ * `request.resource.data.uid == request.auth.uid`, so a real credential
+ * document's account is determined by whoever signs the write, not by
+ * whatever `uid` value is asked for here. */
+async function publishDesktopCredential(
   harness: RemoteHarness,
-  input: { desktopId: string; desktopSecret: string; displayName: string }
+  input: { desktopId: string; desktopSecret: string; displayName: string; uid: string; idToken: string }
 ): Promise<void> {
-  const idToken = await harness.getIdToken();
   const body = {
     fields: {
       desktopId: { stringValue: input.desktopId },
       displayName: { stringValue: input.displayName },
       desktopSecretHash: { stringValue: sha256Hex(input.desktopSecret) },
       revokedAt: { nullValue: null },
-      uid: { stringValue: BUFFY_UID },
+      uid: { stringValue: input.uid },
       updatedAt: { stringValue: new Date().toISOString() }
     }
   };
@@ -312,7 +393,7 @@ async function publishDesktopCredentialAsBuffy(
     {
       method: "PATCH",
       headers: {
-        Authorization: `Bearer ${idToken}`,
+        Authorization: `Bearer ${input.idToken}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify(body)
@@ -320,9 +401,17 @@ async function publishDesktopCredentialAsBuffy(
   );
   if (!response.ok) {
     throw new Error(
-      `failed to publish desktop credential as Buffy: ${response.status} ${await response.text()}`
+      `failed to publish desktop credential for uid ${input.uid}: ${response.status} ${await response.text()}`
     );
   }
+}
+
+async function publishDesktopCredentialAsBuffy(
+  harness: RemoteHarness,
+  input: { desktopId: string; desktopSecret: string; displayName: string }
+): Promise<void> {
+  const idToken = await harness.getIdToken();
+  await publishDesktopCredential(harness, { ...input, uid: BUFFY_UID, idToken });
 }
 
 /** Signs the harness's own (already-running) desktop into the shared Buffy
@@ -356,4 +445,51 @@ async function startSameAccountPeer(harness: RemoteHarness, label: string): Prom
     displayName: `LAN Routing E2E Peer (${label})`
   });
   return await harness.startAdditionalDesktop({ desktopId, desktopSecret });
+}
+
+/** Starts a second, genuinely separate `kanna-server`/daemon pair signed into
+ * the real, seeded `OTHER_ACCOUNT_UID` account - a completely different
+ * account from `harness`'s Buffy, not a fabricated uid: Firestore's own
+ * security rules require `request.resource.data.uid == request.auth.uid` on
+ * a `desktopCredentials` write, so proving cross-account isolation for real
+ * requires a real second signed-in identity to author that document, not
+ * just an arbitrary string.
+ *
+ * Cannot reuse `startAdditionalDesktop`'s default relay-visibility wait,
+ * which polls through `harness`'s own (Buffy) relay client -
+ * `waitForRelayVisibility: false` skips it, and this instead waits for the
+ * peer's own server log to report a real, successful relay authentication
+ * under its own account, independent of Buffy's client ever observing it. */
+async function startPeerForAccount(harness: RemoteHarness, label: string): Promise<RemoteDesktop> {
+  const desktopId = `desktop-lan-peer-${label}-${Date.now()}`;
+  const desktopSecret = desktopSecretFor(desktopId);
+  const signIn = await signInWithPassword({
+    authPort: harness.ports.auth,
+    email: OTHER_ACCOUNT_EMAIL,
+    password: OTHER_ACCOUNT_PASSWORD
+  });
+  if (!signIn.idToken) {
+    throw new Error(`failed to sign in as the other seeded account: ${signIn.failure ?? "no idToken"}`);
+  }
+  if (signIn.localId && signIn.localId !== OTHER_ACCOUNT_UID) {
+    throw new Error(`other-account auth seed resolved unexpected uid ${signIn.localId}`);
+  }
+  await publishDesktopCredential(harness, {
+    desktopId,
+    desktopSecret,
+    displayName: `LAN Routing E2E Peer (${label})`,
+    uid: OTHER_ACCOUNT_UID,
+    idToken: signIn.idToken
+  });
+  const peer = await harness.startAdditionalDesktop({
+    desktopId,
+    desktopSecret,
+    waitForRelayVisibility: false
+  });
+  await waitForCondition(
+    async () => peer.serverLogs().includes("Authenticated with relay"),
+    30_000,
+    `${desktopId} never authenticated with relay under the other account`
+  );
+  return peer;
 }

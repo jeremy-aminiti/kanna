@@ -218,6 +218,64 @@ mod tests {
         }
     }
 
+    /// Qualifies the listener's own reachability on this host's real
+    /// routable interface address, bound via `lan_host: "0.0.0.0"" -
+    /// independent of discovery, using a plain TCP connect (no TLS/pinned
+    /// identity - that layer is separately proven by
+    /// `invoke_desktop::tests::a_real_lan_invoke_completes_over_a_real_tls_socket_end_to_end`,
+    /// which uses loopback). This only answers "is the bound socket even
+    /// reachable at the address a real sibling would try," never "is the
+    /// full authenticated dial correct" - added while diagnosing the LAN
+    /// discovery defect (architect `2bf0950f` acceptance criterion 3), to
+    /// isolate that the listener/TLS layer was never the fault. Portable:
+    /// discovers a real address at run time rather than hardcoding one, and
+    /// is a no-op (not a failure) on a host with no non-loopback interface
+    /// at all.
+    #[tokio::test]
+    async fn listener_bound_to_all_interfaces_is_reachable_on_a_real_routable_address() {
+        let Some(real_ip) = if_addrs::get_if_addrs().ok().and_then(|interfaces| {
+            interfaces
+                .into_iter()
+                .map(|interface| interface.addr.ip())
+                .find(crate::lan_discovery::is_routable_lan_address)
+        }) else {
+            eprintln!(
+                "skipping: no non-loopback interface on this host to qualify reachability on"
+            );
+            return;
+        };
+
+        let mut config = test_config("desktop-real-addr-reachability");
+        config.lan_host = "0.0.0.0".to_string();
+        let state = Arc::new(AppState::new(config));
+        let bound_addr = Arc::new(tokio::sync::Mutex::new(None));
+        let bound_addr_in_callback = Arc::clone(&bound_addr);
+
+        let _serving = tokio::spawn(async move {
+            serve(state, 0, move |addr| {
+                let bound_addr = Arc::clone(&bound_addr_in_callback);
+                tokio::spawn(async move {
+                    *bound_addr.lock().await = Some(addr);
+                });
+            })
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let addr = bound_addr.lock().await.expect("listener bound");
+
+        let real_addr = std::net::SocketAddr::new(real_ip, addr.port());
+        let connect_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::TcpStream::connect(real_addr),
+        )
+        .await;
+        assert!(
+            matches!(connect_result, Ok(Ok(_))),
+            "the listener bound via lan_host=0.0.0.0 was not reachable at this host's real \
+             routable address {real_addr}: {connect_result:?}"
+        );
+    }
+
     /// The production ordering contract this whole `on_bound` parameter
     /// exists for: a caller learns the real bound address (and so only
     /// starts advertising) exactly when, and only when, the bind actually

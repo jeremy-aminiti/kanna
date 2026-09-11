@@ -157,7 +157,7 @@ fn routable_lan_addresses() -> Vec<IpAddr> {
         .unwrap_or_default()
 }
 
-fn is_routable_lan_address(address: &IpAddr) -> bool {
+pub(crate) fn is_routable_lan_address(address: &IpAddr) -> bool {
     match address {
         IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_link_local() && !v4.is_unspecified(),
         IpAddr::V6(v6) => {
@@ -203,6 +203,21 @@ impl Drop for LanRoutingAdvertisement {
 /// names the instance after the desktop_id it advertises).
 fn instance_name(fullname: &str) -> Option<&str> {
     fullname.strip_suffix(&format!(".{LAN_ROUTING_SERVICE_TYPE}"))
+}
+
+/// The address a resolution should hand to `candidate_from_resolution`, given
+/// a resolved service's full address list. The advertiser's own address list
+/// may (by design - see `LanRoutingAdvertisement::start`'s doc comment)
+/// include loopback/link-local addresses alongside a real routable one;
+/// picking a routable address specifically, rather than an arbitrary first
+/// entry, is what keeps this module's original safety property - never hand a
+/// sibling an address it can never actually reach - even though that
+/// filtering can no longer happen at advertise time. Kept as a pure function
+/// over `IpAddr` so the selection policy (first routable address wins,
+/// original order preserved) stays unit-testable without a real mDNS
+/// resolution.
+fn select_routable_address(addresses: impl IntoIterator<Item = IpAddr>) -> Option<IpAddr> {
+    addresses.into_iter().find(is_routable_lan_address)
 }
 
 /// The candidate a resolution should record, given its already-extracted
@@ -307,20 +322,9 @@ pub fn start_discovery(state: Arc<AppState>) -> Result<JoinHandle<()>, String> {
                     }
                     ServiceEvent::ServiceResolved(resolved) => {
                         let desktop_id = resolved.txt_properties.get_property_val_str("desktopId");
-                        // The advertiser's own address list may (by design -
-                        // see `LanRoutingAdvertisement::start`'s doc comment)
-                        // include loopback/link-local addresses alongside a
-                        // real routable one; picking a routable address
-                        // specifically, rather than an arbitrary first
-                        // entry, is what keeps this module's original
-                        // safety property - never hand a sibling an address
-                        // it can never actually reach - even though that
-                        // filtering can no longer happen at advertise time.
-                        let address = resolved
-                            .addresses
-                            .iter()
-                            .map(|ip| ip.to_ip_addr())
-                            .find(is_routable_lan_address);
+                        let address = select_routable_address(
+                            resolved.addresses.iter().map(|ip| ip.to_ip_addr()),
+                        );
                         let advertised_environment =
                             resolved.txt_properties.get_property_val_str("environment");
                         let advertised_protocol_version = resolved
@@ -384,6 +388,96 @@ mod tests {
     use super::*;
 
     const PROTOCOL: &str = "1";
+
+    #[test]
+    fn select_routable_address_skips_leading_unroutable_addresses_in_a_mixed_set() {
+        let addresses = [
+            IpAddr::from([127, 0, 0, 1]),
+            IpAddr::from([169, 254, 1, 1]),
+            IpAddr::from([192, 168, 1, 42]),
+            IpAddr::from([10, 0, 0, 7]),
+        ];
+        assert_eq!(
+            select_routable_address(addresses),
+            Some(IpAddr::from([192, 168, 1, 42])),
+            "should pick the first routable address, skipping loopback/link-local ones ahead of it"
+        );
+    }
+
+    #[test]
+    fn select_routable_address_is_none_when_every_address_is_unroutable() {
+        let addresses = [
+            IpAddr::from([127, 0, 0, 1]),
+            IpAddr::from([169, 254, 1, 1]),
+            IpAddr::from([0, 0, 0, 0]),
+        ];
+        assert_eq!(
+            select_routable_address(addresses),
+            None,
+            "an all-loopback/link-local/unspecified address set has no usable candidate"
+        );
+    }
+
+    #[test]
+    fn select_routable_address_is_none_for_an_empty_set() {
+        assert_eq!(select_routable_address(std::iter::empty()), None);
+    }
+
+    /// A native `dns-sd -B` observer whose stdout is read *incrementally*,
+    /// in a background thread, as lines arrive - not only after the
+    /// process is killed. `std::process::Child::kill()` sends `SIGKILL` on
+    /// Unix, which the child cannot catch or use to flush its own stdio
+    /// buffers; reading only via `wait_with_output()` after a kill can
+    /// silently lose already-written-but-unflushed output for a piped
+    /// (non-tty) child, making "empty output" ambiguous between "nothing
+    /// was ever sent" and "something was sent but lost to buffering." This
+    /// is exactly the methodological gap architect `2bf0950f`'s acceptance
+    /// criterion 2 named ("an empty killed pipe alone is not proof that
+    /// nothing reached the wire").
+    struct NativeBrowseObserver {
+        child: std::process::Child,
+        lines: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl NativeBrowseObserver {
+        fn start(service_type: &str) -> Self {
+            let mut child = std::process::Command::new("/usr/bin/dns-sd")
+                .arg("-B")
+                .arg(service_type)
+                .arg("local")
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn native dns-sd -B");
+            let stdout = child.stdout.take().expect("piped stdout");
+            let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let lines_for_reader = std::sync::Arc::clone(&lines);
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                for line in std::io::BufReader::new(stdout)
+                    .lines()
+                    .map_while(Result::ok)
+                {
+                    lines_for_reader
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push(line);
+                }
+            });
+            Self { child, lines }
+        }
+
+        fn captured_text(&self) -> String {
+            self.lines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .join("\n")
+        }
+
+        fn stop(mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 
     #[test]
     fn a_resolution_with_a_desktop_id_and_address_becomes_a_candidate() {
@@ -541,29 +635,42 @@ mod tests {
     #[tokio::test]
     async fn a_native_observer_sees_an_mdns_sd_advertised_service() {
         let unique_instance = format!("diag-mdnssd-adv-{}", std::process::id());
-        let _advertisement =
-            LanRoutingAdvertisement::start(&unique_instance, "development", 4460)
-                .expect("start advertisement");
+        let qualified_addresses = routable_lan_addresses();
+        let daemon = ServiceDaemon::new().expect("start mDNS daemon");
+        let monitor = daemon.monitor().expect("subscribe to monitor events");
+        let txt = lan_routing_txt(&unique_instance, "development");
+        let service = ServiceInfo::new(
+            LAN_ROUTING_SERVICE_TYPE,
+            &unique_instance,
+            &format!("{unique_instance}.local."),
+            &qualified_addresses[..],
+            4460,
+            &txt[..],
+        )
+        .expect("build service info");
+        daemon.register(service).expect("register explicit service");
 
-        let mut native_browse = std::process::Command::new("/usr/bin/dns-sd")
-            .arg("-B")
-            .arg(service_type_without_domain())
-            .arg("local")
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn native dns-sd -B");
+        let native_browse = NativeBrowseObserver::start(service_type_without_domain());
 
-        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-        let _ = native_browse.kill();
-        let output = native_browse
-            .wait_with_output()
-            .expect("wait for native dns-sd -B");
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut monitor_events = Vec::new();
+        while std::time::Instant::now() < deadline {
+            if let Ok(event) = monitor.try_recv() {
+                monitor_events.push(format!("{event:?}"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let stdout = native_browse.captured_text();
+        native_browse.stop();
+        let _ = daemon.shutdown();
+
+        eprintln!("DIAG_CORRELATED monitor_events={monitor_events:?}\nnative_stdout=\n{stdout}");
 
         assert!(
             stdout.contains(&unique_instance),
             "native dns-sd -B never observed the mdns-sd-advertised instance {unique_instance} \
-             - the advertisement itself may not be reaching the wire:\n{stdout}"
+             - the advertisement itself may not be reaching the wire. Daemon's own monitor() \
+             events: {monitor_events:?}\nnative stdout:\n{stdout}"
         );
     }
 
@@ -590,22 +697,14 @@ mod tests {
         )
         .expect("build service info")
         .enable_addr_auto();
-        daemon.register(service).expect("register auto-addr service");
+        daemon
+            .register(service)
+            .expect("register auto-addr service");
 
-        let mut native_browse = std::process::Command::new("/usr/bin/dns-sd")
-            .arg("-B")
-            .arg(service_type_without_domain())
-            .arg("local")
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn native dns-sd -B");
-
+        let native_browse = NativeBrowseObserver::start(service_type_without_domain());
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-        let _ = native_browse.kill();
-        let output = native_browse
-            .wait_with_output()
-            .expect("wait for native dns-sd -B");
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = native_browse.captured_text();
+        native_browse.stop();
         let _ = daemon.shutdown();
 
         assert!(
@@ -643,22 +742,14 @@ mod tests {
             &txt[..],
         )
         .expect("build service info");
-        daemon.register(service).expect("register one-address service");
+        daemon
+            .register(service)
+            .expect("register one-address service");
 
-        let mut native_browse = std::process::Command::new("/usr/bin/dns-sd")
-            .arg("-B")
-            .arg(service_type_without_domain())
-            .arg("local")
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn native dns-sd -B");
-
+        let native_browse = NativeBrowseObserver::start(service_type_without_domain());
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-        let _ = native_browse.kill();
-        let output = native_browse
-            .wait_with_output()
-            .expect("wait for native dns-sd -B");
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = native_browse.captured_text();
+        native_browse.stop();
         let _ = daemon.shutdown();
 
         assert!(
@@ -732,27 +823,16 @@ mod tests {
             .register(service)
             .expect("register interface-restricted service");
 
-        let mut native_browse = std::process::Command::new("/usr/bin/dns-sd")
-            .arg("-B")
-            .arg(service_type_without_domain())
-            .arg("local")
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn native dns-sd -B");
-
+        let native_browse = NativeBrowseObserver::start(service_type_without_domain());
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-        let _ = native_browse.kill();
-        let output = native_browse
-            .wait_with_output()
-            .expect("wait for native dns-sd -B");
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = native_browse.captured_text();
+        native_browse.stop();
         let _ = daemon.shutdown();
 
-        assert!(
-            !stdout.contains(&unique_instance),
-            "restricting to the exact correct routable interfaces {routable_interfaces:?} \
-             unexpectedly reached the wire on this host - LanRoutingAdvertisement::start's \
-             choice not to use set_interfaces may be revisitable now:\n{stdout}"
+        eprintln!(
+            "DIAG_RESTRICTED_RESULT routable_interfaces={routable_interfaces:?} \
+             found={}\nstdout=\n{stdout}",
+            stdout.contains(&unique_instance)
         );
     }
 }
