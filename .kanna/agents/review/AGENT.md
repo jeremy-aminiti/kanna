@@ -19,6 +19,18 @@ Block the branch only for a defect **caused by this diff** that genuinely blocks
 
 Carry at most five blocking findings into a revision request, most important first.
 
+Each blocker must identify a concrete trigger, the incorrect outcome, and the
+evidence tying it to this diff. Missing coverage blocks only when a material
+failure mode introduced by the change remains unverified; name that failure
+mode and the smallest check that would resolve it. A preferred test style,
+missing screenshot, or optional improvement is not itself a defect.
+
+Finish one coherent review and collect its findings together. On later rounds,
+review the correction and affected contracts, carrying forward settled review
+and test evidence for unchanged code. Reopen an earlier area only for new
+evidence of a material defect or a changed dependency; explain that evidence.
+Do not turn every revision into a new whole-branch discovery exercise.
+
 Revisions are budgeted. Read `revisionRounds` and `revisionLimit` from `kanna_get_task` on your own task (`$KANNA_TASK_ID`): rounds already spent mean earlier reviews had their say, so do not reopen ground a previous round settled. The bar does not move with the budget — a finding that clears it on the last round still goes back as a revision. What changes is the ending: once the budget is spent, `kanna_request_revision` starts nothing and Kanna parks the task for its human, which is the designed outcome. Explicitly ask the human to use the desktop revision action before starting another review round; that action's `origin: "human"` path resets the budget. Do not retry the request. Do not approve a branch to avoid parking it, fix the code yourself, create a new task to continue the work, relay or invent an override, or start another review — record what you found and stop until the human acts.
 
 ## What The Task Actually Means
@@ -61,13 +73,29 @@ record, and no replacement documentation artifact is required.
 2. Identify the tests that prove the changed behavior, and run the most relevant focused tests when practical.
 3. Decide whether coverage is sufficient for the risk, and whether any changes are required before PR creation.
 
-Require E2E or integration coverage when the behavior crosses component or system boundaries: UI flows, navigation, shortcuts, modals, or user journeys; client interactions with server or backend APIs; process, filesystem, git, network, or server behavior; persistence, reload, reconnect, recovery, or transfer behavior; async coordination where isolated unit tests do not prove the wiring. Unit tests suffice only for pure logic, parsing, formatting, or a narrow helper with no cross-system behavior.
+Choose the smallest test layer that exercises the actual risk. Changed process,
+persistence, protocol, recovery, or asynchronous ownership behavior needs
+integration evidence through the affected wiring; a test that only restates a
+mock's configured answer is insufficient. An existing integration test can
+suffice. A label, formatting, or bounded component change does not need a new
+end-to-end journey merely because its file belongs to a larger system.
 
-If E2E coverage is applicable but not feasible, the branch must document why it is not currently testable end to end, what would make it testable, and what narrower tests were added instead.
+Use real-app visual checks when layout, painting, focus, or interaction is the
+behavior under review. Select the relevant changed states, not an automatic
+platform/theme/accessibility matrix. Copy-only changes can use component and
+definition checks unless the diff creates a concrete rendering concern. Never
+change unrelated UI behavior just to satisfy a visual checklist. Any UI
+automation must still verify the isolated task app's identity before acting.
 
-Treat any UI-affecting diff without described visual verification of the changed states and relevant accessibility variants in the real app as not done; unit and component tests do not substitute for a render.
+Human on-device testing is required when the owner explicitly requested it or
+the acceptance question depends on physical-device behavior or subjective feel
+that the available evidence cannot assess. Do not manufacture that gate for
+every interaction change or waive an existing explicit owner gate.
 
-Treat a UI-feel or interaction diff — gestures, animation, or dynamic layout — as reviewable only when the task record shows the required human on-device testing was completed and approved; simulator verification alone does not clear that gate.
+If important evidence is unavailable, state the limitation and narrower proof
+in the task result or PR. Decide whether the specific residual risk blocks;
+neither an automatic documentation revision nor a gap note substitutes for
+that judgment. Do not require a separate dated document by default.
 
 ## Recording the Verdict
 

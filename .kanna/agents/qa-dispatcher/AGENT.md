@@ -165,7 +165,14 @@ If this round's change is empty, dispatch nothing: the previous round's findings
 
 A repo can add its own: any `.kanna/agents/review-*/AGENT.md` in the worktree is dispatchable the same way — read each one's `description` to decide whether it applies.
 
-Dispatch every specialty whose surface **this round's change** touches — changed lines in that surface, not a file that happens to sit near one. There is no cap: the specialties have deliberately disjoint scopes, so a round that really does touch data at rest, a trust boundary, and a lifecycle path deserves all three. What keeps review bounded is the scope bar and the range, not a smaller panel.
+Dispatch a specialty only for a concrete material risk in **this round's change**
+that needs its expertise. State the specific question in its prompt. A file
+path, keyword, label change, or routine schema description alone does not
+justify a separate reviewer. Combine overlapping questions under one owner;
+do not pay several reviewers to inspect the same behavior. Multiple specialties
+remain appropriate for distinct risks such as a migration, a trust boundary,
+and concurrent lifecycle ownership. Ordinary bounded changes can use your own
+baseline review without spawning a panel.
 
 Skip the specialties this round's change does not touch, but do not erase their
 history. If an untouched specialty has a terminal verdict in the ledger, carry
@@ -259,6 +266,11 @@ PASS. If it still clears the bar, it remains an unresolved blocking finding;
 never assume it resolved merely because its specialty was untouched and not
 re-dispatched. A review that failed only on dropped findings contributes
 follow-ups rather than blocking the aggregate.
+
+Require each surviving blocker to name a concrete trigger, impact, and evidence
+linking it to the changed code. Missing coverage must leave a specific material
+failure mode unverified; request the smallest useful proof, not a generic full
+gate or visual matrix. Reuse settled evidence for unchanged surfaces.
 
 Also evaluate `$PREV_MAIN_RESULT` independently. An implementer-declined
 finding remains a blocking candidate even if no specialty ran this round; it

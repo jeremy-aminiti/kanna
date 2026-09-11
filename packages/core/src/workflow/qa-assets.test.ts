@@ -499,11 +499,9 @@ describe("QA workflow assets", () => {
   it("gates specialty dispatch on the surfaces the round actually changes", () => {
     const dispatcher = readRepoPhrases(".kanna/agents/qa-dispatcher/AGENT.md");
 
-    // Relevance, not a headcount: the specialties have disjoint scopes, so a
-    // change that touches several genuinely needs several reviewers. Scope is
-    // held by the bar every reviewer works to and by the round budget.
-    expect(dispatcher).toContain("Dispatch every specialty whose surface **this round's change** touches");
-    expect(dispatcher).toContain("There is no cap");
+    // Dispatch answers concrete risk questions, not every matching file path.
+    expect(dispatcher).toContain("Dispatch a specialty only for a concrete material risk");
+    expect(dispatcher).toContain("Combine overlapping questions under one owner");
     expect(dispatcher).toContain("Skip the specialties this round's change does not touch");
     expect(dispatcher).toContain("### 5. Filter the findings");
     expect(dispatcher).toContain("Do not create follow-up tasks");
