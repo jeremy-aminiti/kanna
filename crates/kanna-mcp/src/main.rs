@@ -457,9 +457,9 @@ struct MachineInvokeResponse {
     body: Option<Value>,
     error: Option<String>,
     /// "local" | "lan" | "relay", reported by servers new enough to know
-    /// which transport actually served the call. `None` for an older server
-    /// - callers must not read that as "not relay" or "not local", only as
-    /// "this server predates route reporting".
+    /// which transport actually served the call. `None` for an older
+    /// server, and callers must not read that as "not relay" or "not
+    /// local," only as "this server predates route reporting."
     #[serde(default)]
     route: Option<String>,
 }

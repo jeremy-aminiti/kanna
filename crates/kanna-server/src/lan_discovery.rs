@@ -598,8 +598,18 @@ mod tests {
     /// conclusion this one run cannot by itself support. Must run in
     /// isolation: `cargo test -p kanna-server --bin kanna-server -- \
     /// --exact lan_discovery::tests::matched_single_interface_explicit_vs_auto_publish_comparison \
-    /// --nocapture`.
+    /// --ignored --nocapture` (`--ignored` is required now that this test
+    /// is itself `#[ignore]`d). `#[ignore]`d for exactly that reason: cargo's default
+    /// test run executes tests concurrently within one process, and this
+    /// test's `log::set_logger` call is process-global - confirmed to
+    /// actually corrupt sibling tests when left unignored, not just a
+    /// theoretical risk: `relay.rs`'s own `start_test_log_capture` (a
+    /// different, unrelated test-only logger) failed with
+    /// `SetLoggerError(())` the one time this ran as part of the default
+    /// sweep, because this test's logger had already claimed the single
+    /// global slot.
     #[tokio::test]
+    #[ignore = "installs a process-global logger; run explicitly and alone, see doc comment"]
     async fn matched_single_interface_explicit_vs_auto_publish_comparison() {
         let Some((if_name, if_addr)) = if_addrs::get_if_addrs().ok().and_then(|interfaces| {
             interfaces.into_iter().find_map(|interface| {

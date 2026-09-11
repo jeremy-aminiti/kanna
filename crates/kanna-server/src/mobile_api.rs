@@ -2625,6 +2625,7 @@ mod tests {
             lan_host: "0.0.0.0".to_string(),
             lan_port: 48120,
             transfer_port: 4455,
+            lan_routing_port: 4460,
             activity_event_debounce_seconds: 300,
             pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
         };

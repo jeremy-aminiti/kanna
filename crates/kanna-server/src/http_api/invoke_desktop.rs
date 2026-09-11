@@ -161,23 +161,41 @@ pub(crate) fn eligible_lan_desktop_ids(state: &Arc<AppState>) -> Vec<String> {
 /// The shared merge every list/wait/stats/signal fan-out consumer needs:
 /// relay's own active-desktop listing, extended unconditionally with
 /// [`eligible_lan_desktop_ids`] so a trusted discovered LAN peer is never
-/// dropped merely because relay happens to be unavailable - sorted and
-/// deduplicated. The relay listing's own error, if any, is returned
-/// alongside rather than folded away: some consumers must still surface it as
-/// their own outage dimension (`cloud_desktops`'s `relay_available`/`error`,
-/// `machine_stats`'s `machine_errors`), and one (`signal_agent`'s singleton
-/// resolution) must fail closed on it when the merged id list is also empty,
-/// so no caller can be made silently to swallow a real relay fault.
+/// dropped merely because relay happens to be unavailable. The relay
+/// listing's own error, if any, is returned alongside rather than folded
+/// away: some consumers must still surface it as their own outage dimension
+/// (`cloud_desktops`'s `relay_available`/`error`, `machine_stats`'s
+/// `machine_errors`), and one (`signal_agent`'s singleton resolution) must
+/// fail closed on it when the merged id list is also empty, so no caller can
+/// be made silently to swallow a real relay fault.
+///
+/// Relay's own ordering is preserved rather than globally re-sorted:
+/// `tasks::get_all_machines_tasks` merges each machine's own already-sorted
+/// task page into one global order matching relay's own machine order, so
+/// alphabetically resorting the id list here would silently scramble that
+/// merge's stability - a real regression this exact change once caused (see
+/// `core_routes::get_tasks_all_machines_merges_successful_peers_with_stable_global_sorting`).
+/// Only the LAN-only ids relay never listed are appended, sorted just among
+/// themselves for determinism, since discovery order is not itself
+/// meaningful. Deduplication still applies across the whole result.
 pub(crate) async fn relay_and_lan_desktop_ids(
     state: &Arc<AppState>,
 ) -> (Vec<String>, Option<String>) {
-    let (mut ids, error) = match state.list_active_relay_desktops().await {
+    let (relay_ids, error) = match state.list_active_relay_desktops().await {
         Ok(ids) => (ids, None),
         Err(error) => (Vec::new(), Some(error)),
     };
-    ids.extend(eligible_lan_desktop_ids(state));
-    ids.sort();
-    ids.dedup();
+    let mut seen = std::collections::HashSet::new();
+    let mut ids: Vec<String> = relay_ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+    let mut lan_only: Vec<String> = eligible_lan_desktop_ids(state)
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+    lan_only.sort();
+    ids.extend(lan_only);
     (ids, error)
 }
 
