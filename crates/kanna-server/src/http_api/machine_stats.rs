@@ -429,23 +429,25 @@ async fn cached_compact_local_stats(state: &Arc<AppState>) -> CompactMachineStat
 
 fn gather_local_compact_stats(state: &AppState) -> CompactMachineStats {
     let load = System::load_average();
-    let mut errors = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let load_averages = compact_load_averages(load.five, load.fifteen, &mut errors);
     let available_memory_bytes = match native::memory() {
         Ok(memory) => Some(memory.available_bytes),
-        Err(error) => {
-            errors.push(format!("memory unavailable: {error}"));
+        Err(_) => {
+            errors.push("memory unavailable: local collector failed".into());
             None
         }
     };
     let free_disk_bytes = match Db::open(&state.config.db_path) {
         Ok(db) => {
-            let storage = storage::collect(&db, &mut errors);
+            // Detailed storage errors contain a path-by-path inventory. Compact
+            // callers only need to know whether a usable measurement exists.
+            let mut storage_errors = Vec::new();
+            let storage = storage::collect(&db, &mut storage_errors);
             storage::least_available_bytes(&storage)
         }
-        Err(error) => {
-            errors.push(format!(
-                "disk unavailable: database could not be opened: {error}"
-            ));
+        Err(_) => {
+            errors.push("disk unavailable: database could not be opened".into());
             None
         }
     };
@@ -459,10 +461,7 @@ fn gather_local_compact_stats(state: &AppState) -> CompactMachineStats {
     compact_errors(&mut errors);
     CompactMachineStats {
         machine_id: state.config.desktop_id.clone(),
-        load_averages: CompactLoadAverages {
-            five: load.five.is_finite().then_some(load.five),
-            fifteen: load.fifteen.is_finite().then_some(load.fifteen),
-        },
+        load_averages,
         available_memory_bytes,
         free_disk_bytes,
         errors,
@@ -591,8 +590,15 @@ fn decode_remote_compact(
 }
 
 fn compact_from_detailed(machine: MachineStats) -> CompactMachineStats {
-    let mut errors = machine.collection_errors.unwrap_or_default();
-    errors.extend(machine.memory.collection_errors.clone().unwrap_or_default());
+    // Detailed collection errors describe CPU sampling, process enumeration,
+    // topology, and individual storage paths. None are compact-field errors by
+    // themselves, so derive compact availability solely from the compact data.
+    let mut errors = Vec::new();
+    let load_averages = compact_load_averages(
+        machine.load_averages.five,
+        machine.load_averages.fifteen,
+        &mut errors,
+    );
     let free_disk_bytes = machine
         .storage
         .as_deref()
@@ -603,22 +609,29 @@ fn compact_from_detailed(machine: MachineStats) -> CompactMachineStats {
     compact_errors(&mut errors);
     CompactMachineStats {
         machine_id: machine.machine_id,
-        load_averages: CompactLoadAverages {
-            five: machine
-                .load_averages
-                .five
-                .is_finite()
-                .then_some(machine.load_averages.five),
-            fifteen: machine
-                .load_averages
-                .fifteen
-                .is_finite()
-                .then_some(machine.load_averages.fifteen),
-        },
+        load_averages,
         available_memory_bytes: Some(machine.memory.available_bytes),
         free_disk_bytes,
         errors,
     }
+}
+
+fn compact_load_averages(five: f64, fifteen: f64, errors: &mut Vec<String>) -> CompactLoadAverages {
+    let five = five.is_finite().then_some(five);
+    let fifteen = fifteen.is_finite().then_some(fifteen);
+    match (five.is_none(), fifteen.is_none()) {
+        (true, true) => {
+            errors.push("load unavailable: 5- and 15-minute averages could not be measured".into())
+        }
+        (true, false) => {
+            errors.push("load unavailable: 5-minute average could not be measured".into())
+        }
+        (false, true) => {
+            errors.push("load unavailable: 15-minute average could not be measured".into())
+        }
+        (false, false) => {}
+    }
+    CompactLoadAverages { five, fifteen }
 }
 
 fn compact_errors(errors: &mut Vec<String>) {

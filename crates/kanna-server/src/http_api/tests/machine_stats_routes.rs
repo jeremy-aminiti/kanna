@@ -2,6 +2,227 @@ use super::*;
 use crate::http_api::state::DesktopRelayRequest;
 use serde_json::{json, Value};
 
+#[tokio::test]
+async fn compact_local_disk_unavailability_is_concise_and_hides_database_path() {
+    let marker = "compact-private-database-path";
+    let mut state = (*test_state_with_seed("stats-disk-failure", "Disk failure", |_| {})).clone();
+    let invalid_db = tempfile::Builder::new().prefix(marker).tempdir().unwrap();
+    state.config.db_path = invalid_db.path().to_string_lossy().into_owned(); // directory, not SQLite
+    let app = router(Arc::new(state));
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/machine-stats?localOnly=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Value = from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(body["machines"][0]["freeDiskBytes"].is_null(), "{body}");
+    assert_eq!(
+        body["machines"][0]["errors"],
+        json!(["disk unavailable: database could not be opened"])
+    );
+    assert!(!body.to_string().contains(marker), "{body}");
+}
+
+#[tokio::test]
+async fn compact_local_stats_do_not_expose_failed_storage_paths() {
+    let marker = "compact-private-storage-path";
+    let state = test_state_with_seed("stats-storage-filter", "Storage filter", |db| {
+        db.insert_test_repo_with_path("broken-storage", &format!("/{marker}\0/repo"), "Broken")
+            .unwrap();
+    });
+    let app = router(state);
+
+    let compact = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/machine-stats?localOnly=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let compact: Value = from_slice(
+        &axum::body::to_bytes(compact.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        compact["machines"][0]["freeDiskBytes"].is_u64(),
+        "{compact}"
+    );
+    assert!(compact["machines"][0].get("errors").is_none(), "{compact}");
+    assert!(!compact.to_string().contains(marker), "{compact}");
+
+    let detailed = app
+        .oneshot(
+            Request::get("/v1/machine-stats?localOnly=true&detailed=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let detailed: Value = from_slice(
+        &axum::body::to_bytes(detailed.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        detailed["machines"][0]["collectionErrors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().is_some_and(|error| error.contains(marker))),
+        "{detailed}"
+    );
+}
+
+#[tokio::test]
+async fn compact_legacy_remote_filters_detailed_diagnostics_but_detailed_retains_them() {
+    let state = test_state_with_seed("stats-aggregate", "Aggregate", |_| {});
+    let mut requests = state.take_desktop_relay_requests().unwrap();
+    state.set_desktop_routing_available(true);
+    let remote_body = json!({
+        "machines": [{
+            "machineId": "stats-legacy-peer",
+            "loadAverages": {"one": 1.0, "five": 2.0, "fifteen": 3.0},
+            "cpuCoreCount": 8,
+            "memory": {
+                "totalBytes": 1000, "usedBytes": 600, "freeBytes": 300,
+                "availableBytes": 400,
+                "collectionErrors": ["memory pressure probe returned an unsupported diagnostic"]
+            },
+            "heavyProcessCount": 1,
+            "heavyProcesses": {"cargo": 1},
+            "busyTaskCount": 0,
+            "cpu": {
+                "busyPercent": 50.0, "idlePercent": 50.0, "userPercent": 30.0,
+                "systemPercent": 20.0, "sampleStartedAt": 1, "sampledAt": 501,
+                "sampleWindowMs": 500, "source": "legacy-cpu"
+            },
+            "processes": {
+                "topProcesses": [{
+                    "pid": 42, "parentPid": 1, "name": "cargo",
+                    "cpuPercent": 50.0, "sampleWindowMs": 500, "residentBytes": 1234
+                }],
+                "observedProcessCount": 1, "sampledProcessCount": 1,
+                "unavailableProcessCount": 0, "truncated": false
+            },
+            "storage": [],
+            "collectionErrors": [
+                "CPU topology unavailable",
+                "process enumeration failed",
+                "storage repo /private/work/repo: permission denied"
+            ]
+        }],
+        "machineErrors": []
+    });
+    let relay_body = remote_body.clone();
+    let relay = tokio::spawn(async move {
+        for expected_path in [
+            "/v1/machine-stats?localOnly=true",
+            "/v1/machine-stats?localOnly=true&detailed=true",
+        ] {
+            let DesktopRelayRequest::ListActive { response, .. } = requests.recv().await.unwrap()
+            else {
+                panic!("expected listing")
+            };
+            response.send(Ok(vec!["stats-legacy-peer".into()])).unwrap();
+            let DesktopRelayRequest::Invoke { path, response, .. } = requests.recv().await.unwrap()
+            else {
+                panic!("expected invoke")
+            };
+            assert_eq!(path, expected_path);
+            response
+                .send(Ok(crate::http_api::HttpInvokeResponse {
+                    status: 200,
+                    body: Some(relay_body.clone()),
+                    error: None,
+                }))
+                .unwrap();
+        }
+    });
+    let app = router(state);
+
+    let compact = app
+        .clone()
+        .oneshot(
+            Request::get("/v1/machine-stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let compact: Value = from_slice(
+        &axum::body::to_bytes(compact.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let compact_peer = compact["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|machine| machine["machineId"] == "stats-legacy-peer")
+        .unwrap();
+    assert!(compact_peer["freeDiskBytes"].is_null(), "{compact}");
+    assert_eq!(
+        compact_peer["errors"],
+        json!(["disk unavailable: peer returned no storage measurement"])
+    );
+    assert!(compact_peer.get("cpu").is_none(), "{compact}");
+    assert!(compact_peer.get("processes").is_none(), "{compact}");
+    assert!(
+        !compact.to_string().contains("/private/work/repo"),
+        "{compact}"
+    );
+
+    let detailed = app
+        .oneshot(
+            Request::get("/v1/machine-stats?detailed=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let detailed: Value = from_slice(
+        &axum::body::to_bytes(detailed.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    relay.await.unwrap();
+    let detailed_peer = detailed["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|machine| machine["machineId"] == "stats-legacy-peer")
+        .unwrap();
+    assert_eq!(detailed_peer["cpu"]["source"], "legacy-cpu");
+    assert_eq!(
+        detailed_peer["processes"]["topProcesses"][0]["name"],
+        "cargo"
+    );
+    assert!(
+        detailed_peer["collectionErrors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "storage repo /private/work/repo: permission denied"),
+        "{detailed}"
+    );
+}
+
 // Real listener -> auth middleware -> aggregate handler -> relay invoke boundary
 // -> sibling router -> native two-point sampler. A broken local collector must
 // not erase the sibling's CPU sample.
