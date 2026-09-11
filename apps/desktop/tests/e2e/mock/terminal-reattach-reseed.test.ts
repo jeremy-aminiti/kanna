@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -12,8 +13,14 @@ import { dismissStartupShortcutsModal } from "../helpers/startupOverlays";
 import { cleanupWorktrees, importTestRepoDirect, resetDatabase } from "../helpers/reset";
 import { callVueMethod, execDb, tauriInvoke } from "../helpers/vue";
 import { WebDriverClient } from "../helpers/webdriver";
+import { assertNativeWindowIdentity, resolveExpectedNativeWindowIdentity, type ExpectedNativeWindowIdentity } from "../helpers/windowIdentity";
 
 const execFileAsync = promisify(execFile);
+let expectedIdentity: ExpectedNativeWindowIdentity;
+
+async function verifyWindow(client: WebDriverClient, label: string): Promise<void> {
+  await assertNativeWindowIdentity(client, expectedIdentity, `terminal fidelity ${label}`);
+}
 
 interface SessionRecoveryStatePayload {
   serialized: string;
@@ -203,6 +210,7 @@ async function paintedRows(client: WebDriverClient, sessionId: string): Promise<
 }
 
 async function scrollToOldestRows(client: WebDriverClient, sessionId: string): Promise<void> {
+  await verifyWindow(client, "before scroll");
   await client.executeSync(
     `const el = window.__KANNA_E2E__.terminalBuffers.element(${JSON.stringify(sessionId)});
      const viewport = el.querySelector(".xterm-scrollable-element");
@@ -226,6 +234,7 @@ function expectSubmittedRows(lines: string[], message: string, response: string)
 // for a task inserted straight into the database only exists once the store
 // has refreshed. Keep asking until this task owns the terminal view.
 async function selectTask(client: WebDriverClient, taskId: string): Promise<void> {
+  await verifyWindow(client, "before task switch");
   const deadline = Date.now() + 45_000;
   let latest: unknown = null;
   while (Date.now() < deadline) {
@@ -241,7 +250,10 @@ async function selectTask(client: WebDriverClient, taskId: string): Promise<void
       latest = await client.executeSync(
         "return window.__KANNA_E2E__.setupState.store.selectedTaskId ?? null;",
       );
-      if (latest === taskId) return;
+      if (latest === taskId) {
+        await verifyWindow(client, "after task switch");
+        return;
+      }
     } else {
       latest = result;
     }
@@ -270,10 +282,13 @@ describe("terminal re-attach re-seed", () => {
   const sessionIds: string[] = [];
 
   beforeAll(async () => {
-    await client.createSession();
+    expectedIdentity = await resolveExpectedNativeWindowIdentity(fileURLToPath(new URL("../../../../../", import.meta.url)));
+    await client.createSession({ dismissStartupShortcuts: false });
+    await verifyWindow(client, "session connected");
     await resetDatabase(client);
     await client.executeSync(RELOAD_APP_SCRIPT);
     await client.waitForAppReady();
+    await verifyWindow(client, "after reload");
     await dismissStartupShortcutsModal(client);
     fixtureRepoPath = await createFixtureRepo("terminal-reattach-reseed");
     repoId = await importTestRepoDirect(client, fixtureRepoPath, "Terminal re-attach re-seed");
@@ -321,6 +336,7 @@ describe("terminal re-attach re-seed", () => {
     // Keep a desktop-sized CSS viewport on Retina too; 1280 physical pixels
     // puts the app into its narrow layout and leaves the terminal hidden.
     const scale = await client.executeSync<number>("return window.devicePixelRatio;");
+    await verifyWindow(client, "before window resize");
     await client.setWindowRect({ width: 1280 * scale, height: 900 * scale });
     await expect.poll(() => client.executeSync<number>("return innerWidth;"), {
       timeout: 30_000,
@@ -376,6 +392,7 @@ describe("terminal re-attach re-seed", () => {
     async function evidence(state: string): Promise<void> {
       if (!evidenceDir) return;
       await mkdir(evidenceDir, { recursive: true });
+      await verifyWindow(client, "before capture");
       await client.screenshot(join(evidenceDir, `terminal-su-${label}-${state}.png`));
     }
     await evidence("before-scroll");
@@ -427,6 +444,7 @@ describe("terminal re-attach re-seed", () => {
         sessionId, awayId, grid, disabled, live, retained, returned,
         painted: await paintedRows(client, sessionId),
         build: await client.getAppBuildInfo(),
+        nativeTitle: await client.getNativeWindowTitle(),
         reducedMotion: await client.executeSync("return matchMedia('(prefers-reduced-motion: reduce)').matches;"),
       }, null, 2));
     }
@@ -495,6 +513,7 @@ describe("terminal re-attach re-seed", () => {
 
     await queueUnparsedOutput(client, sessionId, 10_000);
     const replacement = await replaceDaemon(client);
+    await verifyWindow(client, "after daemon reconnect");
     expect(replacement.successor).not.toBe(replacement.incumbent);
 
     // Quiesce, then change exactly one row. Every other frame row predates the
@@ -528,6 +547,7 @@ describe("terminal re-attach re-seed", () => {
         `window.__KANNA_E2E__?.terminalBuffers?.refresh(${JSON.stringify(sessionId)});`,
       );
       await sleep(400);
+      await verifyWindow(client, "before capture");
       await client.screenshot(join(evidenceDir, `terminal-reattach-reseed-${agentProvider}.png`));
     }
   });
