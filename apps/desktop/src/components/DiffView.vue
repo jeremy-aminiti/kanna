@@ -58,6 +58,8 @@ interface ActiveDiffScrollAnchor {
 interface LoadDiffOptions {
   preserveCurrentScroll?: boolean;
   scrollAnchor?: DiffScrollAnchor | null;
+  preserveViewStateIfUnchanged?: boolean;
+  restoreSavedScrollIfUnchanged?: boolean;
 }
 
 const workingFilterOrder: WorkingFilter[] = ["all", "unstaged", "staged"];
@@ -133,6 +135,10 @@ let activeDiffLoadId = 0;
 let openViewGeneration = 0;
 let scrollRestorePendingLoadId = 0;
 let activeDiffScrollAnchor: ActiveDiffScrollAnchor | null = null;
+let diffRenderIdentity = 0;
+let renderedDiffSnapshot: { identity: number; patch: string; truncated: boolean } | null = null;
+let branchRefreshPending = false;
+let branchRefreshQueuedWhileHidden = false;
 let applySearchHighlightsFromSearch = () => {};
 
 const {
@@ -396,6 +402,9 @@ function openView(): Promise<void> {
 }
 
 async function loadDiff(options: LoadDiffOptions = {}) {
+  const renderIdentity = options.preserveViewStateIfUnchanged
+    ? diffRenderIdentity
+    : ++diffRenderIdentity;
   const scrollAnchor = options.scrollAnchor === undefined
     && options.preserveCurrentScroll !== false
     && allLines.value
@@ -405,7 +414,9 @@ async function loadDiff(options: LoadDiffOptions = {}) {
     saveCurrentScrollPosition();
   }
   emit("scope-change", scope.value);
-  closeSearch();
+  if (!options.preserveViewStateIfUnchanged) {
+    closeSearch();
+  }
   const path = props.worktreePath || props.repoPath;
   const loadId = ++nextDiffLoadId;
   activeDiffLoadId = loadId;
@@ -501,6 +512,30 @@ async function loadDiff(options: LoadDiffOptions = {}) {
     if (!isActiveDiffLoad(loadId)) {
       return;
     }
+
+    if (
+      options.preserveViewStateIfUnchanged
+      && renderedDiffSnapshot?.identity === renderIdentity
+      && renderedDiffSnapshot.patch === patch
+      && renderedDiffSnapshot.truncated === truncated
+    ) {
+      error.value = null;
+      noDiff.value = !patch?.trim() && !truncated;
+      diffTruncated.value = truncated;
+      scrollRestorePendingLoadId = 0;
+      clearScrollAnchorForLoad(loadId);
+      if (options.restoreSavedScrollIfUnchanged) {
+        restoreScrollPosition();
+      }
+      logDiffPerf(loadId, "unchanged", {
+        totalMs: roundDuration(performance.now() - loadStartedAt),
+      });
+      return;
+    }
+
+    if (options.preserveViewStateIfUnchanged) {
+      closeSearch();
+    }
     diffTruncated.value = truncated;
 
     if (!patch?.trim() && !truncated) {
@@ -508,6 +543,7 @@ async function loadDiff(options: LoadDiffOptions = {}) {
       diffContent.value = "";
       renderedFiles.value = [];
       cleanupInstance();
+      renderedDiffSnapshot = { identity: renderIdentity, patch, truncated };
       scrollRestorePendingLoadId = 0;
       clearScrollAnchorForLoad(loadId);
       logDiffPerf(loadId, "empty", {
@@ -527,6 +563,7 @@ async function loadDiff(options: LoadDiffOptions = {}) {
     if (!isActiveDiffLoad(loadId)) {
       return;
     }
+    renderedDiffSnapshot = { identity: renderIdentity, patch, truncated };
     if (!restoreScrollAnchorForActiveLoad(renderContext)) {
       restoreScrollPosition();
     }
@@ -613,10 +650,43 @@ function toggleContextLines() {
   void loadDiff({ preserveCurrentScroll: false, scrollAnchor });
 }
 
-function refreshBranchDiffOnWindowFocus() {
-  if (scope.value !== "branch" || loading.value) return;
-  void loadDiff({ preserveCurrentScroll: true });
+function flushPendingBranchRefresh() {
+  if (
+    !branchRefreshPending
+    || !(props.isForeground?.() ?? true)
+    || scope.value !== "branch"
+  ) return;
+
+  const restoreSavedScroll = branchRefreshQueuedWhileHidden;
+  branchRefreshPending = false;
+  branchRefreshQueuedWhileHidden = false;
+  void loadDiff({
+    // A hidden v-show scroller can report zero in native WebKit. Its emitted
+    // per-scope position remains authoritative until the view is visible.
+    preserveCurrentScroll: !restoreSavedScroll,
+    preserveViewStateIfUnchanged: true,
+    restoreSavedScrollIfUnchanged: restoreSavedScroll,
+  });
 }
+
+function refreshBranchDiffOnWindowFocus() {
+  if (scope.value !== "branch") return;
+  // Hidden tabs retain their rendered tree, so remember this freshness signal
+  // until the reader returns. The subsequent content comparison avoids a DOM
+  // rebuild (and preserves search/scroll state) when Git returns the same patch.
+  branchRefreshPending = true;
+  if (!(props.isForeground?.() ?? true)) {
+    branchRefreshQueuedWhileHidden = true;
+  }
+  flushPendingBranchRefresh();
+}
+
+watch(
+  () => props.isForeground?.() ?? true,
+  (foreground) => {
+    if (foreground) flushPendingBranchRefresh();
+  },
+);
 
 function handleScroll() {
   if (loading.value || scrollRestorePendingLoadId === activeDiffLoadId) return;

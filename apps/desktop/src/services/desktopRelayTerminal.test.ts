@@ -750,12 +750,16 @@ describe("createDesktopRelayTerminalClient", () => {
       taskId: "owner-task",
       request: { scope: "working", mode: "staged" },
     });
+    const graphPromise = client.readTaskGraph({
+      desktopId: "desktop-owner", taskId: "owner-task", request: { fromRef: "HEAD" },
+    });
 
     await openRelayTunnel(socket);
     socket.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
     await vi.waitFor(() => {
       expect(socket.sent.some((entry) => entry.includes("/browse?"))).toBe(true);
       expect(socket.sent.some((entry) => entry.includes("/diff?"))).toBe(true);
+      expect(socket.sent.some((entry) => entry.includes("/graph"))).toBe(true);
     });
 
     const firstRequests = socket.sent.map((entry) => JSON.parse(entry));
@@ -767,6 +771,8 @@ describe("createDesktopRelayTerminalClient", () => {
     );
     expect(firstDirectory).toMatchObject({ type: "request", method: "GET", body: null });
     expect(diff).toMatchObject({ type: "request", method: "GET", body: null });
+    const graph = firstRequests.find((entry) => entry.path === "/v1/tasks/owner-task/graph?fromRef=HEAD");
+    expect(graph).toMatchObject({ type: "request", method: "GET", body: null });
 
     socket.onmessage?.({
       data: JSON.stringify({
@@ -781,6 +787,13 @@ describe("createDesktopRelayTerminalClient", () => {
           totalEntries: 2,
         },
       }),
+    });
+    socket.onmessage?.({
+      data: JSON.stringify({ type: "response", id: graph.id, status: 200, body: {
+        taskId: "owner-task", headCommit: "abc123", commits: [
+          { hash: "abc123", shortHash: "abc123", message: "remote graph", author: "Owner", timestamp: 1, parents: [], refs: ["main"] },
+        ],
+      } }),
     });
     socket.onmessage?.({
       data: JSON.stringify({
@@ -828,6 +841,7 @@ describe("createDesktopRelayTerminalClient", () => {
       totalEntries: 2,
     });
     await expect(diffPromise).resolves.toMatchObject({ taskId: "owner-task", patch: "remote patch" });
+    await expect(graphPromise).resolves.toMatchObject({ headCommit: "abc123" });
   });
 
   it("rejects a blocked owner response with its message", async () => {

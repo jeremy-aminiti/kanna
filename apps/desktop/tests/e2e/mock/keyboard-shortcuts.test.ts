@@ -1275,6 +1275,34 @@ describe("keyboard shortcuts", () => {
     await client.waitForNoElement(".picker-modal", 2000);
   });
 
+  it("opens the file picker from a local repository with no selected task", async () => {
+    const repoId = await importRepoWithoutSetupTask(testRepoPath, "keyboard-file-picker-repo-only");
+    await client.executeSync(
+      `${CTX_SCRIPT}.showShortcutsModal = false;
+       ${CTX_SCRIPT}.showFilePickerModal = false;
+       for (const tab of [...(${CTX_SCRIPT}.mainTabs?.tabs?.value ?? [])]) {
+         if (tab.kind === "file") ${CTX_SCRIPT}.mainTabs.closeTab(tab.id);
+       }`,
+    );
+
+    const selectionResult = await client.executeAsync<string>(
+      `const cb = arguments[arguments.length - 1];
+       const ctx = ${CTX_SCRIPT};
+       Promise.resolve(ctx.refreshAllItems())
+         .then(function() { return ctx.store.selectRepo(${JSON.stringify(repoId)}); })
+         .then(function() { cb("ok"); })
+         .catch(function(e) { cb("err:" + (e && e.message ? e.message : e)); });`,
+    );
+    expect(selectionResult).toBe("ok");
+    await waitForSelection({ repoId });
+
+    await pressKey("p", { meta: true });
+    await client.waitForElement(".picker-modal", 2000);
+
+    await client.executeSync(`${CTX_SCRIPT}.showFilePickerModal = false;`);
+    await client.waitForNoElement(".picker-modal", 2000);
+  });
+
   it("does not reserve Command+Z while keeping Undo Close in the command palette", async () => {
     await client.executeSync(
       `${CTX_SCRIPT}.showCommandPalette = false;

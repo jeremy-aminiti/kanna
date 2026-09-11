@@ -38,6 +38,7 @@ mod task_blockers;
 mod task_diff;
 mod task_events;
 mod task_files;
+mod task_graph;
 mod task_input;
 mod task_logs;
 mod task_ports;
@@ -118,5 +119,5 @@ pub(crate) use task_input::{
 #[cfg(test)]
 pub(crate) use test_support::{
     test_router, test_state_with_daemon_dir, test_state_with_daemon_dir_and_debounce,
-    test_state_with_seed,
+    test_state_with_seed, wait_for_task_mutation_to_finish,
 };

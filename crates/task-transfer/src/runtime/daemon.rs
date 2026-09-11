@@ -411,6 +411,21 @@ pub(super) async fn read_owner_task_diff(
     .await
 }
 
+pub(super) async fn read_owner_task_graph(
+    context: &ListenerContext,
+    task_id: &str,
+    from_ref: Option<&str>,
+) -> Result<serde_json::Value, RuntimeError> {
+    let port = context
+        .kanna_server_port
+        .ok_or_else(|| RuntimeError::Protocol("Kanna server port is not configured".into()))?;
+    let suffix = from_ref.map_or_else(
+        || "graph".to_string(),
+        |from_ref| format!("graph?fromRef={}", percent_encode_query_value(from_ref)),
+    );
+    get_local_kanna_task_json(port, task_id, &suffix, "task graph").await
+}
+
 fn percent_encode_query_value(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {

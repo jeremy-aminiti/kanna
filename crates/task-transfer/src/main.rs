@@ -1118,6 +1118,18 @@ async fn handle_request(
             Ok(diff) => ControlResponse::ReadPeerTaskDiff { request_id, diff },
             Err(error) => control_error(request_id, error),
         },
+        ControlRequest::ReadPeerTaskGraph {
+            request_id,
+            target_peer_id,
+            task_id,
+            from_ref,
+        } => match runtime
+            .read_peer_task_graph(&target_peer_id, &task_id, from_ref.as_deref())
+            .await
+        {
+            Ok(graph) => ControlResponse::ReadPeerTaskGraph { request_id, graph },
+            Err(error) => control_error(request_id, error),
+        },
         ControlRequest::MarkPeerTaskRead {
             request_id,
             target_peer_id,

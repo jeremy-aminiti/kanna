@@ -1,7 +1,9 @@
 import type {
   DesktopMode,
   DesktopSummary,
+  HumanReviewDecision,
   TaskActivity,
+  TaskReviewContext,
   TaskSummary,
   RepoSummary,
   RepoCommandCatalog,
@@ -188,6 +190,21 @@ export interface SessionState {
   searchQuery: string;
   searchResults: TaskSummary[];
   selectedTaskId: string | null;
+  /**
+   * The selected task's pull-request review identity and latest human merge
+   * decision, when task detail has reported them.
+   *
+   * Kept as its own field rather than folded into `TaskSummary` because it is
+   * detail-only: it comes from `getTask`, is meaningful for exactly one task
+   * at a time, and must never be inherited by a neighbouring row in a list.
+   * `taskId` is what makes a stale read visible — a payload for a task that is
+   * no longer selected is ignored rather than shown against the wrong PR.
+   */
+  selectedTaskReviewState: {
+    taskId: string;
+    reviewContext: TaskReviewContext | null;
+    humanReviewDecision: HumanReviewDecision | null;
+  } | null;
   pendingTaskAction: PendingTaskAction | null;
   activeView: MobileView;
   pairingCode: string | null;
@@ -375,6 +392,9 @@ export interface SessionStore {
   setLocalTaskListPreferences(preferences: LocalTaskListPreferences): void;
   setTaskPrompt(taskId: string, prompt: string): void;
   setTaskPorts(taskId: string, ports: TaskSummary["ports"]): void;
+  setSelectedTaskReviewState(
+    state: SessionState["selectedTaskReviewState"]
+  ): void;
   setSelectedTask(taskId: string | null): void;
   beginTaskAction(taskId: string, action: TaskStageAction): boolean;
   finishTaskAction(taskId: string, action: TaskStageAction): void;
@@ -509,6 +529,7 @@ export function createSessionStore(): SessionStore {
     searchQuery: "",
     searchResults: [],
     selectedTaskId: null,
+    selectedTaskReviewState: null,
     pendingTaskAction: null,
     activeView: "tasks",
     pairingCode: null,
@@ -1306,10 +1327,23 @@ export function createSessionStore(): SessionStore {
       state = { ...state, repoTasks, recentTasks, searchResults, taskUiSlots };
       publish();
     },
+    setSelectedTaskReviewState(reviewState) {
+      const current = state.selectedTaskReviewState;
+      if (JSON.stringify(current) === JSON.stringify(reviewState)) return;
+      state = { ...state, selectedTaskReviewState: reviewState };
+      publish();
+    },
     setSelectedTask(selectedTaskId) {
       state = {
         ...state,
         selectedTaskId,
+        // A review identity belongs to exactly one task. Carrying it across a
+        // selection change would show one pull request's head under another
+        // task, which is the confusion this whole path exists to prevent.
+        selectedTaskReviewState:
+          state.selectedTaskReviewState?.taskId === selectedTaskId
+            ? state.selectedTaskReviewState
+            : null,
         taskTerminalTaskId:
           selectedTaskId === null ? null : state.taskTerminalTaskId,
         taskTerminalStatus:
@@ -2151,6 +2185,7 @@ export function createSessionStore(): SessionStore {
       state = {
         ...state,
         selectedTaskId: null,
+        selectedTaskReviewState: null,
         taskTerminalTaskId: null,
         taskTerminalStatus: "idle",
         taskTerminalOutput: EMPTY_TERMINAL_OUTPUT,

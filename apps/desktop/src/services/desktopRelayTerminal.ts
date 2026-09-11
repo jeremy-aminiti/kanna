@@ -6,6 +6,7 @@ import type {
   DesktopRemoteTaskClient,
   DesktopRemoteTaskViewClient,
   RemoteTaskDiffContent,
+  RemoteTaskGraphContent,
   RemoteTaskDirectoryListing,
 } from "./desktopRemoteTaskClient";
 
@@ -335,6 +336,16 @@ export function createDesktopRelayTerminalClient({
       assertSuccessfulTaskAction(response, "task diff read");
       return parseTaskDiffContent(response.body);
     },
+    async readTaskGraph(options) {
+      const query = options.request.fromRef
+        ? `?fromRef=${encodeURIComponent(options.request.fromRef)}`
+        : "";
+      const response = await clientForDesktop(options.desktopId).request(
+        "GET", `/v1/tasks/${encodeURIComponent(options.taskId)}/graph${query}`, null,
+      );
+      assertSuccessfulTaskAction(response, "task graph read");
+      return parseTaskGraphContent(response.body);
+    },
     async markTaskRead(options) {
       const response = await clientForDesktop(options.desktopId).request(
         "POST",
@@ -399,6 +410,22 @@ export function parseTaskDiffContent(value: unknown): RemoteTaskDiffContent {
     patch: value.patch,
     truncated: value.truncated,
   };
+}
+
+export function parseTaskGraphContent(value: unknown): RemoteTaskGraphContent {
+  if (!isRecord(value) || typeof value.taskId !== "string" || !Array.isArray(value.commits)
+    || !(typeof value.headCommit === "string" || value.headCommit === null)) {
+    throw new Error("Remote task graph response was malformed.");
+  }
+  for (const commit of value.commits) {
+    if (!isRecord(commit) || typeof commit.hash !== "string" || typeof commit.shortHash !== "string"
+      || typeof commit.message !== "string" || typeof commit.author !== "string"
+      || typeof commit.timestamp !== "number" || !Array.isArray(commit.parents) || !Array.isArray(commit.refs)
+      || !commit.parents.every((value) => typeof value === "string") || !commit.refs.every((value) => typeof value === "string")) {
+      throw new Error("Remote task graph response was malformed.");
+    }
+  }
+  return value as unknown as RemoteTaskGraphContent;
 }
 
 interface DesktopRelayRpcClient {

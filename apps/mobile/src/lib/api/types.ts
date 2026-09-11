@@ -399,6 +399,57 @@ export interface TaskLatestRun {
   finishedAt?: string | null;
 }
 
+/**
+ * What a review task is reviewing, as the forge identifies it.
+ *
+ * Candidate information published by the review or triage agent — never an
+ * approval. It is what lets this app name the pull request and show the
+ * operator the exact commit their decision is pinned to.
+ */
+export interface TaskReviewContext {
+  /** Bumped on every refresh; a decision records the version it was taken against. */
+  version: number;
+  prUrl: string;
+  headRepo?: string | null;
+  headRef?: string | null;
+  headSha: string;
+  baseRef: string;
+  baseSha?: string | null;
+  producingTaskId?: string | null;
+  producingMachineId?: string | null;
+  triageParentTaskId?: string | null;
+  triageRank?: number | null;
+  relatedPrUrls?: string[];
+  updatedAt: string;
+}
+
+/**
+ * A recorded human merge authorization for one reviewed head.
+ *
+ * `deliveryStatus` is kept beside the decision, never inside it: `uncertain`
+ * means the merge agent may already hold the request and a person must
+ * reconcile that session rather than send it again.
+ */
+export interface HumanReviewDecision {
+  id: string;
+  taskId: string;
+  reviewContextVersion: number;
+  prUrl: string;
+  head?: string | null;
+  headSha: string;
+  baseRef: string;
+  baseSha?: string | null;
+  actionText: string;
+  origin: string;
+  sourceMachineId?: string | null;
+  createdAt: string;
+  deliveryStatus: "pending" | "delivered" | "failed" | "uncertain";
+  deliveryDetail?: string | null;
+  deliveredAt?: string | null;
+  mergeTaskId?: string | null;
+  ownerDesktopId?: string | null;
+}
+
 export interface TaskDetail extends TaskSummary {
   workflowName?: string | null;
   stageTransition?: string | null;
@@ -420,4 +471,8 @@ export interface TaskDetail extends TaskSummary {
   revisionRounds?: number;
   /** Rounds the task's workflow allows before it parks for its human; 0 = unlimited. */
   revisionLimit?: number;
+  /** Absent when this task is not a pull-request review with a published PR identity. */
+  reviewContext?: TaskReviewContext | null;
+  /** The most recent human merge authorization recorded on this task. */
+  humanReviewDecision?: HumanReviewDecision | null;
 }

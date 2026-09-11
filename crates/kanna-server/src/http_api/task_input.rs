@@ -316,6 +316,12 @@ async fn deliver_server_task_input_with_recording(
     .await
     {
         Ok(_) => Ok(()),
+        // A strict ledger failure occurs after acknowledged PTY delivery.
+        // Preserve its code so singleton callers cannot classify it as safe
+        // to resend merely because the durable record could not be written.
+        Err((status, Json(failure))) if failure.reason == "task_input_record_failed" => {
+            Err((status, format!("{}: {}", failure.reason, failure.message)))
+        }
         Err((status, Json(failure))) => Err((status, failure.message)),
     }
 }

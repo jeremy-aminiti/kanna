@@ -52,6 +52,23 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   repository and uses the ordinary singleton signal path to send the supplied
   task, PR, head, base, and summary. It does not interpret stage results,
   compare branch names with saved metadata, or attest approval eligibility.
+- **Human-reviewed merge authorization**: `kanna_queue_reviewed_pr` calls
+  `/v1/tasks/{task_id}/actions/queue-reviewed-pr` with the exact reviewed head,
+  context version and verbatim operator instruction. It shares the existing
+  human-decision path; the retained `signal-merge-handoff` decision branch
+  still works. The conversation route declares `operator-relayed`, with the
+  observed latest stage-run id as corroboration, not verified human presence.
+  No desktop/mobile queue buttons remain. Here
+  the server *does* bind the request: it derives the head and base from the
+  task's stored `task_review_context` rather than from the caller, refuses a
+  decision whose context version or head SHA has moved, and records an
+  immutable `human_review_decision` (unique per task and reviewed head) before
+  delivering. The wire line gains `HUMAN-REVIEW-DECISION`,
+  `HUMAN-AUTHORIZATION`, and optional producing-task and triage-ordering lines,
+  so a merge master on another machine can read the durable record without a
+  living review or triage session. `merge_signaled_at` is deliberately not
+  touched: it answers the approve post's question, not this one. See
+  [pr-review-dispatch.md](./pr-review-dispatch.md#the-humans-route-to-the-merge-queue).
 - **Close-time backstop**: a delivered handoff is stamped on the task
   (`merge_signaled_at`), and a task whose pinned final stage declares the
   `approve` post cannot close still owing one — the engine sends the same
@@ -60,9 +77,11 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   left alive, so it cannot be the only thing standing between a finished PR and
   the merge master. See
   [kanna-server-boundary.md](../kanna-server-boundary.md#merge-handoff).
-- A replacement review experience is intentionally out of scope here and is
-  being designed separately in task 231ad8fc. The merge-stage behavior above
-  remains the supported approval path.
+- The merge-stage behavior above remains the approval path for Kanna's own
+  product workflows, where an agent review gates the merge. The
+  human-assisted PR review path — where a person is the reviewer — reaches the
+  same queue through the human-reviewed authorization above, and is designed in
+  [pr-review-dispatch.md](./pr-review-dispatch.md).
 
 ## User-space work (reference implementations, all `.kanna/` files)
 

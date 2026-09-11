@@ -77,6 +77,29 @@ per session incarnation, cleared when the session goes busy again. A refusal
 stays painted for as long as the session is parked in front of it; one refusal
 is one observation.
 
+Fresh PTY sessions keep notice evidence in a separate screen-only VT projection
+fed by their actual output. Carryover seeds restore only the primary terminal,
+which still owns display/history, snapshots, composer and runtime classification.
+The projection follows session resize and discards every terminal reply. Notice
+matching reconstructs retained logical rows across soft wraps, preserves blank
+boundaries, and anchors the measured glyph and opening word at the logical row
+start. A JSON/prose prefix cannot disappear merely because a glyph wraps to
+visual column zero. An indistinguishable glyph-led quotation printed on a new
+logical row can still match; these constraints do not establish authorship.
+
+Same-PTY daemon handoff carries the projection in optional
+`HandoffSession.notice_snapshot`, using the existing `TerminalSnapshot` type.
+An empty projection is distinct from a missing one. With missing or unusable
+projection evidence, adoption logs and restores the primary snapshot as a
+compatibility fallback. That can reintroduce historical notices, and the
+ambiguity can persist through later handoffs. Older/degraded peers retain their
+old behavior; they do not gain provenance protection. If neither snapshot is
+usable, previously painted evidence is unavailable and only future output can
+be classified. The notice latch is not transferred: re-announcements after
+adoption are absorbed by the server's existing per-run/provider/scope record.
+The trust handshake, lifecycle seals, descriptor transfer and recovery policy
+are unchanged.
+
 The daemon broadcasts `Event::ProviderNotice { session_id, kind, session_kind,
 agent_provider, rule_id, scope, text, cli_version }`. Broadcast only, like
 `InputBlockedChanged`: this is `kanna-server`'s signal, not a terminal client's

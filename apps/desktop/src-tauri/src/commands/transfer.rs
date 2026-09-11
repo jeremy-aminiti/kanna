@@ -454,6 +454,27 @@ pub async fn read_transfer_peer_task_diff(
 }
 
 #[tauri::command]
+pub async fn read_transfer_peer_task_graph(
+    app: tauri::AppHandle,
+    peer_id: String,
+    task_id: String,
+    from_ref: Option<String>,
+) -> Result<Value, String> {
+    let response = transfer_control(
+        &app,
+        "read-peer-task-graph",
+        json!({
+            "peerId": peer_id, "taskId": task_id, "fromRef": from_ref,
+        }),
+    )
+    .await?;
+    response
+        .get("graph")
+        .cloned()
+        .ok_or_else(|| "transfer control task graph response is missing graph".to_string())
+}
+
+#[tauri::command]
 pub async fn mark_transfer_peer_task_read(
     app: tauri::AppHandle,
     peer_id: String,

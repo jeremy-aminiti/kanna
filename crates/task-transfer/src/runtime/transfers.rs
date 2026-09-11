@@ -140,6 +140,7 @@ impl TransferRuntime {
             | PeerResponse::ReadTaskFile { .. }
             | PeerResponse::ReadTaskDirectory { .. }
             | PeerResponse::ReadTaskDiff { .. }
+            | PeerResponse::ReadTaskGraph { .. }
             | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
                 "unexpected observe-session response during preflight".into(),
             )),
@@ -257,6 +258,7 @@ impl TransferRuntime {
             | PeerResponse::ReadTaskFile { .. }
             | PeerResponse::ReadTaskDirectory { .. }
             | PeerResponse::ReadTaskDiff { .. }
+            | PeerResponse::ReadTaskGraph { .. }
             | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
                 "unexpected observe-session response during transfer commit".into(),
             )),
@@ -375,6 +377,7 @@ impl TransferRuntime {
             | PeerResponse::ReadTaskFile { .. }
             | PeerResponse::ReadTaskDirectory { .. }
             | PeerResponse::ReadTaskDiff { .. }
+            | PeerResponse::ReadTaskGraph { .. }
             | PeerResponse::AbandonTransfer { .. }
             | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while finalizing outgoing transfer".into(),
@@ -670,6 +673,7 @@ impl TransferRuntime {
             | PeerResponse::ReadTaskFile { .. }
             | PeerResponse::ReadTaskDirectory { .. }
             | PeerResponse::ReadTaskDiff { .. }
+            | PeerResponse::ReadTaskGraph { .. }
             | PeerResponse::AbandonTransfer { .. }
             | PeerResponse::MarkTaskRead { .. } => Err(RuntimeError::Protocol(
                 "unexpected response while acknowledging import commit".into(),

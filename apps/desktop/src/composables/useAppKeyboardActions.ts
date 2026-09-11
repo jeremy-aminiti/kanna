@@ -147,6 +147,15 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     return contexts.includes(activeSurfaceContext());
   }
 
+  // The file picker calls the local Tauri filesystem command. A projected
+  // task's paths name its owner machine, so do not let a keyboard path open a
+  // picker that could accidentally fall back to this machine's repository.
+  function refuseRemoteFilePicker(): boolean {
+    if (selectedWorkspaceTask.value?.localTaskId !== null) return false;
+    toast.warning(t("toasts.remoteTaskPathUnavailable"));
+    return true;
+  }
+
   // Keyboard shortcuts
   const keyboardActions = {
     newTask: () => {
@@ -186,6 +195,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       if (showFilePickerModal.value) {
         closeFilePicker();
       } else {
+        if (refuseRemoteFilePicker()) return;
         showFilePickerOnTop();
       }
     },
@@ -207,6 +217,7 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
         openFilePreview(recalled.filePath, recalled.initialLine);
         return;
       }
+      if (refuseRemoteFilePicker()) return;
       showFilePickerOnTop();
     },
     toggleTreeExplorer: () => {
@@ -214,6 +225,10 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
     },
     openInIDE: async () => {
       if (tabInFrontOwns(IDE_BOUND_BY_VIEW)) return;
+      if (selectedWorkspaceTask.value && !selectedWorkspaceTask.value.capabilities.canOpenShell) {
+        toast.warning(t("toasts.remoteTaskPathUnavailable"));
+        return;
+      }
       const item = store.currentItem;
       const repo = store.selectedRepo;
       if (!item?.branch || !repo) return;
@@ -284,6 +299,11 @@ export function useAppKeyboardActions(options: UseAppKeyboardActionsOptions) {
       });
     },
     openShellRepoRoot: () => {
+      const workspaceTask = selectedWorkspaceTask.value;
+      if (workspaceTask && !workspaceTask.capabilities.canOpenShell) {
+        toast.warning(t("toasts.remoteShellUnavailable"));
+        return;
+      }
       mainTabs.openTab({ kind: "shell", shellScope: "repo" });
     },
     showDiff: () => {

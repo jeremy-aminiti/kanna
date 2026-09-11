@@ -31,6 +31,11 @@ name: Linux Release Check
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      apt_interop_only:
+        description: Run only test-key apt/GnuPG interoperability (no native builds)
+        type: boolean
+        default: false
   pull_request:
     paths:
       - "packaging/linux/**"
@@ -60,7 +65,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  apt-interop:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm --filter @kanna/kd install --frozen-lockfile --ignore-scripts
+      - name: Build and validate the actual Node adapter bundle
+        run: |
+          pnpm --dir tools/kd exec tsup --out-dir ../../.tmp/apt-adapter-bundle
+          node tools/kd/tests/apt-bundle-smoke.mjs .tmp/apt-adapter-bundle
+      - name: Test disposable signatures with Ubuntu apt and GnuPG
+        # Uses existing runner tools, loopback HTTP and private apt state.
+        # No sudo, package installs, stored private keys or publication.
+        run: pnpm --dir tools/kd exec tsx tests/linux-apt-interop.ts
+
   build:
+    if: ${{ !inputs.apt_interop_only }}
     # Both required architectures, each built natively. Cross-compiling the
     # other would leave the linkage — which is what the audit is about —
     # untested on the machine it has to run on.
@@ -157,6 +187,7 @@ jobs:
   # before any install is attempted. It does not run the installed lane itself
   # yet, and it changes nothing about the `build` job's own output.
   installed-check-prerequisites:
+    if: ${{ !inputs.apt_interop_only }}
     strategy:
       fail-fast: false
       matrix:

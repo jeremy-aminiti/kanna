@@ -47,6 +47,7 @@ use super::task_blockers::{block_task, unblock_task};
 use super::task_diff::get_task_diff;
 use super::task_events::wait_task_events;
 use super::task_files::{get_task_file, resolve_task_file_mentions};
+use super::task_graph::get_task_graph;
 use super::task_input::send_task_input;
 use super::task_logs::task_logs;
 use super::task_ports::{claim_task_ports, release_task_ports};
@@ -218,6 +219,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(resolve_task_file_mentions),
         )
         .route("/v1/tasks/{task_id}/diff", get(get_task_diff))
+        .route("/v1/tasks/{task_id}/graph", get(get_task_graph))
         .route(
             "/v1/tasks/{task_id}/dependent-tasks-exist",
             get(dependent_tasks_exist),
@@ -260,6 +262,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/tasks/{task_id}/actions/complete-stage",
             post(complete_stage),
+        )
+        .route(
+            "/v1/tasks/{task_id}/actions/queue-reviewed-pr",
+            post(super::signal_agent::queue_reviewed_pr),
         )
         .route(
             "/v1/tasks/{task_id}/actions/signal-merge-handoff",

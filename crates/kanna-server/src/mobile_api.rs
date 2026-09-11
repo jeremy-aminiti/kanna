@@ -259,6 +259,18 @@ pub struct TaskDetail {
     /// them would make an empty list mean two different things.
     #[serde(default)]
     pub child_task_ids: Vec<String>,
+    /// What this task is reviewing, when a pull-request review context has
+    /// been published for it. Absent means the task is not queueable from the
+    /// review control — there is no PR identity to offer and nothing a
+    /// decision could be checked against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_context: Option<crate::db::TaskReviewContext>,
+    /// The most recent human merge authorization recorded on this task, with
+    /// its delivery outcome. Older decisions stay in the durable record: a PR
+    /// whose head moved and was re-reviewed has a history, and showing only
+    /// the newest as if it were the only one would misread it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_review_decision: Option<crate::db::HumanReviewDecision>,
     #[serde(default)]
     pub blocked_by_task_ids: Vec<String>,
     /// Declared ports currently claimed for this task. `null` means there is
@@ -531,6 +543,15 @@ pub struct CreateTaskRequest {
     /// value and task creation never persists it.
     pub notify_task_id: Option<String>,
     pub parent_task_id: Option<String>,
+    /// What this task is reviewing, when it is a pull-request review.
+    ///
+    /// Candidate information about the forge, supplied by whoever creates the
+    /// task — never an approval. It exists because a review child forks from
+    /// `pull/<n>/head` into a local `pr/<n>` ref, so nothing about the task
+    /// itself names the PR, and a consumer without this would be reduced to
+    /// parsing the review session's terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_context: Option<crate::db::ReviewContextInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -564,10 +585,49 @@ pub struct CompleteStageRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeHandoffRequest {
-    pub branch: String,
-    pub target: String,
+    /// Resolved PR head branch. Required on the ordinary agent path; on the
+    /// human-review path the server derives it from the task's stored review
+    /// context instead, because a review child's own `task-*` branch and its
+    /// local `pr/<n>` fetch ref name nothing the forge can merge.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Resolved PR base branch. Derived from the review context on the
+    /// human-review path, for the same reason as `branch`.
+    #[serde(default)]
+    pub target: Option<String>,
     pub pr_url: Option<String>,
     pub summary: String,
+    /// A human's explicit merge authorization for a reviewed head.
+    ///
+    /// Retained direct-decision API. The separate queue-reviewed-pr tool
+    /// reuses this payload internally with an honest operator-relayed origin.
+    /// Neither route proves human presence; the ordinary policy handoff tool
+    /// continues to expose no decision fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_review_decision: Option<HumanReviewDecisionRequest>,
+}
+
+/// The operator's instruction, bound to the reviewed context.
+///
+/// It carries no PR identity of its own: the server derives the PR, head, and
+/// base from the task's stored review context, so a caller cannot name one PR
+/// in the confirmation and another on the wire. What it does carry is what the
+/// operator was *looking at* — the context version and head SHA — which is how
+/// a decision taken against a PR that has since moved is refused instead of
+/// applied to a commit nobody read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanReviewDecisionRequest {
+    pub review_context_version: i64,
+    pub head_sha: String,
+    /// The exact instruction the operator gave, stored verbatim on the
+    /// decision so the record says what they authorized, not a paraphrase.
+    pub action_text: String,
+    /// Authenticated device or account provenance the client can prove, when
+    /// it has any. It corroborates the declared origin; it does not establish
+    /// that a person was present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_provenance: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -916,6 +976,14 @@ impl MobileApi {
             .count_task_inputs(&item.id)
             .map_err(|e| format!("db error: {}", e))?;
         let provider_rejection = self.task_provider_rejection(&item)?;
+        let review_context = self
+            ._db
+            .read_task_review_context(&item.id)
+            .map_err(|e| format!("db error: {}", e))?;
+        let human_review_decision = self
+            ._db
+            .latest_human_review_decision(&item.id)
+            .map_err(|e| format!("db error: {}", e))?;
         let ports = self
             ._db
             .list_task_ports_for_item(&item.id)
@@ -943,6 +1011,8 @@ impl MobileApi {
                 delivered_input_count,
                 ports,
                 provider_rejection,
+                review_context,
+                human_review_decision,
             },
         );
         detail.runtime_settled = runtime_settled;
@@ -1223,6 +1293,8 @@ struct TaskDetailRelations {
     delivered_input_count: i64,
     ports: Vec<TaskPort>,
     provider_rejection: Option<TaskProviderRejection>,
+    review_context: Option<crate::db::TaskReviewContext>,
+    human_review_decision: Option<crate::db::HumanReviewDecision>,
 }
 
 fn map_task_detail(
@@ -1240,6 +1312,8 @@ fn map_task_detail(
         delivered_input_count,
         mut ports,
         provider_rejection,
+        review_context,
+        human_review_decision,
     } = relations;
     let prompt = item.prompt.clone();
     let title = item
@@ -1356,6 +1430,8 @@ fn map_task_detail(
         delivered_input_count,
         parent_task_id: item.parent_task_id,
         child_task_ids,
+        review_context,
+        human_review_decision,
         blocked_by_task_ids,
         ports: (!ports.is_empty()).then_some(ports),
         provider_rejection,
@@ -2357,6 +2433,107 @@ mod tests {
         let detail = api.get_task("task-stored").unwrap().unwrap();
 
         assert_eq!(detail.stage_transition.as_deref(), Some("manual"));
+    }
+
+    /// Task detail is what the review agent and read-only clients read. Nothing else on a review
+    /// task names its pull request — the child forks from `pull/<n>/head` into
+    /// a local `pr/<n>` ref — so if this projection were missing, the only way
+    /// to learn which PR is being authorized would be to parse the review
+    /// session's terminal.
+    #[test]
+    fn get_task_projects_the_review_context_and_latest_human_decision() {
+        let config = Config {
+            relay_url: "wss://relay.example".to_string(),
+            device_token: "device-token".to_string(),
+            firebase_project_id: "kanna-local".to_string(),
+            firebase_auth_emulator_url: None,
+            firebase_firestore_emulator_host: None,
+            daemon_dir: "/tmp/kanna-daemon".to_string(),
+            db_path: Db::test_db_path("task-detail-review-context"),
+            kanna_cli_path: None,
+            desktop_id: "desktop-1".to_string(),
+            desktop_secret: Some("desktop-secret".to_string()),
+            desktop_name: "Studio Mac".to_string(),
+            version: "test-version".to_string(),
+            environment: "development".to_string(),
+            lan_host: "0.0.0.0".to_string(),
+            lan_port: 48120,
+            transfer_port: 4455,
+            activity_event_debounce_seconds: 300,
+            pairing_store_path: "/tmp/kanna-pairings.json".to_string(),
+        };
+        let db = Db::open_for_tests(&config.db_path).unwrap();
+        db.insert_test_repo("repo-1", "Repo One").unwrap();
+        db.insert_test_pipeline_item(
+            "task-review",
+            "repo-1",
+            "Review pull request #12",
+            Some("PR #12"),
+            "review",
+            "2026-09-08 09:00:00",
+        )
+        .unwrap();
+
+        db.insert_test_pipeline_item(
+            "task-plain",
+            "repo-1",
+            "Ordinary work",
+            Some("Ordinary"),
+            "in progress",
+            "2026-09-08 09:00:00",
+        )
+        .unwrap();
+        db.upsert_task_review_context(
+            "task-review",
+            &crate::db::ReviewContextInput {
+                pr_url: "https://github.com/acme/repo/pull/12".to_string(),
+                head_repo: Some("contributor/repo".to_string()),
+                head_ref: Some("feature/x".to_string()),
+                head_sha: "a".repeat(40),
+                base_ref: "main".to_string(),
+                base_sha: None,
+                producing_task_id: None,
+                producing_machine_id: None,
+                triage_parent_task_id: None,
+                triage_rank: Some(1),
+                related_pr_urls: vec!["https://github.com/acme/repo/pull/13".to_string()],
+            },
+        )
+        .unwrap();
+        db.record_human_review_decision(crate::db::NewHumanReviewDecision {
+            task_id: "task-review",
+            review_context_version: 1,
+            pr_url: "https://github.com/acme/repo/pull/12",
+            head: Some("contributor/repo:feature/x"),
+            head_sha: &"a".repeat(40),
+            base_ref: "main",
+            base_sha: None,
+            action_text: "I reviewed it and authorize the merge.",
+            origin: "operator",
+            device_provenance: None,
+            source_machine_id: Some("desktop-1"),
+        })
+        .unwrap();
+
+        let api = super::MobileApi::new(config, db);
+        // No published context means no control: absent is the honest answer,
+        // and inferring the PR from the title or branch is what this refuses.
+        let plain = api.get_task("task-plain").unwrap().unwrap();
+        assert!(plain.review_context.is_none());
+        assert!(plain.human_review_decision.is_none());
+
+        let detail = api.get_task("task-review").unwrap().unwrap();
+        let context = detail.review_context.expect("review context");
+        assert_eq!(context.version, 1);
+        assert_eq!(context.context.head_sha, "a".repeat(40));
+        assert_eq!(
+            context.context.related_pr_urls,
+            vec!["https://github.com/acme/repo/pull/13".to_string()]
+        );
+        let decision = detail.human_review_decision.expect("decision");
+        assert_eq!(decision.origin, "operator");
+        assert_eq!(decision.delivery_status, "pending");
+        assert_eq!(decision.head_sha, "a".repeat(40));
     }
 
     #[test]

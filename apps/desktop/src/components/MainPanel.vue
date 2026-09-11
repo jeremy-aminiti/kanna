@@ -10,7 +10,9 @@ import {
 import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
 import type { AgentProvider, BlockerDisplayItem } from "../types/kanna";
 import type { TaskUiSlot } from "../types/taskUi";
-import type { RequestRevisionOptions } from "../stores/workflow";
+import type {
+  RequestRevisionOptions,
+} from "../stores/workflow";
 import {
   fetchDesktopTaskDetail,
   type DesktopTaskDetail,
@@ -318,6 +320,44 @@ const taskDetailIsLocal = computed(() => {
   return !props.cloudTask && !isRemotePresentationTaskId(taskId);
 });
 
+/** Read-only PR identity and decision status, never inferred from the task title. */
+const reviewContext = computed(() => {
+  const task = item.value;
+  const detail = taskDetail.value;
+  if (!task || !detail || detail.id !== task.id) return null;
+  return detail.reviewContext ?? null;
+});
+
+const humanReviewDecision = computed(() => {
+  const task = item.value;
+  const detail = taskDetail.value;
+  if (!task || !detail || detail.id !== task.id) return null;
+  return detail.humanReviewDecision ?? null;
+});
+
+/**
+ * A decision already taken for the exact head on screen. A decision recorded
+ * against an older head is deliberately not treated as this one: the PR moved,
+ * and what the reviewer authorized was a commit that is no longer the head.
+ */
+const decisionForCurrentHead = computed(() => {
+  const decision = humanReviewDecision.value;
+  const context = reviewContext.value;
+  if (!decision || !context) return null;
+  return decision.headSha.toLowerCase() === context.headSha.toLowerCase() ? decision : null;
+});
+
+const shortReviewedHead = computed(() => reviewContext.value?.headSha.slice(0, 12) ?? "");
+
+const reviewedHeadLabel = computed(() => {
+  const context = reviewContext.value;
+  if (!context) return "";
+  const branch = context.headRepo && context.headRef
+    ? `${context.headRepo}:${context.headRef}`
+    : context.headRef ?? "";
+  return branch ? `${branch} @ ${shortReviewedHead.value}` : shortReviewedHead.value;
+});
+
 let taskDetailRequest = 0;
 async function loadTaskDetail(taskId: string): Promise<void> {
   const request = ++taskDetailRequest;
@@ -612,6 +652,42 @@ function dismissCommandHint() {
     />
     <template v-if="uiSlot">
       <div v-show="agentTabActive" class="main-tab-panel" data-testid="main-tab-panel-agent">
+        <section
+          v-if="reviewContext"
+          class="review-merge"
+          data-testid="review-merge-status"
+        >
+          <div class="review-merge-copy">
+            <p class="review-merge-title">{{ $t('mainPanel.reviewMergeTitle') }}</p>
+            <p class="review-merge-detail" data-testid="review-merge-head">
+              {{ $t('mainPanel.reviewMergeReviewed', {
+                pr: reviewContext.prUrl,
+                head: reviewedHeadLabel,
+                base: reviewContext.baseRef,
+              }) }}
+            </p>
+            <p
+              v-if="reviewContext.relatedPrUrls && reviewContext.relatedPrUrls.length > 0"
+              class="review-merge-warning"
+              data-testid="review-merge-overlap"
+            >
+              {{ $t('mainPanel.reviewMergeOverlap', {
+                prs: reviewContext.relatedPrUrls.join(', '),
+              }) }}
+            </p>
+            <p
+              v-if="decisionForCurrentHead"
+              class="review-merge-detail"
+              data-testid="review-merge-decision"
+            >
+              {{ $t(`mainPanel.reviewMergeDelivery.${decisionForCurrentHead.deliveryStatus}`, {
+                mergeTask: decisionForCurrentHead.mergeTaskId ?? '',
+                machine: decisionForCurrentHead.ownerDesktopId ?? '',
+                detail: decisionForCurrentHead.deliveryDetail ?? '',
+              }) }}
+            </p>
+          </div>
+        </section>
         <CloudTerminalCache
           :active-terminal="activeCloudTerminal"
           :discard-key="discardedCloudTerminalKey"
@@ -715,6 +791,7 @@ function dismissCommandHint() {
           v-show="activeTabId === tab.id"
           :repo-path="scopeRepoPath"
           :worktree-path="taskWorktreePath"
+          :remote-graph-loader="views?.modals.activeTaskViewIsRemote.value ? views.modals.readRemoteTaskGraph : undefined"
           embedded
           :active="activeTabId === tab.id"
           @close="closeTab(tab.id)"
@@ -869,6 +946,41 @@ function dismissCommandHint() {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+}
+
+.review-merge {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--kn-border);
+  background: var(--kn-bg-subtle, var(--kn-bg-app));
+}
+
+.review-merge-copy {
+  min-width: 0;
+}
+
+.review-merge-title {
+  margin: 0;
+  color: var(--kn-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.review-merge-detail {
+  margin: 2px 0 0;
+  color: var(--kn-text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.review-merge-warning {
+  margin: 2px 0 0;
+  color: var(--kn-warning);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .revision-recovery {

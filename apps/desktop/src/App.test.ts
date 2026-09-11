@@ -6050,7 +6050,7 @@ describe("App", () => {
     expect(wrapper.get('[data-testid="command-palette"]').text()).toContain("taskTransfer.pushToMachine");
   });
 
-  it("warns instead of silently ignoring Cmd+J for remote tasks", async () => {
+  it("refuses local file and shell shortcuts for a selected remote task", async () => {
     store.repos = [];
     store.selectedRepoId = "cloud:repo-remote";
     store.selectedItemId = "cloud:repo-remote:task-1";
@@ -6117,10 +6117,16 @@ describe("App", () => {
     expect(capturedKeyboardActions).not.toBeNull();
 
     capturedKeyboardActions?.openShell();
+    capturedKeyboardActions?.openShellRepoRoot();
+    capturedKeyboardActions?.openFile();
+    capturedKeyboardActions?.toggleFilePreview();
     await flushPromises();
 
     expect(toastWarningMock).toHaveBeenCalledWith("toasts.remoteShellUnavailable");
+    expect(toastWarningMock).toHaveBeenCalledWith("toasts.remoteTaskPathUnavailable");
     expect(wrapper.findComponent({ name: "ShellModal" }).exists()).toBe(false);
+    expect(wrapper.find('[data-testid="file-picker-modal"]').exists()).toBe(false);
+    expect(invokeMock.mock.calls.some(([command]) => command === "list_files")).toBe(false);
   });
 
   it("adds Pair Machine to command palette commands independently of task transfer", async () => {

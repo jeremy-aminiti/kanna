@@ -796,6 +796,29 @@ async fn aggregate_task_summaries(
     })))
 }
 
+/// Persist a newly created task's pull-request review context.
+///
+/// The context is *candidate information about the forge* — which PR, which
+/// head commit, which base — supplied by whoever created the task. It is
+/// deliberately not an approval and grants nothing: what it does is give the
+/// operator's own control, and later the merge master, a durable PR identity
+/// to work from. Without it a review child names only its `task-*` branch and
+/// the local `pr/<n>` ref it forked from, neither of which the forge can
+/// merge, and every consumer would be left parsing the review session's
+/// terminal.
+fn persist_created_task_review_context(
+    db: &Db,
+    task_id: &str,
+    review_context: Option<&crate::db::ReviewContextInput>,
+) -> Result<(), (axum::http::StatusCode, String)> {
+    let Some(context) = review_context else {
+        return Ok(());
+    };
+    db.upsert_task_review_context(task_id, context)
+        .map(|_| ())
+        .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, error.to_string()))
+}
+
 pub(super) async fn create_task(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<crate::mobile_api::CreateTaskRequest>,
@@ -871,6 +894,18 @@ pub(super) async fn create_task_with_requested_id(
             .validate()
             .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, message))?;
     }
+    // Validated here, before anything is created: a review context that cannot
+    // identify what is being reviewed must fail the request outright. Creating
+    // the task and silently dropping the context would leave a review whose
+    // operator control is absent for no visible reason.
+    let review_context = match payload.review_context.as_ref() {
+        Some(context) => Some(
+            context
+                .validated()
+                .map_err(|error| (axum::http::StatusCode::BAD_REQUEST, error.to_string()))?,
+        ),
+        None => None,
+    };
 
     #[cfg(test)]
     if let Some(task_creator) = state.task_creator.clone() {
@@ -1035,9 +1070,14 @@ pub(super) async fn create_task_with_requested_id(
                             return Ok(PreparedCreateOutcome::Done(existing));
                         }
                     };
-                    if let Err(err) =
+                    if let Err(err) = persist_created_task_review_context(
+                        &db,
+                        &created.task_id,
+                        review_context.as_ref(),
+                    )
+                    .and_then(|()| {
                         persist_resolved_task_blockers(&db, &created.task_id, &resolved_blocker_ids)
-                    {
+                    }) {
                         let rollback_result = db.delete_task_creation_artifacts(&created.task_id);
                         return Err(match rollback_result {
                             Ok(()) => err,
@@ -1076,18 +1116,25 @@ pub(super) async fn create_task_with_requested_id(
                     }
                 }
             };
-            if !resolved_blocker_ids.is_empty() {
+            if !resolved_blocker_ids.is_empty() || review_context.is_some() {
                 let db = Db::open(&state.config.db_path).map_err(|e| {
                     (
                         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                         format!("db error: {}", e),
                     )
                 })?;
-                if let Err(err) = persist_task_blocker_rows(
+                if let Err(err) = persist_created_task_review_context(
                     &db,
                     crate::task_creator::prepared_task_id(&prepared),
-                    &resolved_blocker_ids,
-                ) {
+                    review_context.as_ref(),
+                )
+                .and_then(|()| {
+                    persist_task_blocker_rows(
+                        &db,
+                        crate::task_creator::prepared_task_id(&prepared),
+                        &resolved_blocker_ids,
+                    )
+                }) {
                     let rollback_result =
                         crate::task_creator::rollback_prepared_task_for_api(&db, &prepared);
                     return Err(match rollback_result {

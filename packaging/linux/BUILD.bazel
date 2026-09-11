@@ -1,0 +1,40 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_python//python:defs.bzl", "py_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "resolve_sysroot.py",
+    "runtime-policy.json",
+    "runtime-policy.schema.json",
+    "sysroot-amd64.lock.json",
+    "sysroot-arm64.lock.json",
+    "sysroot_overlay.c",
+    "sysroot_repository.bzl",
+])
+
+py_test(
+    name = "resolve_sysroot_test",
+    srcs = [
+        "resolve_sysroot.py",
+        "tests/test_resolve_sysroot.py",
+    ],
+    data = [
+        ":sysroot_overlay_test_tool",
+        "runtime-policy.json",
+        "sysroot-amd64.lock.json",
+        "sysroot-arm64.lock.json",
+        "//:MODULE.bazel",
+        "//tools/bazel:BUILD.bazel",
+        "//tools/bazel:linux_cc_toolchain_config.bzl",
+        "@ubuntu_noble_sysroot_amd64//:sysroot_overlay_report",
+    ],
+    main = "tests/test_resolve_sysroot.py",
+    python_version = "PY3",
+)
+
+cc_binary(
+    name = "sysroot_overlay_test_tool",
+    srcs = ["sysroot_overlay.c"],
+    testonly = True,
+)

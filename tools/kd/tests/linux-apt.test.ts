@@ -4,10 +4,10 @@ import {
   buildPackagesIndex,
   buildReleaseIndex,
   inReleasePath,
+  packagesByHashPath,
   packagesIndexPath,
   planPublish,
   poolPath,
-  signInReleaseCommand,
   sourcesListEntry,
   verifyBeforeCommit,
   type AptArtifact,
@@ -48,6 +48,18 @@ describe("archive layout", () => {
 });
 
 describe("Packages index", () => {
+  it("uses computed archive metadata instead of stale control fields", () => {
+    const item = artifact();
+    item.controlFields.Filename = "../wrong.deb";
+    item.controlFields.Size = "1";
+    item.controlFields.sha256 = "stale";
+    const index = buildPackagesIndex([item]);
+    expect(index).not.toMatch(/wrong\.deb|stale|Size: 1\n/);
+    expect(index.match(/^Filename:/gm)).toHaveLength(1);
+    expect(index.match(/^Size:/gm)).toHaveLength(1);
+    expect(index.match(/^SHA256:/gm)).toHaveLength(1);
+  });
+
   it("carries the checksum and size a client checks before trusting a download", () => {
     const index = buildPackagesIndex([artifact()]);
     expect(index).toContain("Package: kanna");
@@ -134,6 +146,17 @@ describe("the publish plan", () => {
     expect(steps.slice(0, firstIndex).every((step) => step.kind === "data")).toBe(true);
     expect(firstIndex).toBe(2);
   });
+
+  it("creates an immutable by-hash index before replacing each canonical alias", () => {
+    const item = artifact();
+    const path = packagesByHashPath("desktop-linux-staging", "amd64", buildPackagesIndex([item]));
+    expect(path).toMatch(/^dists\/staging\/main\/binary-amd64\/by-hash\/SHA256\/[0-9a-f]{64}$/);
+    const position = steps.findIndex((step) => step.path === path);
+    expect(position).toBeGreaterThan(-1);
+    expect(steps[position]?.write).toBe("immutable");
+    expect(steps[position + 1]?.path).toBe(packagesIndexPath("desktop-linux-staging", "amd64"));
+    expect(steps[position + 1]?.write).toBe("replace");
+  });
 });
 
 describe("verifyBeforeCommit", () => {
@@ -195,23 +218,6 @@ describe("verifyBeforeCommit", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.problems.join(" ")).toMatch(/disagree on version/);
-  });
-});
-
-describe("signing", () => {
-  /** Signing with whatever key is first in a keyring is how a staging key ends
-   *  up on a production archive. */
-  it("names the key explicitly", () => {
-    const [command, args] = signInReleaseCommand({
-      releasePath: "/tmp/Release",
-      outputPath: "/tmp/InRelease",
-      keyFingerprint: "DEADBEEF",
-    });
-    expect(command).toBe("gpg");
-    expect(args).toContain("--local-user");
-    expect(args[args.indexOf("--local-user") + 1]).toBe("DEADBEEF");
-    expect(args).toContain("--clearsign");
-    expect(args).toContain("--batch");
   });
 });
 

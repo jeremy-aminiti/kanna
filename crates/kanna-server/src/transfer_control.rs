@@ -32,6 +32,7 @@ const OPERATIONS: &[&str] = &[
     "read-peer-task-file",
     "read-peer-task-directory",
     "read-peer-task-diff",
+    "read-peer-task-graph",
     "mark-peer-task-read",
     "start-pairing",
     "accept-pairing",
@@ -264,6 +265,18 @@ pub async fn dispatch(
                         "task_id": required_string(&params, &["taskId"] )?,
                         "scope": required_string(&params, &["scope"] )?,
                         "mode": required_string(&params, &["mode"] )?,
+                    }),
+                )
+                .await
+        }
+        "read-peer-task-graph" => {
+            client
+                .request(
+                    "read_peer_task_graph",
+                    json!({
+                        "target_peer_id": required_string(&params, &["peerId"] )?,
+                        "task_id": required_string(&params, &["taskId"] )?,
+                        "from_ref": params.get("fromRef").and_then(Value::as_str),
                     }),
                 )
                 .await

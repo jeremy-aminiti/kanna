@@ -17,6 +17,10 @@
 
 use super::*;
 
+mod revision_recovery;
+
+mod real_daemon;
+
 const TASK_ID: &str = "quota-task";
 const REVIEW_WORKTREE_BRANCH: &str = "task-quota-review";
 

@@ -283,7 +283,10 @@
           "priority": 10,
           "when": {
             "anyLineWrapped": {
-              "containsAll": ["reached your", "limit. Run /usage-credits"]
+              "allOf": [
+                { "startsWith": "⎿ You've" },
+                { "containsAll": ["reached your", "limit. Run /usage-credits"] }
+              ]
             }
           },
           "scope": { "between": ["reached your ", " limit"] }
@@ -394,9 +397,12 @@
           "priority": 10,
           "when": {
             "anyLineWrapped": {
-              "containsAll": [
-                "hit your usage limit",
-                "chatgpt.com/codex/settings/usage"
+              "allOf": [
+                { "startsWith": "■ You've" },
+                { "containsAll": [
+                  "hit your usage limit",
+                  "chatgpt.com/codex/settings/usage"
+                ] }
               ]
             }
           }

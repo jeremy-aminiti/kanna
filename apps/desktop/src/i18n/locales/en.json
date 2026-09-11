@@ -179,6 +179,7 @@
     "selectRepoFirst": "Select a repository first",
     "noReposLoaded": "Load a repository first",
     "remoteShellUnavailable": "Shell is only available for local tasks.",
+    "remoteTaskPathUnavailable": "This action is not available for a task on another machine.",
     "agentStartFailed": "Agent failed to start",
     "sessionRespawned": "The previous terminal session could not be reattached. A new session was started.",
     "sessionRespawnedWithScrollback": "The previous terminal session could not be reattached. Scrollback was restored and a new session was started.",
@@ -342,6 +343,15 @@
     "agentCopied": "Copied!",
     "commandHintPrefix": "Use",
     "commandHintSuffix": "to see available commands.",
+    "reviewMergeTitle": "Reviewed pull request",
+    "reviewMergeReviewed": "{pr} — reviewing {head} into {base}.",
+    "reviewMergeOverlap": "Overlaps or stacks with: {prs}. The merge agent orders by branch topology; these are the ones most likely to collide.",
+    "reviewMergeDelivery": {
+      "pending": "Your merge authorization was recorded but never reported an outcome. Read the merge agent's session and reconcile it — do not send it again.",
+      "delivered": "Request delivered to merge task {mergeTask} on {machine}. The merge agent decides when it is safe to merge.",
+      "failed": "The merge agent did not receive the request: {detail}. Your decision is recorded; sending again delivers the same one.",
+      "uncertain": "Delivery stopped part-way and the merge agent may already hold this request: {detail}. Read that session and reconcile it — do not send it again."
+    },
     "revisionExhaustedTitle": "Automatic revisions exhausted",
     "revisionExhaustedHint": "This task is parked after {rounds} of {limit} automatic revision rounds.",
     "revise": "Revise",

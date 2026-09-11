@@ -423,6 +423,19 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         diff_base_ref: Option<String>,
 
+        /// For a pull-request review task, a JSON object naming the PR this
+        /// task reviews: prUrl, headSha and baseRef are required, with
+        /// optional headRepo, headRef, baseSha, producingTaskId,
+        /// producingMachineId, triageParentTaskId, triageRank and
+        /// relatedPrUrls
+        ///
+        /// This is candidate information about the forge and authorizes
+        /// nothing. It exists so the operator's own merge control has a
+        /// durable pull-request identity; a review child's branch and its
+        /// local `pr/<n>` fork point are not mergeable names.
+        #[arg(long)]
+        review_context: Option<String>,
+
         /// Agent definition name to run the task's first stage with,
         /// overriding the workflow stage's own agent binding
         #[arg(long)]
@@ -619,6 +632,30 @@ pub(crate) enum TaskCommands {
         #[arg(long)]
         summary: String,
 
+        /// Override the local Kanna server base URL
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Relay an explicit operator queue instruction for one reviewed PR
+    QueueReviewedPr {
+        /// Review task whose conversation contains the instruction
+        #[arg(long)]
+        task_id: String,
+        /// Exact published review context version
+        #[arg(long)]
+        review_context_version: i64,
+        /// Exact commit the human reviewed
+        #[arg(long)]
+        head_sha: String,
+        /// Operator's queue instruction, verbatim; never an inferred verdict
+        #[arg(long)]
+        instruction: String,
+        /// Optional concise PR summary
+        #[arg(long)]
+        summary: Option<String>,
+        /// Machine that owns the review task; omit for this machine
+        #[arg(long)]
+        machine_id: Option<String>,
         /// Override the local Kanna server base URL
         #[arg(long)]
         server_url: Option<String>,

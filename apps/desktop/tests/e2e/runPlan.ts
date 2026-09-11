@@ -9,7 +9,7 @@ export function shouldStartInitialInstances(firstTarget: string | undefined): bo
 export function targetNeedsSecondaryInstance(testTarget: string): boolean {
   return /real\/local-transfer-.*\.test\.ts$/.test(testTarget) ||
     /real\/cloud-task-(?:sync|transfer)\.test\.ts$/.test(testTarget) ||
-    /real\/remote-visual-companion\.test\.ts$/.test(testTarget);
+    /real\/remote-(?:visual-companion|task-graph-refusal)\.test\.ts$/.test(testTarget);
 }
 
 export function targetNeedsEmulators(testTarget: string): boolean {
@@ -17,14 +17,14 @@ export function targetNeedsEmulators(testTarget: string): boolean {
     /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget) ||
     /real\/mobile-pairing-ui\.test\.ts$/.test(testTarget) ||
     /real\/auth-indexeddb-fallback\.test\.ts$/.test(testTarget) ||
-    /real\/remote-visual-companion\.test\.ts$/.test(testTarget);
+    /real\/remote-(?:visual-companion|task-graph-refusal)\.test\.ts$/.test(testTarget);
 }
 
 export function targetNeedsRelay(testTarget: string): boolean {
   return /real\/cloud-task-(?:sync|mobile-index|transfer)\.test\.ts$/.test(testTarget) ||
     /real\/mobile-relay-auth-recovery\.test\.ts$/.test(testTarget) ||
     /real\/mobile-pairing-ui\.test\.ts$/.test(testTarget) ||
-    /real\/remote-visual-companion\.test\.ts$/.test(testTarget);
+    /real\/remote-(?:visual-companion|task-graph-refusal)\.test\.ts$/.test(testTarget);
 }
 
 export function targetNeedsRelayControl(testTarget: string): boolean {
@@ -33,7 +33,7 @@ export function targetNeedsRelayControl(testTarget: string): boolean {
 
 export function targetNeedsIsolatedAgentProviders(testTarget: string): boolean {
   return /mock\/new-task-modal\.test\.ts$/.test(testTarget) ||
-    /real\/remote-visual-companion\.test\.ts$/.test(testTarget);
+    /real\/remote-(?:visual-companion|task-graph-refusal)\.test\.ts$/.test(testTarget);
 }
 
 export function targetNeedsPlaywrightChromium(testTarget: string): boolean {
