@@ -127,6 +127,8 @@ const highlighted = ref("");
 const currentLang = ref("text");
 const loading = ref(true);
 const error = ref<string | null>(null);
+let nextFileLoadId = 0;
+let activeFileLoadId = 0;
 
 const isMarkdownFile = computed(() =>
   props.filePath.toLowerCase().endsWith(".md")
@@ -220,6 +222,8 @@ watch([renderMarkdown, content, effectiveCodeTheme], async ([shouldRender, raw])
 });
 
 async function loadFile() {
+  const loadId = ++nextFileLoadId;
+  activeFileLoadId = loadId;
   loading.value = true;
   error.value = null;
   try {
@@ -231,6 +235,8 @@ async function loadFile() {
           ? props.remoteContent
           : await invoke<string>("read_text_file", { path: `${props.worktreePath}/${props.filePath}` });
 
+    if (loadId !== activeFileLoadId) return;
+
     const hl = await getHighlighter();
     const lang = getSyntaxLanguageForPath(props.filePath);
 
@@ -241,14 +247,19 @@ async function loadFile() {
       // Language not available — fall back to text
     }
 
+    if (loadId !== activeFileLoadId) return;
+
     const loadedLangs = hl.getLoadedLanguages();
     // Set lang before content so the watcher fires once with the correct language
     currentLang.value = loadedLangs.includes(toShikiLanguage(lang)) ? lang : "text";
     content.value = raw;
   } catch (e: unknown) {
+    if (loadId !== activeFileLoadId) return;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    loading.value = false;
+    if (loadId === activeFileLoadId) {
+      loading.value = false;
+    }
   }
 }
 
