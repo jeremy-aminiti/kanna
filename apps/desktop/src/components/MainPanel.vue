@@ -272,6 +272,7 @@ const activeCloudTerminal = computed<CloudTerminalCacheEntry | null>(() => {
     ownerDesktopId: terminalRef.ownerDesktopId,
     ownerTaskId: terminalRef.ownerLocalTaskId,
     transport: terminalRef.transport,
+    sessionRevision: task.transition_revision ?? null,
   };
 });
 

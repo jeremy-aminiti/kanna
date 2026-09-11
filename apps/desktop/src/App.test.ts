@@ -1,6 +1,16 @@
 // @vitest-environment happy-dom
 
-import { computed, defineComponent, h, nextTick, reactive, ref } from "vue";
+import {
+  computed,
+  defineComponent,
+  getCurrentInstance,
+  h,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  reactive,
+  ref,
+} from "vue";
 import { mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeyboardActions } from "./composables/useKeyboardShortcuts";
@@ -4050,6 +4060,76 @@ describe("App", () => {
       taskId: "task-blocked",
       expectedTransitionRevision: "run-blocked-2",
     });
+
+    wrapper.unmount();
+  });
+
+  it("follows a selected remote task to the terminal for its next stage run", async () => {
+    const terminalLifecycle: Array<["attached" | "detached", string]> = [];
+    const CloudTerminalStub = defineComponent({
+      name: "CloudTerminalView",
+      setup() {
+        const instance = getCurrentInstance();
+        const sessionRevision = () => String(instance?.vnode.key ?? "");
+        onMounted(() => terminalLifecycle.push(["attached", sessionRevision()]));
+        onUnmounted(() => terminalLifecycle.push(["detached", sessionRevision()]));
+        return () => h("div", { "data-testid": "remote-cloud-terminal" });
+      },
+    });
+    const TaskHeaderStub = defineComponent({
+      name: "TaskHeader",
+      props: { item: Object },
+      template: '<div data-testid="remote-stage">{{ item?.stage }}:{{ item?.branch }}</div>',
+    });
+    const wrapper = await mountAppWithOverrides(SidebarWithRepoStub, {
+      Sidebar: false,
+      MainPanel: false,
+      TaskHeader: TaskHeaderStub,
+      TerminalTabs: true,
+      CloudTerminalView: CloudTerminalStub,
+    });
+    const stageA = buildRemoteBlockedWorkflowSnapshot({
+      blocked: false,
+      transitionRevision: "run-stage-a",
+      updatedAt: "2026-07-25T01:00:00.000Z",
+    });
+    emitDesktopCloudSnapshot(stageA);
+    await flushPromises();
+
+    await wrapper.get('.workflow-item[data-task-id="cloud:repo-remote:task-blocked"]').trigger("click");
+    await flushPromises();
+    const selectedPresentationId = store.selectedItemId;
+
+    expect(wrapper.find(".cloud-terminal-cache").exists()).toBe(true);
+    expect(wrapper.find('[data-testid="remote-cloud-terminal"]').exists()).toBe(true);
+    expect(terminalLifecycle).toEqual([["attached", "run-stage-a"]]);
+    expect(wrapper.get('[data-testid="remote-stage"]').text())
+      .toBe("in progress:task-blocked");
+
+    const stageB: DesktopCloudSnapshot = {
+      ...stageA,
+      items: stageA.items.map((item) => item.id === "cloud:repo-remote:task-blocked"
+        ? {
+            ...item,
+            stage: "review",
+            branch: "task-blocked-2",
+            transition_revision: "run-stage-b",
+            updated_at: "2026-07-25T01:01:00.000Z",
+          }
+        : item),
+    };
+    emitDesktopCloudSnapshot(stageB);
+    await flushPromises();
+
+    expect(store.selectedItemId).toBe(selectedPresentationId);
+    expect(wrapper.get('[data-testid="remote-stage"]').text())
+      .toBe("review:task-blocked-2");
+    expect(wrapper.findAll('[data-testid="remote-cloud-terminal"]')).toHaveLength(1);
+    expect(terminalLifecycle).toEqual([
+      ["attached", "run-stage-a"],
+      ["detached", "run-stage-a"],
+      ["attached", "run-stage-b"],
+    ]);
 
     wrapper.unmount();
   });
