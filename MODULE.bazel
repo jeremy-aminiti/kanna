@@ -7,6 +7,7 @@ git_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:git.bzl", "g
 
 bazel_dep(name = "rules_tauri", version = "0.0.0")
 bazel_dep(name = "rules_shell", version = "0.6.1")
+bazel_dep(name = "rules_cc", version = "0.2.17")
 bazel_dep(name = "rules_python", version = "1.7.0")
 bazel_dep(name = "rules_rust", version = "0.69.0")
 bazel_dep(name = "rules_zig", version = "0.12.3")
@@ -227,7 +228,39 @@ zig.toolchain(
     default = True,
     zig_version = "0.15.2",
 )
-use_repo(zig, "zig_toolchains")
+use_repo(
+    zig,
+    "zig_0.15.2_aarch64-linux",
+    "zig_0.15.2_aarch64-macos",
+    "zig_0.15.2_x86_64-linux",
+    "zig_toolchains",
+)
+
+ubuntu_sysroot_repository = use_repo_rule(
+    "//packaging/linux:sysroot_repository.bzl",
+    "ubuntu_sysroot_repository",
+)
+ubuntu_sysroot_repository(
+    name = "ubuntu_noble_sysroot_amd64",
+    architecture = "amd64",
+    lock = "//packaging/linux:sysroot-amd64.lock.json",
+)
+ubuntu_sysroot_repository(
+    name = "ubuntu_noble_sysroot_arm64",
+    architecture = "arm64",
+    lock = "//packaging/linux:sysroot-arm64.lock.json",
+)
+
+register_toolchains(
+    "//:linux_arm64_cc_on_linux_arm64",
+    "//:linux_arm64_cc_on_linux_x86_64",
+    "//:linux_arm64_cc_on_macos_arm64",
+    "//tools/bazel:linux_arm64_zig_target_toolchain",
+    "//:linux_x86_64_cc_on_linux_arm64",
+    "//:linux_x86_64_cc_on_linux_x86_64",
+    "//:linux_x86_64_cc_on_macos_arm64",
+    "//tools/bazel:linux_x86_64_zig_target_toolchain",
+)
 
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
 node.toolchain(node_version = "24.13.0")
