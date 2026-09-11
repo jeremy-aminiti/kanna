@@ -2378,14 +2378,20 @@ async fn run_terminal_control(
             }
         }
 
-        let pending_is_registration = pending_command
-            .as_ref()
-            .is_some_and(|command| matches!(command, TerminalControlCommand::Register { .. }));
+        let pending_is_viewer_command = pending_command.as_ref().is_some_and(|command| {
+            matches!(
+                command,
+                TerminalControlCommand::Register { .. }
+                    | TerminalControlCommand::Active
+                    | TerminalControlCommand::Takeover
+                    | TerminalControlCommand::Release
+            )
+        });
         if !geometry_supported.unwrap_or(false) {
-            if pending_is_registration {
+            if pending_is_viewer_command {
                 pending_command = None;
             }
-        } else if !pending_is_registration {
+        } else if !pending_is_viewer_command {
             if let Some(command) = registration.as_ref() {
                 if daemon_writer.send_one_way(command).await.is_err() {
                     continue;

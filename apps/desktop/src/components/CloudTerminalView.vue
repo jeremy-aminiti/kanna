@@ -92,6 +92,9 @@ let lifecycleGeneration = 0;
 let unmounted = false;
 let stopNativeWindowFocusTracking: (() => void) | null = null;
 let nativeWindowFocusTrackingGeneration = 0;
+// WebKit can still report document focus briefly after a native blur. Native
+// eligibility is authoritative until the corresponding key-window edge.
+let nativeWindowActive = true;
 const inputProducer = createTerminalInputProducerClassifier();
 const controlInputEvents = ["mousedown", "mouseup", "mousemove", "wheel", "focus", "blur"];
 const draftInputEvents = ["beforeinput", "paste"];
@@ -249,6 +252,7 @@ function hasVisibleRemoteContainer(): boolean {
 function syncRemoteViewerEligibility(activate: boolean): void {
   const visible = props.active
     && !unmounted
+    && nativeWindowActive
     && !document.hidden
     && document.hasFocus()
     && hasVisibleRemoteContainer();
@@ -279,9 +283,13 @@ function startForegroundTracking(): void {
   void getCurrentWindow().onFocusChanged((event) => {
     if (unmounted || generation !== nativeWindowFocusTrackingGeneration) return;
     if (!event.payload) {
-      syncRemoteViewerEligibility(false);
+      nativeWindowActive = false;
+      // Do not recompute from WebKit here: it may still say focused on this
+      // native edge. A background cached viewer must withdraw immediately.
+      subscription?.setViewerVisible?.(false);
       return;
     }
+    nativeWindowActive = true;
     // Tauri's native key-window edge can precede WebKit's document focus.
     syncRemoteViewerEligibilityAfterDocumentFocus(true);
   }).then((unlisten) => {
