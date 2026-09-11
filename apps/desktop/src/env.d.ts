@@ -59,6 +59,19 @@ interface KannaTerminalBuffersE2EApi {
   selectText: (sessionId: string, text: string) => string | null;
 }
 
+interface KannaActiveViewTraceEntry {
+  sessionId: string;
+  phase: "ineligible" | "eligible" | "stale" | "sent";
+  attached: boolean;
+  paused: boolean;
+  disposed: boolean;
+  hasContainer: boolean;
+  visible: boolean;
+  terminal: { cols: number; rows: number } | null;
+  documentHasFocus: boolean;
+  documentHidden: boolean;
+}
+
 interface KannaAppMetricsSnapshot {
   invokeCounts: Record<string, number>;
   listenCounts: Record<string, number>;
@@ -144,6 +157,8 @@ interface KannaE2EHook {
     getAll(): Array<{ event: string; payload?: unknown }>;
   };
   terminalBuffers?: KannaTerminalBuffersE2EApi;
+  /** DEV/E2E-only active-view lifecycle decisions. */
+  activeViewTrace?: KannaActiveViewTraceEntry[];
   remoteCompanion?: KannaRemoteCompanionE2EApi;
   /** What the most recently initialized terminal view actually rendered with. */
   terminalRenderer?: import("./composables/terminalRenderer").TerminalRendererOutcome | null;

@@ -312,6 +312,10 @@ async function captureHandbackDiagnostics(
     taskId,
     focus,
     primaryOutboundControl: await terminalControlTrace(primary, taskId),
+    primaryActiveViewTrace: await primary.executeSync(`
+      return (window.__KANNA_E2E__?.activeViewTrace ?? [])
+        .filter((entry) => entry?.sessionId === ${JSON.stringify(taskId)});
+    `),
   }, null, 2)}\n`);
 }
 

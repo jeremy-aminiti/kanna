@@ -91,6 +91,23 @@ export function createTerminalSessionLifecycle(params: {
         && style.display !== "none"
         && style.visibility !== "hidden"
     }
+    const trace = (phase: "ineligible" | "eligible" | "stale" | "sent") => {
+      if (!import.meta.env.DEV || !window.__KANNA_E2E__) return
+      const visible = container ? hasVisibleSize(container) : false
+      window.__KANNA_E2E__.activeViewTrace ??= []
+      window.__KANNA_E2E__.activeViewTrace.push({
+        sessionId: params.sessionId,
+        phase,
+        attached: params.state.attached,
+        paused: params.state.paused,
+        disposed: params.state.disposed,
+        hasContainer: container !== null,
+        visible,
+        terminal: terminal ? { cols: terminal.cols, rows: terminal.rows } : null,
+        documentHasFocus: document.hasFocus(),
+        documentHidden,
+      })
+    }
     if (
       !params.state.attached
       || params.state.paused
@@ -102,8 +119,12 @@ export function createTerminalSessionLifecycle(params: {
       || terminal.rows <= 0
       || documentHidden
       || !document.hasFocus()
-    ) return
+    ) {
+      trace("ineligible")
+      return
+    }
 
+    trace("eligible")
     const client = await params.getTerminalStreamClient()
     if (
       params.state.paused
@@ -112,9 +133,13 @@ export function createTerminalSessionLifecycle(params: {
       || !hasVisibleSize(container)
       || (document as Document & { visibilityState: string }).visibilityState === "hidden"
       || !document.hasFocus()
-    ) return
+    ) {
+      trace("stale")
+      return
+    }
     client.setTerminalViewerVisibility?.(params.sessionId, true)
     client.activateTerminalViewer?.(params.sessionId)
+    trace("sent")
   }
   const disposal = createTerminalDisposalController({
     sessionId: params.sessionId,
