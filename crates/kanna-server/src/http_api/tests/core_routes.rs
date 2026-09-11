@@ -7159,6 +7159,14 @@ async fn start_desktop_view_open(
     tokio::task::JoinHandle<serde_json::Value>,
     serde_json::Value,
 ) {
+    // The lane keeps what earlier opens in the same test put there, so wait
+    // for a command *beyond* those rather than for any command at all.
+    let already_queued = fixture
+        .state
+        .desktop_view_commands()
+        .read(None, None, 100)
+        .events
+        .len();
     let app = fixture.app.clone();
     let pending = tokio::spawn(async move {
         let response = app
@@ -7180,9 +7188,9 @@ async fn start_desktop_view_open(
     });
 
     for _ in 0..200 {
-        let batch = fixture.state.desktop_view_commands().read(None, None, 10);
-        if let Some(event) = batch.events.first() {
-            return (pending, event["event"].clone());
+        let batch = fixture.state.desktop_view_commands().read(None, None, 100);
+        if batch.events.len() > already_queued {
+            return (pending, batch.events[already_queued]["event"].clone());
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
@@ -7430,10 +7438,7 @@ async fn a_branch_the_task_has_left_is_named_as_stale_rather_than_missing() {
     .await;
     assert_eq!(body["code"], serde_json::json!("stale_branch_alias"));
     assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("task-file"),
+        body["message"].as_str().unwrap().contains("task-file"),
         "the message names the task that is still there: {}",
         body["message"]
     );
@@ -7461,7 +7466,11 @@ async fn a_symlink_out_of_the_worktree_is_refused_like_any_other_escape() {
             )
             .await;
             assert_eq!(body["opened"], serde_json::json!(false), "view {view}");
-            assert_eq!(body["code"], serde_json::json!("invalid_path"), "view {view}");
+            assert_eq!(
+                body["code"],
+                serde_json::json!("invalid_path"),
+                "view {view}"
+            );
         }
         let batch = fixture.state.desktop_view_commands().read(None, None, 10);
         assert!(batch.events.is_empty());
@@ -7488,7 +7497,6 @@ async fn a_tree_target_may_be_a_directory_or_a_file_inside_the_worktree() {
         let request_id = command["requestId"].as_str().unwrap().to_string();
         acknowledge_desktop_view(&fixture, &request_id, true, None).await;
         assert_eq!(pending.await.unwrap()["opened"], serde_json::json!(true));
-        fixture.state.desktop_view_commands().read(None, None, 10);
     }
 }
 
@@ -7517,12 +7525,20 @@ async fn a_diff_anchor_is_checked_against_the_diff_before_a_window_is_asked() {
     .await;
     // Both sides' numbering travels with the anchor, because the rendered diff
     // numbers each row by its own side.
-    assert_eq!(command["target"]["anchorKind"], serde_json::json!("addition"));
+    assert_eq!(
+        command["target"]["anchorKind"],
+        serde_json::json!("addition")
+    );
     assert_eq!(command["target"]["newLine"], serde_json::json!(2));
     let request_id = command["requestId"].as_str().unwrap().to_string();
     acknowledge_desktop_view(&fixture, &request_id, true, None).await;
     assert_eq!(pending.await.unwrap()["opened"], serde_json::json!(true));
-    fixture.state.desktop_view_commands().read(None, None, 10);
+    let queued_after_the_valid_open = fixture
+        .state
+        .desktop_view_commands()
+        .read(None, None, 100)
+        .events
+        .len();
 
     for (target, expected_code) in [
         (
@@ -7545,8 +7561,16 @@ async fn a_diff_anchor_is_checked_against_the_diff_before_a_window_is_asked() {
         .await;
         assert_eq!(body["code"], serde_json::json!(expected_code));
     }
-    let batch = fixture.state.desktop_view_commands().read(None, None, 10);
-    assert!(batch.events.is_empty());
+    // None of the refused anchors reached a window.
+    assert_eq!(
+        fixture
+            .state
+            .desktop_view_commands()
+            .read(None, None, 100)
+            .events
+            .len(),
+        queued_after_the_valid_open
+    );
 }
 
 #[tokio::test]

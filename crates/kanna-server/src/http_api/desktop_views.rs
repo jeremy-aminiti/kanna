@@ -296,9 +296,8 @@ pub(super) async fn open_desktop_view(
         }
         Some(ack) => Ok(Json(failure_body(OpenViewFailure::new(
             renderer_failure_code(ack.code.as_deref()),
-            ack.message.unwrap_or_else(|| {
-                "the desktop could not show the requested view".to_string()
-            }),
+            ack.message
+                .unwrap_or_else(|| "the desktop could not show the requested view".to_string()),
         )))),
         None => Ok(Json(failure_body(OpenViewFailure::new(
             "desktop_unavailable",
@@ -336,10 +335,7 @@ struct PreparedOpen {
     target: Option<Value>,
 }
 
-fn prepare_open(
-    db: &Db,
-    request: OpenDesktopViewRequest,
-) -> Result<PreparedOpen, OpenViewFailure> {
+fn prepare_open(db: &Db, request: OpenDesktopViewRequest) -> Result<PreparedOpen, OpenViewFailure> {
     let Some(view) = DesktopViewKind::parse(request.view.trim()) else {
         return Err(OpenViewFailure::new(
             "unsupported_view",
@@ -488,7 +484,10 @@ fn resolve_file_target(
     if line > total {
         return Err(OpenViewFailure::new(
             "invalid_range",
-            format!("{} has {total} lines; line {line} is past its end", file.path),
+            format!(
+                "{} has {total} lines; line {line} is past its end",
+                file.path
+            ),
         ));
     }
     let end_line = positive("endLine", target.end_line)?.unwrap_or(line);
@@ -642,8 +641,8 @@ fn resolve_diff_target(
         ));
     }
 
-    let request = crate::task_diff::TaskDiffRequest::parse(Some(scope), None)
-        .map_err(map_diff_failure)?;
+    let request =
+        crate::task_diff::TaskDiffRequest::parse(Some(scope), None).map_err(map_diff_failure)?;
     let diff = crate::task_diff::read_task_diff(db, task_id, request).map_err(map_diff_failure)?;
     let anchor = locate_diff_line(&diff.patch, path, side, line)?;
     if let Some(excerpt) = target.excerpt.as_deref() {
@@ -1049,15 +1048,20 @@ pub(super) async fn wait_desktop_view_commands(
 mod tests {
     use super::{locate_diff_line, parse_hunk_header, patch_path_matches};
 
-    const PATCH: &str = "diff --git a/src/main.rs b/src/main.rs\n\
---- a/src/main.rs\n\
-+++ b/src/main.rs\n\
-@@ -10,4 +10,5 @@ fn main() {\n\
- let kept = 1;\n\
--let removed = 2;\n\
-+let added = 3;\n\
-+let also_added = 4;\n\
- let tail = 5;\n";
+    // Written as joined lines rather than with `\`-continuations: a
+    // continuation eats the next line's leading whitespace, which is exactly
+    // the character that marks a context line in a patch.
+    const PATCH: &str = concat!(
+        "diff --git a/src/main.rs b/src/main.rs\n",
+        "--- a/src/main.rs\n",
+        "+++ b/src/main.rs\n",
+        "@@ -10,4 +10,5 @@ fn main() {\n",
+        " let kept = 1;\n",
+        "-let removed = 2;\n",
+        "+let added = 3;\n",
+        "+let also_added = 4;\n",
+        " let tail = 5;\n",
+    );
 
     #[test]
     fn hunk_headers_give_both_starting_lines() {
@@ -1069,7 +1073,10 @@ mod tests {
     #[test]
     fn patch_paths_ignore_the_a_and_b_prefixes_and_dev_null() {
         assert!(patch_path_matches("a/src/main.rs", "src/main.rs"));
-        assert!(patch_path_matches("b/src/main.rs\t2026-01-01", "src/main.rs"));
+        assert!(patch_path_matches(
+            "b/src/main.rs\t2026-01-01",
+            "src/main.rs"
+        ));
         assert!(!patch_path_matches("/dev/null", "src/main.rs"));
         assert!(!patch_path_matches("a/src/other.rs", "src/main.rs"));
     }
@@ -1078,7 +1085,9 @@ mod tests {
     fn each_side_counts_only_the_lines_that_side_has() {
         // New side: 10 kept, 11 added, 12 also_added, 13 tail.
         assert_eq!(
-            locate_diff_line(PATCH, "src/main.rs", "new", 12).unwrap().text,
+            locate_diff_line(PATCH, "src/main.rs", "new", 12)
+                .unwrap()
+                .text,
             "let also_added = 4;"
         );
         let context = locate_diff_line(PATCH, "src/main.rs", "new", 10).unwrap();
@@ -1086,7 +1095,9 @@ mod tests {
         assert_eq!((context.old_line, context.new_line), (Some(10), Some(10)));
         // Old side: 10 kept, 11 removed, 12 tail.
         assert_eq!(
-            locate_diff_line(PATCH, "src/main.rs", "old", 11).unwrap().text,
+            locate_diff_line(PATCH, "src/main.rs", "old", 11)
+                .unwrap()
+                .text,
             "let removed = 2;"
         );
     }

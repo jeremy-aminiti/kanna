@@ -219,7 +219,8 @@ fn dispatch_desktop_view_open(app: &AppHandle, event: &Value) {
 /// first window there is. Ordered by label so the fallback does not change
 /// from one command to the next for no reason.
 fn choose_desktop_view_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
-    let mut windows: Vec<(String, tauri::WebviewWindow)> = app.webview_windows().into_iter().collect();
+    let mut windows: Vec<(String, tauri::WebviewWindow)> =
+        app.webview_windows().into_iter().collect();
     windows.sort_by(|(left, _), (right, _)| left.cmp(right));
     windows
         .iter()
