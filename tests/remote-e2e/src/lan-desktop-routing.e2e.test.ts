@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { localProcessFetch } from "@kanna/local-process-fetch";
+import { claimDesktopPairingSession } from "./desktopPairing";
 import {
   BUFFY_UID,
   OTHER_ACCOUNT_EMAIL,
@@ -283,6 +284,89 @@ describe("LAN-first desktop-to-desktop routing E2E", () => {
     },
     60_000
   );
+
+  /**
+   * Manual/mobile pairing separation. `pairing::PairingStore` (mobile QR
+   * pairing, keyed by `desktop_id` -> `TrustedDevice` entries) and
+   * `machine_trust::MachineTrustStore` (automatic same-account
+   * desktop-to-desktop LAN trust) are two independent trust systems that
+   * merely persist as sibling files under the same daemon directory - they
+   * share only a hashing utility (`pairing::hash_device_secret`/
+   * `constant_time_eq`), never state; neither reads nor writes the other's
+   * store, and `lan_discovery`'s own candidate map has no reference to
+   * pairing at all. No existing test ever completed a real pairing claim -
+   * every prior test (`lan-layer.e2e.test.ts`,
+   * `cloud-pairing-auth-discovery.e2e.test.ts`) stopped at session
+   * creation, asserting only on the unclaimed `PairingSession`'s own
+   * fields. This drives a real claim through the actual production
+   * endpoint (`POST /v1/pairing/sessions/claim`, `pairing::
+   * claim_pairing_session`) - not a fixture write - then proves the
+   * separation two ways: the claim alone leaves `machine-trust.json`
+   * completely unchanged, and normal LAN desktop-to-desktop trust
+   * establishment (the same production path the relay-bootstrap scenario
+   * above proves) still works identically for a desktop that has a real,
+   * separately-completed mobile pairing on file.
+   */
+  it(
+    "completes a real mobile pairing claim without affecting LAN desktop-to-desktop trust or routing",
+    async () => {
+      const trustBefore = await readMachineTrustStore(harness);
+
+      const session = await harness.createDesktopPairingSession();
+      const deviceId = `pairing-separation-phone-${Date.now()}`;
+      const claim = await claimDesktopPairingSession(harness.lanBaseUrl, {
+        code: session.code,
+        deviceId,
+        deviceName: "Pairing Separation E2E Phone"
+      });
+      expect(claim.desktopId).toBe(harness.desktopId);
+      expect(claim.deviceSecret.length).toBeGreaterThan(0);
+
+      // The claim is real, not a no-op: PairingStore actually gained the
+      // trusted device, keyed by desktop_id per `add_trusted_device`.
+      const pairingStore = await readPairingStore(harness);
+      const trustedDevices = pairingStore?.trusted_devices[harness.desktopId] ?? [];
+      expect(trustedDevices.some((device) => device.device_id === deviceId)).toBe(true);
+
+      // Separation, direction 1: the claim alone must not touch machine_trust.
+      const trustAfterClaim = await readMachineTrustStore(harness);
+      expect(trustAfterClaim).toEqual(trustBefore);
+
+      // Separation, direction 2: normal LAN desktop-to-desktop trust
+      // establishment (the same real bootstrap-over-relay path the
+      // "establishes a real trust grant..." scenario above proves) still
+      // works identically for a desktop that now has a real, completed
+      // mobile pairing on file - pairing having happened is not something
+      // the LAN trust path needs to know or care about.
+      const peer = await startSameAccountPeer(harness, "post-pairing");
+      try {
+        await invokeMachine(harness, peer.desktopId, "/v1/status");
+        await waitForCondition(
+          async () => {
+            const store = await readMachineTrustStore(harness);
+            return store?.outbound.some(
+              (grant) =>
+                grant.targetDesktopId === peer.desktopId && grant.accountUid === BUFFY_UID
+            ) ?? false;
+          },
+          30_000,
+          `${harness.desktopId} never recorded a real outbound bootstrap grant for ${peer.desktopId} after a completed mobile pairing`
+        );
+
+        // The pairing claim must equally not have leaked into this
+        // completely separate desktop's own trust store.
+        const peerTrust = await readMachineTrustStore(peer);
+        expect(
+          peerTrust?.inbound.some((grant) => grant.sourceDesktopId === harness.desktopId)
+        ).toBe(true);
+        const peerPairingStore = await readPairingStore(peer);
+        expect(peerPairingStore?.trusted_devices ?? {}).toEqual({});
+      } finally {
+        await peer.stop();
+      }
+    },
+    60_000
+  );
 });
 
 interface MachineInvokeResult {
@@ -317,6 +401,28 @@ async function readMachineTrustStore(
   try {
     const raw = await readFile(join(daemonDir, "machine-trust.json"), "utf8");
     return JSON.parse(raw) as MachineTrustStoreSnapshot;
+  } catch {
+    return null;
+  }
+}
+
+interface PairingStoreSnapshot {
+  trusted_devices: Record<string, Array<{ device_id: string; device_name: string }>>;
+}
+
+/** Reads the real, on-disk `pairings.json` `pairing::claim_pairing_session`
+ * itself writes - `PairingStore`'s own field names are snake_case (no
+ * `#[serde(rename_all = "camelCase")]` on that struct, unlike
+ * `MachineTrustStore`), so this reads them as-is rather than assuming the
+ * other store's convention. Absent reads as an empty store, matching
+ * `readMachineTrustStore`'s own convention. */
+async function readPairingStore(
+  desktop: Pick<RemoteHarness, "paths"> | Pick<RemoteDesktop, "paths">
+): Promise<PairingStoreSnapshot | null> {
+  const daemonDir = "daemonDir" in desktop.paths ? desktop.paths.daemonDir : join(desktop.paths.root, "daemon");
+  try {
+    const raw = await readFile(join(daemonDir, "pairings.json"), "utf8");
+    return JSON.parse(raw) as PairingStoreSnapshot;
   } catch {
     return null;
   }
