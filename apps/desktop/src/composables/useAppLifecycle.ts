@@ -30,6 +30,7 @@ import {
 } from "../windowWorkspace";
 import { scheduleStartupBackup, startPeriodicBackup } from "./useBackup";
 import {
+  DESKTOP_VIEW_OPEN_EVENT,
   parseDesktopViewOpenCommand,
   type DesktopViewOpenCommand,
 } from "./desktopViewOpen";
@@ -378,22 +379,29 @@ export function useAppLifecycle({
     );
 
     try {
-      const unlistenDesktopViewOpen = await listen("desktop-view-open", (event: unknown) => {
-        let command: DesktopViewOpenCommand;
-        try {
-          command = parseDesktopViewOpenCommand(eventPayload(event));
-        } catch (e: unknown) {
-          // Nothing to acknowledge with: a command this window cannot read
-          // carries no request id to answer. The caller learns of it as an
-          // unavailable desktop, which is as close to the truth as this
-          // window can get.
-          console.error("[App] failed to read a desktop view open command:", e);
-          return;
-        }
-        void openTaskView(command).catch((e: unknown) => {
-          console.error("[App] failed to handle desktop view open command:", e);
-        });
-      });
+      // Window-scoped, not global: the native side picks one window and
+      // addresses the command to it, the same way the native menu events are
+      // addressed. A global listener is registered for "any target" and does
+      // not receive a webview-addressed emit.
+      const unlistenDesktopViewOpen = await listenCurrentWebviewWindow(
+        DESKTOP_VIEW_OPEN_EVENT,
+        (event: unknown) => {
+          let command: DesktopViewOpenCommand;
+          try {
+            command = parseDesktopViewOpenCommand(eventPayload(event));
+          } catch (e: unknown) {
+            // Nothing to acknowledge with: a command this window cannot read
+            // carries no request id to answer. The caller learns of it as an
+            // unavailable desktop, which is as close to the truth as this
+            // window can get.
+            console.error("[App] failed to read a desktop view open command:", e);
+            return;
+          }
+          void openTaskView(command).catch((e: unknown) => {
+            console.error("[App] failed to handle desktop view open command:", e);
+          });
+        },
+      );
       appUnlisteners.push(unlistenDesktopViewOpen);
     } catch (e: unknown) {
       console.error("[App] desktop-view-open listener registration failed:", e);

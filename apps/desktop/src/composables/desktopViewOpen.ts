@@ -12,6 +12,12 @@
 
 import { mainTabScopeKeyForTask, type MainTabDescriptor } from "./useMainTabs";
 
+/**
+ * The native event carrying one command. Addressed to a single window rather
+ * than broadcast, so it is listened for on this webview rather than globally.
+ */
+export const DESKTOP_VIEW_OPEN_EVENT = "desktop-view-open";
+
 export const DESKTOP_VIEW_KINDS = [
   "agent",
   "file",

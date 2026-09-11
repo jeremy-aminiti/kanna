@@ -465,6 +465,12 @@ async function revealDesktopViewTarget(
     return { opened: true };
   }
 
+  // A rendered markdown preview has no lines to land on — it is prose, not a
+  // file — so a line target switches this view to the raw text. The reader's
+  // remembered preference is deliberately not written: they asked for
+  // markdown, an agent asked for one line of it, and only this view moves.
+  renderMarkdown.value = false;
+
   const lines = content.value.split("\n");
   const startLine = Math.min(target.line, lines.length) - 1;
   const endLine = Math.min(target.endLine ?? target.line, lines.length) - 1;
