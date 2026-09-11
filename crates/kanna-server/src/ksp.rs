@@ -1975,6 +1975,13 @@ enum TerminalInputKind {
 }
 
 impl TerminalControlCommand {
+    fn is_viewer_command(&self) -> bool {
+        matches!(
+            self,
+            Self::Register { .. } | Self::Active | Self::Takeover | Self::Release
+        )
+    }
+
     fn into_daemon_command(self, session_id: String) -> DaemonCommand {
         match self {
             Self::Input { data, kind } => match kind {
@@ -2378,15 +2385,9 @@ async fn run_terminal_control(
             }
         }
 
-        let pending_is_viewer_command = pending_command.as_ref().is_some_and(|command| {
-            matches!(
-                command,
-                TerminalControlCommand::Register { .. }
-                    | TerminalControlCommand::Active
-                    | TerminalControlCommand::Takeover
-                    | TerminalControlCommand::Release
-            )
-        });
+        let pending_is_viewer_command = pending_command
+            .as_ref()
+            .is_some_and(TerminalControlCommand::is_viewer_command);
         if !geometry_supported.unwrap_or(false) {
             if pending_is_viewer_command {
                 pending_command = None;
@@ -2468,16 +2469,7 @@ async fn run_terminal_control(
                             "[ksp] writing terminal resize (task={task_id}, session={session_id}, cols={cols}, rows={rows}, source=live)"
                         );
                     }
-                    let daemon_command = command.into_daemon_command(session_id.clone());
-                    if !geometry_supported.unwrap_or(false)
-                        && matches!(
-                            &daemon_command,
-                            DaemonCommand::RegisterViewer { .. }
-                                | DaemonCommand::ActiveViewer { .. }
-                                | DaemonCommand::TakeoverViewer { .. }
-                                | DaemonCommand::ReleaseViewer { .. }
-                        )
-                    {
+                    if !geometry_supported.unwrap_or(false) && command.is_viewer_command() {
                         let _ = send_task_error(
                             &frame_tx,
                             &task_id,
@@ -2487,6 +2479,7 @@ async fn run_terminal_control(
                         .await;
                         continue;
                     }
+                    let daemon_command = command.into_daemon_command(session_id.clone());
                     if matches!(&daemon_command, DaemonCommand::RegisterViewer { .. }) {
                         registration = Some(daemon_command.clone());
                     }
@@ -10218,6 +10211,27 @@ mod tests {
                 rows: 40,
             })
         ));
+    }
+
+    #[test]
+    fn old_geometry_probe_filters_every_viewer_command_but_not_local_input() {
+        let register = TerminalControlCommand::Register {
+            viewer_id: "viewer".into(),
+            role: TerminalViewerRole::Remote,
+            generation: 1,
+            cols: 80,
+            rows: 24,
+            visible: true,
+        };
+        assert!(register.is_viewer_command());
+        assert!(TerminalControlCommand::Active.is_viewer_command());
+        assert!(TerminalControlCommand::Takeover.is_viewer_command());
+        assert!(TerminalControlCommand::Release.is_viewer_command());
+        assert!(!TerminalControlCommand::Input {
+            data: b"local input".to_vec(),
+            kind: TerminalInputKind::Draft,
+        }
+        .is_viewer_command());
     }
 
     #[tokio::test]
