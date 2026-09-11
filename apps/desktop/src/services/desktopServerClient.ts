@@ -257,7 +257,7 @@ export interface DesktopTaskLatestRun {
 /**
  * What a review task is reviewing, as the forge identifies it.
  *
- * Published by the review or triage agent and stored on the task. It is
+ * Published by the reviewer or PR review manager and stored on the task. It is
  * candidate information, never an approval: it exists so this control can name
  * the pull request, show the operator exactly which commit they are
  * authorizing, and pin their decision to it.

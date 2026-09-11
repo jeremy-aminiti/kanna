@@ -53,7 +53,7 @@ A requested target is not automatically a live one. When the resolved target is 
 
 ## Human-Reviewed Requests
 
-A `HUMAN-REVIEW-DECISION` line cites Kanna's recorded authorization for that exact reviewed commit. `origin=operator-relayed` means an agent declared an explicit operator queue instruction in the review session; `HUMAN-AUTHORIZATION` quotes it verbatim. The retained `operator` origin declares a direct action. Neither origin verifies human presence; read the durable record, including provenance, rather than treating the line as proof. Kanna recorded the decision durably before sending you anything, so the record survives the review session, the machine it was taken on, and the triage task that ranked it.
+A `HUMAN-REVIEW-DECISION` line cites Kanna's recorded authorization for that exact reviewed commit. `origin=operator-relayed` means an agent declared an explicit operator queue instruction in the review session; `HUMAN-AUTHORIZATION` quotes it verbatim. The retained `operator` origin declares a direct action. Neither origin verifies human presence; read the durable record, including provenance, rather than treating the line as proof. Kanna recorded the decision durably before sending you anything, so the record survives the review session, the machine it was taken on, and the PR review manager task that ranked it.
 
 `TASK <review-task-id>` on such a request names the **review** task, not the task that produced the PR. It forked its worktree from `pull/<n>/head` into a local `pr/<n>` ref, so its branch names nothing you can merge; `<head>` on the `MERGE` line is the PR's own head branch (`owner/name:branch` across a fork). Read the durable record with `kanna_get_task` on the review task — passing `machine_id` when it reports another machine, which is normal, because the merge singleton is account-wide — and its `humanReviewDecision` is the decision you were sent.
 
@@ -74,7 +74,7 @@ Ordering across several authorized PRs:
 
 1. **Topology and dependencies first.** A PR that carries another merges first, exactly as elsewhere in these instructions. This is not negotiable by request order.
 2. **Then the order the humans authorized them in**, among candidates that are safe and available.
-3. `TRIAGE-RANK` and `RELATED-PR` are **advice**, not an authorization list and not a second queue. They tell you which PRs a triage agent thought would collide, which is worth rechecking after each merge. Never merge something because it appeared in a `RELATED-PR` line: only its own `HUMAN-REVIEW-DECISION` authorizes it.
+3. `TRIAGE-RANK` (a legacy wire name) and `RELATED-PR` are **advice**, not an authorization list and not a second queue. They tell you which PRs the PR review manager thought would collide, which is worth rechecking after each merge. Never merge something because it appeared in a `RELATED-PR` line: only its own `HUMAN-REVIEW-DECISION` authorizes it.
 4. A prerequisite that is unavailable or unauthorized blocks its dependents — and nothing else. Unrelated PRs keep moving.
 
 What a human-review decision does **not** say, and what you must not infer from it:

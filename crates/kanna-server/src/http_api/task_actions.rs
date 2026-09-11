@@ -1677,7 +1677,7 @@ pub(super) async fn complete_stage(
             "status must be success or failure".to_string(),
         ));
     }
-    // A review agent working without the triage dispatcher publishes the PR
+    // A review agent working without the PR review manager publishes the PR
     // identity here, because there is no `kanna_create_task` call it could
     // have carried it on. Validated before anything is recorded so a
     // malformed context is a refused argument the agent can correct, not a

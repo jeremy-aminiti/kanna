@@ -64,9 +64,10 @@ transition model in [task-graph-stages.md](./task-graph-stages.md).
   decision whose context version or head SHA has moved, and records an
   immutable `human_review_decision` (unique per task and reviewed head) before
   delivering. The wire line gains `HUMAN-REVIEW-DECISION`,
-  `HUMAN-AUTHORIZATION`, and optional producing-task and triage-ordering lines,
+  `HUMAN-AUTHORIZATION`, and optional producing-task and PR-review-ordering lines
+  (the latter retain legacy `TRIAGE-RANK` wire naming),
   so a merge master on another machine can read the durable record without a
-  living review or triage session. `merge_signaled_at` is deliberately not
+  living review or PR review manager session. `merge_signaled_at` is deliberately not
   touched: it answers the approve post's question, not this one. See
   [pr-review-dispatch.md](./pr-review-dispatch.md#the-humans-route-to-the-merge-queue).
 - **Close-time backstop**: a delivered handoff is stamped on the task

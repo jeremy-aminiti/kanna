@@ -92,10 +92,21 @@ impl RepoConfig {
         if let Some(preference) = preferences.get(selector) {
             return Some(preference);
         }
+        let compatible_selectors = agent_repo_dirs(selector);
+        for alias in compatible_selectors.iter().skip(1) {
+            if let Some(preference) = preferences.get(alias) {
+                return Some(preference);
+            }
+        }
 
         preferences
             .iter()
-            .filter(|(pattern, _)| pattern.contains('*') && wildcard_matches(pattern, selector))
+            .filter(|(pattern, _)| {
+                pattern.contains('*')
+                    && compatible_selectors
+                        .iter()
+                        .any(|name| wildcard_matches(pattern, name))
+            })
             .min_by(|(left, _), (right, _)| compare_agent_provider_globs(left, right))
             .map(|(_, preference)| preference)
     }
@@ -602,10 +613,25 @@ impl RepoDefinitions {
 
     pub(super) fn agent_optional(&self, selector: &str) -> Result<Option<AgentDefinition>, String> {
         let selector = AgentSelector::resolve(selector, self.config.flavors.as_ref());
-        let agent_path = format!(".kanna/agents/{}/AGENT.md", selector.repo_agent_dir());
-        let mut definition = match read_snapshot_utf8(&self.snapshot, &agent_path)? {
-            Some(content) => parse_agent_definition(&content)
-                .map_err(|error| definition_error(&self.snapshot, &agent_path, error))?,
+        // `pr-triage` shipped before the human PR-review flow settled on its
+        // product terminology. Probe both names so a new workflow still sees
+        // an existing repository override/extension, and an old pinned
+        // workflow still sees a repository that has moved to the current
+        // name. The requested name wins when both paths exist.
+        let repo_agent_dirs = agent_repo_dirs(&selector.role);
+        let mut definition = None;
+        for dir in &repo_agent_dirs {
+            let agent_path = format!(".kanna/agents/{dir}/AGENT.md");
+            if let Some(content) = read_snapshot_utf8(&self.snapshot, &agent_path)? {
+                definition = Some(
+                    parse_agent_definition(&content)
+                        .map_err(|error| definition_error(&self.snapshot, &agent_path, error))?,
+                );
+                break;
+            }
+        }
+        let mut definition = match definition {
+            Some(definition) => definition,
             None => {
                 let Some(content) = optional_builtin_agent_resource(&selector) else {
                     return Ok(None);
@@ -619,10 +645,13 @@ impl RepoDefinitions {
             }
         };
 
-        let extension_path = format!(".kanna/agents/{}/EXTEND.md", selector.repo_agent_dir());
-        if let Some(extension) = read_snapshot_utf8(&self.snapshot, &extension_path)? {
-            apply_agent_extension(&mut definition, &extension)
-                .map_err(|error| definition_error(&self.snapshot, &extension_path, error))?;
+        for dir in repo_agent_dirs {
+            let extension_path = format!(".kanna/agents/{dir}/EXTEND.md");
+            if let Some(extension) = read_snapshot_utf8(&self.snapshot, &extension_path)? {
+                apply_agent_extension(&mut definition, &extension)
+                    .map_err(|error| definition_error(&self.snapshot, &extension_path, error))?;
+                break;
+            }
         }
         Ok(Some(definition))
     }
@@ -709,17 +738,22 @@ impl RepoDefinitions {
         for name in entries {
             let agent_path = format!(".kanna/agents/{name}/AGENT.md");
             if read_snapshot_utf8(&self.snapshot, &agent_path)?.is_some() {
-                names.insert(name);
+                names.insert(canonical_builtin_agent_name(&name).to_string());
             }
         }
 
         let mut resolved = Vec::new();
         for name in names {
-            let repo_agent_path = format!(".kanna/agents/{name}/AGENT.md");
-            let repo_has_agent = read_snapshot_utf8(&self.snapshot, &repo_agent_path)?.is_some();
-            let repo_extension_path = format!(".kanna/agents/{name}/EXTEND.md");
-            let repo_has_extension =
-                read_snapshot_utf8(&self.snapshot, &repo_extension_path)?.is_some();
+            let repo_dirs = agent_repo_dirs(&name);
+            let mut repo_has_agent = false;
+            let mut repo_has_extension = false;
+            for dir in repo_dirs {
+                let repo_agent_path = format!(".kanna/agents/{dir}/AGENT.md");
+                repo_has_agent |= read_snapshot_utf8(&self.snapshot, &repo_agent_path)?.is_some();
+                let repo_extension_path = format!(".kanna/agents/{dir}/EXTEND.md");
+                repo_has_extension |=
+                    read_snapshot_utf8(&self.snapshot, &repo_extension_path)?.is_some();
+            }
             let builtin = is_builtin_agent_name(&name);
             let source = match (repo_has_agent, repo_has_extension, builtin) {
                 (true, _, true) | (false, true, true) => AgentDefinitionSource::RepoOverride,
@@ -1075,7 +1109,13 @@ impl AgentSelector {
         let (role, explicit_flavor) = split_agent_selector(agent_name);
         let configured_flavor = explicit_flavor
             .is_none()
-            .then(|| flavors.and_then(|map| map.get(&role).cloned()))
+            .then(|| {
+                flavors.and_then(|map| {
+                    agent_repo_dirs(&role)
+                        .into_iter()
+                        .find_map(|name| map.get(&name).cloned())
+                })
+            })
             .flatten();
         Self {
             role,
@@ -1088,10 +1128,6 @@ impl AgentSelector {
         self.explicit_flavor
             .as_deref()
             .or(self.configured_flavor.as_deref())
-    }
-
-    fn repo_agent_dir(&self) -> String {
-        self.role.clone()
     }
 
     fn display(&self) -> String {
@@ -1113,18 +1149,15 @@ fn split_agent_selector(agent_name: &str) -> (String, Option<String>) {
 }
 
 fn optional_builtin_agent_resource(selector: &AgentSelector) -> Option<String> {
+    let role = canonical_builtin_agent_name(&selector.role);
     if let Some(flavor) = selector.selected_flavor() {
-        let flavor_path = format!(
-            ".kanna/agents/{}/flavors/{}/AGENT.md",
-            selector.role, flavor
-        );
+        let flavor_path = format!(".kanna/agents/{}/flavors/{}/AGENT.md", role, flavor);
         if let Some(content) = compiled_builtin_resource(&flavor_path) {
             return Some(content.to_string());
         }
     }
 
-    compiled_builtin_resource(&format!(".kanna/agents/{}/AGENT.md", selector.role))
-        .map(str::to_string)
+    compiled_builtin_resource(&format!(".kanna/agents/{role}/AGENT.md")).map(str::to_string)
 }
 
 const BUILTIN_AGENT_RESOURCES: &[(&str, &str)] = &[
@@ -1193,8 +1226,8 @@ const BUILTIN_AGENT_RESOURCES: &[(&str, &str)] = &[
         include_str!("../../../../.kanna/agents/pr-reviewer/AGENT.md"),
     ),
     (
-        ".kanna/agents/pr-triage/AGENT.md",
-        include_str!("../../../../.kanna/agents/pr-triage/AGENT.md"),
+        ".kanna/agents/pr-review-manager/AGENT.md",
+        include_str!("../../../../.kanna/agents/pr-review-manager/AGENT.md"),
     ),
     (
         ".kanna/agents/qa-dispatcher/AGENT.md",
@@ -1251,10 +1284,39 @@ fn builtin_agent_names() -> BTreeSet<String> {
 }
 
 fn is_builtin_agent_name(name: &str) -> bool {
-    let path = format!(".kanna/agents/{name}/AGENT.md");
+    let path = format!(
+        ".kanna/agents/{}/AGENT.md",
+        canonical_builtin_agent_name(name)
+    );
     BUILTIN_AGENT_RESOURCES
         .iter()
         .any(|(resource_path, _)| *resource_path == path)
+}
+
+/// Built-in agents that shipped under an earlier product term. These are
+/// resolution aliases only: listings expose the current name, while both
+/// names continue to probe repository definitions and extensions.
+const LEGACY_BUILTIN_AGENTS: &[(&str, &str)] = &[("pr-triage", "pr-review-manager")];
+
+fn canonical_builtin_agent_name(name: &str) -> &str {
+    LEGACY_BUILTIN_AGENTS
+        .iter()
+        .find_map(|(legacy, current)| (*legacy == name).then_some(*current))
+        .unwrap_or(name)
+}
+
+fn agent_repo_dirs(name: &str) -> Vec<String> {
+    if let Some((legacy, current)) = LEGACY_BUILTIN_AGENTS
+        .iter()
+        .find(|(legacy, current)| *legacy == name || *current == name)
+    {
+        return if *legacy == name {
+            vec![(*legacy).to_string(), (*current).to_string()]
+        } else {
+            vec![(*current).to_string(), (*legacy).to_string()]
+        };
+    }
+    vec![name.to_string()]
 }
 
 /// Built-in workflows that shipped under an earlier name, mapped to the
@@ -1348,6 +1410,18 @@ fn compiled_builtin_resource(relative_path: &str) -> Option<&'static str> {
         let canonical = canonical_builtin_workflow_name(name);
         if canonical != name {
             return compiled_builtin_resource(&format!(".kanna/workflows/{canonical}.json"));
+        }
+    }
+
+    // Keep explicit agent references in pinned workflow definitions working
+    // after a built-in agent adopts its current product terminology.
+    if let Some(name) = relative_path
+        .strip_prefix(".kanna/agents/")
+        .and_then(|file| file.strip_suffix("/AGENT.md"))
+    {
+        let canonical = canonical_builtin_agent_name(name);
+        if canonical != name {
+            return compiled_builtin_resource(&format!(".kanna/agents/{canonical}/AGENT.md"));
         }
     }
 

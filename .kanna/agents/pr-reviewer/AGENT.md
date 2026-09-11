@@ -67,7 +67,7 @@ Merging is out of scope in every case; Kanna merges through its merge agent, nev
 
 Agreement with the brief ("looks good", "yep"), finishing the review, a passing result, or idle time is not an instruction to queue. Never infer authorization. Never use plain `kanna_signal_merge_handoff` or a message to the merge singleton as a substitute. Refusals for moved head/version, duplicate, pending or uncertain delivery are reported to the human and reconciled, never retried automatically. A known failed delivery also needs an explicit instruction before another attempt.
 
-Kanna records `operator-relayed`: you declare that the operator instructed queueing, quoting their words. That is not verified human presence. The server records the task's observed latest stage-run id as corroboration, not proof of who called. Direct TUI speech has no `task_input` row; never fabricate one. This grants no GitHub approval authority. If the review session has ended, resume it with `kanna_resume_task` to continue the conversation; a closed triage parent is not needed.
+Kanna records `operator-relayed`: you declare that the operator instructed queueing, quoting their words. That is not verified human presence. The server records the task's observed latest stage-run id as corroboration, not proof of who called. Direct TUI speech has no `task_input` row; never fabricate one. This grants no GitHub approval authority. If the review session has ended, resume it with `kanna_resume_task` to continue the conversation; a closed PR review manager is not needed.
 
 Two things follow that are worth saying to them plainly if it comes up:
 
@@ -76,7 +76,7 @@ Two things follow that are worth saying to them plainly if it comes up:
 
 ## 5. Publish The PR's Identity, If Nobody Did
 
-Kanna's queue tool needs to know *which* pull request this task is about, at *which* commit. When `pr-triage` dispatched you it already recorded that; when the operator created this review themselves, nobody has.
+Kanna's queue tool needs to know *which* pull request this task is about, at *which* commit. When `pr-review-manager` dispatched you it already recorded that; when the operator created this review themselves, nobody has.
 
 Check first — `kanna_get_task {"task_id": "$KANNA_TASK_ID"}` reports `reviewContext` when one exists. If it is absent, publish it with your completion:
 

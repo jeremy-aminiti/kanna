@@ -462,7 +462,7 @@ two review paths and only the product one — `single-reviewer`,
 merge singleton. On the human-assisted path (`pr-review` dispatching
 `pr-review-single`) the *person* is the reviewer, and both agents are
 deliberately denied merge authority: `pr-reviewer` may not approve or merge,
-`pr-triage` may not join or aggregate. The operator explicitly tells the review
+`pr-review-manager` may not join or aggregate. The operator explicitly tells the review
 agent to queue this PR; it calls `kanna_queue_reviewed_pr` once with the verbatim
 instruction and the exact reviewed head/context version. Agreement with a brief,
 completion, idle, and agent verdicts never authorize a call. The tool shares the

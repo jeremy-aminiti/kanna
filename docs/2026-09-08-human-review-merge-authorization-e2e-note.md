@@ -168,6 +168,6 @@ on the same desktop. The message and merge-agent contract carry machine/id and
 read-back guidance; that is not a two-machine E2E result.
 
 Queueing now requires a live or resumed review conversation; `kanna_resume_task`
-is recovery when the session stops. A closed triage parent remains irrelevant.
+is recovery when the session stops. A closed PR review manager remains irrelevant.
 Deterministic wiring and asset tests cannot prove that a model follows its
 contract or that a human was present; neither is claimed.

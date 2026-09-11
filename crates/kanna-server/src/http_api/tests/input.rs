@@ -3601,7 +3601,7 @@ mod merge_handoff_on_close {
 /// The human-assisted PR review path: an operator's own merge authorization.
 ///
 /// What these tests hold in place is a boundary, not a feature. `pr-reviewer`
-/// and `pr-triage` are deliberately denied merge authority, so the only route
+/// and `pr-review-manager` are deliberately denied merge authority, so the only route
 /// from a human's verdict to the merge queue is this one — and it must stay
 /// unable to be walked by anything that is not a person pressing a control on
 /// a pull request they read at a commit that has not moved since.
@@ -3630,7 +3630,7 @@ mod human_review_merge_authorization {
         }
     }
 
-    /// A review child, as `pr-triage` dispatches one: forked from the PR head
+    /// A review child, as `pr-review-manager` dispatches one: forked from the PR head
     /// into a local `pr/<n>` ref, on a workflow with no `approve` post.
     fn seed_review_child(db: &Db, task_id: &str) {
         db.insert_test_pipeline_item(
@@ -3838,7 +3838,7 @@ mod human_review_merge_authorization {
     /// local `pr/<n>` ref it forked from, neither of which the forge can
     /// merge — and carries the decision reference, so a merge master on
     /// another machine can read the durable record without a living review or
-    /// triage session.
+    /// PR review manager session.
     #[tokio::test]
     async fn delivers_the_prs_own_head_and_the_recorded_decision() {
         let unique = format!("human-review-merge-{}", unique_test_suffix());

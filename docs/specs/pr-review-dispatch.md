@@ -60,8 +60,8 @@ Consequences worth stating up front:
 
 ```
 Task: "Review open PRs"                    workflow pr-review        (public)
-  agent pr-triage · parked, conversational
-  │  triages open PRs, proposes an order, dispatches on the user's word,
+  agent pr-review-manager · parked, conversational
+  │  plans reviews for open PRs, proposes an order, dispatches on the user's word,
   │  tracks the children, answers "what's left?"
   │
   ├── Child: "PR #412 · relay reconnect"   workflow pr-review-single  (internal)
@@ -84,7 +84,7 @@ other built-in.
 
 ### `workflows/pr-review.json` — public
 
-One manual stage, `triage`, bound to `pr-triage`. Public because the
+One manual stage, `PR review`, bound to `pr-review-manager`. Public because the
 user starts a review session by picking it in the new-task modal, which is the
 app's only agent entry point (it picks a workflow and a provider, not an
 agent). Manual so the session parks and stays conversational: the user keeps
@@ -101,7 +101,7 @@ every child, whatever the outcome, with the human deciding when it is done.
 Unlike `specialty-review`, this workflow **does** bind its agent, because every
 child runs the same one. The manager needs no `agent` override.
 
-### `agents/pr-triage/AGENT.md`
+### `agents/pr-review-manager/AGENT.md`
 
 Its job, in order:
 
@@ -110,7 +110,7 @@ Its job, in order:
    this undefined and asks**, because both answers are correct for real users
    and the built-in cannot know which one is looking at it (see "Defaults,
    extension, and setup"). A repo that has answered it in
-   `.kanna/agents/pr-triage/EXTEND.md` is not asked again; when nobody
+   `.kanna/agents/pr-review-manager/EXTEND.md` is not asked again; when nobody
    has answered, the manager asks once, proceeds on the answer, and offers to
    write the extension so it never asks again.
 2. **Enumerate.** Resolve the open PRs in scope. This is forge work, so it
@@ -166,7 +166,7 @@ one question. It resolves into three obligations:
    than picking a default that is wrong for half its users and silently
    applied. A built-in that must guess should ask instead.
 2. **The repo answers it by extension, not by replacement.** One
-   `.kanna/agents/pr-triage/EXTEND.md` layers the answer onto the
+   `.kanna/agents/pr-review-manager/EXTEND.md` layers the answer onto the
    resolved agent, so the repo keeps receiving improvements to the built-in it
    did not fork. Full replacement (`AGENT.md`) stays available for a repo whose
    review procedure is genuinely its own.
@@ -182,13 +182,13 @@ one question. It resolves into three obligations:
    Inspection can pre-answer it in the common case: if `gh` reports the
    operator has push/admin permission on the repo, "every open PR" is the
    likely answer and the question becomes a confirmation. The answer is
-   written as `.kanna/agents/pr-triage/EXTEND.md`; no answer is also a
+   written as `.kanna/agents/pr-review-manager/EXTEND.md`; no answer is also a
    valid outcome, and the manager asks the first time it runs.
 
-**Exercised now.** `.kanna/agents/pr-triage/EXTEND.md` exists in this
+**Exercised now.** `.kanna/agents/pr-review-manager/EXTEND.md` exists in this
 repository and says Kanna reviews every open PR, with the two repo-specific
 ranking rules that follow from Kanna being a distributed system that ships as
-one signed app. Phase 1 ships the built-in `pr-triage` it extends, so it is
+one signed app. Phase 1 ships the built-in `pr-review-manager` it extends, so it is
 live: the extension layers onto the resolved agent. (It was originally
 committed ahead of that agent, which was safe because an `EXTEND.md` whose base
 agent does not resolve is skipped by `agent_optional`, and a directory holding
@@ -270,15 +270,15 @@ singleton was never told, and the merge had to be arranged by hand.
 Closing that gap must not close the one the section above opens deliberately.
 Three shapes were considered:
 
-- **(a) The child tells its parent, and `pr-triage` runs a merge queue.** It
+- **(a) The child tells its parent, and `pr-review-manager` runs a merge queue.** It
   fits the hierarchy and puts ordering where the overlap analysis already is.
-  It also contradicts triage's explicit contract — it does not join or
+  It also contradicts the manager's explicit contract — it does not join or
   aggregate — and it makes shipping depend on a dispatcher staying alive, which
-  a closed triage session or an independently created review does not have.
+  a closed manager session or an independently created review does not have.
 - **(b) The child relays an explicit instruction directly. Chosen after the
   owner's 2026-09-09 correction.** The child carries a verbatim queue instruction
   through a dedicated, head/version-pinned decision tool, not an inferred
-  verdict through the ordinary policy handoff. This works without triage and
+  verdict through the ordinary policy handoff. This works without the manager and
   records the honest declared origin `operator-relayed`.
 - **(c) A desktop/mobile queue button. Rejected by the owner.** The earlier UI
   entry point required a control they do not want. Its durable decision and
@@ -297,7 +297,7 @@ transcript or composer classifier and no fabricated `task_input` row.
 
 Desktop/mobile queue buttons and action plumbing are removed. Read-only review
 context and decision projections remain. Queueing needs the review conversation;
-`kanna_resume_task` recovers a stopped session, without a living triage parent.
+`kanna_resume_task` recovers a stopped session, without a living PR review manager.
 
 Advancing the stage is deliberately *not* this gesture. Advancing means "I am
 done looking", which on these workflows closes the task; making it also mean
@@ -314,8 +314,10 @@ claim:
 
 - **`task_review_context`** — what a task is reviewing: PR URL, head repo/ref,
   head SHA, base ref and SHA, the producing task when there is one, and
-  triage's rank and overlap set. An agent supplies it, at
-  `kanna_create_task` (triage) or in `kanna_complete_stage` metadata (a
+  the PR review manager's rank and overlap set. The stored fields retain their
+  legacy names, `triageRank` and `triageParentTaskId`, for compatibility. An
+  agent supplies the context at `kanna_create_task` (manager) or in
+  `kanna_complete_stage` metadata (a
   standalone reviewer), so it is *candidate information about the forge* and
   authorizes nothing. It exists because nothing about a review child names its
   PR: it forks from `pull/<n>/head` into a local `pr/<n>` ref, so its branch and
@@ -341,7 +343,8 @@ so a request cannot name one PR in the instruction and another on the wire.
 Under the compact `MERGE` line it carries `HUMAN-REVIEW-DECISION`,
 `HUMAN-AUTHORIZATION`, and optional `PRODUCING-TASK`, `TRIAGE-RANK` and
 `RELATED-PR` lines, which is what lets a merge master on another machine
-resolve everything without a living triage parent. `merge_signaled_at` is left
+resolve everything without a living PR review manager. `TRIAGE-RANK` is retained
+as a legacy wire token. `merge_signaled_at` is left
 alone: that stamp answers the approve post's "does this task still owe one
 handoff?", a different question on a different workflow.
 
@@ -349,7 +352,7 @@ The merge agent merges the reviewed head under the forge's expected-head
 precondition and **must not change the PR under an old decision** — no rebase,
 force-push, fix, conflict resolution, or retarget. Anything that would produce
 a commit nobody read parks the candidate for a fresh decision. Ordering is
-topology first, then the order humans authorized, with triage rank and overlap
+topology first, then the accepted PR review rank and overlap
 as advice rather than an authorization list.
 
 ### The authority boundary
@@ -496,7 +499,7 @@ The rest stays out — see "Still deferred".
 
 **Phase 1 — the loop, dispatched by hand.** *(implemented)* Engine changes A
 and B; the two workflow JSONs and the two AGENT.md files. Judged by using it:
-create a `pr-review` task, let it triage the repo's own open PRs, dispatch two
+create a `pr-review` task, let it plan reviews for the repo's own open PRs, dispatch two
 children, review them in ⌘D.
 
 Acceptance criteria (met except where noted):
@@ -530,13 +533,13 @@ Acceptance criteria (met except where noted):
 - Definition tests, per the existing pattern: both workflows resolve,
   `pr-review-single` is excluded from the listed lineup while still resolving by
   name, and both agents' prompts render. Covered by
-  `builtin_pr_review_workflows_bind_the_triage_and_reviewer_agents` and the
+  `builtin_pr_review_workflows_bind_the_manager_and_reviewer_agents` and the
   existing internal-visibility test.
 - Every `kanna_*` tool an agent body names exists in the tool catalog. This had
   no test before; it does now, over every built-in agent and repo extension,
   not just the new pair.
 - Definition test for the extension path: with
-  `.kanna/agents/pr-triage/EXTEND.md` present, the resolved agent's
+  `.kanna/agents/pr-review-manager/EXTEND.md` present, the resolved agent's
   prompt contains the repo's scope answer; with it absent, the resolved prompt
   still declares the scope question open. (Kanna's own repo is the fixture for
   the first half — the file is already committed.)
@@ -552,11 +555,11 @@ Acceptance criteria:
   base-first, and the stated reason names the stack.
 - Two PRs touching the same file are reported as overlapping in the proposal.
 - Nothing is dispatched without an explicit user instruction (asserted on the
-  fixture: a triage run that is never answered creates zero children).
+  fixture: a PR review manager run that is never answered creates zero children).
 - Agent-flow E2E on a repo with no scope extension: the manager asks the scope
   question before enumerating, and enumerates nothing until it is answered.
 - The `setup` agent's new question writes a well-formed
-  `.kanna/agents/pr-triage/EXTEND.md`, and re-running setup on a repo
+  `.kanna/agents/pr-review-manager/EXTEND.md`, and re-running setup on a repo
   that already has one does not overwrite it without approval (the existing
   rule in `.kanna/agents/setup/AGENT.md`).
 
@@ -642,16 +645,16 @@ coordination; reviewing PRs on repositories Kanna has not imported.
 - **Whether the child may act on the forge** (owner delegated the call).
   Transcription in the built-in, authority by extension, merging never. See
   "What the reviewer may do to the forge".
-- **Naming** (owner delegated the call). Workflows `pr-review` (public) and
-  `pr-review-single` (internal); agents `pr-triage` and `pr-reviewer`.
+- **Naming** (owner correction, 2026-09-10). Workflows `pr-review` (public) and
+  `pr-review-single` (internal); agents `pr-review-manager` and `pr-reviewer`.
   `pr-review-single` says what distinguishes it from the session workflow
   rather than sharing a near-identical name with it, which is the mistake
   `specialized-reviewers` / `specialty-review` had to be defended against.
-  The manager is `pr-triage`, not `pr-review-manager`: the owner's word was
-  "manager", but in this repository `-manager` means `task-manager`'s shape —
-  a long-running orchestrator with an event loop — and this agent is a
-  conversational triage session that parks. Naming it for what it does keeps
-  that distinction legible. One word from the owner reverses this.
+  The manager is a conversational PR review session that parks, distinct from
+  the per-PR reviewer. The former `pr-triage` name remains an unlisted
+  resolution alias, and old/new repo override and extension paths resolve in
+  both directions so pinned tasks and existing repository customizations keep
+  working. Persisted review-context fields retain their legacy `triage*` names.
 - **Whether the diff-tool work is part of this effort** (owner delegated the
   call). Yes — as phase 4 below, scoped to the minimum, and parallel to phases
   2-3 rather than behind them.

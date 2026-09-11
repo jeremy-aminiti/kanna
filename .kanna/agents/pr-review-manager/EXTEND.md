@@ -1,11 +1,11 @@
 ## Kanna Repository Review Scope
 
-The built-in `pr-triage` agent deliberately leaves review scope undefined and
+The built-in `pr-review-manager` agent deliberately leaves review scope undefined and
 asks for it. In this repository it is already answered: **review every open pull
 request on the repo, whoever or whatever opened it** — Kanna task branches,
 hand-authored branches, and dependency bumps alike.
 
-So do not ask the scope question here. Triage the full open list.
+So do not ask the scope question here. Review the full open list.
 
 Two consequences worth carrying into the proposed order, both specific to how
 this repository works:

@@ -227,7 +227,7 @@ struct MergeHandoffMessage {
     summary: String,
     /// Lines appended under the compact `MERGE` line. The human-review path
     /// uses them to carry the decision reference, the reviewed SHAs, and the
-    /// ordering advice triage computed; the agent path sends none, so its wire
+    /// ordering advice the PR review manager computed; the agent path sends none, so its wire
     /// shape is byte-for-byte what it always was.
     extra_lines: Vec<String>,
 }
@@ -323,7 +323,8 @@ async fn deliver_merge_handoff(
 ///
 /// Shared by the conversation tool and the retained direct-decision API.
 /// The reviewer may relay an explicit instruction, never infer one from its
-/// review or the human's agreement. Triage still does not aggregate verdicts.
+/// review or the human's agreement. The PR review manager still does not
+/// aggregate verdicts.
 ///
 /// Four things happen here that the ordinary agent path does not do:
 ///
@@ -633,10 +634,10 @@ fn classify_delivery_failure(reason: &str) -> crate::db::ReviewDecisionDelivery 
 /// The structured lines a human-review request carries under its `MERGE` line.
 ///
 /// The merge master may be running on a different machine from the reviewer —
-/// the singleton is account-wide through the relay directory — and the triage
-/// task that ranked this PR may be closed. So everything it needs travels in
+/// the singleton is account-wide through the relay directory — and the PR
+/// review manager task that ranked this PR may be closed. So everything it needs travels in
 /// the request: which decision authorizes it, what commit that decision was
-/// taken against, where to read the durable record back, and what else triage
+/// taken against, where to read the durable record back, and what else the manager
 /// saw touching the same files.
 fn human_review_request_lines(
     decision: &crate::db::HumanReviewDecision,
