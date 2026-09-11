@@ -257,6 +257,18 @@ async function captureDesktopPane(sessionName: string): Promise<string> {
   });
 }
 
+async function desktopSessionExists(sessionName: string): Promise<boolean> {
+  return await new Promise<boolean>((resolveExists) => {
+    const proc = spawn(
+      "tmux",
+      ["-L", sessionName, "has-session", "-t", sessionName],
+      { stdio: "ignore" },
+    );
+    proc.once("error", () => resolveExists(false));
+    proc.once("exit", (exitCode) => resolveExists(exitCode === 0));
+  });
+}
+
 async function waitForApp(instance: InstanceConfig): Promise<void> {
   let timing = {
     deadline: Date.now() + WEBDRIVER_START_TIMEOUT_MS,
@@ -267,6 +279,15 @@ async function waitForApp(instance: InstanceConfig): Promise<void> {
 
   while (Date.now() < timing.deadline) {
     probe = await probeApp(instance.baseUrl);
+    // `kd dev up` returned successfully, so losing its dedicated tmux server
+    // before WebDriver appears is terminal startup failure, not a cold build.
+    // Failing here preserves the useful launch boundary instead of sleeping for
+    // the 20-minute build allowance against an endpoint that cannot recover.
+    if (!probe.webdriverReady && !(await desktopSessionExists(instance.sessionName))) {
+      throw new Error(
+        `desktop tmux session ${instance.sessionName} disappeared before WebDriver listened at ${instance.baseUrl}`,
+      );
+    }
     timing = advanceAppStartupDeadline(timing, probe, Date.now(), APP_READY_TIMEOUT_MS);
     const state = classifyAppStartup(probe, instance.devUrl);
     if (state === "ready") return;
