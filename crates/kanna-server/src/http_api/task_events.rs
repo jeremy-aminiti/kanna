@@ -2017,18 +2017,31 @@ fn spawn_aggregate_wait(
     Ok(())
 }
 
+// Keep the collector's event, error, and confirmation accumulators explicit at
+// this completion boundary; they share the existing native-call lifetime.
+#[allow(clippy::too_many_arguments)]
 fn apply_aggregate_completion(
     session: &mut AggregateWaitSession,
     completion: AggregateWaitCompletion,
     events: &mut Vec<Value>,
     machine_errors: &mut Vec<Value>,
     failed_machines: &mut HashSet<String>,
+    confirmed_machines: &mut HashSet<String>,
     has_more: &mut bool,
     limit: i64,
 ) -> Result<bool, (axum::http::StatusCode, String)> {
     session.pending_machines.remove(&completion.machine_id);
     let response = match completion.result {
-        Ok(response) => response,
+        // A positive, successful completion of this machine's own leg in
+        // this call — including an empty/no-op one whose checkpoint does
+        // not move. This is the only evidence recovery may be inferred
+        // from; a machine simply absent from `machine_errors` because its
+        // retained leg has not completed at all yet is not evidence of
+        // anything and must not be read as one.
+        Ok(response) => {
+            confirmed_machines.insert(completion.machine_id.clone());
+            response
+        }
         Err(AggregateMachineWaitError::CursorRejected(error)) => {
             return Err((
                 axum::http::StatusCode::BAD_REQUEST,
@@ -2039,6 +2052,16 @@ fn apply_aggregate_completion(
             ));
         }
         Err(AggregateMachineWaitError::Unavailable(error)) => {
+            // A later fault revokes an earlier success for this same
+            // machine within this native call: the re-arm path below can
+            // dispatch a machine a second time after it already completed
+            // successfully once, and that second completion's outcome is
+            // authoritative. Without this removal, a machine that succeeds
+            // then fails in one call would be reported in both
+            // `confirmedMachines` and `machineErrors`, and callers that
+            // reconcile confirmations first (see `accept_page`) would read
+            // the stale success and hide the fault.
+            confirmed_machines.remove(&completion.machine_id);
             failed_machines.insert(completion.machine_id.clone());
             machine_errors.push(json!({
                 "machineId": completion.machine_id,
@@ -2401,6 +2424,9 @@ async fn wait_aggregate_task_events(
     let mut events = Vec::new();
     let mut completed_machines = HashSet::new();
     let mut failed_machines = HashSet::new();
+    // Machines whose own leg completed successfully at least once in this
+    // call — the only positive recovery evidence the mailbox may act on.
+    let mut confirmed_machines = HashSet::new();
     let mut has_more =
         !query.orchestration_notifications && !session.cursor.machines_with_more.is_empty();
     // Batching is applied by the machine serving the wait, over the events of
@@ -2411,8 +2437,20 @@ async fn wait_aggregate_task_events(
     let debounce = hold_duration(query.debounce_ms);
     let mut debounce_deadline: Option<tokio::time::Instant> = None;
     let interval_deadline = interval_hold_deadline(query.min_interval_ms, deadline);
+    // A fault attributed to this machine's own leg is fast-surfaced: this
+    // machine's own observation cannot be trusted, so there is nothing worth
+    // waiting out. A remote peer's fault must not carry the same weight — it
+    // only shrinks this wait's coverage, and the remaining active machines
+    // (this one included) still run their normal collection/timeout cycle so
+    // healthy legs keep producing batches instead of the whole wait cutting
+    // short the instant one peer errors.
+    let local_machine_faulted = |errors: &[Value]| -> bool {
+        errors
+            .iter()
+            .any(|error| error["machineId"].as_str() == Some(local_machine_id.as_str()))
+    };
     loop {
-        if query.subscription_timing && !machine_errors.is_empty() {
+        if query.subscription_timing && local_machine_faulted(&machine_errors) {
             break;
         }
         let remaining_secs = if timeout_secs == 0 {
@@ -2480,6 +2518,7 @@ async fn wait_aggregate_task_events(
             &mut events,
             &mut machine_errors,
             &mut failed_machines,
+            &mut confirmed_machines,
             &mut has_more,
             limit,
         )?;
@@ -2496,7 +2535,7 @@ async fn wait_aggregate_task_events(
         let now = tokio::time::Instant::now();
         let batch_complete = if query.subscription_timing {
             with_collection(&query, |c| c.ready(events.len(), limit, now))
-                || !machine_errors.is_empty()
+                || local_machine_faulted(&machine_errors)
         } else {
             kanna_tool_catalog::task_event_batch_is_complete(
                 events.len(),
@@ -2579,6 +2618,13 @@ async fn wait_aggregate_task_events(
         "events": events,
         "hasMore": has_more,
         "machineErrors": machine_errors,
+        // Machines positively observed to succeed (even with nothing new)
+        // at least once in this call — the subscription mailbox's only
+        // basis for clearing a machine's recorded stale coverage. A machine
+        // absent from both this and `machineErrors` had a leg that simply
+        // did not complete in this call (still retained/pending) and must
+        // not be inferred as recovered.
+        "confirmedMachines": confirmed_machines,
         "waitTimeoutSecs": timeout_secs,
         "waitHint": if wait_outcome == "events" {
             Value::Null

@@ -4,6 +4,7 @@ use super::Db;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +27,17 @@ pub(crate) struct EventSubscription {
     /// wall-clock timestamp survives restart to invent credit or a long wait.
     #[serde(default)]
     pub wake_admitted: bool,
+    /// Non-local machines this aggregate scope currently believes are
+    /// unavailable, machine id -> last reported error. De-duplication
+    /// compares only the machine id set against each fresh page, not the
+    /// error text (which can legitimately churn call to call for the same
+    /// continuous fault, e.g. an embedded timestamp) — so only a new fault
+    /// or a recovery re-wakes, a still-down peer keeps its retained
+    /// checkpoint and healthy legs keep delivering, and the stored text
+    /// stays current for a status read even between wakes. Additive; absent
+    /// on rows written before this tracking.
+    #[serde(default)]
+    pub stale_machines: BTreeMap<String, String>,
 }
 
 fn decode(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventSubscription> {

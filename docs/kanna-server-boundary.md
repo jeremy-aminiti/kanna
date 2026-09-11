@@ -2850,16 +2850,74 @@ the pending page. Corresponding typed CLI commands are `task subscribe-events`,
 All three endpoints (and their `kanna_subscribe_events` /
 `kanna_read_event_subscription` / `kanna_unsubscribe_events` MCP tools) return
 a **compact** response by default: `id`, `active`, `error`, `wakeState`,
-`batchId`, `pending` (`events`, `hasMore`, `waitOutcome`, `machineErrors`,
-`watchError`), and the watched `query` with any cursor-shaped key stripped.
-Acknowledgement is by `batchId` alone, so the durable observation cursor
-(top-level `cursor` and `pending.cursor`) is internal replay/reconnect state an
-agent never needs to read or round-trip. Pass `diagnostic: true` (a query
-parameter on unsubscribe, a body field on subscribe/read) for the full
-internal row — adds `stage`, `branch`, `runId`, `revision`, `delivery`,
-`wakeAdmitted` and the raw cursor — for troubleshooting. The durable mailbox
-itself, its cursor, and restart/reconnect semantics are unchanged; this is a
-response-shape default only.
+`batchId`, `staleMachines`, `pending` (`events`, `hasMore`, `waitOutcome`,
+`machineErrors`, `watchError`), and the watched `query` with any cursor-shaped
+key stripped. Acknowledgement is by `batchId` alone, so the durable
+observation cursor (top-level `cursor` and `pending.cursor`) is internal
+replay/reconnect state an agent never needs to read or round-trip. Pass
+`diagnostic: true` (a query parameter on unsubscribe, a body field on
+subscribe/read) for the full internal row — adds `stage`, `branch`, `runId`,
+`revision`, `delivery`, `wakeAdmitted` and the raw cursor — for
+troubleshooting. The durable mailbox itself, its cursor, and restart/reconnect
+semantics are unchanged; this is a response-shape default only.
+
+`staleMachines` is top-level, not nested under `pending`: an unreachable
+remote peer's degraded coverage is durable, deduped row state (see the
+repo-scoped subscription's outage isolation below), not a batch-scoped fact,
+so it stays visible on a quiet subscription (`pending: null`) between wakes —
+a compact-mode caller does not need `diagnostic: true` just to see a
+known-down peer. It is the same small `{machineId: reason}` map the mailbox
+already uses for de-duplication, never the durable cursor or anything
+cursor-shaped; a delivered batch's own `pending.machineErrors` is unchanged
+and still carries the per-batch diagnostic array.
+
+A repo/parent-scoped subscription fans observation out across every machine
+in scope. One remote peer being unreachable degrades only that peer's own
+leg: `wait_aggregate_task_events` never spawns a wait to a machine currently
+absent from discovery (a fault attributed to that machine, not this one),
+and treats a fault reported for any other machine as informational rather
+than as cause to cut the wait short — the remaining active machines,
+including this one, keep running their normal collection cycle. `accept_page`
+mirrors that split: only a fault attributed to *this* machine's own leg
+(`wait_local_task_events` itself failing, or an already-explicit
+`watchError` such as an invalid/expired cursor) still fails the whole
+subscription (`active` becomes `false`) — that is a local DB/delivery fault
+or a lost checkpoint, and stays fully actionable, never silently reset or
+retried. A remote peer's fault is tracked on the row (`stale_machines`,
+surfaced as `staleMachines` above) and de-duplicated by machine id, not by
+its error text, which can otherwise churn call to call for one continuous
+fault (`AppState::desktop_routing_unreachable_error` mints a fresh
+since-`now` timestamp whenever this machine's own relay routing stays
+healthy) — comparing text would manufacture a fresh wake every collection
+cycle for an unreachable peer that never actually changed. An unchanged,
+already-reported peer fault therefore produces no new page; a new fault, a
+recovery, or real events (with the fault riding along as an annotation) do.
+`accept_page` reconciles rather than replaces this set: one page's
+`machineErrors` is never the complete current truth about every peer, since
+`wait_aggregate_task_events` can seal a batch on this machine's own
+urgent/full/quiet criteria while a listed peer's own leg is still pending in
+the registry, in which case that peer appears in neither `machineErrors` nor
+`confirmedMachines` — that silence is left untouched, never read as
+recovery. Only `confirmedMachines` (a positive, successful completion of
+that machine's own leg this call — including an empty response whose
+checkpoint does not move) may clear an entry. A machine never appears in
+both lists on one response: `wait_aggregate_task_events` can re-arm and
+re-dispatch a machine's leg more than once within a single native call
+while its batch is still filling, so a machine can complete twice in one
+call — and the most recent completion is authoritative there exactly as it
+is across calls, a later same-call failure revoking an earlier same-call
+confirmation rather than the two coexisting. `step`'s own native-call chain
+accumulates `confirmedMachines` the same way it already accumulates events
+across chained calls, so a peer's recovery observed mid-chain is never
+silently dropped by the chain continuing past it; a peer already recorded
+stale being confirmed is also what ends that chain early, the same way a
+fresh failure already does, rather than sitting unreported until the chain
+otherwise runs out of things to say. The unreachable peer's own native
+checkpoint is left exactly as `apply_aggregate_completion` last recorded it
+— never advanced, never dropped from the aggregate's machine roster — so
+its return replays every event since that checkpoint through the same
+subscription, with no unsubscribe/
+resubscribe needed.
 
 `kanna_subscribe_events` also accepts optional, validated, per-subscription
 knobs that reuse existing ownership rather than adding a policy engine:

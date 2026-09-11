@@ -14,7 +14,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -140,6 +140,16 @@ pub(super) struct DiagnosticQuery {
 /// only what an agent acts on — the batch's events, capacity/fault signals,
 /// and the subscription's lifecycle fields — plus its watched scope with any
 /// cursor-shaped key stripped for defense in depth.
+///
+/// `staleMachines` is top-level, not nested under `pending`: a remote peer's
+/// outage is durable, deduped coverage state on the row itself (see
+/// `accept_page`), not a batch-scoped fact, so it must stay visible even on
+/// a quiet subscription with `pending: null` between wakes — a compact-mode
+/// caller must not need `diagnostic: true` just to see a known-down peer. A
+/// delivered batch's own `pending.machineErrors` is unchanged and still
+/// carries the per-batch diagnostic array; `staleMachines` is the small
+/// `{machineId: reason}` map already used for de-duplication, never the
+/// durable cursor or anything cursor-shaped.
 fn compact(row: &EventSubscription) -> Value {
     let mut scope = row.query.clone();
     if let Some(object) = scope.as_object_mut() {
@@ -160,6 +170,7 @@ fn compact(row: &EventSubscription) -> Value {
         "error": row.error,
         "wakeState": row.wake_state,
         "batchId": row.batch_id,
+        "staleMachines": row.stale_machines,
         "pending": pending,
         "query": scope,
     })
@@ -173,17 +184,84 @@ fn response(row: &EventSubscription, diagnostic: bool) -> Value {
     }
 }
 
-fn accept_page(row: &mut EventSubscription, mut batch: Value, observed: bool) {
-    if batch["machineErrors"]
+/// A remote peer's fault is this subscription's fault-isolation boundary:
+/// it degrades that one leg's coverage, never the mailbox as a whole. Only a
+/// fault attributed to this machine's own leg (`wait_local_task_events`
+/// itself failing) still fails the whole subscription — that is a local
+/// DB/delivery fault, not peer unavailability, and must stay fully
+/// actionable rather than being quietly absorbed like a stale peer.
+fn accept_page(
+    row: &mut EventSubscription,
+    mut batch: Value,
+    observed: bool,
+    local_machine_id: &str,
+) {
+    let machine_errors = batch["machineErrors"]
         .as_array()
-        .is_some_and(|errors| !errors.is_empty())
-    {
-        batch["watchError"] = json!("Some machines could not be observed; reconcile the reported gaps and resubscribe after recovery.");
+        .cloned()
+        .unwrap_or_default();
+    let local_faulted = machine_errors
+        .iter()
+        .any(|error| error["machineId"].as_str() == Some(local_machine_id));
+    if local_faulted {
+        batch["watchError"] = json!("This machine's own event observation failed; reconcile the reported fault and resubscribe after recovery.");
     }
+    // Remote-only faults: tracked for de-duplication, never fed into
+    // watchError. A peer that is still down and was already reported stale
+    // must not re-wake the subscriber on every observation cycle; a new
+    // fault or a recovery (the set of stale machine ids changes) is worth
+    // one wake. The comparison is by machine id only, never by the error
+    // text: `desktop_routing_unreachable_error` embeds a since-timestamp
+    // that is only pinned stable while *this* machine's own relay routing
+    // is the thing marked unavailable — for a peer merely absent from the
+    // active list (the common case; this machine's own routing is fine),
+    // every call mints a fresh "unix:<now>" string. Diffing on text would
+    // treat that natural churn as a new fault every cycle and reintroduce
+    // the exact wake flood this exists to prevent. The latest text is still
+    // stored below, so a status read reports the current reason.
+    //
+    // This one page's `machineErrors` is not the complete, current truth
+    // about every peer: `wait_aggregate_task_events` can seal a batch on
+    // this machine's own urgent/full/quiet criteria while a listed peer's
+    // own retained leg is still pending in the registry (still running,
+    // simply hasn't completed in this call) — that peer then appears in
+    // neither `machineErrors` nor `confirmedMachines`. Treating that
+    // silence as recovery would clear stale coverage with zero evidence,
+    // and its eventual (still-failing) completion would then read as a
+    // *new* coverage change and mint another error-only wake for the same
+    // continuous outage. So this reconciles rather than replaces: start
+    // from the durable set, apply this call's fresh/updated faults, and
+    // clear only machines this call positively confirmed succeeded (see
+    // `confirmedMachines`/`apply_aggregate_completion`) — including a
+    // successful empty response whose checkpoint does not move. A machine
+    // in neither list is left exactly as it was.
+    let mut stale_machines = row.stale_machines.clone();
+    for error in &machine_errors {
+        let Some(machine_id) = error["machineId"].as_str() else {
+            continue;
+        };
+        if machine_id == local_machine_id {
+            continue;
+        }
+        stale_machines.insert(
+            machine_id.to_string(),
+            error["error"].as_str().unwrap_or_default().to_string(),
+        );
+    }
+    for machine_id in batch["confirmedMachines"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        stale_machines.remove(machine_id);
+    }
+    let coverage_changed = !local_faulted && !stale_machines.keys().eq(row.stale_machines.keys());
     if batch.get("watchError").is_some()
         || batch["events"]
             .as_array()
             .is_some_and(|events| !events.is_empty())
+        || coverage_changed
     {
         row.batch_id += 1;
         row.pending = Some(batch);
@@ -191,6 +269,7 @@ fn accept_page(row: &mut EventSubscription, mut batch: Value, observed: bool) {
     } else {
         row.cursor = batch["cursor"].as_str().map(str::to_owned);
     }
+    row.stale_machines = stale_machines;
 }
 
 pub(super) async fn subscribe(
@@ -380,14 +459,16 @@ pub(super) async fn subscribe(
         error: None,
         active: true,
         wake_admitted: false,
+        stale_machines: BTreeMap::new(),
     };
     drop(db);
     // A single zero-timeout bootstrap check: whatever is already settled,
     // never a wait, so there is nothing here for a chained collection to own.
+    let local_machine_id = state.config().desktop_id.clone();
     let batch = collect(state.clone(), &row, 0, fresh_collection(&row))
         .await
         .map_err(failure)?;
-    accept_page(&mut row, batch, true);
+    accept_page(&mut row, batch, true, &local_machine_id);
     database(&state)
         .map_err(failure)?
         .insert_event_subscription(&row)
@@ -612,6 +693,13 @@ async fn step(
     // shrink each subsequent call's own limit by that count so the chain's
     // total never exceeds one page.
     let mut retained_events: Vec<Value> = Vec::new();
+    // Like `retained_events`, but for positive-recovery evidence: a peer's
+    // own leg can complete successfully (even with nothing relevant) in one
+    // chained call and then the chain moves on to a fresh one, whose own
+    // `confirmedMachines` starts empty again. Without accumulating here,
+    // that positive observation is silently discarded the moment the chain
+    // continues past it, and `accept_page` never learns it happened.
+    let mut confirmed_machines: HashSet<String> = HashSet::new();
     let batch = 'chain: loop {
         let native_timeout = {
             let guard = collection
@@ -679,6 +767,21 @@ async fn step(
                 let machine_errors_present = batch["machineErrors"]
                     .as_array()
                     .is_some_and(|errors| !errors.is_empty());
+                // A machine erroring this leg is the freshest signal for it —
+                // drop any earlier accumulated confirmation before folding in
+                // this leg's own confirmations, so a peer that succeeded in
+                // an earlier chained call and then failed in this one is
+                // never reported as both.
+                for error in batch["machineErrors"].as_array().into_iter().flatten() {
+                    if let Some(machine_id) = error["machineId"].as_str() {
+                        confirmed_machines.remove(machine_id);
+                    }
+                }
+                if let Some(confirmed) = batch["confirmedMachines"].as_array() {
+                    confirmed_machines.extend(
+                        confirmed.iter().filter_map(Value::as_str).map(str::to_owned),
+                    );
+                }
                 if batch["waitOutcome"] == "timeout" && !machine_errors_present {
                     // Whether this leg's own timeout also means the
                     // subscription is genuinely done cannot be decided from
@@ -698,24 +801,40 @@ async fn step(
                             .intrinsic_deadline()
                             .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
                     };
-                    if !live_deadline_reached {
+                    // A healthy peer succeeding with nothing new must not by
+                    // itself cut this chain short — that is the normal case
+                    // every cycle, and doing so would defeat honoring a
+                    // quiet/max-hold window larger than one native call.
+                    // Only a peer this subscription currently has recorded
+                    // as stale coming back confirmed is coverage-relevant
+                    // enough to stop and report now, exactly like a fresh
+                    // failure already does — otherwise that recovery signal
+                    // would sit accumulated but unreported for as long as
+                    // the chain keeps finding nothing else to say.
+                    let recovered_a_stale_machine = confirmed_machines
+                        .iter()
+                        .any(|machine_id| row.stale_machines.contains_key(machine_id));
+                    if !live_deadline_reached && !recovered_a_stale_machine {
                         #[cfg(test)]
                         subscription_timing::leg_timed_out(state);
                         continue 'chain;
                     }
                 }
                 batch["events"] = json!(std::mem::take(&mut retained_events));
+                batch["confirmedMachines"] =
+                    json!(confirmed_machines.iter().cloned().collect::<Vec<_>>());
                 break 'chain Ok(batch);
             }
             Err(error) => break 'chain Err(error),
         }
     };
+    let local_machine_id = state.config().desktop_id.clone();
     match batch {
-        Ok(batch) => accept_page(&mut row, batch, false),
+        Ok(batch) => accept_page(&mut row, batch, false, &local_machine_id),
         Err(error) => {
             let batch = json!({"events": [], "cursor": row.cursor,
                 "watchError": format!("event watch stopped: {error}; reconcile current state before establishing a new subscription")});
-            accept_page(&mut row, batch, false);
+            accept_page(&mut row, batch, false, &local_machine_id);
         }
     }
     save(state, &mut row)?;
@@ -793,5 +912,199 @@ pub(crate) async fn run(state: Arc<AppState>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod outage_isolation_tests {
+    use super::*;
+
+    fn base_row(id: &str) -> EventSubscription {
+        EventSubscription {
+            id: id.to_string(),
+            task_id: "manager".into(),
+            run_id: "manager-run".into(),
+            stage: Some("in progress".into()),
+            branch: Some("task-manager".into()),
+            query: json!({}),
+            delivery: "poll".into(),
+            revision: 0,
+            cursor: Some("ks1.start".into()),
+            pending: None,
+            batch_id: 0,
+            wake_state: "idle".into(),
+            error: None,
+            active: true,
+            wake_admitted: false,
+            stale_machines: BTreeMap::new(),
+        }
+    }
+
+    fn remote_fault_batch(machine_id: &str, error: &str) -> Value {
+        json!({
+            "events": [],
+            "cursor": "ks1.next",
+            "machineErrors": [{"machineId": machine_id, "error": error, "stale": true}],
+        })
+    }
+
+    /// The real producer for the common "peer absent from the active list"
+    /// case (`AppState::desktop_routing_unreachable_error`) mints a fresh
+    /// `unix:<now>` string on every call once this machine's own routing is
+    /// healthy (its `since` is never pinned, see the comment on
+    /// `accept_page`). Two of its outputs for a still-down, never-recovered
+    /// peer must still dedup by machine id, or every mailbox cycle would
+    /// wake the subscriber solely because the clock moved.
+    #[test]
+    fn unchanged_remote_fault_does_not_rewake_even_as_its_text_churns() {
+        let mut row = base_row("watch-dedup");
+        accept_page(
+            &mut row,
+            remote_fault_batch("desktop-peer", "machine unreachable since unix:1000"),
+            false,
+            "desktop-local",
+        );
+        assert!(
+            row.pending.is_some(),
+            "a newly observed fault must wake once"
+        );
+        assert_eq!(row.batch_id, 1);
+        assert_eq!(
+            row.stale_machines.get("desktop-peer").map(String::as_str),
+            Some("machine unreachable since unix:1000")
+        );
+
+        // Simulate the ack the subscriber performs before the mailbox
+        // collects again; accept_page itself never clears `pending`.
+        row.pending = None;
+
+        // Same peer, same continuous fault, but the embedded timestamp
+        // advanced — exactly what `desktop_routing_unreachable_error`
+        // produces call to call while this machine's own routing stays up.
+        accept_page(
+            &mut row,
+            remote_fault_batch("desktop-peer", "machine unreachable since unix:1300"),
+            false,
+            "desktop-local",
+        );
+        assert!(
+            row.pending.is_none(),
+            "error text churn for the same still-down peer must not manufacture a wake"
+        );
+        assert_eq!(row.batch_id, 1, "no new batch for an unchanged fault");
+        assert_eq!(
+            row.stale_machines.get("desktop-peer").map(String::as_str),
+            Some("machine unreachable since unix:1300"),
+            "the stored reason still tracks the latest text for a status read"
+        );
+
+        // The peer's own retained leg is still pending this call -- neither
+        // succeeded nor failed, so it appears in neither `machineErrors` nor
+        // `confirmedMachines`. That absence must never be read as recovery:
+        // `wait_aggregate_task_events` can seal a batch on this machine's
+        // own criteria while a listed peer's leg simply has not completed
+        // yet, and clearing stale coverage here would let its eventual
+        // (still-failing) completion mint a brand new coverage-change wake
+        // for the same continuous outage.
+        accept_page(
+            &mut row,
+            json!({"events": [], "cursor": "ks1.next2", "machineErrors": []}),
+            false,
+            "desktop-local",
+        );
+        assert!(
+            row.pending.is_none(),
+            "a still-pending leg, absent from both lists, must not be inferred as recovered"
+        );
+        assert_eq!(row.batch_id, 1);
+        assert_eq!(
+            row.stale_machines.get("desktop-peer").map(String::as_str),
+            Some("machine unreachable since unix:1300"),
+            "stale coverage must survive with no positive success evidence for that machine"
+        );
+
+        // The peer's leg finally completes successfully — explicit positive
+        // evidence via `confirmedMachines`, the only thing that may clear
+        // stale coverage. A real coverage change, so it wakes once, even
+        // with no events.
+        accept_page(
+            &mut row,
+            json!({
+                "events": [],
+                "cursor": "ks1.recovered",
+                "machineErrors": [],
+                "confirmedMachines": ["desktop-peer"],
+            }),
+            false,
+            "desktop-local",
+        );
+        assert!(row.pending.is_some(), "a peer's confirmed recovery must wake once");
+        assert_eq!(row.batch_id, 2);
+        assert!(row.stale_machines.is_empty());
+    }
+
+    /// `stale_machines` is a plain field on the same durable JSON row as
+    /// `cursor`/`active`/`wake_admitted`; it survives a server restart the
+    /// same way they do, and the key-only dedup above still holds against a
+    /// row reloaded fresh rather than kept in memory.
+    #[test]
+    fn stale_machines_and_its_dedup_survive_a_reload_from_the_durable_row() {
+        let state = crate::http_api::test_support::test_state_with_seed(
+            "desktop-restart-local",
+            "Restart Local",
+            |db| {
+                db.insert_test_repo("repo-restart", "Restart Repo")
+                    .expect("insert test repo");
+                db.insert_test_pipeline_item(
+                    "manager",
+                    "repo-restart",
+                    "manage",
+                    Some("Manager"),
+                    "in progress",
+                    "2026-09-10 00:00:00",
+                )
+                .expect("insert test pipeline item");
+            },
+        );
+        let db = database(&state).unwrap();
+        let mut row = base_row("watch-restart");
+        accept_page(
+            &mut row,
+            remote_fault_batch(
+                "desktop-restart-peer",
+                "machine unreachable since unix:1000",
+            ),
+            false,
+            "desktop-restart-local",
+        );
+        row.pending = None;
+        db.insert_event_subscription(&row).unwrap();
+
+        // Drop everything in-memory and reopen the row exactly as a fresh
+        // server process would: no carried-over Rust state, only the row.
+        drop(db);
+        let reloaded_db = database(&state).unwrap();
+        let mut reloaded = reloaded_db.event_subscription(&row.id).unwrap().unwrap();
+        assert_eq!(
+            reloaded
+                .stale_machines
+                .get("desktop-restart-peer")
+                .map(String::as_str),
+            Some("machine unreachable since unix:1000")
+        );
+
+        accept_page(
+            &mut reloaded,
+            remote_fault_batch(
+                "desktop-restart-peer",
+                "machine unreachable since unix:9999",
+            ),
+            false,
+            "desktop-restart-local",
+        );
+        assert!(
+            reloaded.pending.is_none(),
+            "a reloaded row must keep deduping an unchanged, still-down peer by id after restart"
+        );
     }
 }
