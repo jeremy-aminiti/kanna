@@ -19,6 +19,8 @@ kanna-daemon manages persistent PTY sessions for Claude CLI agents. It runs as a
    an eligible registered viewer that becomes the actively viewed terminal
    steals controller sizing. Followers render the controller's authoritative grid
    and may pan/scroll it; their viewport is not a PTY resize.
+   Geometry protocol v2 separately negotiates active-view election; a v1 peer
+   may register geometry but must never receive an active-view command.
 9. **Always broadcast.** Before exiting during handoff, the old daemon broadcasts `ShuttingDown` to all subscribers.
 10. **Always reconnect.** Apps detect daemon restart (via `ShuttingDown` or EOF) and automatically reconnect + re-attach all tracked sessions.
 11. **Authorize the successor before handoff state.** For every supported handoff version, the sender authenticates the peer as a daemon directly spawned by the trusted app-launcher executable before it acquires daemon-lifecycle ownership, seals a registry, snapshots a session, writes `HandoffReady`, or transfers a descriptor.

@@ -577,5 +577,20 @@ describe("remote active-view restoration", () => {
     expect(ownerRestored).toEqual(ownerInitial);
     await assertTestWindow(primary, "primary before owner-restored capture");
     await capture(primary, "owner-restored-without-terminal-input.png");
+
+    // CloudTerminalCache keeps this remote component mounted with v-show. A
+    // cached re-selection must publish a fresh foreground edge, then release
+    // it again when the owner regains focus; it cannot rely on first start().
+    await assertTestWindow(secondary, "secondary before cached remote reselect");
+    await selectRemoteTask(remoteItemId, ownerTaskId);
+    await focusTerminal(secondary, ownerTaskId, "cached-remote");
+    const cachedRemoteActive = await waitForOwnerAndRenderer(secondary, ownerTaskId, "cached-remote");
+    expect(cachedRemoteActive.cols).toBeLessThan(ownerInitial.cols);
+    expect(cachedRemoteActive.rows).toBeLessThan(ownerInitial.rows);
+
+    await assertTestWindow(primary, "primary before cached owner handback focus");
+    await focusTerminal(primary, ownerTaskId, "cached-owner-handback");
+    const cachedOwnerRestored = await waitForOwnerAndRenderer(primary, ownerTaskId, "owner", ownerInitial);
+    expect(cachedOwnerRestored).toEqual(ownerInitial);
   }, 180_000);
 });

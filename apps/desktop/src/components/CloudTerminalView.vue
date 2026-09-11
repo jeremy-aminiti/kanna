@@ -6,6 +6,7 @@ import { ImageAddon } from "@xterm/addon-image";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useI18n } from "vue-i18n";
 import "@xterm/xterm/css/xterm.css";
 import {
@@ -37,6 +38,7 @@ import {
 } from "../composables/terminalSnapshotApply";
 import { useTerminalFocusWhenActive } from "../composables/useTerminalFocusWhenActive";
 import { nextFrameOrTimeout } from "../utils/animationFrame";
+import { isTauri } from "../tauri-mock";
 import {
   createTerminalDropBridge,
   type TerminalDropBridge,
@@ -88,6 +90,8 @@ const MAX_PENDING_REMOTE_INPUT_CHARS = 64 * 1024;
 const MAX_REMOTE_INPUT_FRAME_BYTES = 4 * 1024;
 let lifecycleGeneration = 0;
 let unmounted = false;
+let stopNativeWindowFocusTracking: (() => void) | null = null;
+let nativeWindowFocusTrackingGeneration = 0;
 const inputProducer = createTerminalInputProducerClassifier();
 const controlInputEvents = ["mousedown", "mouseup", "mousemove", "wheel", "focus", "blur"];
 const draftInputEvents = ["beforeinput", "paste"];
@@ -226,6 +230,73 @@ function refreshRemoteViewer() {
     fitAddon?.fit?.();
   }
   terminal?.refresh(0, Math.max(0, terminal.rows - 1));
+}
+
+function hasVisibleRemoteContainer(): boolean {
+  const container = containerRef.value;
+  if (!container) return false;
+  const style = window.getComputedStyle(container);
+  return container.isConnected
+    && container.offsetWidth > 0
+    && container.offsetHeight > 0
+    && style.display !== "none"
+    && style.visibility !== "hidden";
+}
+
+/** Keep the daemon's one viewer-election authority informed of this cached
+ * component's real eligibility. Registration/fit remains passive; only an
+ * active, visible, foreground view can announce an active-view edge. */
+function syncRemoteViewerEligibility(activate: boolean): void {
+  const visible = props.active
+    && !unmounted
+    && !document.hidden
+    && document.hasFocus()
+    && hasVisibleRemoteContainer();
+  subscription?.setViewerVisible?.(visible);
+  if (visible && activate) subscription?.activate?.();
+}
+
+function syncRemoteViewerEligibilityAfterDocumentFocus(activate: boolean): void {
+  if (document.hasFocus()) {
+    syncRemoteViewerEligibility(activate);
+    return;
+  }
+  window.addEventListener("focus", () => syncRemoteViewerEligibility(activate), { once: true });
+}
+
+function startForegroundTracking(): void {
+  const syncFromDocument = () => syncRemoteViewerEligibility(document.hasFocus());
+  window.addEventListener("focus", syncFromDocument);
+  window.addEventListener("blur", syncFromDocument);
+  document.addEventListener("visibilitychange", syncFromDocument);
+  stopNativeWindowFocusTracking = () => {
+    window.removeEventListener("focus", syncFromDocument);
+    window.removeEventListener("blur", syncFromDocument);
+    document.removeEventListener("visibilitychange", syncFromDocument);
+  };
+  if (!isTauri) return;
+  const generation = ++nativeWindowFocusTrackingGeneration;
+  void getCurrentWindow().onFocusChanged((event) => {
+    if (unmounted || generation !== nativeWindowFocusTrackingGeneration) return;
+    if (!event.payload) {
+      syncRemoteViewerEligibility(false);
+      return;
+    }
+    // Tauri's native key-window edge can precede WebKit's document focus.
+    syncRemoteViewerEligibilityAfterDocumentFocus(true);
+  }).then((unlisten) => {
+    if (generation !== nativeWindowFocusTrackingGeneration) {
+      unlisten();
+      return;
+    }
+    const stopDomTracking = stopNativeWindowFocusTracking;
+    stopNativeWindowFocusTracking = () => {
+      stopDomTracking?.();
+      unlisten();
+    };
+  }).catch((error) => {
+    console.warn("[cloud-terminal] failed to track native window focus:", error);
+  });
 }
 
 function scheduleRemoteViewerRefresh() {
@@ -394,7 +465,7 @@ async function start() {
     // This component only starts for the selected, rendered remote task.
     // Registration provides its measured viewport; active viewing transfers
     // daemon-owned sizing without a separate UI action.
-    subscription.activate?.();
+    syncRemoteViewerEligibility(true);
   } catch (error) {
     if (unmounted || generation !== lifecycleGeneration) {
       if (acquiredClient && !adopted) acquiredClient.close();
@@ -614,6 +685,7 @@ async function initializeTerminalWhenVisible() {
 }
 
 onMounted(() => {
+  startForegroundTracking();
   // Vitest's DOM has no layout engine, so a visibility wait would prevent the
   // component's normal mount contract from being exercised by unit tests.
   if (import.meta.env.MODE === "test") {
@@ -634,7 +706,11 @@ watch(
 watch(
   () => props.active,
   async (active) => {
-    if (!active) return;
+    if (!active) {
+      cancelPendingFocus();
+      syncRemoteViewerEligibility(false);
+      return;
+    }
     if (import.meta.env.MODE === "test") {
       initializeTerminal();
     } else {
@@ -642,6 +718,7 @@ watch(
     }
     await fitAndResizeRemoteAfterLayout(lifecycleGeneration);
     await focusWhenActive();
+    syncRemoteViewerEligibilityAfterDocumentFocus(true);
   },
 );
 
@@ -654,6 +731,9 @@ watch(effectiveCodeTheme, (theme) => {
 onUnmounted(() => {
   cancelPendingFocus();
   unmounted = true;
+  nativeWindowFocusTrackingGeneration += 1;
+  stopNativeWindowFocusTracking?.();
+  stopNativeWindowFocusTracking = null;
   lifecycleGeneration += 1;
   pendingRemoteViewerProposal = null;
   remoteViewerRefreshScheduled = false;

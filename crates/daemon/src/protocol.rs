@@ -19,7 +19,10 @@ pub const LEGACY_HANDOFF_PROTOCOL_VERSION: u32 = 2;
 /// created or inherited input policy may be classified.
 pub const PROTECTED_INPUT_PROTOCOL_VERSION: u32 =
     kanna_runtime_defaults::PROTECTED_INPUT_PROTOCOL_VERSION;
-pub const TERMINAL_GEOMETRY_PROTOCOL_VERSION: u32 = 1;
+/// Version 2 adds daemon-owned active-view election. Version 1 only accepted
+/// registration/proposal frames, so treating it as equivalent would let a new
+/// server write `ActiveViewer` to an old daemon control socket.
+pub const TERMINAL_GEOMETRY_PROTOCOL_VERSION: u32 = 2;
 
 /// Server/daemon contract required before fenced raw terminal input carrying a
 /// producer-declared class may be sent.

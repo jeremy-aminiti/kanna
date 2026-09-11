@@ -216,6 +216,17 @@ pub(crate) fn e2e_activate_current_app(
         .map_err(|_| "foreground E2E activation did not return from the main thread".to_string())?
 }
 
+/// Foreground activation is intentionally a macOS-only E2E affordance. Keep a
+/// command-shaped non-macOS implementation because the desktop command table
+/// is compiled on every supported target; returning an explicit unsupported
+/// result is safer than making the generated handler reference a missing
+/// symbol.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub(crate) fn e2e_activate_current_app() -> Result<E2eForegroundActivation, String> {
+    Err("foreground E2E activation is only supported on macOS".to_string())
+}
+
 /// Resolve the user's full PATH from their interactive login shell.
 /// macOS apps launched from Finder/Spotlight inherit a minimal PATH
 /// (/usr/bin:/bin:/usr/sbin:/sbin) that doesn't include tools like

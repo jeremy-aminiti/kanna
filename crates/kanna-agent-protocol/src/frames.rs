@@ -58,6 +58,11 @@ pub enum KspCapability {
     /// the daemon-owned geometry controller. Without this capability a peer
     /// is legacy and must not be treated as a local controller.
     TerminalGeometry,
+    /// Terminal geometry v2 also supports explicit foreground active-view
+    /// election. This is deliberately separate from `terminal_geometry`:
+    /// deployed v1 peers understand viewer registration but cannot parse an
+    /// active-view command.
+    TerminalActiveView,
     #[serde(other)]
     Unknown,
 }

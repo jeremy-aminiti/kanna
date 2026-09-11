@@ -724,7 +724,10 @@ export class StreamClient {
   activateTerminalViewer(taskId: string): void {
     if (
       this.options.terminalViewerRole &&
-      (!this.authed || this.supportsCapability("terminal_geometry"))
+      // Geometry v1 recognizes registrations but has no active-view command.
+      // Keep an activation queued until AuthOk, then discard it unless the
+      // peer explicitly negotiated the v2 active-view authority.
+      (!this.authed || this.supportsCapability("terminal_active_view"))
     ) {
       this.sendFrame({ type: "term_viewer_active", task_id: taskId });
     }
@@ -973,7 +976,7 @@ export class StreamClient {
           ? (["agent_history_window"] as const)
           : []),
         ...(this.options.terminalViewerRole
-          ? (["terminal_geometry"] as const)
+          ? (["terminal_geometry", "terminal_active_view"] as const)
           : []),
       ],
     }, socket);
@@ -1072,11 +1075,12 @@ export class StreamClient {
             continue;
           }
           if (
-            !this.supportsCapability("terminal_geometry") &&
-            (frame.type === "term_viewer_register" ||
-              frame.type === "term_viewer_active" ||
+            ((frame.type === "term_viewer_active" &&
+              !this.supportsCapability("terminal_active_view")) ||
+              (!this.supportsCapability("terminal_geometry") &&
+              (frame.type === "term_viewer_register" ||
               frame.type === "term_viewer_takeover" ||
-              frame.type === "term_viewer_release")
+              frame.type === "term_viewer_release")))
           ) {
             continue;
           }

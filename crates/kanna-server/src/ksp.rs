@@ -774,6 +774,18 @@ fn auth_ok_frame_with_terminal_geometry(
     companion_access: bool,
     terminal_geometry_supported: bool,
 ) -> ServerFrame {
+    auth_ok_frame_with_terminal_capabilities(
+        companion_access,
+        terminal_geometry_supported,
+        terminal_geometry_supported,
+    )
+}
+
+fn auth_ok_frame_with_terminal_capabilities(
+    companion_access: bool,
+    terminal_geometry_supported: bool,
+    terminal_active_view_supported: bool,
+) -> ServerFrame {
     let mut stream_kinds = vec![
         StreamKind::Agent,
         StreamKind::Terminal,
@@ -792,6 +804,9 @@ fn auth_ok_frame_with_terminal_geometry(
     if terminal_geometry_supported {
         capabilities.push(KspCapability::TerminalGeometry);
     }
+    if terminal_active_view_supported {
+        capabilities.push(KspCapability::TerminalActiveView);
+    }
     ServerFrame::AuthOk {
         stream_kinds,
         capabilities,
@@ -806,6 +821,18 @@ fn auth_capabilities_do_not_advertise_geometry_without_daemon_support() {
         panic!("expected auth success frame");
     };
     assert!(!capabilities.contains(&KspCapability::TerminalGeometry));
+    assert!(!capabilities.contains(&KspCapability::TerminalActiveView));
+}
+
+#[cfg(test)]
+#[test]
+fn auth_capabilities_keep_active_view_distinct_from_geometry() {
+    let frame = auth_ok_frame_with_terminal_capabilities(true, true, false);
+    let ServerFrame::AuthOk { capabilities, .. } = frame else {
+        panic!("expected auth success frame");
+    };
+    assert!(capabilities.contains(&KspCapability::TerminalGeometry));
+    assert!(!capabilities.contains(&KspCapability::TerminalActiveView));
 }
 
 #[derive(Clone)]
@@ -1706,6 +1733,7 @@ async fn handle_stream_channels(
         supports_term_input_boundary: false,
         supports_terminal_window: false,
         supports_terminal_geometry: false,
+        supports_terminal_active_view: false,
         supports_agent_history_window: false,
         legacy_companion_tasks_on_connection: HashSet::new(),
         auth_mode,
@@ -1801,6 +1829,7 @@ struct StreamConn {
     supports_term_input_boundary: bool,
     supports_terminal_window: bool,
     supports_terminal_geometry: bool,
+    supports_terminal_active_view: bool,
     supports_agent_history_window: bool,
     legacy_companion_tasks_on_connection: HashSet<String>,
     auth_mode: AuthMode,
@@ -3186,9 +3215,10 @@ impl StreamConn {
 
         match frame {
             ClientFrame::Auth { .. } => {
-                self.send(auth_ok_frame_with_terminal_geometry(
+                self.send(auth_ok_frame_with_terminal_capabilities(
                     self.companion_access,
                     self.supports_terminal_geometry,
+                    self.supports_terminal_active_view,
                 ))
                 .await;
             }
@@ -3433,12 +3463,12 @@ impl StreamConn {
                 }
             }
             ClientFrame::TermViewerActive { task_id } => {
-                if self.supports_terminal_geometry {
+                if self.supports_terminal_active_view {
                     self.enqueue_terminal_control(task_id, TerminalControlCommand::Active);
                 } else {
                     self.error(
                         Some(task_id),
-                        "terminal_geometry_unsupported",
+                        "terminal_active_view_unsupported",
                         "terminal active-viewer geometry is unavailable on this desktop".into(),
                     )
                     .await;
@@ -3596,11 +3626,14 @@ impl StreamConn {
         self.supports_terminal_window = capabilities.contains(&KspCapability::TermScrollbackWindow);
         self.supports_terminal_geometry = capabilities.contains(&KspCapability::TerminalGeometry)
             && self.state.terminal_geometry_supported();
+        self.supports_terminal_active_view = self.supports_terminal_geometry
+            && capabilities.contains(&KspCapability::TerminalActiveView);
         self.supports_agent_history_window =
             capabilities.contains(&KspCapability::AgentHistoryWindow);
-        self.send(auth_ok_frame_with_terminal_geometry(
+        self.send(auth_ok_frame_with_terminal_capabilities(
             self.companion_access,
             self.supports_terminal_geometry,
+            self.supports_terminal_active_view,
         ))
         .await;
         true

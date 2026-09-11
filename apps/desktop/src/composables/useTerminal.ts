@@ -126,6 +126,12 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
       // geometry policy.
       traceNativeFocus("event", { focused: event.payload })
       if (!event.payload || generation !== nativeWindowFocusTrackingGeneration) {
+        if (!event.payload) {
+          void lifecycle.setViewerVisibility(false).catch((error) => {
+            traceNativeFocus("error", { detail: String(error) })
+            console.warn("[terminal] failed to withdraw background viewer:", error)
+          })
+        }
         traceNativeFocus("stale", { focused: event.payload })
         return
       }

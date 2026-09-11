@@ -696,13 +696,14 @@ describe("useTerminal", () => {
       handlers.onSnapshot?.(80, 24, btoa("native focused local terminal"));
     });
     const activateTerminalViewer = vi.fn();
+    const setTerminalViewerVisibility = vi.fn();
     streamClientMock.getSharedStreamClient.mockResolvedValue({
       attachTerminal,
       sendTermInput: vi.fn(),
       sendTermResize: vi.fn(),
       detach: vi.fn(),
       registerTerminalViewer: vi.fn(),
-      setTerminalViewerVisibility: vi.fn(),
+      setTerminalViewerVisibility,
       activateTerminalViewer,
     });
     isTauriMock = true;
@@ -729,6 +730,7 @@ describe("useTerminal", () => {
     expect(nativeWindowFocusHandler).not.toBeNull();
     nativeWindowFocusHandler?.({ payload: false });
     await flushAsyncWork();
+    expect(setTerminalViewerVisibility).toHaveBeenLastCalledWith("session-1", false);
     expect(activateTerminalViewer).toHaveBeenCalledTimes(1);
 
     nativeWindowFocusHandler?.({ payload: true });

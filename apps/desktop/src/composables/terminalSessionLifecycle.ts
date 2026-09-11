@@ -52,6 +52,7 @@ export interface TerminalSessionLifecycleController {
   redraw(): Promise<void>
   ensureConnected(): Promise<void>
   activateVisibleViewer(): Promise<void>
+  setViewerVisibility(visible: boolean): Promise<void>
 }
 
 export function createTerminalSessionLifecycle(params: {
@@ -140,6 +141,11 @@ export function createTerminalSessionLifecycle(params: {
     client.setTerminalViewerVisibility?.(params.sessionId, true)
     client.activateTerminalViewer?.(params.sessionId)
     trace("sent")
+  }
+
+  async function setViewerVisibility(visible: boolean): Promise<void> {
+    const client = await params.getTerminalStreamClient()
+    client.setTerminalViewerVisibility?.(params.sessionId, visible)
   }
   const disposal = createTerminalDisposalController({
     sessionId: params.sessionId,
@@ -834,5 +840,6 @@ export function createTerminalSessionLifecycle(params: {
     redraw,
     ensureConnected,
     activateVisibleViewer,
+    setViewerVisibility,
   }
 }
