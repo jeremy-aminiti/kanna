@@ -26,6 +26,8 @@ interface Dimensions {
 interface RenderedTerminal extends Dimensions {
   bufferMarker: string | null;
   renderedMarker: string | null;
+  bufferActiveViewLines: string[];
+  renderedActiveViewLines: string[];
   viewport: Dimensions;
 }
 
@@ -141,15 +143,20 @@ async function renderedDimensions(
     const rect = screen?.getBoundingClientRect() ?? host?.getBoundingClientRect();
     const rows = screen?.querySelector?.(".xterm-rows");
     const marker = /^ACTIVE_VIEW:\d+x\d+$/;
-    const renderedMarkers = Array.from(rows?.children ?? [])
+    const renderedActiveViewLines = Array.from(rows?.children ?? [])
       .map((row) => row.textContent?.trim() ?? "")
-      .filter((line) => marker.test(line));
-    const bufferMarkers = (hook?.lines?.(id) ?? []).filter((line) => marker.test(line));
+      .filter((line) => line.includes("ACTIVE_VIEW"));
+    const bufferActiveViewLines = (hook?.lines?.(id) ?? [])
+      .filter((line) => line.includes("ACTIVE_VIEW"));
+    const renderedMarkers = renderedActiveViewLines.filter((line) => marker.test(line));
+    const bufferMarkers = bufferActiveViewLines.filter((line) => marker.test(line));
     return cursor && viewport && rect && rect.width > 0 && rect.height > 0
       ? {
         bufferMarker: bufferMarkers.at(-1) ?? null,
+        bufferActiveViewLines: bufferActiveViewLines.slice(-8),
         cols: cursor.columns,
         renderedMarker: renderedMarkers.at(-1) ?? null,
+        renderedActiveViewLines: renderedActiveViewLines.slice(-8),
         rows: cursor.rows,
         viewport: { cols: viewport.availableCols, rows: viewport.availableRows },
       }
