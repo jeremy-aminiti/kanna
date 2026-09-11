@@ -24,9 +24,15 @@ function expectRecord(value: unknown, context: string): Record<string, unknown> 
 
 function registryManifestDependencies(manifestPath: string): string[] {
   const manifest = parseTomlFile(manifestPath);
-  const dependencies = expectRecord(manifest.dependencies, `${manifestPath} [dependencies]`);
+  const dependencyTables = [expectRecord(manifest.dependencies, `${manifestPath} [dependencies]`)];
+  if (manifest.target && typeof manifest.target === "object" && !Array.isArray(manifest.target)) {
+    for (const [predicate, target] of Object.entries(manifest.target as Record<string, unknown>)) {
+      const dependencies = expectRecord(target, `${manifestPath} [target.${predicate}]`).dependencies;
+      if (dependencies) dependencyTables.push(expectRecord(dependencies, `${manifestPath} [target.${predicate}.dependencies]`));
+    }
+  }
 
-  return Object.entries(dependencies)
+  return Object.entries(Object.assign({}, ...dependencyTables))
     .filter(([, specification]) => {
       if (!specification || typeof specification !== "object" || Array.isArray(specification)) {
         return true;
@@ -642,6 +648,8 @@ interface CrateUniverse {
   cargoLockfile: string;
   /** Repository-relative synthetic workspace manifest(s) the universe is built from. */
   manifests: string[];
+  /** Every target triple used while resolving this universe. */
+  supportedPlatformTriples: string[];
 }
 
 interface RequestedFeatures {
@@ -650,9 +658,16 @@ interface RequestedFeatures {
   features: string[];
   /** Manifest table that named the dependency. */
   table: string;
-  /** Declared in a `[target.<cfg>.dependencies]` table, so it may be absent from a macOS-only pin. */
-  platformSpecific: boolean;
+  /** Triples on which the manifest dependency is active. */
+  platformTriples: string[];
 }
+
+const requiredCrateUniverseTriples = [
+  "aarch64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu"
+];
 
 function labelToPath(label: string): string {
   const match = label.match(/^\/\/([^:]*):(.+)$/);
@@ -676,13 +691,17 @@ function repositoryCrateUniverses(): CrateUniverse[] {
     const manifests = Array.from((readRuleAttribute(block, "manifests") ?? "").matchAll(/"([^"]+)"/g)).map(
       (label) => label[1]
     );
+    const supportedPlatformTriples = Array.from(
+      (readRuleAttribute(block, "supported_platform_triples") ?? "").matchAll(/"([^"]+)"/g)
+    ).map((triple) => triple[1]);
     if (!repository || !cargoLockfile || manifests.length === 0) {
       throw new Error("MODULE.bazel has a crate.from_cargo call without name, cargo_lockfile and manifests");
     }
     universes.push({
       repository,
       cargoLockfile: labelToPath(cargoLockfile),
-      manifests: manifests.map(labelToPath)
+      manifests: manifests.map(labelToPath),
+      supportedPlatformTriples
     });
     pattern.lastIndex = openingParen + block.length;
   }
@@ -710,23 +729,27 @@ function workspaceMembers(manifestPath: string): string[] {
  */
 function requestedRegistryFeatures(crateDir: string): RequestedFeatures[] {
   const manifest = parseTomlFile(`${crateDir}/Cargo.toml`);
-  const tables: [string, unknown, boolean][] = [
-    ["[dependencies]", manifest.dependencies, false],
+  const tables: [string, unknown, string[]][] = [
+    ["[dependencies]", manifest.dependencies, requiredCrateUniverseTriples],
     // crate_universe resolves dev-dependencies into the same pinned graph, so a
     // feature asked for by a test also has to be in the pin.
-    ["[dev-dependencies]", manifest["dev-dependencies"], false]
+    ["[dev-dependencies]", manifest["dev-dependencies"], requiredCrateUniverseTriples]
   ];
   const targetTables = manifest.target;
   if (targetTables && typeof targetTables === "object" && !Array.isArray(targetTables)) {
     for (const [predicate, table] of Object.entries(targetTables as Record<string, unknown>)) {
       const specific = expectRecord(table, `${crateDir} [target.${predicate}]`);
-      tables.push([`[target.${predicate}.dependencies]`, specific.dependencies, true]);
-      tables.push([`[target.${predicate}.dev-dependencies]`, specific["dev-dependencies"], true]);
+      const platformTriples = requiredCrateUniverseTriples.filter((triple) => {
+        const targetOs = triple.includes("linux") ? "linux" : "macos";
+        return predicate === triple || predicate.includes(`target_os = "${targetOs}"`);
+      });
+      tables.push([`[target.${predicate}.dependencies]`, specific.dependencies, platformTriples]);
+      tables.push([`[target.${predicate}.dev-dependencies]`, specific["dev-dependencies"], platformTriples]);
     }
   }
 
   const requested: RequestedFeatures[] = [];
-  for (const [table, value, platformSpecific] of tables) {
+  for (const [table, value, platformTriples] of tables) {
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     for (const [name, specification] of Object.entries(value as Record<string, unknown>)) {
       if (!specification || typeof specification !== "object" || Array.isArray(specification)) continue;
@@ -740,7 +763,7 @@ function requestedRegistryFeatures(crateDir: string): RequestedFeatures[] {
         packageName: typeof spec.package === "string" ? spec.package : name,
         features: features.sort(),
         table,
-        platformSpecific
+        platformTriples
       });
     }
   }
@@ -764,9 +787,7 @@ function lockedRegistryVersions(lockPath: string): Map<string, string[]> {
 
 /**
  * The `crate_features` a universe pins for one registry crate, read from the
- * generated BUILD file stored in MODULE.bazel.lock. Platform `select()`
- * branches are unioned: a feature only some triple enables still counts as
- * pinned, which is the lenient direction for a macOS-only universe.
+ * generated BUILD file stored in MODULE.bazel.lock.
  */
 let cachedRepoSpecs: Record<string, unknown> | null = null;
 
@@ -786,7 +807,57 @@ function crateUniverseRepoSpecs(): Record<string, unknown> {
   return cachedRepoSpecs;
 }
 
-function pinnedCrateFeatures(repository: string, packageName: string, version: string): string[] | null {
+function quotedFeatures(value: string): string[] {
+  return Array.from(value.matchAll(/"([^"@:/]+)"/g)).map((match) => match[1]);
+}
+
+function pinnedCrateFeaturesFromBuildFile(buildFile: string, triple: string): string[] {
+  const features = new Set<string>();
+  const rulePattern = /^(rust_library|rust_proc_macro|rust_binary|cargo_build_script)\(/gm;
+  let match: RegExpExecArray | null;
+  while ((match = rulePattern.exec(buildFile)) !== null) {
+    const openingParen = match.index + match[1].length;
+    const block = extractCallBlock(buildFile, openingParen, `generated ${match[1]}`);
+    const value = readRuleAttribute(block, "crate_features");
+    if (!value) {
+      rulePattern.lastIndex = openingParen + block.length;
+      continue;
+    }
+    const selectStart = value.indexOf("select({");
+    for (const feature of quotedFeatures(selectStart < 0 ? value : value.slice(0, selectStart))) {
+      features.add(feature);
+    }
+    if (selectStart >= 0) {
+      const mapStart = value.indexOf("{", selectStart);
+      const map = extractBracedBlock(value, mapStart, "crate_features select");
+      const branchMarker = `"@rules_rust//rust/platform:${triple}":`;
+      const branchStart = map.indexOf(branchMarker);
+      if (branchStart >= 0) {
+        const listStart = map.indexOf("[", branchStart + branchMarker.length);
+        let depth = 0;
+        for (let index = listStart; index < map.length; index += 1) {
+          if (map[index] === "[") depth += 1;
+          if (map[index] === "]") {
+            depth -= 1;
+            if (depth === 0) {
+              for (const feature of quotedFeatures(map.slice(listStart, index + 1))) features.add(feature);
+              break;
+            }
+          }
+        }
+      }
+    }
+    rulePattern.lastIndex = openingParen + block.length;
+  }
+  return Array.from(features).sort();
+}
+
+function pinnedCrateFeatures(
+  repository: string,
+  packageName: string,
+  version: string,
+  triple: string
+): string[] | null {
   const spec = crateUniverseRepoSpecs()[`${repository}__${packageName}-${version}`];
   if (spec === undefined) {
     return null;
@@ -796,26 +867,50 @@ function pinnedCrateFeatures(repository: string, packageName: string, version: s
   if (typeof buildFile !== "string") {
     throw new Error(`${repository}__${packageName}-${version} has no generated build_file_content`);
   }
-  // The library, proc-macro and build-script rules of one crate all carry the
-  // same resolved feature set; union them so a crate with only a build script
-  // rule is still readable. Quoted platform labels inside a `select()` are
-  // dropped by the character filter.
-  const features = new Set<string>();
-  const rulePattern = /^(rust_library|rust_proc_macro|rust_binary|cargo_build_script)\(/gm;
-  let match: RegExpExecArray | null;
-  while ((match = rulePattern.exec(buildFile)) !== null) {
-    const openingParen = match.index + match[1].length;
-    const block = extractCallBlock(buildFile, openingParen, `${repository} ${packageName} ${match[1]}`);
-    const value = readRuleAttribute(block, "crate_features");
-    for (const feature of value?.matchAll(/"([^"@:/]+)"/g) ?? []) {
-      features.add(feature[1]);
-    }
-    rulePattern.lastIndex = openingParen + block.length;
-  }
-  return Array.from(features).sort();
+  return pinnedCrateFeaturesFromBuildFile(buildFile, triple);
+}
+
+function crateUniverseTripleProblems(universes: CrateUniverse[]): string[] {
+  return universes.flatMap((universe) => {
+    const missing = requiredCrateUniverseTriples.filter(
+      (triple) => !universe.supportedPlatformTriples.includes(triple)
+    );
+    const extra = universe.supportedPlatformTriples.filter(
+      (triple) => !requiredCrateUniverseTriples.includes(triple)
+    );
+    return [
+      ...missing.map((triple) => `${universe.repository} is missing ${triple}`),
+      ...extra.map((triple) => `${universe.repository} has unexpected ${triple}`)
+    ];
+  });
 }
 
 describe("Bazel crate universe feature pins", () => {
+  it("resolves all eight universes for both Darwin and Linux architectures", () => {
+    const universes = repositoryCrateUniverses();
+    expect(universes).toHaveLength(8);
+    expect(crateUniverseTripleProblems(universes)).toEqual([]);
+  });
+
+  it("reports the exact universe and Linux triple when a platform is dropped", () => {
+    const [universe] = repositoryCrateUniverses();
+    const withoutArm64Linux = {
+      ...universe,
+      supportedPlatformTriples: universe.supportedPlatformTriples.filter(
+        (triple) => triple !== "aarch64-unknown-linux-gnu"
+      )
+    };
+    expect(crateUniverseTripleProblems([withoutArm64Linux])).toEqual([
+      `${universe.repository} is missing aarch64-unknown-linux-gnu`
+    ]);
+  });
+
+  it("does not let a Darwin feature branch satisfy a Linux feature request", () => {
+    const generated = `rust_library(\n  crate_features = select({\n    "@rules_rust//rust/platform:aarch64-apple-darwin": ["darwin-only"],\n    "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": ["linux-only"],\n    "//conditions:default": [],\n  }),\n)`;
+    expect(pinnedCrateFeaturesFromBuildFile(generated, "aarch64-apple-darwin")).toEqual(["darwin-only"]);
+    expect(pinnedCrateFeaturesFromBuildFile(generated, "aarch64-unknown-linux-gnu")).toEqual(["linux-only"]);
+  });
+
   it("pins every feature a member manifest asks of a registry dependency", () => {
     const problems: string[] = [];
 
@@ -833,34 +928,27 @@ describe("Bazel crate universe feature pins", () => {
             );
             continue;
           }
-          // A name locked at several versions is pinned once per version; the
-          // member's edge is satisfied if any of them carries the features.
-          const pins = candidates.map((version) => ({
-            version,
-            features: pinnedCrateFeatures(universe.repository, request.packageName, version)
-          }));
-          const present = pins.filter((pin) => pin.features !== null);
-          if (present.length === 0) {
-            if (request.platformSpecific) continue;
-            problems.push(
-              `${universe.repository} pins no ${request.packageName} crate ` +
-                `(locked at ${candidates.join(", ")}) although ${crateDir}/Cargo.toml ${request.table} depends on it`
+          for (const triple of request.platformTriples) {
+            const pins = candidates.map((version) => ({
+              version,
+              features: pinnedCrateFeatures(universe.repository, request.packageName, version, triple)
+            }));
+            const present = pins.filter((pin) => pin.features !== null);
+            const satisfied = present.some((pin) =>
+              request.features.every((feature) => (pin.features ?? []).includes(feature))
             );
-            continue;
+            if (satisfied) continue;
+            const missing = present.map(
+              (pin) =>
+                `${request.packageName} ${pin.version} pins [${(pin.features ?? []).join(", ")}], missing ` +
+                `[${request.features.filter((feature) => !(pin.features ?? []).includes(feature)).join(", ")}]`
+            );
+            problems.push(
+              `${universe.repository} (MODULE.bazel.lock) is stale for ${triple} and ` +
+                `${crateDir}/Cargo.toml ${request.table}: ${missing.length > 0 ? missing.join("; ") : `no ${request.packageName} pin`} — ` +
+                `repin with CARGO_BAZEL_REPIN=1 bazel query '@${universe.repository}//...'`
+            );
           }
-          const satisfied = present.some((pin) =>
-            request.features.every((feature) => (pin.features ?? []).includes(feature))
-          );
-          if (satisfied) continue;
-          const missing = present.map(
-            (pin) =>
-              `${request.packageName} ${pin.version} pins [${(pin.features ?? []).join(", ")}], missing ` +
-              `[${request.features.filter((feature) => !(pin.features ?? []).includes(feature)).join(", ")}]`
-          );
-          problems.push(
-            `${universe.repository} (MODULE.bazel.lock) is stale for ${crateDir}/Cargo.toml ${request.table}: ` +
-              `${missing.join("; ")} — repin with CARGO_BAZEL_REPIN=1 bazel query '@${universe.repository}//...'`
-          );
         }
       }
     }

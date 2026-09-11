@@ -68,7 +68,11 @@ filegroup(
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2021",
-    extra_target_triples = ["x86_64-apple-darwin"],
+    extra_target_triples = [
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+    ],
     versions = ["1.93.1"],
 )
 use_repo(
@@ -93,7 +97,9 @@ crate.from_cargo(
     manifests = ["//:Cargo.cli.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
     ],
 )
 crate.from_cargo(
@@ -102,7 +108,9 @@ crate.from_cargo(
     manifests = ["//:Cargo.mcp.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
     ],
 )
 crate.from_cargo(
@@ -111,7 +119,9 @@ crate.from_cargo(
     manifests = ["//:Cargo.daemon.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
     ],
 )
 crate.from_cargo(
@@ -120,7 +130,9 @@ crate.from_cargo(
     manifests = ["//:Cargo.server.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
     ],
 )
 crate.from_cargo(
@@ -129,7 +141,9 @@ crate.from_cargo(
     manifests = ["//:Cargo.task-transfer.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
     ],
 )
 crate.from_cargo(
@@ -138,7 +152,9 @@ crate.from_cargo(
     manifests = ["//:Cargo.terminal-recovery.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
     ],
 )
 crate.from_cargo(
@@ -147,7 +163,9 @@ crate.from_cargo(
     manifests = ["//:Cargo.desktop.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
     ],
 )
 crate.from_cargo(
@@ -156,7 +174,9 @@ crate.from_cargo(
     manifests = ["//:Cargo.delta-updater.toml"],
     supported_platform_triples = [
         "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
         "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
     ],
 )
 crate.annotation(
@@ -185,12 +205,86 @@ crate.annotation(
         "@@+git_repository+kanna_ghostty_src//:srcs",
     ],
 )
+
+linux_native_repositories = [
+    "delta_updater_crates",
+    "desktop_crates",
+]
+linux_native_crates = [
+    "atk-sys",
+    "cairo-sys-rs",
+    "gdk-pixbuf-sys",
+    "gdk-sys",
+    "gdkx11-sys",
+    "gio-sys",
+    "glib-sys",
+    "gobject-sys",
+    "gtk",
+    "gtk-sys",
+    "javascriptcore-rs-sys",
+    "pango-sys",
+    "soup3-sys",
+    "webkit2gtk-sys",
+    "x11",
+    "x11-dl",
+]
+
+# These build scripts discover the Linux GUI dependency closure through
+# pkg-config. Their executable is built for the execution platform; only the
+# selected target sysroot is exposed as data and search input.
+[
+    crate.annotation_select(
+        build_script_data = [
+            "@@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_arm64//:files",
+            "@@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_arm64//:sysroot/.kanna-sysroot",
+        ],
+        build_script_env = {
+            "PATH": "",
+            "PKG_CONFIG": "$(execpath @@//packaging/linux:pkg_config)",
+            "PKG_CONFIG_ALLOW_CROSS": "1",
+            "PKG_CONFIG_LIBDIR": "$(execpath @@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_arm64//:sysroot/.kanna-sysroot)/../usr/lib/aarch64-linux-gnu/pkgconfig:$(execpath @@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_arm64//:sysroot/.kanna-sysroot)/../usr/lib/pkgconfig:$(execpath @@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_arm64//:sysroot/.kanna-sysroot)/../usr/share/pkgconfig",
+            "PKG_CONFIG_PATH": "",
+            "PKG_CONFIG_SYSROOT_DIR": "$(execpath @@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_arm64//:sysroot/.kanna-sysroot)/..",
+        },
+        build_script_tools = ["@@//packaging/linux:pkg_config"],
+        crate = native_crate,
+        repositories = linux_native_repositories,
+        triples = ["aarch64-unknown-linux-gnu"],
+    )
+    for native_crate in linux_native_crates
+]
+[
+    crate.annotation_select(
+        build_script_data = [
+            "@@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_amd64//:files",
+            "@@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_amd64//:sysroot/.kanna-sysroot",
+        ],
+        build_script_env = {
+            "PATH": "",
+            "PKG_CONFIG": "$(execpath @@//packaging/linux:pkg_config)",
+            "PKG_CONFIG_ALLOW_CROSS": "1",
+            "PKG_CONFIG_LIBDIR": "$(execpath @@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_amd64//:sysroot/.kanna-sysroot)/../usr/lib/x86_64-linux-gnu/pkgconfig:$(execpath @@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_amd64//:sysroot/.kanna-sysroot)/../usr/lib/pkgconfig:$(execpath @@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_amd64//:sysroot/.kanna-sysroot)/../usr/share/pkgconfig",
+            "PKG_CONFIG_PATH": "",
+            "PKG_CONFIG_SYSROOT_DIR": "$(execpath @@+ubuntu_sysroot_repository+ubuntu_noble_sysroot_amd64//:sysroot/.kanna-sysroot)/..",
+        },
+        build_script_tools = ["@@//packaging/linux:pkg_config"],
+        crate = native_crate,
+        repositories = linux_native_repositories,
+        triples = ["x86_64-unknown-linux-gnu"],
+    )
+    for native_crate in linux_native_crates
+]
 crate.annotation(
     crate = "openssl-src",
     data_glob = ["openssl/**"],
     patch_args = ["-p1"],
     patches = ["//tools/bazel:openssl-src-bazel-runfiles.patch"],
-    repositories = ["desktop_crates"],
+    repositories = [
+        "desktop_crates",
+        "kanna_cli_crates",
+        "kanna_mcp_crates",
+        "kanna_server_crates",
+    ],
 )
 crate.annotation(
     crate = "tauri-utils",
