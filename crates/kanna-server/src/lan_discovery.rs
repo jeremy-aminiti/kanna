@@ -749,6 +749,110 @@ mod tests {
         eprintln!("DIAG_MATCHED_BROWSE_SEND_TRACE {browse_trace_lines:?}");
     }
 
+    /// The decisive follow-up the matched fixture above raises but does not
+    /// answer on its own: `send_to()` failing for this daemon's own browse
+    /// query is a *send*-side fact - it says nothing about whether this
+    /// daemon's *receive* path can still process a genuinely-transmitted,
+    /// unsolicited mDNS Announce from a different advertiser, the way RFC
+    /// 6762 has every advertiser send at registration regardless of
+    /// whether anyone queried for it. An independent, low-level raw-socket
+    /// control (`.tmp/lan-discovery-evidence/raw-multicast-receive-check-run1.log`,
+    /// built with a plain Python `socket`/`IP_ADD_MEMBERSHIP` listener,
+    /// deliberately outside any DNS-SD abstraction so it cannot share
+    /// mDNSResponder's own internal same-process cache) already
+    /// established that this host's receive path genuinely works: it
+    /// captured 17 real multicast packets on `en1` from three distinct
+    /// source addresses, including two - `172.31.32.120`, `172.31.32.123`
+    /// - that are not this host at all, so those specific packets cannot
+    /// be a same-host artifact.
+    ///
+    /// What that control could not answer is whether *this module's own*
+    /// mdns-sd browse - the one thing genuinely proposed for reuse in a
+    /// native-advertisement design - can turn a received native Announce
+    /// into a `ServiceFound`/`ServiceResolved` event, given its own query
+    /// send already fails. This test answers exactly that, with nothing
+    /// inferred: browse a fresh, never-before-used service type restricted
+    /// to the same interface, and independently register that *exact*
+    /// service type natively (`dns-sd -i en1 -R`, a real, separate process,
+    /// genuinely sent per the control above) while browsing, then check
+    /// whether this daemon's receiver ever reports it.
+    #[tokio::test]
+    async fn mdns_sd_browse_receiving_a_genuinely_sent_native_announce() {
+        let Some(if_name) = if_addrs::get_if_addrs().ok().and_then(|interfaces| {
+            interfaces
+                .into_iter()
+                .find(|interface| is_routable_lan_address(&interface.addr.ip()))
+                .map(|interface| interface.name)
+        }) else {
+            eprintln!("skipping: no non-loopback interface on this host to run this control on");
+            return;
+        };
+
+        let unique = format!(
+            "recv-check-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+                % 0x1000
+        );
+        // Same 15-byte service-type-label limit this module's own top
+        // comment documents - short and fresh, never used before.
+        let service_label = format!("rc{:x}", std::process::id() % 0x10000);
+        let service_type_domain = format!("_{service_label}._tcp.local.");
+        let service_type_bare = format!("_{service_label}._tcp");
+
+        let daemon = ServiceDaemon::new().expect("start mDNS daemon");
+        daemon
+            .disable_interface(IfKind::All)
+            .expect("disable all interfaces");
+        daemon
+            .enable_interface(IfKind::Name(if_name.clone()))
+            .expect("enable only the target interface");
+        let receiver = daemon
+            .browse(&service_type_domain)
+            .expect("browse restricted to the target interface");
+
+        let mut native_register = std::process::Command::new("/usr/bin/dns-sd")
+            .arg("-i")
+            .arg(&if_name)
+            .arg("-R")
+            .arg(&unique)
+            .arg(&service_type_bare)
+            .arg("local")
+            .arg("61222")
+            .spawn()
+            .expect("spawn native dns-sd -R restricted to the target interface");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut events = Vec::new();
+        let mut found_or_resolved = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(event) = receiver.try_recv() {
+                let is_relevant = match &event {
+                    ServiceEvent::ServiceFound(_, fullname) => fullname.contains(&unique),
+                    ServiceEvent::ServiceResolved(resolved) => resolved.fullname.contains(&unique),
+                    _ => false,
+                };
+                if is_relevant {
+                    found_or_resolved = true;
+                }
+                events.push(format!("{event:?}"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let _ = native_register.kill();
+        let _ = native_register.wait();
+        let _ = daemon.shutdown();
+
+        eprintln!(
+            "DIAG_RECEIVE_CHECK interface={if_name} service_type={service_type_domain} \
+             instance={unique} found_or_resolved={found_or_resolved} events={events:?}"
+        );
+    }
+
     #[test]
     fn a_resolution_with_a_desktop_id_and_address_becomes_a_candidate() {
         let address = IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 5));
