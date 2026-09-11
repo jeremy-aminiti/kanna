@@ -18,6 +18,12 @@ export interface AndroidVirtualDevice {
   running: boolean;
 }
 
+export interface AndroidPhysicalDevice {
+  serial: string;
+  model?: string;
+  device?: string;
+}
+
 export interface AndroidCommand {
   command: string;
   args: string[];
@@ -78,6 +84,10 @@ export function missingRequiredAndroidTools(tools: AndroidSdkTools): string[] {
   return [tools.adb, tools.emulator].filter((candidate) => !existsSync(candidate));
 }
 
+export function missingRequiredAndroidDeviceTools(tools: AndroidSdkTools): string[] {
+  return [tools.adb].filter((candidate) => !existsSync(candidate));
+}
+
 export function parseAndroidAvdList(stdout: string): string[] {
   return Array.from(new Set(
     stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
@@ -91,6 +101,51 @@ export function parseAdbEmulatorSerials(stdout: string): string[] {
     .map((line) => line.trim().split(/\s+/))
     .filter(([serial, state]) => serial?.startsWith("emulator-") && state === "device")
     .map(([serial]) => serial);
+}
+
+export function parseAdbPhysicalDevices(stdout: string): AndroidPhysicalDevice[] {
+  return stdout
+    .split(/\r?\n/)
+    .slice(1)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split(/\s+/))
+    .filter(([serial, state]) => Boolean(serial) && state === "device" && !serial.startsWith("emulator-"))
+    .map(([serial, _state, ...attributes]) => {
+      const values = Object.fromEntries(attributes.flatMap((attribute) => {
+        const separator = attribute.indexOf(":");
+        return separator > 0 ? [[attribute.slice(0, separator), attribute.slice(separator + 1)]] : [];
+      }));
+      return { serial, model: values.model, device: values.device };
+    });
+}
+
+export async function resolveAndroidPhysicalDevice(input: {
+  runner: CommandRunner;
+  tools: AndroidSdkTools;
+  serial: string;
+}): Promise<AndroidPhysicalDevice> {
+  const result = await input.runner.run(input.tools.adb, ["devices", "-l"]);
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.trim() || result.stdout.trim() || "Failed to list Android devices.");
+  }
+  const devices = parseAdbPhysicalDevices(result.stdout);
+  const device = devices.find((candidate) => candidate.serial === input.serial);
+  if (device) return device;
+  throw new Error(
+    `Android device ${input.serial} is not connected and authorized. Connected physical devices: ${devices.map((candidate) => candidate.serial).join(", ") || "<none>"}.`
+  );
+}
+
+export function buildAndroidReverseCommands(input: {
+  tools: AndroidSdkTools;
+  serial: string;
+  ports: readonly number[];
+}): AndroidCommand[] {
+  return Array.from(new Set(input.ports)).map((port) => ({
+    command: input.tools.adb,
+    args: ["-s", input.serial, "reverse", `tcp:${port}`, `tcp:${port}`]
+  }));
 }
 
 async function runningAndroidAvds(
@@ -269,6 +324,8 @@ export function buildAndroidRunCommand(input: {
   metroPort: number;
   appEnv: string;
   tools: AndroidSdkTools;
+  packagerHost?: string;
+  deviceSerial?: string;
 }): AndroidCommand {
   return {
     command: "pnpm",
@@ -288,7 +345,8 @@ export function buildAndroidRunCommand(input: {
       KANNA_APP_ENV: input.appEnv,
       ANDROID_HOME: input.tools.root,
       ANDROID_SDK_ROOT: input.tools.root,
-      REACT_NATIVE_PACKAGER_HOSTNAME: "10.0.2.2",
+      ...(input.deviceSerial ? { ANDROID_SERIAL: input.deviceSerial } : {}),
+      REACT_NATIVE_PACKAGER_HOSTNAME: input.packagerHost ?? "10.0.2.2",
       RCT_METRO_PORT: String(input.metroPort)
     }
   };

@@ -165,6 +165,8 @@ pnpm test                    # JS/TS suite only
                              # select a Simulator by name (a UDID also works)
 ./kd mobile run --android-emulator Medium_Phone_API_36.1
                              # dev stack + Android AVD build/install/launch
+./kd mobile run --android-device R5CX42N3NLK
+                             # dev stack + exact authorized physical Android build/install/launch
 ./kd mobile run --device     # dev stack + install/launch on a physical iPhone
 ./kd mobile run --device --build dev --owner staging
                              # dev iPhone app + installed staging owner/cloud
@@ -768,6 +770,16 @@ app probes `/v1/status`, derives the real desktop identity from that response,
 and then uses the unchanged pairing-code claim and device-secret-authenticated
 LAN transport. This lane does not provide physical-device NSD, Firebase push,
 Android OTA publication, signing, or Play distribution.
+
+For an authorized physical Android phone, pass its exact adb serial to
+`./kd mobile doctor --android-device <serial>`, then
+`./kd mobile run --android-device <serial>`. kd refuses implicit selection,
+starts the same task-scoped dev stack, and installs the dev identity alongside
+other environments. It creates serial-fenced `adb reverse` routes for Metro,
+the worktree server, relay, and Firebase emulators, so the physical phone uses
+loopback rather than the emulator-only `10.0.2.2` alias. The installed dev
+client requires the kd-managed task services and those reverse routes to remain
+available; this path does not publish to Play, Firebase, production, or OTA.
 
 ## iOS development targets
 

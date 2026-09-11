@@ -1182,7 +1182,7 @@ describe("kd CLI", () => {
       input: { device: true, production: true, staging: false }
     });
     expect(() => parseCliArgs(["mobile", "run", "--staging", "--install"])).toThrow(
-      "mobile run requires a target: use --simulator [<udid|name>], --device, or --android-emulator [<avd>]"
+      "mobile run requires a target: use --simulator [<udid|name>], --device, --android-emulator [<avd>], or --android-device <serial>"
     );
     expect(() => parseCliArgs(["mobile", "run", "--device", "--production", "--staging"])).toThrow(
       "mobile run accepts only one of --production or --staging"
@@ -1278,6 +1278,31 @@ describe("kd CLI", () => {
       "--device",
       "--android-emulator"
     ])).toThrow("mobile doctor requires exactly one");
+  });
+
+  it("requires an exact serial for physical Android run and doctor targets", () => {
+    expect(parseCliArgs(["mobile", "run", "--android-device", "R5CX42N3NLK"])).toEqual({
+      taskId: "mobile.run",
+      input: {
+        device: false,
+        androidDevice: "R5CX42N3NLK",
+        production: false,
+        staging: false
+      }
+    });
+    expect(parseCliArgs(["mobile", "doctor", "--android-device", "R5CX42N3NLK"])).toEqual({
+      taskId: "mobile.doctor",
+      input: {
+        device: false,
+        androidDevice: "R5CX42N3NLK",
+        production: false,
+        staging: false
+      }
+    });
+    expect(() => parseCliArgs(["mobile", "run", "--android-device"]))
+      .toThrow("requires an exact adb serial");
+    expect(() => parseCliArgs(["mobile", "doctor", "--android-device"]))
+      .toThrow("requires an exact adb serial");
   });
 
   it("parses desktop staging cloud as an explicit cloud axis", () => {

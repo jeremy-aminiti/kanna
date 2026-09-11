@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAndroidPrebuildCommand,
+  buildAndroidReverseCommands,
   buildAndroidRunCommand,
   parseAdbEmulatorSerials,
+  parseAdbPhysicalDevices,
   parseAndroidAvdList,
   selectAndroidVirtualDevice
 } from "../src/runtime/mobile-android";
@@ -16,6 +18,9 @@ describe("Android emulator mobile runtime", () => {
     expect(parseAdbEmulatorSerials(
       "List of devices attached\nemulator-5554 device product:sdk_gphone\nphone-1 device\nemulator-5556 offline\n"
     )).toEqual(["emulator-5554"]);
+    expect(parseAdbPhysicalDevices(
+      "List of devices attached\nR5CX42N3NLK device usb:5-1 product:a15xcs model:SM_A156W device:a15x\nemulator-5554 device product:sdk_gphone\nphone-2 unauthorized\n"
+    )).toEqual([{ serial: "R5CX42N3NLK", model: "SM_A156W", device: "a15x" }]);
   });
 
   it("selects an exact requested AVD and otherwise prefers the one running AVD", () => {
@@ -64,6 +69,39 @@ describe("Android emulator mobile runtime", () => {
         ANDROID_HOME: "/sdk",
         ANDROID_SDK_ROOT: "/sdk",
         REACT_NATIVE_PACKAGER_HOSTNAME: "10.0.2.2",
+        RCT_METRO_PORT: "8082"
+      }
+    });
+  });
+
+  it("builds serial-fenced reverse routes and loopback physical-device launch commands", () => {
+    const tools = {
+      root: "/sdk",
+      adb: "/sdk/platform-tools/adb",
+      emulator: "/sdk/emulator/emulator"
+    };
+    expect(buildAndroidReverseCommands({
+      tools,
+      serial: "R5CX42N3NLK",
+      ports: [8082, 48122, 8082]
+    })).toEqual([
+      { command: tools.adb, args: ["-s", "R5CX42N3NLK", "reverse", "tcp:8082", "tcp:8082"] },
+      { command: tools.adb, args: ["-s", "R5CX42N3NLK", "reverse", "tcp:48122", "tcp:48122"] }
+    ]);
+    expect(buildAndroidRunCommand({
+      repoRoot: "/repo",
+      deviceName: "SM_A156W",
+      packageId: "build.kanna.app.dev",
+      metroPort: 8082,
+      appEnv: "dev",
+      tools,
+      packagerHost: "127.0.0.1",
+      deviceSerial: "R5CX42N3NLK"
+    })).toMatchObject({
+      args: expect.arrayContaining(["--device", "SM_A156W"]),
+      env: {
+        ANDROID_SERIAL: "R5CX42N3NLK",
+        REACT_NATIVE_PACKAGER_HOSTNAME: "127.0.0.1",
         RCT_METRO_PORT: "8082"
       }
     });
