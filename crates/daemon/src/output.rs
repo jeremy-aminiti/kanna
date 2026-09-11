@@ -27,28 +27,27 @@ const STAGE_MIRROR_OUTPUT: &str = "mirror_output";
 const STAGE_DETECT_STATUS: &str = "detect_status";
 const STAGE_RECOVERY_WRITE: &str = "recovery_write";
 
-/// The pause the PTY writer holds after one delivered message's submission
-/// boundary, before the next one may own the composer.
+/// The fixed pause the PTY writer holds between logical input writes.
 ///
-/// This is the whole of the writer's input pacing. It is not a protection and
-/// it withholds nothing: a CLI needs a processing turn after Enter before it
-/// can take another line, and two deliveries written back to back without one
-/// arrive merged. It always elapses, on a fixed clock, without reading the
-/// terminal.
+/// A logical message gets one compatibility processing turn between its
+/// burst-written text and its CR, then the same turn before the next queued
+/// message may own the composer. This does not promise how a PTY consumer
+/// groups reads or events. The pause always elapses on a fixed clock; it never
+/// reads the terminal, waits for settling, or withholds a boundary indefinitely.
 ///
 /// The writer used to carry a second, very different fence: after writing a
-/// message's text it waited for the terminal to *settle* before writing that
-/// message's Enter, and gave up unproven when it never did — which, for an
-/// agent mid-turn, was every time. The text then sat unsent at a composer and
-/// the session started refusing later messages. That fence is gone; a logical
-/// message is one write, Enter included.
+/// message's text it waited for the terminal to *settle* before writing Enter,
+/// and gave up unproven when it never did — which, for an agent mid-turn, was
+/// every time. The text then sat unsent and the session refused later
+/// messages. That conditional fence remains gone: this is unconditional
+/// pacing within one always-submitted delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SubmitPause {
     until: Instant,
 }
 
 impl SubmitPause {
-    fn after_submission(now: Instant) -> Self {
+    fn between_input_events(now: Instant) -> Self {
         Self {
             until: now + Duration::from_millis(LOGICAL_INPUT_SUBMIT_DELAY_MS),
         }
@@ -281,15 +280,32 @@ pub(crate) async fn stream_output(
                         session.mark_active().await;
                         pending_offset += n;
                         if pending_offset >= front.data.len() {
+                            if front.kind == PendingInputKind::LogicalMessage {
+                                pending_offset = 0;
+                                let advanced = pending_input
+                                    .front_mut()
+                                    .expect("pending logical message disappeared")
+                                    .advance_logical_message_to_boundary();
+                                debug_assert!(advanced);
+                                // Keep the same pending item at the front so
+                                // neither queued raw input nor another logical
+                                // message can interleave before its Enter.
+                                submit_pause = Some(SubmitPause::between_input_events(
+                                    Instant::now(),
+                                ));
+                                continue;
+                            }
                             let completed = pending_input
                                 .pop_front()
                                 .expect("pending input disappeared before completion");
                             pending_offset = 0;
-                            if completed.kind == PendingInputKind::Logical {
+                            if completed.kind == PendingInputKind::LogicalBoundary {
                                 // The CLI needs a processing turn after the
                                 // submission boundary before another queued
                                 // message can safely own its composer.
-                                submit_pause = Some(SubmitPause::after_submission(Instant::now()));
+                                submit_pause = Some(SubmitPause::between_input_events(
+                                    Instant::now(),
+                                ));
                             }
                             // A declared draft has now actually reached the
                             // terminal, so frames rendered after it can start

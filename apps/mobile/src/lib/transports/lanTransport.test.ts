@@ -929,7 +929,8 @@ describe("createLanTransport", () => {
           "companion_event_epoch",
           "term_input_boundary",
           "term_scrollback_window",
-          "terminal_geometry"
+          "terminal_geometry",
+          "terminal_active_view"
         ]
       },
       { type: "attach", task_id: "task-1", kind: "terminal", from_seq: 0 }
@@ -1050,7 +1051,8 @@ describe("createLanTransport", () => {
           "companion_event_epoch",
           "term_input_boundary",
           "term_scrollback_window",
-          "terminal_geometry"
+          "terminal_geometry",
+          "terminal_active_view"
         ] },
       { type: "term_input_control", task_id: "task-1", data_b64: "G1s8NjU7MTsxTQ==" },
       { type: "term_input", task_id: "task-1", data_b64: "aHVtYW4gZHJhZnQ=" },

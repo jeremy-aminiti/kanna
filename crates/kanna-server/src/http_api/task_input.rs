@@ -146,10 +146,10 @@ pub(crate) enum TaskInputError {
 
 /// Write one semantic logical message into a daemon session.
 ///
-/// The daemon types the text and its submission boundary as one write. It does
-/// not consult the composer, so there is no held, parked, or refused answer to
-/// map here: the message reaches the PTY, the session is gone, or the round
-/// trip was lost.
+/// The daemon types the text and then writes its submission boundary as one
+/// fenced delivery. It does not consult the composer, so there is no held,
+/// parked, or refused answer to map here: the message reaches the PTY, the
+/// session is gone, or the round trip was lost.
 async fn send_logical_session_input(
     daemon: &mut crate::daemon_client::DaemonClient,
     session_id: &str,

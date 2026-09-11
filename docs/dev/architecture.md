@@ -361,7 +361,8 @@ The contracts below are specified in
   task-summary streams.
 - **Task input pipeline.** `POST /v1/tasks/{id}/input` writes into the live PTY
   through the daemon, which types the text and writes its submission boundary
-  as one write. A success means *written*, boundary included. A live session
+  as one fenced delivery with its CR written later. A success means *written*,
+  boundary included. A live session
   always takes the message: the daemon does not wait for the terminal to settle
   and does not inspect the composer, so a human's unsent draft is a collision
   the message lands after rather than a reason to hold it (owner decision,

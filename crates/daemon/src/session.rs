@@ -19,18 +19,18 @@ use kanna_daemon::terminal_perf::{self, TerminalPerfContext};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 
 pub const STATUS_DETECTION_THROTTLE_MS: u64 = 500;
-/// How long the writer pauses after one logical message's submission boundary
-/// before the next queued message may own the composer.
+/// How long the writer pauses between the text and Enter of one logical
+/// message, and after that boundary before the next message may own the
+/// composer.
 ///
-/// This is write pacing between two *delivered* messages, not a protection
-/// against anything a human did: a CLI needs a processing turn after Enter
-/// before it can take another line, and back-to-back deliveries that skip it
-/// arrive merged. It is a fixed, short, unconditional pause that always
-/// elapses — it never withholds a message, never inspects the terminal, and
-/// never reports a delivery as anything but written.
+/// This is compatibility pacing, not a protection against anything a human
+/// did and not a guarantee about how the PTY consumer groups reads or events.
+/// It is a fixed, short, unconditional pause that always elapses — it never
+/// inspects the terminal or leaves a delivered message without its boundary.
 pub const LOGICAL_INPUT_SUBMIT_DELAY_MS: u64 = 150;
 const BRACKETED_PASTE_BEGIN: &[u8] = b"\x1b[200~";
 const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+const LOGICAL_SUBMISSION_BOUNDARY: &[u8] = b"\r";
 
 /// A logical message at least this long is framed as a paste even when it
 /// carries no embedded newline.
@@ -48,9 +48,8 @@ const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 /// slash command, which is the only thing the unframed path protects.
 const PASTE_FRAMING_MIN_LEN: usize = 256;
 
-/// The exact bytes one logical message puts on the PTY: the text, framed as a
-/// paste when the terminal supports it, followed immediately by its submission
-/// boundary.
+/// Present one logical message to the terminal, framing it as a paste when the
+/// terminal supports it.
 ///
 /// A PTY is only a byte stream, and the daemon's writes are not the CLI's reads:
 /// embedded line feeds are indistinguishable from independently typed input,
@@ -59,34 +58,35 @@ const PASTE_FRAMING_MIN_LEN: usize = 256;
 /// editor actions and submits only a fragment. When the application has enabled
 /// the mode, the explicit paste markers travel in-band with the bytes and are
 /// therefore immune to however the queue splits them: every byte between them
-/// is one editor operation, closed before the trailing Enter submits it.
+/// is one editor operation, closed before a later Enter submits it.
 /// Otherwise the bytes stay untouched; sending unsupported control markers
 /// as literal composer text would be a worse corruption, and a session whose
 /// terminal never advertised the mode cannot be protected from the split.
-///
-/// The Enter is part of this buffer rather than a separately fenced second
-/// write. Withholding it until the terminal proved it had consumed the text is
-/// what stranded messages at composers and wedged sessions, and the owner's
-/// 2026-09-08 decision is that a message that occasionally collides with a
-/// human's draft is far cheaper than one that silently never arrives.
-fn logical_message_bytes(mut data: Vec<u8>, bracketed_paste_mode: bool) -> Vec<u8> {
-    if data.is_empty() {
-        return vec![b'\r'];
-    }
+fn frame_logical_message(mut data: Vec<u8>, bracketed_paste_mode: bool) -> Vec<u8> {
     let has_newline = data.iter().any(|byte| matches!(byte, b'\r' | b'\n'));
     if !bracketed_paste_mode || (!has_newline && data.len() < PASTE_FRAMING_MIN_LEN) {
-        data.push(b'\r');
         return data;
     }
 
-    let mut framed = Vec::with_capacity(
-        BRACKETED_PASTE_BEGIN.len() + data.len() + BRACKETED_PASTE_END.len() + 1,
-    );
+    let mut framed =
+        Vec::with_capacity(BRACKETED_PASTE_BEGIN.len() + data.len() + BRACKETED_PASTE_END.len());
     framed.extend_from_slice(BRACKETED_PASTE_BEGIN);
     framed.append(&mut data);
     framed.extend_from_slice(BRACKETED_PASTE_END);
-    framed.push(b'\r');
     framed
+}
+
+/// Reproduce the pre-fix write shape for the bounded live provider regression.
+/// This is compiled only into debug/test daemons; release daemons always use
+/// the discrete boundary path.
+#[cfg(debug_assertions)]
+fn test_single_write_logical_input() -> bool {
+    std::env::var_os("KANNA_TEST_LOGICAL_INPUT_SINGLE_WRITE").is_some()
+}
+
+#[cfg(not(debug_assertions))]
+fn test_single_write_logical_input() -> bool {
+    false
 }
 
 #[derive(Clone)]
@@ -250,9 +250,11 @@ pub struct SessionRuntimeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingInputKind {
     Raw,
-    /// One delivered message: its text and its submission boundary, in one
-    /// buffer. There is no second, separately fenced write to withhold.
-    Logical,
+    /// The text half of one logical message. Its boundary remains attached to
+    /// this pending item and is written next, so other input cannot interleave.
+    LogicalMessage,
+    /// The synthesized Enter that completes one logical message.
+    LogicalBoundary,
 }
 
 /// Meaning declared by the terminal input producer. Submission is never
@@ -268,6 +270,8 @@ pub enum RawInputKind {
 pub struct PendingInput {
     pub data: Vec<u8>,
     pub kind: PendingInputKind,
+    /// Boundary retained by a logical message until its body write completes.
+    logical_boundary: Option<&'static [u8]>,
     /// Set for bytes a producer declared a draft. The writer reports these
     /// back when their PTY write completes, so attestation can tell a frame
     /// that post-dates the draft from one that merely predates it.
@@ -282,6 +286,7 @@ impl PendingInput {
         Self {
             data,
             kind: PendingInputKind::Raw,
+            logical_boundary: None,
             declared_draft: false,
             written,
         }
@@ -291,26 +296,58 @@ impl PendingInput {
         Self {
             data,
             kind: PendingInputKind::Raw,
+            logical_boundary: None,
             declared_draft: true,
             written,
         }
     }
 
-    /// One delivered message and its submission boundary, as a single write.
-    ///
-    /// The acknowledgement therefore means what a caller assumes it means:
-    /// the whole message, Enter included, is on the PTY.
+    /// One delivered message whose acknowledgement remains attached until its
+    /// later, discrete submission boundary reaches the PTY.
     pub(crate) fn logical(
         data: Vec<u8>,
         written: Option<oneshot::Sender<()>>,
         bracketed_paste_mode: bool,
     ) -> Self {
+        let empty = data.is_empty();
+        let mut framed = if empty {
+            LOGICAL_SUBMISSION_BOUNDARY.to_vec()
+        } else {
+            frame_logical_message(data, bracketed_paste_mode)
+        };
+        let single_write = !empty && test_single_write_logical_input();
+        if single_write {
+            // Exact pre-fix behavior for the bounded live A/B: every provider
+            // received a legacy CR in the same write as the message.
+            framed.push(b'\r');
+        }
         Self {
-            data: logical_message_bytes(data, bracketed_paste_mode),
-            kind: PendingInputKind::Logical,
+            data: framed,
+            kind: if empty || single_write {
+                PendingInputKind::LogicalBoundary
+            } else {
+                PendingInputKind::LogicalMessage
+            },
+            logical_boundary: (!empty && !single_write).then_some(LOGICAL_SUBMISSION_BOUNDARY),
             declared_draft: false,
             written,
         }
+    }
+
+    /// Keep this delivery at the front of the writer queue while advancing
+    /// from its message bytes to the discrete Enter that submits them.
+    pub fn advance_logical_message_to_boundary(&mut self) -> bool {
+        if self.kind != PendingInputKind::LogicalMessage {
+            return false;
+        }
+        let boundary = self
+            .logical_boundary
+            .take()
+            .expect("logical message lost its submission boundary");
+        self.data.clear();
+        self.data.extend_from_slice(boundary);
+        self.kind = PendingInputKind::LogicalBoundary;
+        true
     }
 
     /// Whether these bytes were declared a draft by their producer.
@@ -632,8 +669,8 @@ impl SessionHandle {
     /// decision is that the collision is cheaper: if a human has an unsent
     /// line open, the delivered message lands after it and both go in.
     ///
-    /// The returned receiver resolves when the message *and* its submission
-    /// boundary have reached the PTY, because they are one write.
+    /// The returned receiver resolves only when the message *and* its later,
+    /// discrete submission boundary have reached the PTY.
     pub fn enqueue_logical_input(
         &self,
         data: Vec<u8>,
@@ -2134,13 +2171,13 @@ mod tests {
             .recv()
             .await
             .expect("the first message goes out now");
-        assert_eq!(one.kind, super::PendingInputKind::Logical);
-        assert_eq!(one.data, b"manager one\r");
+        assert_eq!(one.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(one.data, b"manager one");
         let two = input_rx
             .recv()
             .await
             .expect("the second message goes out now, in order");
-        assert_eq!(two.data, b"manager two\r");
+        assert_eq!(two.data, b"manager two");
 
         one.acknowledge_written();
         two.acknowledge_written();
@@ -2296,11 +2333,10 @@ mod tests {
         handle.kill().await.unwrap();
     }
 
-    /// A logical message and its submission boundary are one write, so the
-    /// acknowledgement means what its caller assumes: the whole thing, Enter
-    /// included, is on the PTY.
+    /// A logical message keeps one acknowledgement across its two writes, so
+    /// its caller hears success only after the later Enter reaches the PTY.
     #[tokio::test]
-    async fn logical_input_is_acknowledged_only_once_its_whole_write_lands() {
+    async fn logical_input_is_acknowledged_only_once_its_whole_delivery_lands() {
         let handle = spawn_test_handle(AgentProvider::Codex, SessionStatus::Idle).unwrap();
         let mut input_rx = handle.take_input_rx().await.expect("input queue");
 
@@ -2312,17 +2348,21 @@ mod tests {
             "queueing alone must not report the message submitted"
         );
 
-        let pending = input_rx.recv().await.expect("logical message");
-        assert_eq!(pending.kind, super::PendingInputKind::Logical);
-        assert_eq!(
-            pending.data, b"owner reply\r",
-            "the submission boundary travels with the text"
-        );
+        let mut pending = input_rx.recv().await.expect("logical message");
+        assert_eq!(pending.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(pending.data, b"owner reply");
         assert!(
             written.try_recv().is_err(),
             "reaching the writer must not report the message submitted"
         );
 
+        assert!(pending.advance_logical_message_to_boundary());
+        assert_eq!(pending.kind, super::PendingInputKind::LogicalBoundary);
+        assert_eq!(pending.data, b"\r");
+        assert!(
+            written.try_recv().is_err(),
+            "writing the text half must not report the message submitted"
+        );
         pending.acknowledge_written();
         written
             .await
@@ -2351,17 +2391,19 @@ mod tests {
             )
             .expect("accept multiline logical input");
 
-        let pending = input_rx.recv().await.expect("logical message");
-        assert_eq!(pending.kind, super::PendingInputKind::Logical);
+        let mut pending = input_rx.recv().await.expect("logical message");
+        assert_eq!(pending.kind, super::PendingInputKind::LogicalMessage);
         assert_eq!(
             pending.data,
-            b"\x1b[200~commit instructions\n\nPrevious implementation result:\x1b[201~\r"
+            b"\x1b[200~commit instructions\n\nPrevious implementation result:\x1b[201~"
         );
         assert!(
             written.try_recv().is_err(),
             "reaching the writer must not report the message submitted"
         );
 
+        assert!(pending.advance_logical_message_to_boundary());
+        assert_eq!(pending.data, b"\r");
         pending.acknowledge_written();
         written
             .await
@@ -2372,10 +2414,10 @@ mod tests {
     #[test]
     fn multiline_logical_input_does_not_send_unadvertised_terminal_controls() {
         let message = b"first line\nsecond line".to_vec();
-        let mut expected = message.clone();
-        expected.push(b'\r');
-
-        assert_eq!(super::logical_message_bytes(message, false), expected);
+        assert_eq!(
+            super::frame_logical_message(message.clone(), false),
+            message
+        );
     }
 
     /// The fault the owner's 1,227-byte dictated message hit. A PTY master
@@ -2400,11 +2442,11 @@ mod tests {
             .expect("accept a long single-line logical input");
         let pending = input_rx.recv().await.expect("logical message");
 
-        assert_eq!(pending.kind, super::PendingInputKind::Logical);
+        assert_eq!(pending.kind, super::PendingInputKind::LogicalMessage);
         assert!(pending.data.starts_with(b"\x1b[200~"));
-        assert!(pending.data.ends_with(b"\x1b[201~\r"));
+        assert!(pending.data.ends_with(b"\x1b[201~"));
         assert_eq!(
-            &pending.data[6..pending.data.len() - 7],
+            &pending.data[6..pending.data.len() - 6],
             dictated.as_slice(),
             "framing must not alter a single byte of the message"
         );
@@ -2418,19 +2460,13 @@ mod tests {
     #[test]
     fn a_message_short_enough_to_arrive_whole_is_not_framed() {
         let short = vec![b'x'; super::PASTE_FRAMING_MIN_LEN - 1];
-        let mut expected = short.clone();
-        expected.push(b'\r');
-
-        assert_eq!(super::logical_message_bytes(short, true), expected);
+        assert_eq!(super::frame_logical_message(short.clone(), true), short);
     }
 
     #[test]
     fn a_long_message_is_not_framed_for_an_unadvertising_terminal() {
         let long = vec![b'x'; super::PASTE_FRAMING_MIN_LEN * 2];
-        let mut expected = long.clone();
-        expected.push(b'\r');
-
-        assert_eq!(super::logical_message_bytes(long, false), expected);
+        assert_eq!(super::frame_logical_message(long.clone(), false), long);
     }
 
     #[tokio::test]
@@ -2447,8 +2483,8 @@ mod tests {
             .expect("accept single-line logical input");
         let pending = input_rx.recv().await.expect("logical message");
 
-        assert_eq!(pending.kind, super::PendingInputKind::Logical);
-        assert_eq!(pending.data, b"/quit\r");
+        assert_eq!(pending.kind, super::PendingInputKind::LogicalMessage);
+        assert_eq!(pending.data, b"/quit");
         handle.kill().await.unwrap();
     }
 
@@ -2472,7 +2508,7 @@ mod tests {
             .recv()
             .await
             .expect("the message goes out over the draft");
-        assert_eq!(delivered.data, b"owner reply\r");
+        assert_eq!(delivered.data, b"owner reply");
         delivered.acknowledge_written();
         written.await.expect("the delivery is acknowledged");
         handle.kill().await.unwrap();
@@ -2681,7 +2717,7 @@ mod tests {
             .expect("accept logical input");
         assert_eq!(
             input_rx.recv().await.expect("logical message").data,
-            b"manager message\r"
+            b"manager message"
         );
 
         handle
@@ -2704,11 +2740,11 @@ mod tests {
 
         assert_eq!(
             input_rx.recv().await.expect("first held message").data,
-            b"owner one\r"
+            b"owner one"
         );
         assert_eq!(
             input_rx.recv().await.expect("second held message").data,
-            b"owner two\r"
+            b"owner two"
         );
         handle.kill().await.unwrap();
     }
@@ -2731,7 +2767,7 @@ mod tests {
             .enqueue_logical_input(b"manager message".to_vec())
             .expect("an unattested session still accepts logical input");
         let delivered = input_rx.recv().await.expect("logical delivery");
-        assert_eq!(delivered.data, b"manager message\r");
+        assert_eq!(delivered.data, b"manager message");
         delivered.acknowledge_written();
         written.await.expect("the delivery is acknowledged");
         assert_eq!(

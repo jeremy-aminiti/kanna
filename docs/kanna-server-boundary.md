@@ -85,8 +85,8 @@ scope still tells an older consumer exactly what to invalidate.
 ## Terminal Input Boundaries
 
 `POST /v1/tasks/{task_id}/input` carries one logical message, not raw terminal
-bytes. The daemon writes it immediately: the text, framed as a paste when the
-terminal supports it, followed by its submission boundary, as one write. It
+bytes. The daemon writes it as one fenced delivery: the text, framed as a paste
+when the terminal supports it, followed by Enter in a later writer step. It
 does not inspect the composer first, and there is no condition under which it
 retains, defers, or refuses the message.
 
@@ -158,14 +158,15 @@ written as 1022 + 169 bytes, and only the 169-byte tail was submitted.
 Unadvertised mode and input short enough to arrive in one write remain unframed,
 preserving literal-text and provider slash-command semantics. The paste markers
 travel in-band with the bytes, so however the kernel queue divides them the
-closing marker still ends the editor operation and the CR after it is a
-submission rather than pasted text.
+closing marker still ends the editor operation before the later submission
+boundary rather than letting that boundary become pasted text.
 
-The writer holds a fixed short pause after one delivered message's submission
-boundary before the next queued message may own the composer: a CLI needs a
-processing turn after Enter, and two deliveries written back to back without one
-arrive merged. It is write pacing, not a protection — it always elapses, it
-never inspects the terminal, and it cannot withhold a message.
+The writer holds a fixed short pause between a delivered message's text and
+its CR, keeping both atomic against other input. The pause is unconditional
+compatibility pacing, not proof that the PTY consumer will expose separate
+reads or events. It holds the same pause after Enter before the next queued
+message may own the composer. It never waits for terminal quiet, never inspects
+the composer, and never omits a boundary.
 
 Raw terminal producers classify each frame as draft, submission, or control.
 Desktop keyboard events declare unmodified Enter; mobile LAN and relay clients

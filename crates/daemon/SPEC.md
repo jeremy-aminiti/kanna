@@ -463,15 +463,16 @@ restore the retired native-terminal-only merge policy.
 before the server exposes HTTP/relay or creates a merge PTY. Version 2 includes
 the observed-PTY-process-ID `InputIfSession` fence; version 3 adds daemon-owned
 logical input. `SubmitInput` accepts a complete logical message and writes it —
-text and submission boundary, as one write — immediately. `Input`,
+text, then its submission boundary in a later writer step — as one fenced delivery. `Input`,
 `InputBoundary`, and `InputControl` (plus their one-way forms) classify raw
 bytes as draft, submission, or non-composer control for the composer
 attestation ledger; the daemon never infers a boundary from CR/LF bytes.
 
-**`Ok` to `SubmitInput` means written, submission boundary included.** A
-logical message and its Enter are one PTY write, so the acknowledgement means
-what a caller assumes it means. There is no held, parked, deferred or refused
-answer: a live session always takes the message, whatever is on its composer.
+**`Ok` to `SubmitInput` means written, submission boundary included.** The
+message and its later Enter stay atomic against other input, and the daemon
+acknowledges only after both input events reach the PTY. There is no held,
+parked, deferred or refused answer: a live session always takes the message,
+whatever is on its composer.
 
 Until 2026-09-08 the daemon did the opposite. It kept a delivery out of the PTY
 while a producer-declared draft was active, and withheld its Enter from a
@@ -516,19 +517,14 @@ would become literal composer text, a worse corruption — and so is a message
 short enough to arrive in one write, which keeps provider slash commands typed
 rather than pasted.
 
-**The submission boundary is written immediately.** It travels in the same
-buffer as the text, immediately after the closing paste marker when there is
-one, so however the kernel queue divides that buffer the marker still closes
-the editor operation in-band and the CR after it is a keypress rather than
-pasted text. The daemon does not wait for the terminal to settle, does not read
-the composer, and does not consult the ledger before writing it.
-
-After a message's boundary the writer holds a fixed
-`LOGICAL_INPUT_SUBMIT_DELAY_MS` pause before the next queued message may own
-the composer: a CLI needs a processing turn after Enter, and two deliveries
-written back to back without one arrive merged. It is write pacing between two
-*delivered* messages — a fixed clock that always elapses, reads nothing, and
-cannot withhold anything.
+**The submission boundary is a later writer step.** The writer holds the
+fixed `LOGICAL_INPUT_SUBMIT_DELAY_MS` pause after the message bytes, then writes
+CR while retaining ownership of the queue. The pause gives the CLI a
+compatibility processing turn to close any bracketed paste before the boundary.
+It does not guarantee how the PTY consumer groups its reads or events. The
+writer holds the same pause after Enter before the next message may own the
+composer. This is unconditional input pacing: it never waits for terminal
+quiet, reads the composer, consults the ledger, or omits a boundary.
 
 The composer attestation ledger is part of transactional-v3 handoff state. A
 sender refuses a legacy-v2 adopter while a declared draft is active, because

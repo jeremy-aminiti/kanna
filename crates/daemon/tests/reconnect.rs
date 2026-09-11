@@ -950,10 +950,10 @@ fn a_faint_suggestion_with_the_cursor_at_the_start_clears_the_ledger() {
 }
 
 /// `Ok` means written, submission boundary included. The message and its Enter
-/// are one write, so an acknowledgement that arrives at all means the whole
-/// thing reached the PTY.
+/// are one fenced delivery, so an acknowledgement that arrives at all means
+/// both input events reached the PTY.
 #[test]
-fn submit_input_is_acknowledged_only_after_its_whole_write_is_on_the_pty() {
+fn submit_input_is_acknowledged_only_after_its_whole_delivery_is_on_the_pty() {
     let daemon = DaemonHandle::start();
     let mut conn = daemon.connect();
     let session_id = "acknowledged-submit";
@@ -963,11 +963,16 @@ fn submit_input_is_acknowledged_only_after_its_whole_write_is_on_the_pty() {
         "stty -echo; while IFS= read -r line; do printf 'LINE:<%s>\\n' \"$line\"; done",
     );
 
+    let submitted_at = Instant::now();
     conn.send(&Cmd::SubmitInput {
         session_id: session_id.to_string(),
         data: b"owner reply".to_vec(),
     });
     expect_ok(&mut conn);
+    assert!(
+        submitted_at.elapsed() >= Duration::from_millis(100),
+        "SubmitInput acknowledged the text before the later boundary could reach the PTY"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -5637,10 +5642,9 @@ fn a_long_single_line_logical_message_survives_the_pty_queue_split() {
         recorder.first_read() < expected.len() - 1,
         "the split must fall inside the paste region, not at its Enter: {reads:?}"
     );
-    // The Enter travels in the same buffer as the message, immediately after
-    // the closing paste marker. Wherever the kernel queue divides that buffer,
-    // the marker still closes the editor operation in-band, so the CR after it
-    // is a submission rather than pasted text.
+    // The Enter is a discrete event after the message buffer. The paste marker
+    // closes the editor operation in-band before that later keypress submits
+    // it, regardless of how the message itself was fragmented.
     assert!(
         received.ends_with(b"\x1b[201~\r"),
         "the submission boundary must follow the closing paste marker: {:?}",
@@ -5771,6 +5775,53 @@ fn a_short_logical_message_is_delivered_unframed_and_whole() {
     assert_eq!(occurrences(&received, PASTE_BEGIN), 0);
 }
 
+/// Splitting the writes must not split ownership of the composer. Raw terminal
+/// input that arrives during the fixed pause stays behind the logical
+/// message's Enter, preserving the old one-delivery ordering and PID-fence
+/// semantics while giving the provider two input events.
+#[test]
+fn raw_input_cannot_interleave_before_a_logical_submission_boundary() {
+    let daemon = DaemonHandle::start();
+    let mut setup = daemon.connect();
+    let session_id = "logical-boundary-ownership";
+    let recorder = spawn_stdin_recorder(&daemon, &mut setup, session_id, true, 0.0);
+    let message = b"mobile marker".to_vec();
+
+    let mut submitter = daemon.connect();
+    let delivery = thread::spawn({
+        let message = message.clone();
+        move || {
+            submitter.send(&Cmd::SubmitInput {
+                session_id: session_id.to_string(),
+                data: message,
+            });
+            expect_ok(&mut submitter);
+        }
+    });
+
+    assert_eq!(
+        recorder.wait_for_bytes(message.len(), Duration::from_secs(15)),
+        message,
+        "the message body must reach the PTY before the boundary pause"
+    );
+
+    let mut raw = daemon.connect();
+    raw.send(&Cmd::InputNoReply {
+        session_id: session_id.to_string(),
+        data: b"later raw input".to_vec(),
+    });
+    delivery.join().expect("logical delivery thread");
+
+    let mut expected = submitted(&message);
+    expected.extend_from_slice(b"later raw input");
+    assert_eq!(
+        recorder.wait_for_bytes(expected.len(), Duration::from_secs(15)),
+        expected,
+        "queued raw input interleaved between the message and its Enter"
+    );
+    recorder.assert_settled_at(&expected, Duration::from_millis(400));
+}
+
 /// The contract's limit, stated as a test rather than left to be discovered.
 ///
 /// A terminal that never advertised bracketed paste cannot be sent the markers
@@ -5809,8 +5860,8 @@ fn without_bracketed_paste_mode_a_long_message_is_whole_but_the_split_remains() 
     );
 }
 
-/// A CLI repainting while it consumes the message no longer delays anything:
-/// the message and its submission boundary are one write.
+/// A CLI repainting while it consumes the message no longer withholds anything:
+/// the boundary follows on a fixed clock without waiting for quiet.
 #[test]
 fn a_logical_message_is_submitted_once_into_a_repainting_terminal() {
     let daemon = DaemonHandle::start();
@@ -5972,4 +6023,203 @@ fn the_paste_framing_threshold_is_where_framing_starts() {
         "256 bytes is the threshold and must be framed as one paste"
     );
     recorder.assert_settled_at(&expected, Duration::from_millis(300));
+}
+
+#[derive(Debug)]
+struct LiveCodexSubmission {
+    accepted_turns: usize,
+    final_screen: String,
+}
+
+fn collect_jsonl_files(path: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_jsonl_files(&path, files);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        {
+            files.push(path);
+        }
+    }
+}
+
+fn value_contains_string_fragment(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::String(value) => value.contains(expected),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_string_fragment(value, expected)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| value_contains_string_fragment(value, expected)),
+        _ => false,
+    }
+}
+
+fn accepted_codex_user_turns(codex_home: &Path, marker: &str) -> usize {
+    let mut files = Vec::new();
+    collect_jsonl_files(codex_home, &mut files);
+    files
+        .into_iter()
+        .flat_map(|path| {
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>()
+        })
+        .filter(|event| {
+            event["type"] == "response_item"
+                && event["payload"]["type"] == "message"
+                && event["payload"]["role"] == "user"
+                && value_contains_string_fragment(&event["payload"]["content"], marker)
+        })
+        .count()
+}
+
+fn run_live_codex_submission(single_write: bool, marker: &str) -> LiveCodexSubmission {
+    let daemon = if single_write {
+        DaemonHandle::start_with_env([("KANNA_TEST_LOGICAL_INPUT_SINGLE_WRITE", "1")])
+    } else {
+        DaemonHandle::start()
+    };
+    let codex_home = daemon._dir.join("codex-home");
+    let cwd = daemon._dir.join("codex-cwd");
+    std::fs::create_dir_all(&codex_home).expect("should create isolated CODEX_HOME");
+    std::fs::create_dir_all(&cwd).expect("should create isolated Codex cwd");
+    std::os::unix::fs::symlink(
+        PathBuf::from(std::env::var_os("HOME").expect("home directory")).join(".codex/auth.json"),
+        codex_home.join("auth.json"),
+    )
+    .expect("live Codex regression requires readable ~/.codex/auth.json");
+
+    let codex =
+        PathBuf::from(std::env::var_os("KANNA_LIVE_CODEX_BIN").unwrap_or_else(|| "codex".into()));
+    let session_id = if single_write {
+        "live-codex-single-write"
+    } else {
+        "live-codex-discrete-boundary"
+    };
+    let mut conn = daemon.connect();
+    conn.send_json(&serde_json::json!({
+        "type": "Spawn",
+        "session_id": session_id,
+        "executable": codex,
+        "args": [],
+        "cwd": cwd,
+        "env": { "CODEX_HOME": codex_home, "TERM": "xterm-256color" },
+        "cols": 120,
+        "rows": 40,
+        "agent_provider": "codex",
+        "agent_executable": codex,
+    }));
+    expect_session_created_with_timeout(&mut conn, session_id, Duration::from_secs(15));
+
+    let ready_deadline = Instant::now() + Duration::from_secs(45);
+    let mut trust_accepted = false;
+    let mut composer_observed_at = None;
+    let ready_screen = loop {
+        let screen = recv_snapshot_for(&mut conn, session_id).vt;
+        let trust_visible = screen.contains("trust") && screen.contains("directory?");
+        if !trust_accepted && trust_visible {
+            composer_observed_at = None;
+            conn.send(&Cmd::InputBoundary {
+                session_id: session_id.to_string(),
+                data: vec![b'\r'],
+            });
+            expect_ok(&mut conn);
+            trust_accepted = true;
+            // The trust screen also paints the normal composer chrome behind
+            // its modal. Require a later snapshot after the modal is gone;
+            // otherwise the marker races the trust selection instead of
+            // testing an agent turn.
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+        let composer_visible = !trust_visible
+            && screen.contains("/model")
+            && (screen.contains("Ask Codex") || screen.contains("Use /skills"));
+        if composer_visible {
+            let observed_at = composer_observed_at.get_or_insert_with(Instant::now);
+            if observed_at.elapsed() >= Duration::from_secs(1) {
+                break screen;
+            }
+        } else {
+            composer_observed_at = None;
+        }
+        assert!(
+            Instant::now() < ready_deadline,
+            "Codex never reached its composer; last screen: {screen:?}"
+        );
+        thread::sleep(Duration::from_millis(250));
+    };
+
+    let expected_pid = session_pid(&mut conn, session_id);
+    conn.send(&Cmd::SubmitInputIfSession {
+        session_id: session_id.to_string(),
+        expected_pid,
+        data: marker.as_bytes().to_vec(),
+    });
+    expect_ok(&mut conn);
+
+    let acceptance_deadline = Instant::now() + Duration::from_secs(12);
+    let mut accepted_turns = 0;
+    while Instant::now() < acceptance_deadline {
+        accepted_turns = accepted_codex_user_turns(&codex_home, marker);
+        if accepted_turns > 0 {
+            // A duplicate can only appear after the first accepted event, so
+            // give the same live session time to expose one before counting.
+            thread::sleep(Duration::from_millis(500));
+            accepted_turns = accepted_codex_user_turns(&codex_home, marker);
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let final_screen = recv_snapshot_for(&mut conn, session_id).vt;
+    conn.send(&Cmd::Kill {
+        session_id: session_id.to_string(),
+    });
+    expect_ok(&mut conn);
+
+    assert!(!ready_screen.is_empty());
+    LiveCodexSubmission {
+        accepted_turns,
+        final_screen,
+    }
+}
+
+/// Bounded real-path regression for the mobile incident's shared submission
+/// boundary. Both arms use the PID-fenced daemon `SubmitInputIfSession` command
+/// used by kanna-server and a real Codex TUI. The only difference is a
+/// debug-only switch that reproduces the old single-write buffer. The oracle
+/// is Codex's durable accepted user turn, never PTY write/read chunking or text
+/// visible in its composer.
+#[test]
+#[ignore = "requires KANNA_RUN_LIVE_AGENT_CLI_CONTRACTS=1, authenticated codex, and network"]
+fn live_codex_submit_input_accepts_the_marker_once_without_manual_enter() {
+    assert_eq!(
+        std::env::var("KANNA_RUN_LIVE_AGENT_CLI_CONTRACTS").as_deref(),
+        Ok("1"),
+        "set KANNA_RUN_LIVE_AGENT_CLI_CONTRACTS=1 to run this live regression"
+    );
+    let marker = format!("kanna-mobile-submit-marker-{}", std::process::id());
+
+    let baseline = run_live_codex_submission(true, &marker);
+    assert_eq!(
+        baseline.accepted_turns, 0,
+        "the pre-fix single write unexpectedly became an accepted Codex turn; screen: {:?}",
+        baseline.final_screen
+    );
+
+    let candidate = run_live_codex_submission(false, &marker);
+    assert_eq!(
+        candidate.accepted_turns, 1,
+        "the candidate must produce exactly one accepted Codex turn; screen: {:?}",
+        candidate.final_screen
+    );
 }

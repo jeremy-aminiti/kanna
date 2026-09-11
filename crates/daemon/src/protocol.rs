@@ -405,9 +405,10 @@ pub enum Command {
         class: RawInputClass,
     },
     /// One logical message for a PTY session. Unlike raw terminal input, the
-    /// daemon keeps the message and its synthesized Enter atomic, frames
-    /// multiline text as one bracketed paste when the terminal requested that
-    /// mode, and defers the delivery while a raw composer draft is active.
+    /// daemon keeps the message and its synthesized Enter atomic against other
+    /// input, frames multiline text as one bracketed paste when the terminal
+    /// requested that mode, and writes Enter later after fixed compatibility
+    /// pacing.
     SubmitInput {
         session_id: String,
         data: Vec<u8>,
