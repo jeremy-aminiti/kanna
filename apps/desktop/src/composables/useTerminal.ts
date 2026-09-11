@@ -106,7 +106,7 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
   let nativeWindowFocusTrackingGeneration = 0
 
   function traceNativeFocus(
-    phase: "start" | "ready" | "event" | "stale" | "error",
+    phase: "start" | "ready" | "event" | "activate" | "stale" | "error",
     details: Partial<Omit<KannaNativeFocusTraceEntry, "sessionId" | "phase">> = {},
   ) {
     if (!import.meta.env.DEV || !window.__KANNA_E2E__) return
@@ -129,7 +129,9 @@ export function useTerminal(sessionId: string, spawnOptions?: SpawnOptions, opti
         traceNativeFocus("stale", { focused: event.payload })
         return
       }
+      traceNativeFocus("activate", { focused: event.payload })
       void lifecycle.activateVisibleViewer().catch((error) => {
+        traceNativeFocus("error", { detail: String(error) })
         console.warn("[terminal] failed to activate native-focused viewer:", error)
       })
     }).then((unlisten) => {

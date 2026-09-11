@@ -74,7 +74,7 @@ interface KannaActiveViewTraceEntry {
 
 interface KannaNativeFocusTraceEntry {
   sessionId: string;
-  phase: "start" | "ready" | "event" | "stale" | "error";
+  phase: "start" | "ready" | "event" | "activate" | "stale" | "error";
   focused?: boolean;
   detail?: string;
 }
