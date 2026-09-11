@@ -30,7 +30,6 @@ function setFilePickerRef(component: Element | ComponentPublicInstance | null) {
   <NewTaskModal
     v-if="m.showNewTaskModal.value"
     :default-agent-provider="preferences.defaultAgentProvider"
-    :default-agent-type="preferences.defaultAgentType"
     :recent-agent-choices="preferences.recentAgentChoices"
     :available-agent-providers="c.appTaskCreation.availableAgentProviders.value"
     :workflows="m.availableWorkflows.value"

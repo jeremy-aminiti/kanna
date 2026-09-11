@@ -338,8 +338,6 @@ pub(crate) struct CreateTaskRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) agent_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) agent_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) effort: Option<String>,
@@ -562,7 +560,6 @@ pub(crate) struct TaskCreateOptions {
     pub(crate) review_context: Option<Value>,
     pub(crate) agent: Option<String>,
     pub(crate) agent_provider: Option<String>,
-    pub(crate) agent_type: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) effort: Option<String>,
     pub(crate) permission_mode: Option<String>,

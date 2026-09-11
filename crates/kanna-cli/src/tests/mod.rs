@@ -371,7 +371,6 @@ fn typed_tool_surfaces() -> BTreeMap<&'static str, TypedToolSurface> {
                     ("review_context", "review_context"),
                     ("agent", "agent"),
                     ("agent_provider", "agent_provider"),
-                    ("agent_type", "agent_type"),
                     ("model", "model"),
                     ("effort", "effort"),
                     ("permission_mode", "permission_mode"),

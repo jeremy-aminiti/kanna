@@ -563,8 +563,7 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             ResponseKind::Json,
             "/v1/tasks",
             json!({
-                "prompt": "Inferred repo task",
-                "agentType": "pty"
+                "prompt": "Inferred repo task"
             }),
         ),
         (
@@ -573,7 +572,6 @@ fn resolves_expected_requests_for_every_bundled_tool() {
                 "repo_id": "repo-1",
                 "prompt": "Blocked work",
                 "display_name": "Short task title",
-                "agent_type": "agent",
                 "agent_provider": "codex",
                 "model": "gpt-5.6-codex",
                 "effort": "xhigh",
@@ -586,7 +584,6 @@ fn resolves_expected_requests_for_every_bundled_tool() {
                 "repoId": "repo-1",
                 "prompt": "Blocked work",
                 "displayName": "Short task title",
-                "agentType": "agent",
                 "agentProvider": "codex",
                 "model": "gpt-5.6-codex",
                 "effort": "xhigh",
@@ -606,7 +603,6 @@ fn resolves_expected_requests_for_every_bundled_tool() {
             json!({
                 "repoId": "repo-1",
                 "prompt": "Subtask",
-                "agentType": "pty",
                 "parentTaskId": "task-parent"
             }),
         ),
@@ -1415,7 +1411,6 @@ fn create_task_preserves_parent_for_genuine_dispatch_fan_out() {
             "workflowName": "specialty-review",
             "agent": "review-security",
             "baseRef": "task-parent-1-2",
-            "agentType": "pty",
             "parentTaskId": "parent-1"
         })
     );
@@ -1636,12 +1631,7 @@ fn catalog_types_are_deserialized_from_manifest_values() {
         ParamLoc::Body,
         Some("displayName"),
     )));
-    assert!(params.contains(&(
-        "agent_type",
-        ParamType::String,
-        ParamLoc::Body,
-        Some("agentType"),
-    )));
+    assert!(!params.iter().any(|(name, _, _, _)| *name == "agent_type"));
     assert!(params.contains(&(
         "blocker_task_ids",
         ParamType::StringArray,

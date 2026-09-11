@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { AGENT_PROVIDERS, getAgentProviderSpec } from "@kanna/agent-protocol";
+import { AGENT_PROVIDERS } from "@kanna/agent-protocol";
 import BlockerSelectModal from "./BlockerSelectModal.vue";
 import type { AgentProvider, PipelineItem } from "../types/kanna";
 import { useModalZIndex } from "../composables/useModalZIndex";
@@ -17,7 +17,6 @@ registerContextShortcuts("newTask", [
 
 const props = defineProps<{
   defaultAgentProvider?: AgentProvider;
-  defaultAgentType?: AgentExecutionType;
   recentAgentChoices?: RecentAgentChoice[];
   availableAgentProviders?: AgentProvider[];
   workflows?: string[];
@@ -37,7 +36,6 @@ const emit = defineEmits<{
 
 const prompt = ref("");
 const agentProvider = ref<AgentProvider>(props.defaultAgentProvider ?? "claude");
-const displayMode = ref<AgentExecutionType>(props.defaultAgentType ?? "pty");
 const workflowOptions = computed(() => {
   if (props.workflows && props.workflows.length > 0) return props.workflows;
   return ["no-review"];
@@ -107,36 +105,22 @@ const availableProviders = computed<AgentProvider[]>(() => {
   return [...(scoped === undefined ? providers : scoped)]
     .sort((a, b) => a.localeCompare(b));
 });
-type AgentChoice = RecentAgentChoice;
-
 function providerLabel(provider: AgentProvider): string {
   return provider;
 }
 
-function supportsChatMode(provider: AgentProvider): boolean {
-  return getAgentProviderSpec(provider).supports_headless;
-}
-
-const baseAgentChoices = computed(() => [
-  ...availableProviders.value.map((provider) => ({ provider, executionType: "pty" as const })),
-  ...availableProviders.value
-    .filter(supportsChatMode)
-    .map((provider) => ({ provider, executionType: "agent" as const })),
-]);
-const agentChoices = computed(() =>
-  sortAgentChoicesByRecentUsage(baseAgentChoices.value, props.recentAgentChoices ?? []),
+const agentChoices = computed<RecentAgentChoice[]>(() =>
+  sortAgentChoicesByRecentUsage(
+    availableProviders.value.map((provider) => ({ provider, executionType: "pty" })),
+    props.recentAgentChoices ?? [],
+  ),
 );
 
-function choiceMatches(choice: AgentChoice, provider: AgentProvider, executionType: AgentExecutionType): boolean {
-  return choice.provider === provider && choice.executionType === executionType;
-}
-
-function applyChoice(choice: AgentChoice) {
+function applyChoice(choice: RecentAgentChoice) {
   agentProvider.value = choice.provider;
-  displayMode.value = choice.executionType;
 }
 
-function preferredChoice(): AgentChoice | undefined {
+function preferredChoice(): RecentAgentChoice | undefined {
   const choices = agentChoices.value;
   if (choices.length === 0) return undefined;
 
@@ -147,15 +131,13 @@ function preferredChoice(): AgentChoice | undefined {
   const preferredProvider = props.defaultAgentProvider && availableProviders.value.includes(props.defaultAgentProvider)
     ? props.defaultAgentProvider
     : agentProvider.value;
-  const preferredExecutionType = props.defaultAgentType ?? "pty";
-  return choices.find((choice) => choice.provider === preferredProvider && choice.executionType === preferredExecutionType)
-    ?? choices.find((choice) => choice.provider === preferredProvider)
+  return choices.find((choice) => choice.provider === preferredProvider)
     ?? choices[0];
 }
 
 watch(agentChoices, (choices) => {
   if (choices.length === 0) return;
-  if (choices.some((choice) => choiceMatches(choice, agentProvider.value, displayMode.value))) return;
+  if (choices.some((choice) => choice.provider === agentProvider.value)) return;
   const nextChoice = preferredChoice();
   if (nextChoice) applyChoice(nextChoice);
 }, { immediate: true });
@@ -166,13 +148,9 @@ watch([resolvedDefaultWorkflow, workflowOptions], ([defaultWorkflow, options]) =
   workflowSelectionIsAutomatic = true;
 }, { immediate: true });
 
-function agentChoiceLabel(provider: AgentProvider, executionType: AgentExecutionType): string {
-  return executionType === "agent" ? `${providerLabel(provider)} sdk` : providerLabel(provider);
-}
-
 function cycleAgentChoice(direction: -1 | 1) {
   const choices = agentChoices.value;
-  const idx = choices.findIndex((choice) => choiceMatches(choice, agentProvider.value, displayMode.value));
+  const idx = choices.findIndex((choice) => choice.provider === agentProvider.value);
   if (idx === -1) return;
   applyChoice(choices[(idx + direction + choices.length) % choices.length]);
 }
@@ -228,7 +206,7 @@ function handleSubmit() {
     agentProvider.value,
     selectedWorkflow.value,
     selectedBaseBranch.value,
-    displayMode.value,
+    "pty",
     selectedBlockerItems.value.map((item) => item.id),
   );
   prompt.value = "";
@@ -415,7 +393,7 @@ function handleKeydown(e: KeyboardEvent) {
           @mousedown.prevent
           @click="cycleAgentChoice(1)"
         >
-          {{ agentChoices.length === 0 ? $t('mainPanel.agentNotInstalled') : agentChoiceLabel(agentProvider, displayMode) }}
+          {{ agentChoices.length === 0 ? $t('mainPanel.agentNotInstalled') : providerLabel(agentProvider) }}
         </button>
       </div>
       <div class="modal-body">
