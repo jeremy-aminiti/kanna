@@ -86,6 +86,55 @@ describe("seedTrustedDesktopFromUrl", () => {
 
     expect(reload).toHaveBeenCalledTimes(1);
   });
+
+  it("accepts the current build's own registered scheme, not only the legacy literal", async () => {
+    // A real OS-level open (xcrun simctl openurl, Safari, another app) can
+    // only route to this app via a scheme it actually registered in
+    // Info.plist -- kanna-dev for a dev build, never bare "kanna" (see
+    // mobileEnvironments.json). The Appium-driven E2E harness bypasses that
+    // resolution entirely (`mobile: deepLink` with an explicit bundle id),
+    // which is why it could send literal "kanna://" and still work; a plain
+    // URL open cannot.
+    const persistence = createSessionPersistence(createMemoryStorage());
+    const reload = vi.fn(async () => undefined);
+
+    await seedTrustedDesktopFromUrl(
+      "kanna-dev://e2e-trust?desktopId=desktop-dev&displayName=Dev%20Desktop",
+      { getPersistence: async () => persistence, reload },
+      "kanna-dev"
+    );
+
+    expect(reload).toHaveBeenCalledTimes(1);
+    const persisted = await persistence.load();
+    expect(persisted?.selectedDesktopId).toBe("desktop-dev");
+  });
+
+  it("still accepts the legacy literal scheme when a build scheme is supplied", async () => {
+    const persistence = createSessionPersistence(createMemoryStorage());
+    const reload = vi.fn(async () => undefined);
+
+    await seedTrustedDesktopFromUrl(
+      "kanna://e2e-trust?desktopId=desktop-legacy&displayName=Legacy",
+      { getPersistence: async () => persistence, reload },
+      "kanna-dev"
+    );
+
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a scheme that matches neither the legacy literal nor the build's own", async () => {
+    const persistence = createSessionPersistence(createMemoryStorage());
+    const reload = vi.fn(async () => undefined);
+
+    await seedTrustedDesktopFromUrl(
+      "other-app://e2e-trust?desktopId=desktop-dev&displayName=Dev%20Desktop",
+      { getPersistence: async () => persistence, reload },
+      "kanna-dev"
+    );
+
+    expect(reload).not.toHaveBeenCalled();
+    expect(await persistence.load()).toBeNull();
+  });
 });
 
 describe("claimPairingPayloadFromUrl", () => {
@@ -113,5 +162,23 @@ describe("claimPairingPayloadFromUrl", () => {
     await claimPairingPayloadFromUrl("kanna://e2e-pair", pairPayload);
 
     expect(pairPayload).not.toHaveBeenCalled();
+  });
+
+  it("accepts the current build's own registered scheme for a real OS-level open", async () => {
+    const pairPayload = vi.fn().mockResolvedValue("desktop-e2e");
+    const payload = JSON.stringify({
+      type: "kanna.machine-pairing",
+      version: 1,
+      desktopId: "desktop-e2e",
+      code: "ABC123"
+    });
+
+    await claimPairingPayloadFromUrl(
+      `kanna-dev://e2e-pair?payload=${encodeURIComponent(payload)}`,
+      pairPayload,
+      "kanna-dev"
+    );
+
+    expect(pairPayload).toHaveBeenCalledWith(payload);
   });
 });

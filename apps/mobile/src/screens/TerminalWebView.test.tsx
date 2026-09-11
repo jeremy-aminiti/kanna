@@ -1501,6 +1501,123 @@ describe("TerminalWebView", () => {
     ).toBeNull();
   });
 
+  it("keeps the loading overlay up for a connecting-status placeholder paint, and only clears it once the live snapshot renders", async () => {
+    // This is the first-connect sequence: beginTaskTerminal attaches with an
+    // empty, "connecting" buffer before the webview document has loaded, so
+    // the replace is queued rather than injected immediately.
+    const webView = await renderTerminalWebView({
+      output: "",
+      outputEpoch: 5,
+      status: "connecting"
+    });
+    runEffects();
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).not.toBeNull();
+
+    // The document finishes loading and flushes the queued connecting
+    // placeholder — the same "Connecting..." text getStatusCopy writes into
+    // xterm itself. Acknowledging that paint must not be read as "there is a
+    // grid to look at": it has no real output and is about to be replaced.
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
+    } as WebViewMessageEvent);
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-content-ready",
+          contentRevision: 5
+        })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({
+      output: "",
+      outputEpoch: 5,
+      status: "connecting"
+    });
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).not.toBeNull();
+
+    // The real snapshot lands moments later as a new epoch with live output.
+    await renderTerminalWebView({
+      output: `${Buffer.from("first live frame").toString("base64")}\n`,
+      outputEpoch: 6,
+      status: "live"
+    });
+    runEffects();
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-content-ready",
+          contentRevision: 6
+        })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({
+      output: `${Buffer.from("first live frame").toString("base64")}\n`,
+      outputEpoch: 6,
+      status: "live"
+    });
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).toBeNull();
+  });
+
+  it("resolves a duplicate acknowledgement for the same outstanding revision the same way both times", async () => {
+    // The bridge's own scheduleTerminalContentReady dedupes by comparing the
+    // scheduled revision against the latest one, not by call: two replaces
+    // issued for the same still-current revision (e.g. an empty-buffer
+    // connecting -> restarting -> connecting cycle before any content
+    // arrives, which never bumps the epoch) can each independently post their
+    // own "terminal-content-ready" for that revision. A second ack for a
+    // revision already resolved once must not fall back to a "no record"
+    // default — it must resolve exactly the way the first one did.
+    const webView = await renderTerminalWebView({
+      output: "",
+      outputEpoch: 5,
+      status: "connecting"
+    });
+    runEffects();
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: { data: JSON.stringify({ type: "terminal-ready" }) }
+    } as WebViewMessageEvent);
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-content-ready",
+          contentRevision: 5
+        })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({
+      output: "",
+      outputEpoch: 5,
+      status: "connecting"
+    });
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).not.toBeNull();
+
+    (webView.props.onMessage as (event: WebViewMessageEvent) => void)({
+      nativeEvent: {
+        data: JSON.stringify({
+          type: "terminal-content-ready",
+          contentRevision: 5
+        })
+      }
+    } as WebViewMessageEvent);
+    await renderTerminalWebView({
+      output: "",
+      outputEpoch: 5,
+      status: "connecting"
+    });
+    expect(
+      findByAccessibilityLabel(lastTree, "Loading terminal content")
+    ).not.toBeNull();
+  });
+
   it("finishes empty snapshots and does not return to loading for live output in the same epoch", async () => {
     const webView = await renderTerminalWebView({
       output: "",

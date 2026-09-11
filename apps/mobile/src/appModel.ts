@@ -51,7 +51,7 @@ import {
   type SessionPersistence,
   type TrustedDesktopRecord
 } from "./state/sessionPersistence";
-import { readKannaExpoExtra } from "./mobileEnvironment";
+import { readKannaExpoExtra, resolveMobileAppEnvironment } from "./mobileEnvironment";
 import {
   isCustomRelayControlEnabled,
   normalizeCustomRelayUrl,
@@ -732,7 +732,8 @@ export function createAppModel(input: CreateAppModelInput = {}): AppModel {
       async reload() {
         await hydratePersistedContext();
         await controller.bootstrap();
-      }
+      },
+      scheme: resolveMobileAppEnvironment(extra?.appEnv).scheme
     });
   }
 
